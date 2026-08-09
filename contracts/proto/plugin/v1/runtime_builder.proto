@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message BuildRuntimeRequest {
+  string workload_request_json = 1;
+  string hardware_manifest_json = 2;
+  string model_manifest_json = 3;
+}
+
+message BuildRuntimeResponse {
+  string runtime_manifest_json = 1;
+}

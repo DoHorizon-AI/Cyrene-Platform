@@ -1,0 +1,159 @@
+# Manifest Canonicalization & Hashing
+
+This document is the **normative specification** for turning a manifest into the
+exact byte sequence that is hashed. It is the contract that guarantees the Rust
+implementation (`contracts/rust/cy-manifest`) and the Python implementation
+(`framework/sdk/python/cy-manifest`) produce **byte-identical** output — and therefore
+identical `runtime_id` values — for the same logical input.
+
+If the two implementations ever disagree, this document is the source of truth
+and one of them has a bug.
+
+## 1. Scheme summary
+
+The canonical form is **RFC 8785 (JSON Canonicalization Scheme, JCS)**,
+including its ES6/ECMA-262 number formatting. Both implementations delegate to a
+maintained RFC 8785 library rather than hand-rolling the serializer:
+
+- **Rust** (`contracts/rust/cy-manifest`): the [`serde_jcs`] crate (RFC 8785 compliant,
+  ES6 number formatting via `ryu-js`).
+- **Python** (`framework/sdk/python/cy-manifest`): the [`jcs`] library — the RFC 8785
+  reference implementation, byte-identical to `serde_jcs` across our value
+  domain (see §3 for the one integer caveat).
+
+[`serde_jcs`]: https://crates.io/crates/serde_jcs
+[`jcs`]: https://pypi.org/project/jcs/
+
+The salient properties of JCS, restated for the value shapes our manifests use:
+
+- **Encoding:** UTF-8, no BOM.
+- **No insignificant whitespace.** The only separators are `,` between array
+  items / object members and `:` between an object key and its value. There are
+  no spaces, tabs, or newlines anywhere.
+- **Object member order:** members are sorted by key. JCS sorts by the UTF-16
+  code units of the key; because all manifest keys are ASCII, this is identical
+  to a Unicode code-point sort and to a byte-wise sort of the UTF-8 key bytes.
+- **Array order is preserved** exactly as given (arrays are ordered data).
+- **Strings** are wrapped in `"` and escaped with the RFC 8785 minimal escape
+  set (see §4).
+- **Numbers** are emitted with ES6/ECMA-262 `Number`-to-string formatting as
+  described in §3.
+- **`true`, `false`, `null`** are emitted as those literals.
+- **Computed-id exclusion:** every immutable resource carries a computed
+  content id whose own field is removed **before** canonicalization — it is an
+  output, never part of its own preimage. This applies to `RuntimeManifest`
+  (`runtime_id`), `TrainingRevision` (`revision_id`), `CheckpointMetadata`
+  (`checkpoint_id`) and `ArtifactManifest` (`artifact_id`). See §6.
+- **Nondeterministic fields are excluded from any hash preimage.** Wall-clock
+  timestamps, durations, hostnames, PIDs and similar volatile values must never
+  enter a canonical preimage. None of the hashed manifests define such fields
+  today; if a human-facing timestamp is ever added, keep it out of the value
+  returned by the model's `canonical_value()` so the id stays reproducible.
+  Secrets are references only and likewise never appear in a manifest or a
+  preimage.
+
+## 2. Pipeline
+
+1. Parse the input (JSON or YAML) into the typed manifest model.
+2. Serialize the typed model to a JSON value tree.
+   - Optional fields that are absent/`None` are **omitted** (not emitted as
+     `null`). Both implementations use the same field set, so the emitted key
+     set is identical for identical input.
+3. For a `RuntimeManifest`, delete the top-level `runtime_id` key if present.
+4. Canonicalize the value tree per §1/§3/§4 into a UTF-8 byte string
+   (`canonical_bytes`).
+5. `digest = SHA-256(canonical_bytes)`.
+6. `runtime_id = "sha256:" + lowercase_hex(digest)`.
+
+Formally:
+
+```
+runtime_id = "sha256:" + hex(sha256(canonical_bytes(runtime_manifest_without_runtime_id)))
+```
+
+## 3. Numbers
+
+Numbers are emitted exactly as RFC 8785 specifies: the value is interpreted as
+an IEEE-754 double and serialized with the ES6/ECMA-262 `Number.prototype`
+`toString` algorithm (the shortest string that round-trips to the same double).
+This is what makes canonicalization cross-language stable — both `serde_jcs`
+(via `ryu-js`) and Python `jcs` implement the same ES6 algorithm, so there is no
+longer a Rust-`Display`-vs-Python-`repr` divergence.
+
+Consequences worth noting:
+
+- **Integral-valued floats** collapse to the integer form: `40.0` → `40`,
+  `100.0` → `100`, `1000000.0` → `1000000`, `-0.0` → `0`.
+- **Plain decimal fractions** use the shortest round-tripping form: `0.1` →
+  `0.1`, `0.42137624` → `0.42137624`, `1.7320508075688772` →
+  `1.7320508075688772`.
+- **Scientific notation** is used per ES6 for very small/large magnitudes and is
+  now **byte-identical across both languages**: `0.00002` → `0.00002`,
+  `1e-7` → `1e-7`, `1e21` → `1e+21`. (This is the case that the previous
+  hand-rolled scheme got wrong — Rust wrote `0.00002` while Python's `repr`
+  wrote `2e-05` — and is the reason this document now mandates JCS.)
+
+> **IEEE-754 / 2^53 integer caveat.** RFC 8785's number model is IEEE-754
+> doubles, so exactness is only guaranteed for integers within the safe-integer
+> range **±(2^53 − 1)** (`±9_007_199_254_740_991`). All integers our manifests
+> actually carry (GPU counts, byte sizes, step/epoch counters, parameter counts
+> up to ~1e11) are far inside this range, so they are exact and identical on
+> both sides. For integers **≥ 2^53**, `serde_jcs` and Python `jcs` still agree
+> byte-for-byte (both emit the full-precision integer literal), but such values
+> lie outside RFC 8785's guaranteed-exact domain and should be avoided in hashed
+> preimages. (The stricter `rfc8785` PyPI package was evaluated and rejected for
+> the Python side precisely because it *raises* on integers ≥ 2^53 while
+> `serde_jcs` accepts them, which would make Rust and Python disagree — one
+> hashing, one erroring — rather than stay identical.)
+
+## 4. String escaping (RFC 8785 minimal set)
+
+Within a string, the following characters are escaped; everything else
+(including all non-ASCII Unicode) is emitted verbatim as UTF-8:
+
+| Character            | Output |
+|----------------------|--------|
+| `"` (U+0022)         | `\"`   |
+| `\` (U+005C)         | `\\`   |
+| backspace (U+0008)   | `\b`   |
+| tab (U+0009)         | `\t`   |
+| line feed (U+000A)   | `\n`   |
+| form feed (U+000C)   | `\f`   |
+| carriage return (U+000D) | `\r` |
+| other C0 controls (U+0000–U+001F not listed above) | `\u00xx` (lowercase hex) |
+
+Note: `/` (solidus) is **not** escaped. Non-ASCII characters are **not**
+`\u`-escaped; they are written as their raw UTF-8 bytes.
+
+## 5. Worked example
+
+For the reference input `contracts/schemas/examples/runtime_manifest.example.json`, both
+implementations MUST produce the same `runtime_id`. That value is asserted as a
+hard-coded known-answer in both `contracts/rust/cy-manifest` (Rust) and
+`framework/sdk/python/cy-manifest` (Python) test suites. See each package's tests for the
+exact string.
+
+The same guarantee holds for the immutable resources: the reference inputs
+`contracts/schemas/examples/artifact_manifest.example.json` and
+`contracts/schemas/examples/training_revision.example.json` produce known-answer
+`artifact_id` / `revision_id` values asserted identically on both sides.
+
+## 6. Contract inventory
+
+| Type | Schema | Computed id | Preimage exclusion |
+|------|--------|-------------|--------------------|
+| `HardwareManifest` | `manifests/hardware_manifest.schema.json` | — | — |
+| `ModelManifest` | `manifests/model_manifest.schema.json` | — | — |
+| `WorkloadRequest` | `manifests/workload_request.schema.json` | — | — |
+| `RuntimeManifest` | `manifests/runtime_manifest.schema.json` | `runtime_id` | `runtime_id` |
+| `WhyReport` | `manifests/why_report.schema.json` | none (hash available) | — |
+| `ValidationResult` | `manifests/validation_result.schema.json` | none (hash available) | — |
+| `TrainingRevision` | `manifests/training_revision.schema.json` | `revision_id` | `revision_id` |
+| `CheckpointMetadata` | `manifests/checkpoint_metadata.schema.json` | `checkpoint_id` | `checkpoint_id` |
+| `ArtifactManifest` | `manifests/artifact_manifest.schema.json` | `artifact_id` | `artifact_id` |
+
+The three new immutable resources compute their id exactly as `RuntimeManifest`
+does: `id = "sha256:" + hex(sha256(canonical_bytes(record_without_its_id)))`.
+`WhyReport` and `ValidationResult` are not immutable and carry no published id,
+but both implementations still expose `canonical_bytes()` / `canonical_sha256_hex()`
+for change detection.

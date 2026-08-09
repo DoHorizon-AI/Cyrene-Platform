@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Rust and JVM build output
+target/
+**/target/
+*.rs.bk
+.gradle/
+**/.gradle/
+**/build/
+*.class
+*.jar
+*.war
+
+# Local runtime state and large artifacts
+.cache/
+logs/
+runs/
+output/
+storage/
+artifacts/
+sboms/
+models/
+checkpoints/
+*.log
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.onnx
+*.engine
+*.plan
+*.tar.gz
+*.tgz
+oci-archive/
+docker-out/
+
+# Secrets and local configuration
+.env
+.env.*
+!**/.env.example
+credentials/
+secrets/
+
+# Editors, assistants, and OS files
+.idea/
+.vscode/
+.claude/
+.gemini/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.tmp

@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+import "proto/plugin/v1/probe.proto";
+import "proto/plugin/v1/model_analyzer.proto";
+import "proto/plugin/v1/compat_rule.proto";
+import "proto/plugin/v1/runtime_builder.proto";
+import "proto/plugin/v1/execution_engine.proto";
+import "proto/plugin/v1/training_backend.proto";
+import "proto/plugin/v1/quantization.proto";
+import "proto/plugin/v1/gateway_filter.proto";
+import "proto/plugin/v1/notification.proto";
+import "proto/plugin/v1/storage.proto";
+
+message Envelope {
+  string request_id = 1;
+  string trace_id = 2;
+  string plugin_id = 3;
+  uint32 protocol_version = 4;
+  int64 deadline_ms = 5;
+  uint64 sequence_number = 6;
+
+  oneof payload {
+    // Control & Lifecycle
+    Hello hello = 10;
+    HelloAck hello_ack = 11;
+    Configure configure = 12;
+    Cancel cancel = 13;
+    HealthCheck health_check = 14;
+    HealthStatus health_status = 15;
+    Shutdown shutdown = 16;
+
+    // Extension Points Payload RPC
+    Invoke invoke = 20;
+    InvokeResult invoke_result = 21;
+    StreamItem stream_item = 22;
+
+    // Error
+    PluginErrorPayload error = 30;
+  }
+}
+
+message Hello {
+  uint32 min_protocol_version = 1;
+  uint32 max_protocol_version = 2;
+  string host_version = 3;
+}
+
+message HelloAck {
+  uint32 selected_protocol_version = 1;
+  string plugin_id = 2;
+  string plugin_version = 3;
+  string api_version = 4;
+  repeated string declared_capabilities = 5;
+  map<string, string> metrics = 6;
+  string capabilities_json = 7;
+}
+
+message Configure {
+  map<string, string> settings = 1;
+}
+
+message Cancel {
+  string target_request_id = 1;
+  string reason = 2;
+}
+
+message HealthCheck {}
+
+message HealthStatus {
+  enum Status {
+    HEALTHY = 0;
+    DEGRADED = 1;
+    UNHEALTHY = 2;
+  }
+  Status status = 1;
+  string message = 2;
+}
+
+message Shutdown {
+  uint32 grace_period_ms = 1;
+}
+
+message PluginErrorPayload {
+  enum Code {
+    UNKNOWN = 0;
+    UNAVAILABLE = 1;
+    INCOMPATIBLE = 2;
+    INVALID_INPUT = 3;
+    PERMISSION_DENIED = 4;
+    TIMEOUT = 5;
+    CANCELLED = 6;
+    RETRYABLE = 7;
+    EXECUTION_FAILED = 8;
+    PROTOCOL_ERROR = 9;
+    FATAL = 10;
+  }
+  Code code = 1;
+  string message = 2;
+  string details = 3;
+}
+
+message Invoke {
+  string extension_point = 1;
+  string method = 2;
+
+  oneof request {
+    DetectHardwareRequest detect_hardware = 10;
+    AnalyzeModelRequest analyze_model = 11;
+    EvaluateCompatRequest evaluate_compat = 12;
+    BuildRuntimeRequest build_runtime = 13;
+    ExecuteInferenceRequest execute_inference = 14;
+    RunTrainingStepRequest run_training_step = 15;
+    QuantizeModelRequest quantize_model = 16;
+    FilterRequest filter_request_data = 17;
+    SendNotificationRequest send_notification = 18;
+    StoreArtifactRequest store_artifact = 19;
+    FetchArtifactRequest fetch_artifact = 20;
+  }
+}
+
+message InvokeResult {
+  oneof response {
+    DetectHardwareResponse detect_hardware = 10;
+    AnalyzeModelResponse analyze_model = 11;
+    EvaluateCompatResponse evaluate_compat = 12;
+    BuildRuntimeResponse build_runtime = 13;
+    ExecuteInferenceResponse execute_inference = 14;
+    RunTrainingStepResponse run_training_step = 15;
+    QuantizeModelResponse quantize_model = 16;
+    FilterResponse filter_response_data = 17;
+    SendNotificationResponse send_notification = 18;
+    StoreArtifactResponse store_artifact = 19;
+    FetchArtifactResponse fetch_artifact = 20;
+  }
+}
+
+message StreamItem {
+  string request_id = 1;
+  uint64 sequence_number = 2;
+  bool is_last = 3;
+
+  oneof data {
+    string text_chunk = 10;
+    bytes binary_chunk = 11;
+    string log_line = 12;
+  }
+}

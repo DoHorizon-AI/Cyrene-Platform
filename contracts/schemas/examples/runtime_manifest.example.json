@@ -1,0 +1,24 @@
+{
+  "runtime_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "workload": "finetune",
+  "hardware_profile": {
+    "gpu_model": "NVIDIA A100-SXM4-40GB",
+    "gpu_count": 1,
+    "vram_gb": 40,
+    "driver_version": "550.90.07",
+    "cuda_max_supported": "12.4"
+  },
+  "python": "3.12.13",
+  "cuda_runtime": "12.4.1",
+  "torch": "2.4.0",
+  "frameworks": {
+    "transformers": "4.44.2",
+    "peft": "0.12.0",
+    "trl": "0.9.6"
+  },
+  "precision": "bf16",
+  "training_strategy": "qlora",
+  "base_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "uv_lock_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "validation_level": "resolved"
+}

@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message FilterRequest {
+  map<string, string> headers = 1;
+  string body = 2;
+}
+
+message FilterResponse {
+  bool allow = 1;
+  string reason = 2;
+}

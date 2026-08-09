@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message AnalyzeModelRequest {
+  string model_manifest_json = 1;
+  string workload_request_json = 2;
+}
+
+message AnalyzeModelResponse {
+  double train_gb = 1;
+  double infer_gb = 2;
+}

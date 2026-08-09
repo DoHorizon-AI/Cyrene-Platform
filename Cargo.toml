@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "contracts/rust/cy-manifest",
+    "contracts/rust/cy-plugin-protocol",
+    "contracts/rust/cy-proto",
+    "kernel/crates/cy-local-transport",
+    "kernel/crates/cy-node-agent",
+    "kernel/crates/cy-plugin-supervisor",
+    "framework/crates/cy-extension-registry",
+    "framework/crates/cy-platform-api",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true

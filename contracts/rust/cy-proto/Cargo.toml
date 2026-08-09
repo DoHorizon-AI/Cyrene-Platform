@@ -1,0 +1,18 @@
+[package]
+name = "cy-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Generated CYRENE protocol types and tonic client/server bindings."
+license = "Apache-2.0"
+
+[lib]
+name = "cy_proto"
+path = "src/lib.rs"
+
+[dependencies]
+prost = "0.12"
+tonic = "0.11"
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.11"

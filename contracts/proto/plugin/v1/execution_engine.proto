@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message ExecuteInferenceRequest {
+  string runtime_manifest_json = 1;
+  string model_manifest_json = 2;
+  string prompt = 3;
+  bool streaming = 4;
+}
+
+message ExecuteInferenceResponse {
+  string output_text = 1;
+}

@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message DetectHardwareRequest {}
+
+message DetectHardwareResponse {
+  string hardware_manifest_json = 1;
+}

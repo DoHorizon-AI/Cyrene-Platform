@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message RunTrainingStepRequest {
+  string runtime_manifest_json = 1;
+  string training_revision_json = 2;
+}
+
+message RunTrainingStepResponse {
+  string checkpoint_metadata_json = 1;
+}

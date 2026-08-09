@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/manifests/runtime_manifest.schema.json",
+  "title": "RuntimeManifest",
+  "description": "The fully resolved runtime environment for a workload. Its `runtime_id` is a content hash of the manifest with the `runtime_id` field itself excluded (see schemas/CANONICALIZATION.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workload",
+    "hardware_profile",
+    "python",
+    "cuda_runtime",
+    "torch",
+    "frameworks",
+    "precision",
+    "training_strategy",
+    "base_image_digest",
+    "uv_lock_digest",
+    "validation_level"
+  ],
+  "properties": {
+    "runtime_id": {
+      "type": "string",
+      "description": "Computed content id, format 'sha256:<hex>'. EXCLUDED from the canonical hash preimage; treat as output only.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "workload": {
+      "type": "string",
+      "description": "Kind of workload this runtime serves.",
+      "enum": ["finetune", "serve"]
+    },
+    "hardware_profile": {
+      "type": "object",
+      "description": "Compact hardware profile the runtime is resolved against (subset of HardwareManifest).",
+      "additionalProperties": false,
+      "required": ["gpu_model", "gpu_count", "vram_gb", "driver_version", "cuda_max_supported"],
+      "properties": {
+        "gpu_model": { "type": "string", "description": "GPU model string, e.g. 'NVIDIA A100-SXM4-40GB'." },
+        "gpu_count": { "type": "integer", "minimum": 0, "description": "Number of GPUs the runtime targets." },
+        "vram_gb": { "type": "number", "minimum": 0, "description": "Per-GPU VRAM in GiB." },
+        "driver_version": { "type": "string", "description": "GPU driver version, e.g. '550.90.07'." },
+        "cuda_max_supported": { "type": "string", "description": "Maximum CUDA runtime the driver supports, e.g. '12.4'." }
+      }
+    },
+    "python": { "type": "string", "description": "Python version, e.g. '3.12.13'." },
+    "cuda_runtime": { "type": "string", "description": "CUDA runtime version bundled in the image, e.g. '12.4.1'." },
+    "torch": { "type": "string", "description": "PyTorch version, e.g. '2.4.0'." },
+    "frameworks": {
+      "type": "object",
+      "description": "Additional framework versions keyed by package name, e.g. {'transformers': '4.44.2'}.",
+      "additionalProperties": { "type": "string" }
+    },
+    "precision": {
+      "type": "string",
+      "description": "Runtime numeric precision.",
+      "enum": ["fp32", "fp16", "bf16", "fp8", "int8", "int4"]
+    },
+    "training_strategy": {
+      "type": "string",
+      "description": "Training/serving strategy, e.g. 'full', 'lora', 'qlora', or 'none' for pure serving.",
+      "enum": ["none", "full", "lora", "qlora", "deepspeed", "fsdp"]
+    },
+    "base_image_digest": {
+      "type": "string",
+      "description": "Digest of the base container image, format 'sha256:<hex>'.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "uv_lock_digest": {
+      "type": "string",
+      "description": "Digest of the resolved uv.lock, format 'sha256:<hex>'.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "validation_level": {
+      "type": "string",
+      "description": "Highest validation level reached for this runtime.",
+      "enum": [
+        "declared",
+        "resolved",
+        "built",
+        "smoke-tested",
+        "model-loaded",
+        "validated",
+        "benchmarked",
+        "certified"
+      ]
+    }
+  }
+}

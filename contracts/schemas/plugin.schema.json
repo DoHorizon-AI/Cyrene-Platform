@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/plugin.schema.json",
+  "title": "PluginManifest",
+  "description": "Canonical CYRENE plugin.toml manifest (spec_version 1.0). See docs/PLUGIN_SPEC.md. Supports single-plugin and multi-component bundle forms.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plugin"],
+  "properties": {
+    "plugin": { "$ref": "#/$defs/pluginTable" },
+    "capabilities": { "$ref": "#/$defs/capabilities" },
+    "dependencies": { "$ref": "#/$defs/dependencies" },
+    "launch": { "$ref": "#/$defs/launch" },
+    "permissions": { "$ref": "#/$defs/permissions" },
+    "resources": { "$ref": "#/$defs/resources" },
+    "package": { "$ref": "#/$defs/package" },
+    "components": {
+      "type": "array",
+      "description": "Present only in bundle form. Each element is an independently-kinded component.",
+      "items": { "$ref": "#/$defs/component" }
+    }
+  },
+  "$defs": {
+    "kind": {
+      "type": "string",
+      "description": "Controlled plugin taxonomy. First ten values are the canonical extension points; remainder support the bundle form.",
+      "enum": [
+        "probe",
+        "model-analyzer",
+        "compat-rule",
+        "runtime-builder",
+        "execution-engine",
+        "training-backend",
+        "quantization",
+        "gateway-filter",
+        "notification",
+        "storage",
+        "bundle",
+        "service",
+        "library",
+        "python-package",
+        "protocol-and-services",
+        "deployment-assets"
+      ]
+    },
+    "edition": {
+      "type": "string",
+      "enum": ["community", "pro"]
+    },
+    "runtime": {
+      "type": "string",
+      "enum": ["in-proc-rust", "subprocess-python", "subprocess-jvm", "service"]
+    },
+    "apiVersion": {
+      "type": "string",
+      "description": "Plugin-contract version the host checks for compatibility.",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "pluginTable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "api_version", "kind", "edition"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "api_version": { "$ref": "#/$defs/apiVersion" },
+        "kind": { "$ref": "#/$defs/kind" },
+        "edition": { "$ref": "#/$defs/edition" },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "license_gate": { "type": "boolean" },
+        "entrypoint": { "type": "string" },
+        "crate": { "type": "string" },
+        "author": { "type": "string" },
+        "description": { "type": "string" },
+        "license": { "type": "string" },
+        "source_target": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "$comment": "subprocess runtimes require an entrypoint",
+          "if": { "properties": { "runtime": { "enum": ["subprocess-python", "subprocess-jvm"] } }, "required": ["runtime"] },
+          "then": { "required": ["entrypoint"] }
+        },
+        {
+          "$comment": "in-proc-rust requires a crate name",
+          "if": { "properties": { "runtime": { "const": "in-proc-rust" } }, "required": ["runtime"] },
+          "then": { "required": ["crate"] }
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Structured, matchable capabilities for single-plugin manifests.",
+      "properties": {
+        "supported_hardware": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["nvidia", "cuda", "ascend", "amd", "rocm", "cpu"] }
+        },
+        "supported_precisions": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["fp32", "fp16", "bf16", "fp8", "int8", "int4"] }
+        },
+        "supported_quantizations": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["none", "awq", "gptq", "bnb-nf4", "bnb-int8", "fp8"] }
+        },
+        "supports_streaming": { "type": "boolean" },
+        "features": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required_plugins": { "type": "array", "items": { "type": "string" } },
+        "optional_plugins": { "type": "array", "items": { "type": "string" } },
+        "conflicts": { "type": "array", "items": { "type": "string" } },
+        "required_capabilities": { "type": "array", "items": { "type": "string" } },
+        "system_dependencies": { "type": "array", "items": { "type": "string" } },
+        "python_packages": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executable": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "transport": { "type": "string", "enum": ["stdio", "uds", "named-pipe"] },
+        "startup_timeout_ms": { "type": "integer" },
+        "shutdown_timeout_ms": { "type": "integer" }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "filesystem_read": { "type": "array", "items": { "type": "string" } },
+        "filesystem_write": { "type": "array", "items": { "type": "string" } },
+        "network": { "type": "array", "items": { "type": "string" } },
+        "gpu": { "type": "boolean" },
+        "process_spawn": { "type": "boolean" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "memory_mb": { "type": "integer" },
+        "max_message_bytes": { "type": "integer" }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sha256": { "type": "string" },
+        "signature": { "type": "string" },
+        "target_os": { "type": "array", "items": { "type": "string" } },
+        "target_arch": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "edition", "version"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/kind" },
+        "edition": { "$ref": "#/$defs/edition" },
+        "version": { "type": "string", "minLength": 1 },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "license_gate": { "type": "boolean" },
+        "capabilities": {
+          "type": "array",
+          "description": "Free-form coarse capability tags for a bundle component (not the typed matchable vocabulary).",
+          "items": { "type": "string" }
+        },
+        "status": { "type": "string" },
+        "source_target": { "type": "string" }
+      }
+    }
+  }
+}

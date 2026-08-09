@@ -1,0 +1,96 @@
+// agent_service.proto
+// [Core] Controller <-> Node Agent gRPC Contract
+// Defines Heartbeat, Target Registration, Command Stream execution, and Journal Log Streaming.
+
+syntax = "proto3";
+
+package cy.llm;
+
+option java_multiple_files = true;
+option java_package = "com.cy.llm.proto";
+option java_outer_classname = "AgentServiceProto";
+
+// AgentService for Node Agent communication with Control Plane Controller
+service AgentService {
+  rpc Heartbeat(AgentHeartbeatRequest) returns (AgentHeartbeatResponse);
+  rpc RegisterTarget(TargetRegistrationRequest) returns (TargetRegistrationResponse);
+  rpc ExecuteCommandStream(AgentCommandRequest) returns (stream AgentCommandResponse);
+  rpc StreamJournal(JournalStreamRequest) returns (stream JournalEntry);
+}
+
+// ========== Heartbeat Messages ==========
+
+message AgentHeartbeatRequest {
+  string agent_id = 1;
+  string target_id = 2;
+  int64 timestamp = 3;
+  string status = 4;
+  map<string, string> metrics = 5;
+}
+
+message AgentHeartbeatResponse {
+  bool acknowledged = 1;
+  int64 timestamp = 2;
+  bool command_pending = 3;
+  string message = 4;
+}
+
+// ========== Target Registration Messages ==========
+
+message TargetRegistrationRequest {
+  string target_id = 1;
+  string hostname = 2;
+  string ip_address = 3;
+  string arch = 4;
+  string os = 5;
+  repeated string capabilities = 6;
+  map<string, string> labels = 7;
+  string agent_version = 8;
+}
+
+message TargetRegistrationResponse {
+  bool success = 1;
+  string registered_target_id = 2;
+  string assigned_cluster = 3;
+  string message = 4;
+}
+
+// ========== Command Stream Execution Messages ==========
+
+message AgentCommandRequest {
+  string command_id = 1;
+  string target_id = 2;
+  string command_type = 3;
+  string payload = 4;
+  uint32 timeout_seconds = 5;
+  map<string, string> env = 6;
+}
+
+message AgentCommandResponse {
+  string command_id = 1;
+  uint64 sequence_number = 2;
+  bytes stdout_chunk = 3;
+  bytes stderr_chunk = 4;
+  int32 exit_code = 5;
+  bool completed = 6;
+  string error_message = 7;
+}
+
+// ========== Journal Streaming Messages ==========
+
+message JournalStreamRequest {
+  string target_id = 1;
+  bool follow = 2;
+  uint32 tail_lines = 3;
+  string filter_unit = 4;
+  int64 since_timestamp = 5;
+}
+
+message JournalEntry {
+  string target_id = 1;
+  int64 timestamp = 2;
+  string source = 3;
+  string log_level = 4;
+  string message = 5;
+  map<string, string> metadata = 6;
+}

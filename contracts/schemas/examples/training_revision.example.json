@@ -1,0 +1,38 @@
+{
+  "revision_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "run_id": "run-2026-07-22-abc123",
+  "parent_revision_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "reason": "oom_recovery",
+  "input_metrics": {
+    "gpu_mem_peak_gb": 39.7,
+    "step": 1200,
+    "tokens_per_s": 5400
+  },
+  "decision_rule": "guarded-auto.oom_backoff.v1",
+  "config_before": {
+    "gradient_accumulation": 4,
+    "micro_batch_size": 8
+  },
+  "config_after": {
+    "gradient_accumulation": 8,
+    "micro_batch_size": 4
+  },
+  "base_checkpoint_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "state_retention": {
+    "model": true,
+    "optimizer": true,
+    "scheduler": true,
+    "grad_scaler": false
+  },
+  "canary_result": {
+    "loss": 0.42,
+    "passed": true,
+    "steps": 50
+  },
+  "performance_delta": {
+    "loss_delta": -0.03,
+    "tokens_per_s_delta": -120
+  },
+  "rolled_back": false,
+  "actor": "rule"
+}

@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message EvaluateCompatRequest {
+  string hardware_manifest_json = 1;
+  string model_manifest_json = 2;
+  string workload_request_json = 3;
+}
+
+message EvaluateCompatResponse {
+  string why_report_json = 1;
+}

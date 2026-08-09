@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package cy.plugin.v1;
+
+message SendNotificationRequest {
+  string topic = 1;
+  string message = 2;
+  string level = 3;
+}
+
+message SendNotificationResponse {
+  bool success = 1;
+}
