@@ -4,9 +4,9 @@ Core CYRENE manifest types (Hardware / Model / Workload / Runtime) with a
 deterministic canonical hash.
 
 The JSON Schemas under `contracts/schemas/manifests/` are the single source of truth, and
-`contracts/schemas/CANONICALIZATION.md` is the normative hashing spec. This crate and the
-Python package `framework/sdk/python/cy-manifest` both implement that spec and produce
-**byte-identical** `canonical_bytes`, hence identical `runtime_id` values.
+`contracts/schemas/CANONICALIZATION.md` is the normative hashing spec. This crate is the
+in-repository implementation. External language bindings must produce byte-identical
+`canonical_bytes` before they are accepted as compatible.
 
 ## Library
 
@@ -28,5 +28,5 @@ cargo run -p cy-manifest --bin cy-manifest -- hash contracts/schemas/examples/ru
 ## Test
 
 ```bash
-cargo test -p cy-manifest   # determinism + cross-language known-answer
+cargo test -p cy-manifest   # determinism + known-answer tests
 ```

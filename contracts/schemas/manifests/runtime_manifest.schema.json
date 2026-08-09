@@ -15,7 +15,6 @@
     "precision",
     "training_strategy",
     "base_image_digest",
-    "uv_lock_digest",
     "validation_level"
   ],
   "properties": {
@@ -63,11 +62,6 @@
     "base_image_digest": {
       "type": "string",
       "description": "Digest of the base container image, format 'sha256:<hex>'.",
-      "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "uv_lock_digest": {
-      "type": "string",
-      "description": "Digest of the resolved uv.lock, format 'sha256:<hex>'.",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "validation_level": {

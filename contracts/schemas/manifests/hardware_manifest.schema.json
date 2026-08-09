@@ -14,7 +14,6 @@
     "driver_version",
     "cuda_max_supported",
     "interconnect",
-    "container_runtime",
     "precision_support"
   ],
   "properties": {
@@ -66,7 +65,6 @@
         "pcie_gen": { "type": "integer", "minimum": 1, "description": "PCIe generation, e.g. 4 or 5 (optional)." }
       }
     },
-    "container_runtime": { "type": "string", "description": "Container runtime, e.g. 'docker 26.1.0' or 'none'." },
     "precision_support": {
       "type": "object",
       "additionalProperties": false,

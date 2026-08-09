@@ -1,7 +1,6 @@
 //! Core manifest types.
 //!
-//! These mirror the JSON Schemas under `schemas/manifests/` (source of truth)
-//! and the pydantic models in `framework/sdk/python/cy-manifest`.
+//! These mirror the JSON Schemas under `schemas/manifests/` (source of truth).
 
 use std::collections::BTreeMap;
 
@@ -63,7 +62,6 @@ pub struct HardwareManifest {
     pub driver_version: String,
     pub cuda_max_supported: String,
     pub interconnect: Interconnect,
-    pub container_runtime: String,
     pub precision_support: PrecisionSupport,
 }
 
@@ -220,7 +218,6 @@ pub struct RuntimeManifest {
     pub precision: WeightPrecision,
     pub training_strategy: TrainingStrategy,
     pub base_image_digest: String,
-    pub uv_lock_digest: String,
     pub validation_level: ValidationLevel,
 }
 

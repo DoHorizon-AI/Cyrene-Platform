@@ -1,28 +1,22 @@
 # Manifest Canonicalization & Hashing
 
 This document is the **normative specification** for turning a manifest into the
-exact byte sequence that is hashed. It is the contract that guarantees the Rust
-implementation (`contracts/rust/cy-manifest`) and the Python implementation
-(`framework/sdk/python/cy-manifest`) produce **byte-identical** output — and therefore
-identical `runtime_id` values — for the same logical input.
+exact byte sequence that is hashed. The Rust implementation in
+`contracts/rust/cy-manifest` is the in-repository reference. Any external
+language binding must produce byte-identical output for the same logical input.
 
-If the two implementations ever disagree, this document is the source of truth
-and one of them has a bug.
+If an implementation disagrees with this document, the implementation has a bug.
 
 ## 1. Scheme summary
 
 The canonical form is **RFC 8785 (JSON Canonicalization Scheme, JCS)**,
-including its ES6/ECMA-262 number formatting. Both implementations delegate to a
+including its ES6/ECMA-262 number formatting. The Rust reference delegates to a
 maintained RFC 8785 library rather than hand-rolling the serializer:
 
 - **Rust** (`contracts/rust/cy-manifest`): the [`serde_jcs`] crate (RFC 8785 compliant,
   ES6 number formatting via `ryu-js`).
-- **Python** (`framework/sdk/python/cy-manifest`): the [`jcs`] library — the RFC 8785
-  reference implementation, byte-identical to `serde_jcs` across our value
-  domain (see §3 for the one integer caveat).
 
 [`serde_jcs`]: https://crates.io/crates/serde_jcs
-[`jcs`]: https://pypi.org/project/jcs/
 
 The salient properties of JCS, restated for the value shapes our manifests use:
 
@@ -58,7 +52,7 @@ The salient properties of JCS, restated for the value shapes our manifests use:
 2. Serialize the typed model to a JSON value tree.
    - Optional fields that are absent/`None` are **omitted** (not emitted as
      `null`). Both implementations use the same field set, so the emitted key
-     set is identical for identical input.
+  set must be identical for identical input.
 3. For a `RuntimeManifest`, delete the top-level `runtime_id` key if present.
 4. Canonicalize the value tree per §1/§3/§4 into a UTF-8 byte string
    (`canonical_bytes`).
@@ -76,9 +70,7 @@ runtime_id = "sha256:" + hex(sha256(canonical_bytes(runtime_manifest_without_run
 Numbers are emitted exactly as RFC 8785 specifies: the value is interpreted as
 an IEEE-754 double and serialized with the ES6/ECMA-262 `Number.prototype`
 `toString` algorithm (the shortest string that round-trips to the same double).
-This is what makes canonicalization cross-language stable — both `serde_jcs`
-(via `ryu-js`) and Python `jcs` implement the same ES6 algorithm, so there is no
-longer a Rust-`Display`-vs-Python-`repr` divergence.
+This is what makes canonicalization stable across conforming implementations.
 
 Consequences worth noting:
 
@@ -87,24 +79,15 @@ Consequences worth noting:
 - **Plain decimal fractions** use the shortest round-tripping form: `0.1` →
   `0.1`, `0.42137624` → `0.42137624`, `1.7320508075688772` →
   `1.7320508075688772`.
-- **Scientific notation** is used per ES6 for very small/large magnitudes and is
-  now **byte-identical across both languages**: `0.00002` → `0.00002`,
-  `1e-7` → `1e-7`, `1e21` → `1e+21`. (This is the case that the previous
-  hand-rolled scheme got wrong — Rust wrote `0.00002` while Python's `repr`
-  wrote `2e-05` — and is the reason this document now mandates JCS.)
+- **Scientific notation** is used per ES6 for very small/large magnitudes:
+  `0.00002` → `0.00002`, `1e-7` → `1e-7`, `1e21` → `1e+21`.
 
 > **IEEE-754 / 2^53 integer caveat.** RFC 8785's number model is IEEE-754
 > doubles, so exactness is only guaranteed for integers within the safe-integer
 > range **±(2^53 − 1)** (`±9_007_199_254_740_991`). All integers our manifests
 > actually carry (GPU counts, byte sizes, step/epoch counters, parameter counts
-> up to ~1e11) are far inside this range, so they are exact and identical on
-> both sides. For integers **≥ 2^53**, `serde_jcs` and Python `jcs` still agree
-> byte-for-byte (both emit the full-precision integer literal), but such values
-> lie outside RFC 8785's guaranteed-exact domain and should be avoided in hashed
-> preimages. (The stricter `rfc8785` PyPI package was evaluated and rejected for
-> the Python side precisely because it *raises* on integers ≥ 2^53 while
-> `serde_jcs` accepts them, which would make Rust and Python disagree — one
-> hashing, one erroring — rather than stay identical.)
+> up to ~1e11) are far inside this range. Values outside the safe-integer range
+> must not be used in hashed preimages.
 
 ## 4. String escaping (RFC 8785 minimal set)
 
@@ -127,11 +110,9 @@ Note: `/` (solidus) is **not** escaped. Non-ASCII characters are **not**
 
 ## 5. Worked example
 
-For the reference input `contracts/schemas/examples/runtime_manifest.example.json`, both
-implementations MUST produce the same `runtime_id`. That value is asserted as a
-hard-coded known-answer in both `contracts/rust/cy-manifest` (Rust) and
-`framework/sdk/python/cy-manifest` (Python) test suites. See each package's tests for the
-exact string.
+For the reference input `contracts/schemas/examples/runtime_manifest.example.json`, a
+conforming implementation MUST produce the same `runtime_id`. The Rust crate
+asserts that value as a hard-coded known-answer test.
 
 The same guarantee holds for the immutable resources: the reference inputs
 `contracts/schemas/examples/artifact_manifest.example.json` and
@@ -155,5 +136,5 @@ The same guarantee holds for the immutable resources: the reference inputs
 The three new immutable resources compute their id exactly as `RuntimeManifest`
 does: `id = "sha256:" + hex(sha256(canonical_bytes(record_without_its_id)))`.
 `WhyReport` and `ValidationResult` are not immutable and carry no published id,
-but both implementations still expose `canonical_bytes()` / `canonical_sha256_hex()`
-for change detection.
+but the reference implementation still exposes `canonical_bytes()` /
+`canonical_sha256_hex()` for change detection.

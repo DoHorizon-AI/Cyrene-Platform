@@ -1,6 +1,6 @@
 # CYRENE Core
 
-CYRENE Core is the host runtime, framework contract, and SDK repository for the
+CYRENE Core is the Rust host runtime and framework-contract repository for the
 CYRENE AI software matrix. It is being developed privately first and is intended
 to become the open-source trust base later.
 
@@ -14,7 +14,7 @@ from this repository.
 | Directory | Responsibility |
 | --- | --- |
 | `kernel/` | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
-| `framework/` | Extension API, registry, SDKs, JVM boundary, and service-manifest tooling |
+| `framework/` | Extension API, registry, and JVM boundary |
 | `contracts/` | Protobuf, JSON Schema, canonical manifests, and generated protocol crates |
 | `examples/` | Non-production plugin integration examples |
 | `docs/` | Architecture, protocol, and repository-boundary decisions |

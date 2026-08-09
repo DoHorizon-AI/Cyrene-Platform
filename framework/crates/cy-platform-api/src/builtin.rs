@@ -72,7 +72,6 @@ impl Probe for BuiltinSystemProbe {
                 nvlink: false,
                 pcie_gen: Some(4),
             },
-            container_runtime: "docker".to_string(),
             precision_support: PrecisionSupport {
                 bf16: true,
                 fp16: true,

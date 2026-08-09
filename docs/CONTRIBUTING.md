@@ -12,11 +12,12 @@ Before handing off a core change, run:
 ```bash
 cargo fmt --all -- --check
 cargo check --workspace --locked
-cargo test --workspace --offline
-python framework/tooling/validate_advanced_service.py \
-  --schema contracts/schemas/advanced-service.schema.json \
-  examples/advanced-service/service.json
+cargo test --workspace --locked
 ```
 
 Contract changes require a versioning decision and a compatibility test before
 an advanced service may consume them.
+
+Do not add a Python workspace, Python tests, package lock, container image, or
+container-runtime probe to the core. Language-specific plugin code and service
+packaging belong in the private advanced-services repository.

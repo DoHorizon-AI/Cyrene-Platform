@@ -186,7 +186,7 @@ All fields optional, default empty:
 [dependencies]
 required_plugins     = []   # other plugin ids that must be present
 required_capabilities = []  # feature strings that must be provided
-system_dependencies  = []   # host binaries (e.g. "docker", "nvidia-smi")
+system_dependencies  = []   # host binaries (e.g. "nvidia-smi")
 python_packages      = []   # pip package names
 ```
 

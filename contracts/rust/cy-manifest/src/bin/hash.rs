@@ -7,9 +7,8 @@
 //! `<kind>` is one of: runtime (default), training-revision, checkpoint,
 //! artifact. Reads a JSON or YAML manifest of that type (format inferred from
 //! the extension, with a JSON-then-YAML fallback) and prints the computed id
-//! ("sha256:<hex>") to stdout. This backs the REBUILD_PLAN acceptance
-//! `cy manifest hash <input>` and cross-language identity with the Python
-//! `python -m cy_manifest.hash` entrypoint.
+//! ("sha256:<hex>") to stdout. This is the core reference implementation for
+//! manifest content identifiers.
 
 use std::path::Path;
 use std::process::ExitCode;

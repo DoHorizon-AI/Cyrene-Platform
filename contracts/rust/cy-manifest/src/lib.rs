@@ -1,11 +1,8 @@
 //! Core CYRENE manifest types and deterministic canonical hashing.
 //!
-//! The JSON Schemas under `schemas/manifests/` are the single source of truth;
-//! these Rust types and the pydantic models in `framework/sdk/python/cy-manifest` are both
-//! derived from them. The canonicalization scheme (see
-//! `schemas/CANONICALIZATION.md`) is implemented identically here and in
-//! `framework/sdk/python/cy-manifest` so that both produce byte-identical `canonical_bytes`
-//! and therefore identical `runtime_id` values.
+//! The JSON Schemas under `schemas/manifests/` are the single source of truth.
+//! The canonicalization scheme in `schemas/CANONICALIZATION.md` is implemented
+//! here as the core reference for `canonical_bytes` and content identifiers.
 
 mod canonical;
 mod manifest;
@@ -118,11 +115,10 @@ mod tests {
 
     /// Known-answer for `schemas/examples/runtime_manifest.example.json`.
     ///
-    /// This exact string is also asserted by the Python test suite in
-    /// `framework/sdk/python/cy-manifest/tests/test_canonical.py`. If you change the sample
-    /// or the canonicalization scheme, update BOTH sides together.
+    /// If the sample or canonicalization scheme changes, update this value and
+    /// version the contract before external bindings consume it.
     const KNOWN_RUNTIME_ID: &str =
-        "sha256:91fe1b35cf0dfd7f5162ef0895cd288e094111add6e8ec136fdda445d11b5445";
+        "sha256:9420315d29b089f5b95b3d39ee1d473426246cd32cd91631f37fdee596c46478";
 
     fn sample() -> RuntimeManifest {
         let mut frameworks = BTreeMap::new();
@@ -150,9 +146,6 @@ mod tests {
             training_strategy: TrainingStrategy::Qlora,
             base_image_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_string(),
-            uv_lock_digest:
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_string(),
             validation_level: ValidationLevel::Resolved,
         }
@@ -199,7 +192,7 @@ mod tests {
         assert_eq!(
             runtime_id(&m),
             KNOWN_RUNTIME_ID,
-            "canonical hash changed; if intentional, update KNOWN_RUNTIME_ID in BOTH Rust and Python tests"
+            "canonical hash changed; if intentional, update KNOWN_RUNTIME_ID and version the contract"
         );
     }
 
@@ -212,9 +205,8 @@ mod tests {
 
     // -- Immutable-resource known-answer tests ------------------------------
     //
-    // These literals are also asserted by the Python suite in
-    // `framework/sdk/python/cy-manifest/tests/test_canonical.py`. If a sample or the
-    // canonicalization scheme changes, update BOTH sides together.
+    // If a sample or canonicalization scheme changes, update these literals and
+    // version the contract before external bindings consume it.
 
     const KNOWN_ARTIFACT_ID: &str =
         "sha256:25c57c49626124d95c0a6135e71a3c5d7ec78a22736aa884f988ede8ea43c77c";
@@ -236,7 +228,7 @@ mod tests {
         assert_eq!(
             artifact_id(&artifact_sample()),
             KNOWN_ARTIFACT_ID,
-            "canonical hash changed; if intentional, update KNOWN_ARTIFACT_ID in BOTH Rust and Python tests"
+            "canonical hash changed; if intentional, update KNOWN_ARTIFACT_ID and version the contract"
         );
     }
 
@@ -245,7 +237,7 @@ mod tests {
         assert_eq!(
             revision_id(&revision_sample()),
             KNOWN_REVISION_ID,
-            "canonical hash changed; if intentional, update KNOWN_REVISION_ID in BOTH Rust and Python tests"
+            "canonical hash changed; if intentional, update KNOWN_REVISION_ID and version the contract"
         );
     }
 
@@ -283,9 +275,8 @@ mod tests {
     //
     // A revision whose free-form snapshot contains fractional/exponential
     // floats (`0.00002`, `0.42137624`, `1.7320508075688772`, `1000000.0`).
-    // Under the old hand-rolled canonicalizer these hashed DIFFERENTLY in Rust
-    // vs Python (`0.00002` vs `2e-05`); under RFC 8785 (JCS) both sides now
-    // agree on this literal. Also asserted identically in the Python suite.
+    // The old hand-rolled canonicalizer emitted inconsistent representations
+    // for values such as `0.00002`; RFC 8785 (JCS) fixes the representation.
     const KNOWN_ADVERSARIAL_REVISION_ID: &str =
         "sha256:1e71cfa0560a8a2ca65ff04e09585c4ccd4c9dd549c4682b3531e18e8f5cafd8";
 
@@ -310,7 +301,7 @@ mod tests {
         assert_eq!(
             revision_id(&adversarial_revision()),
             KNOWN_ADVERSARIAL_REVISION_ID,
-            "RFC 8785 float canonicalization changed; update in BOTH Rust and Python tests"
+            "RFC 8785 float canonicalization changed; version the contract before updating"
         );
     }
 }

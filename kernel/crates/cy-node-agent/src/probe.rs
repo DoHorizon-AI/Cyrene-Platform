@@ -57,10 +57,7 @@ impl HardwareProbe {
         // 5. GPU & Driver Probing
         let (gpus, driver_version, cuda_max_supported, nvlink) = probe_gpus_and_driver();
 
-        // 6. Container Runtime
-        let container_runtime = probe_container_runtime();
-
-        // 7. Precision Support
+        // 6. Precision Support
         let precision_support = determine_precision_support(&gpus);
 
         HardwareManifest {
@@ -83,7 +80,6 @@ impl HardwareProbe {
                 nvlink,
                 pcie_gen: Some(4),
             },
-            container_runtime,
             precision_support,
         }
     }
@@ -354,29 +350,6 @@ fn check_nvlink_support() -> bool {
         || std::env::var("HAS_NVLINK")
             .map(|v| v == "1")
             .unwrap_or(false)
-}
-
-/// Probe container runtime binary.
-fn probe_container_runtime() -> String {
-    for rt in &["docker", "podman", "containerd"] {
-        if is_command_available(rt) {
-            return rt.to_string();
-        }
-    }
-    "docker".to_string()
-}
-
-fn is_command_available(cmd: &str) -> bool {
-    let check_cmd = if cfg!(target_os = "windows") {
-        "where"
-    } else {
-        "which"
-    };
-    std::process::Command::new(check_cmd)
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Determine precision support based on GPU compute capability.

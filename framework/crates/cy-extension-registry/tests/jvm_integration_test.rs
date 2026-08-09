@@ -29,7 +29,6 @@ fn test_runtime() -> RuntimeManifest {
         precision: WeightPrecision::Fp16,
         training_strategy: TrainingStrategy::None,
         base_image_digest: "sha256:test".to_string(),
-        uv_lock_digest: "sha256:test".to_string(),
         validation_level: ValidationLevel::Declared,
     }
 }

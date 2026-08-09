@@ -2,10 +2,8 @@
 //!
 //! This implements the scheme specified in `schemas/CANONICALIZATION.md`, which
 //! is now RFC 8785 (JSON Canonicalization Scheme) including ES6/ECMA-262 number
-//! formatting. It uses the `serde_jcs` crate so that this stays byte-for-byte
-//! identical to the Python implementation in
-//! `framework/sdk/python/cy-manifest/src/cy_manifest/canonical.py`, which uses the RFC 8785
-//! `rfc8785` library.
+//! formatting. It uses the `serde_jcs` crate as the in-repository reference
+//! implementation. External language bindings must conform to the same bytes.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
