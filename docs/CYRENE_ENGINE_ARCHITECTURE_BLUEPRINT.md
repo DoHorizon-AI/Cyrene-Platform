@@ -1,9 +1,9 @@
 # CYRENE Engine 初始架构与协议蓝图
 
-- 状态：Draft / Architecture Discussion
+- 状态：Draft / Confirmed Direction
 - 日期：2026-08-10
-- 范围：目录规划、内核与框架边界、分布式控制契约
-- 本轮变更：仅新增本文档，不修改源码、构建配置或现有协议
+- 范围：多仓库规划、内核与框架边界、分布式控制契约
+- 本轮变更：仅修订本文档，不修改源码、构建配置或现有协议
 
 ## 1. 结论先行
 
@@ -32,10 +32,23 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
    Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离适配器中。
 6. **控制流、事件流和数据流分离。**
    模型、数据集、checkpoint 和张量不经过普通 Kernel RPC 或 Kotlin 控制面。
-7. **跨语言只有一个线协议权威。**
+7. **采用方案 A：Core 单独开源，官方服务插件各自独立建仓。**
+   Core 不包含任何官方 App 源码；每个插件仓库独立发布、测试和签名。
+8. **跨语言只有一个线协议权威。**
    Protobuf 是 Rust、Kotlin、Python 和 TypeScript SDK 的唯一生成源。
-8. **Shell 不直接连接 Kernel。**
-   Tauri/Web 客户端只访问 Kotlin 的公开 API，节点管理凭证不下发到客户端。
+9. **UI 与 Shell 属于服务插件。**
+   Core 只发布客户端协议与 SDK，不保存产品界面。普通服务提供 UI extension，
+   Navigator 服务仓库可提供官方 Tauri/Web 组合壳；客户端仍不能直连 Kernel。
+10. **Kotlin 固定为 Pure Kotlin Domain + Spring Boot Adapters。**
+    Domain/Application 层没有 Spring 依赖，Spring Boot 只负责入站、出站和部署
+    适配。
+11. **插件以签名 OCI Artifact 分发。**
+    tag 只用于发现，安装与运行必须绑定 digest、签名身份和策略。
+12. **Node 默认主动拨号，直连模式可选。**
+    默认由 Rust Agent 建立到 Kotlin 的 mTLS 双向流；网络可达且经策略允许时，
+    Kotlin 也可直接请求 Node 的 `KernelService`。两种模式复用同一命令消息。
+13. **开发统一进入 `develop`，`main` 只保存通过完整验收的可发布基线。**
+    禁止在 `main` 直接开发；完整流水线和真实环境测试缺一不可。
 
 ## 2. RustRover 对当前仓库的只读检查结果
 
@@ -79,7 +92,7 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 | `StdioTransport::spawn(executable, args)` 裸启动进程 | 没有 cgroup、沙盒、设备映射或资源环境注入 | 所有进程经 `ProcessRuntime` 与 `SandboxBackend` |
 | 当前 ADR 允许 `in-proc-rust` 业务插件和 PyO3 | 业务崩溃可能影响可信核心 | 进程内仅限平台适配器；PyO3 只能存在于外部 worker |
 | GPU 按型号聚合 | 无法对单卡、MIG/分区做租约 | 使用稳定设备 ID、PCI 地址、分区和健康状态 |
-| 现有仓库边界文档把六大 App 放在另一私有仓库 | 与本次 Monorepo `apps/` 要求冲突 | 先以 ADR 明确仓库治理，再迁移源码 |
+| 六大 App 尚未形成各自独立仓库 | 发布、权限和版本边界尚未落地 | 方案 A：Core 开源，六个服务一服务一仓 |
 
 ## 3. 内核、框架、插件与 Shell 的边界
 
@@ -88,7 +101,7 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 | Rust Kernel / Node Runtime | 主机资源发现；设备清单；资源租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；本地 IPC；节点观察状态 | 训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库 |
 | Kotlin Framework / Control Plane | 插件目录与安装；依赖解析；期望状态；集群拓扑；节点选择；权限、租户与配额策略；工作流；配置；分布式状态协调；面向 Shell 的 API | 直接调用 CUDA/NVML；直接操作 cgroup/device node；用 `ProcessBuilder` 启动计算插件；加载 Python 到 JVM |
 | App / Plugin | Catalyst、Yield、Reactor 等全部 AI 和产品能力；PyTorch、vLLM、uv；数据、训练、推理、网关、评估和微前端 | 依赖 Kernel 私有 crate；绕过租约；自行选择未授权 GPU；修改控制面全局状态 |
-| Tauri/Web Shell | UI、窗口/托盘、安全存储、认证会话、公开 API 客户端、远程控制体验 | 直接调用 KernelService；启动节点进程；扫描 GPU；加载服务端业务插件；持有节点管理凭证 |
+| 服务插件 UI / Shell | UI extension、窗口/托盘、安全存储、认证会话、公开 API 客户端和远程控制体验；Navigator 可提供官方组合壳 | 进入 Core 仓库；直接调用 KernelService；启动节点进程；扫描 GPU；持有节点管理凭证 |
 | SDK / Contracts | 唯一跨语言协议；版本策略；代码生成；manifest/schema；兼容性测试与 TCK | 业务实现；某一种语言独有但未进入协议的隐藏语义 |
 
 Kernel 不能被称为完全“无状态”。进程、租约、重启计数和健康信息都是节点
@@ -112,22 +125,29 @@ Kernel 不能被称为完全“无状态”。进程、租约、重启计数和�
 
 ```mermaid
 sequenceDiagram
-    participant UI as Tauri/Web Shell
+    participant UI as Plugin-owned UI / Navigator Shell
     participant CP as Kotlin Control Plane
     participant K as Rust Kernel / Node Agent
     participant P as Out-of-process Plugin
     participant D as Artifact/Data Plane
 
+    K->>CP: ConnectNode(mTLS, node identity, resume token)
+    CP-->>K: session accepted + desired generation
     UI->>CP: StartPlugin / workload request
     CP->>CP: manifest、权限、依赖、节点调度
-    CP->>K: LaunchPlugin(idempotency key, resource claim, immutable refs)
+    CP-->>K: LaunchPlugin command over outbound stream
     K->>K: 原子租约 + cgroup/device/sandbox
     K->>P: 启动并注入可见设备，执行本地握手
     P-->>K: cy.plugin.v1 Health/Invoke
-    K-->>CP: observed state / heartbeat / event
+    K->>CP: command result / observed state / heartbeat
     CP-->>UI: lifecycle event
     P->>D: URI/handle/shared memory/streaming data
 ```
+
+上图是默认的主动拨号模式。可选直连模式下，Kotlin 通过 mTLS 直接调用 Rust
+暴露的 `KernelService`；`LaunchPluginRequest`、`Operation`、幂等规则、
+generation 和错误语义完全相同。直连模式只是传输拓扑变化，不能形成第二套
+节点 API。
 
 控制 RPC 只传标识符、digest、URI/handle、配额、状态、deadline、revision、
 幂等键和能力引用。模型权重、数据集、checkpoint、日志正文和张量不作为
@@ -137,15 +157,18 @@ sequenceDiagram
 
 | 平面 | 用途 | 推荐传输 |
 | --- | --- | --- |
-| 控制面 | 资源租约、插件期望状态、进程启停、查询 | 远程 mTLS gRPC；本地可用 UDS |
+| 控制面 | 资源租约、插件期望状态、进程启停、查询 | 默认 Agent 主动 mTLS 双向 gRPC；可选 Kotlin 直连 KernelService；本地可用 UDS |
 | 事件面 | 节点、租约、进程、插件状态变化 | 可恢复的 gRPC stream；后续可接事件总线 |
 | 本地插件面 | Supervisor 与 Python/JVM/native worker | 现有 length-prefixed Protobuf over stdio；后续 UDS/Named Pipe |
 | 数据面 | 模型、数据集、checkpoint、token/tensor 流 | 对象存储 URI、共享内存、mmap、UDS 或独立流服务 |
 | 客户端面 | Shell 到控制面 | HTTPS、WebSocket、gRPC-Web/Connect 等公开 API |
 
-分布式部署时，推荐 Rust Agent 主动建立到 Kotlin 控制面的 mTLS 长连接，以
-适应 NAT 和防火墙。无论采用主动流还是控制面直连，协议中的 generation、
-node epoch、fence token 和 idempotency key 都必须保持一致。
+分布式部署默认由 Rust Agent 主动建立到 Kotlin 控制面的 mTLS 长连接，以
+适应 NAT 和防火墙。第一帧必须完成节点身份、node epoch、协议版本和恢复
+token 协商；断线重连后先对账 desired/observed generation，再接收新命令。
+网络可达时可以启用控制面直连，但必须由显式部署策略选择，不能在运行中
+无序混用两种命令通道。若确需故障切换，同一节点同一时刻只能有一个持有效
+session lease 的命令来源。
 
 ## 4. Rust、Kotlin 与 C 的范围
 
@@ -165,13 +188,21 @@ Kernel 默认应使用 `forbid(unsafe_code)`。确需 unsafe/FFI 的 crate 必�
 
 ### 4.2 Kotlin 的范围
 
-Kotlin 负责长期运行的分布式控制面。建议核心领域层采用 Kotlin 协程和
-生成的 gRPC client/server，不把 Spring 类型渗透进领域模型。Spring Boot、
-Ktor 或其他 Web 框架可以作为公开 API、企业集成和部署适配器，不能成为
-插件契约本身。
+Kotlin 负责长期运行的分布式控制面，固定采用
+**Pure Kotlin Domain + Spring Boot Adapters**：
 
-Kotlin 模块应遵循 `domain <- application <- adapters` 的依赖方向，并通过
-架构测试阻止 `framework` 导入 `apps`。
+- `domain/`：实体、值对象、状态机、调度规则和领域事件；只依赖 Kotlin/JDK，
+  不依赖 Spring、gRPC、数据库或生成代码。
+- `application/`：用例、事务边界与输入/输出 ports；可以依赖 domain，不依赖
+  Spring adapter。
+- `adapters/inbound-*`：Spring Boot gRPC/HTTP/WebSocket、认证和管理 API。
+- `adapters/outbound-*`：Kernel client、持久化、事件总线、OCI registry、
+  签名验证与 secret provider。
+- `bootstrap/`：Spring Boot 装配和部署入口，不承载业务规则。
+
+模块依赖只能沿 `domain <- application <- adapters <- bootstrap` 方向，
+并通过架构测试阻止 Spring annotation/type 进入 domain/application，也阻止
+Core Framework 导入任何服务插件仓库。
 
 ### 4.3 是否需要 C
 
@@ -230,184 +261,212 @@ GPU 清单至少要包含稳定设备 ID、PCI 地址、厂商、型号、显存
 - `OBSERVE_ONLY`：只能观察，不能限制；
 - `UNENFORCED`：无法执行，默认应 fail closed。
 
-## 6. 目标 Monorepo 目录结构
+## 6. 方案 A：多仓库拓扑与文件树
 
-以下目标树假设 CYRENE-Platform 在孵化阶段成为完整私有 Monorepo，并通过
-依赖规则保持 Core 可独立发布。当前仓库文档仍规定六大 App 位于另一个私有
-仓库，因此在仓库边界 ADR 获批前，不应直接搬迁这些源码。
+CYRENE 固定采用“一个开源 Core + 每个服务插件一个独立仓库”的多仓库模型，
+不再规划把六大服务、Shell 或产品界面并入 Core。Core 只发布内核、控制面、
+通信契约、SDK、TCK 与可信打包规范；服务仓库独立发布功能、worker、界面和
+可选客户端壳。
+
+### 6.1 组织级仓库树
 
 ```text
-Cyrene-Platform/
+cyrene/
+├── cyrene-core/                 # 开源：Kernel、Framework、SDK、TCK、规范
+├── cyrene-catalyst/             # 独立服务仓：数据与知识提取
+├── cyrene-yield/                # 独立服务仓：训练与微调
+├── cyrene-reactor/              # 独立服务仓：量化、部署与推理
+├── cyrene-exchange/             # 独立服务仓：工作流、网关与企业协调
+├── cyrene-navigator/            # 独立服务仓：官方体验、Web/Tauri Shell
+├── cyrene-echo/                 # 独立服务仓：评估、评分与反馈增强
+├── cyrene-plugin-template/      # 可选开源参考实现与脚手架
+└── cyrene-distribution/         # 可选私有发行编排，仅保存 catalog lock/部署清单
+```
+
+`cyrene-distribution` 不是源码汇总仓，不复制 Core 或插件源码；它只锁定一次
+产品发行所选的 Core、插件 OCI digest、签名策略和部署参数。没有组合发行需求
+时可以不创建该仓库。
+
+### 6.2 `cyrene-core` 开源仓库树
+
+```text
+cyrene-core/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── settings.gradle.kts
 ├── build.gradle.kts
-├── pnpm-workspace.yaml
 ├── buf.work.yaml
 │
-├── kernel/                               # Rust 用户态微内核 / Node Runtime
-│   ├── README.md
+├── kernel/                              # Rust 用户态微内核 / Node Runtime
 │   ├── crates/
-│   │   ├── cy-kernel-api/                # OS/GPU/process/sandbox 抽象 traits
-│   │   ├── cy-kernel-daemon/             # KernelService 服务入口
-│   │   ├── cy-resource-manager/          # 原子配额、租约、fencing
-│   │   ├── cy-hardware-discovery/        # 只读硬件事实和遥测
-│   │   ├── cy-sandbox/                   # runtime/backend 编排
-│   │   ├── cy-local-transport/           # 已存在
-│   │   ├── cy-plugin-supervisor/         # 已存在
-│   │   └── cy-node-agent/                # 已存在
+│   │   ├── cy-kernel-api/               # OS/GPU/process/sandbox 抽象 traits
+│   │   ├── cy-kernel-daemon/            # KernelService 与 Node outbound client
+│   │   ├── cy-resource-manager/         # 原子配额、租约、fencing
+│   │   ├── cy-hardware-discovery/       # 只读硬件事实和遥测
+│   │   ├── cy-sandbox/                  # runtime/backend 编排
+│   │   ├── cy-local-transport/          # 已存在
+│   │   ├── cy-plugin-supervisor/        # 已存在
+│   │   └── cy-node-agent/               # 已存在
 │   ├── adapters/
-│   │   ├── os/linux/
+│   │   ├── os/linux-procfs/
+│   │   ├── os/linux-sysfs/
+│   │   ├── os/linux-cgroup-v2/
 │   │   ├── gpu/generic/
 │   │   ├── gpu/nvidia-cli/
-│   │   ├── gpu/amd-cli/
+│   │   ├── gpu/amd-sysfs/
 │   │   ├── gpu/ascend-cli/
-│   │   └── sandbox/
-│   │       ├── native/
-│   │       ├── bwrap/
-│   │       └── oci/
+│   │   └── sandbox/{native,bwrap,oci}/
 │   └── tests/
 │
-├── framework/                            # Kotlin/JVM 控制面
-│   ├── README.md
-│   ├── jvm/
-│   │   ├── settings.gradle.kts
-│   │   ├── build.gradle.kts
-│   │   ├── gradle/libs.versions.toml
-│   │   ├── control-plane/
-│   │   ├── modules/
-│   │   │   ├── kernel-client/
-│   │   │   ├── plugin-catalog/
-│   │   │   ├── plugin-lifecycle/
-│   │   │   ├── scheduler/
-│   │   │   ├── cluster/
-│   │   │   ├── policy/
-│   │   │   ├── eventing/
-│   │   │   └── public-api/
-│   │   └── test-support/
-│   └── crates/                           # 迁移期 Rust 兼容层
-│       ├── cy-extension-registry/
-│       └── cy-platform-api/
+├── framework/jvm/                       # Kotlin/JVM 控制面
+│   ├── settings.gradle.kts
+│   ├── build.gradle.kts
+│   ├── gradle/libs.versions.toml
+│   ├── domain/                           # 纯 Kotlin/JDK 领域模型与规则
+│   ├── application/                      # use case 与 inbound/outbound ports
+│   ├── adapters/
+│   │   ├── inbound-grpc/
+│   │   ├── inbound-http/
+│   │   ├── inbound-websocket/
+│   │   ├── outbound-kernel/
+│   │   ├── outbound-persistence/
+│   │   ├── outbound-events/
+│   │   ├── outbound-oci/
+│   │   └── outbound-signature/
+│   ├── bootstrap/                        # Spring Boot 装配和部署入口
+│   └── architecture-tests/               # 强制依赖方向与禁用依赖
 │
-├── sdk/                                  # 唯一跨语言契约与 SDK 边界
+├── sdk/                                  # 唯一公开跨语言契约边界
 │   ├── proto/
 │   │   ├── buf.yaml
-│   │   ├── cyrene/core/v1/
-│   │   │   └── cyrene_core.proto
-│   │   ├── cy/plugin/v1/                 # 现有本地插件协议
-│   │   ├── cy/llm/v0/                    # 现有兼容命名空间
+│   │   ├── cyrene/core/v1/cyrene_core.proto
+│   │   ├── cy/plugin/v1/                 # 现有 worker 协议
+│   │   ├── cy/llm/v0/                    # 冻结兼容命名空间
 │   │   └── third_party/
 │   ├── schemas/
-│   ├── codegen/
-│   │   ├── buf.gen.yaml
-│   │   └── scripts/
-│   ├── rust/
-│   │   ├── cy-proto/
-│   │   ├── cy-plugin-protocol/
-│   │   ├── cy-manifest/
-│   │   └── cy-platform-api/
-│   ├── kotlin/
-│   │   ├── cyrene-proto/
-│   │   ├── cyrene-kernel-client/
-│   │   └── cyrene-plugin-sdk/
-│   ├── python/
-│   │   ├── pyproject.toml
-│   │   └── src/cyrene_sdk/
+│   ├── codegen/{buf.gen.yaml,scripts}/
+│   ├── rust/{cy-proto,cy-plugin-protocol,cy-manifest,cy-platform-api}/
+│   ├── kotlin/{cyrene-proto,cyrene-kernel-client,cyrene-plugin-sdk}/
+│   ├── python/src/cyrene_sdk/
 │   ├── typescript/
-│   └── conformance/
+│   └── conformance/                      # 可独立发布的 TCK client/fixtures
 │
-├── apps/                                 # 六大官方插件/插件束
-│   ├── README.md
-│   ├── _template/
-│   │   ├── service.json
-│   │   ├── plugins/
-│   │   ├── workers/
-│   │   ├── ui/
-│   │   ├── deploy/
-│   │   └── tests/
-│   ├── catalyst/                         # 数据与知识提取
-│   ├── yield/                            # 训练与微调
-│   ├── reactor/                          # 量化、部署与推理
-│   ├── exchange/                         # 工作流、网关与企业协调
-│   ├── navigator/                        # 官方用户体验与跨设备执行
-│   └── echo/                             # 评估、评分与反馈增强
-│
-├── shell/                                # 无业务的客户端壳
-│   ├── desktop-tauri/
-│   │   ├── src/
-│   │   └── src-tauri/
-│   ├── web/                              # 浏览器/PWA 远程控制入口
-│   ├── packages/
-│   │   ├── ui-kit/
-│   │   └── framework-client/
-│   └── tests/
-│
-├── infra/
-│   ├── images/
-│   │   ├── python-base/                  # 固定基础镜像 + uv
-│   │   ├── kernel/
-│   │   └── framework/
-│   ├── compose/
-│   ├── kubernetes/helm/cyrene/
-│   ├── systemd/
-│   ├── sandbox/bwrap/
-│   └── observability/
-│
-├── tools/
-│   ├── codegen/
-│   ├── cyrene-cli/
-│   ├── dev/
-│   ├── release/
-│   └── ci/
-│
-├── tests/
-│   ├── contract/
-│   ├── conformance/
-│   ├── integration/
-│   │   ├── kernel-framework/
-│   │   ├── plugin-runtime/
-│   │   └── multinode/
-│   ├── e2e/
-│   ├── performance/
-│   ├── security/
-│   └── fixtures/
-│
-├── examples/
-├── docs/
-│   ├── architecture/
-│   ├── adr/
-│   ├── api/
-│   ├── plugins/
-│   ├── operations/
-│   └── security/
+├── packaging/
+│   ├── oci-spec/                         # artifact media types 与 manifest schema
+│   └── signing-policy/                   # 信任根、身份与验签策略 schema
+├── infra/                                # 仅 Core 自身镜像/部署，不含产品服务
+├── tools/{codegen,cyrene-cli,release,ci}/
+├── tests/{contract,conformance,integration,security}/
+├── examples/plugin-reference/            # 无业务能力的最小参考插件
+├── docs/{architecture,adr,api,plugins,operations,security}/
 └── .github/workflows/
 ```
 
-`shell/desktop-tauri` 是通用渲染容器，`apps/navigator` 是官方产品体验插件。
-二者不能互相硬编码。对于 HarmonyOS 等尚未验证的原生目标，应首先保证
-`shell/web` 可作为远程控制入口，原生包装作为独立客户端适配器评估。
+Core 仓库不能出现 `apps/`、产品 `shell/` 或六大服务源码。其 CI 也不能通过
+私有凭据 checkout 官方服务仓；开源仓必须在没有任何服务插件源码的条件下
+独立构建、测试和发布。
 
-### 6.1 当前路径到目标路径
+### 6.3 通用服务插件仓库树
+
+六大官方服务和第三方服务采用同一种仓库契约：
+
+```text
+cyrene-<service>/
+├── README.md
+├── service.json                          # 服务束身份、版本与组件清单
+├── core.lock                             # 精确锁定 Core API/SDK/TCK 版本和 digest
+├── contracts/
+│   └── proto/cyrene/apps/<service>/v1/   # 仅该服务的业务契约
+├── plugins/
+│   ├── <component-a>/plugin.toml
+│   └── <component-b>/plugin.toml
+├── workers/
+│   ├── python/{pyproject.toml,uv.lock,src}/
+│   ├── rust/                             # 可选，必须以子进程运行
+│   └── jvm/                              # 可选，必须以子进程运行
+├── ui/
+│   ├── extension/                        # 注入组合壳的微前端/能力面板
+│   └── packages/                         # 服务私有 UI 组件
+├── shell/                                # 可选；壳仍属于服务，不进入 Core
+│   ├── desktop-tauri/
+│   └── web/
+├── packaging/
+│   └── oci/{artifact-manifest,Dockerfile,signing}/
+├── deploy/{compose,helm}/
+├── tests/
+│   ├── core-conformance/                 # 按 core.lock 拉取并运行 Core TCK
+│   ├── contract/
+│   ├── integration/
+│   └── e2e/
+├── tools/
+└── .github/workflows/
+```
+
+`shell/` 是可选目录：普通服务通常只提供 `ui/extension`；`cyrene-navigator`
+作为官方组合体验可以同时提供 Tauri desktop shell 和 Web/PWA shell。其他服务
+若需要独立产品入口，也在自己的仓库内提供，但只能通过公开 Control Plane SDK
+访问平台，不能持有节点凭证或绕过 Kotlin 直连 Kernel。
+
+### 6.4 Navigator 的产品壳示例
+
+```text
+cyrene-navigator/
+├── service.json
+├── core.lock
+├── contracts/proto/cyrene/apps/navigator/v1/
+├── plugins/navigator/plugin.toml
+├── workers/
+├── ui/{extension,packages}/
+├── shell/
+│   ├── desktop-tauri/{src,src-tauri}/
+│   └── web/                              # 浏览器/PWA/跨设备远程入口
+├── packaging/oci/
+├── deploy/
+└── tests/{core-conformance,contract,integration,e2e}/
+```
+
+### 6.5 插件仓如何引用 Core
+
+- `core.lock` 锁定 Core release、Proto/API compatibility level、各语言 SDK 和
+  TCK artifact 的不可变 digest；禁止跟随 `main` 或 `develop` 浮动版本。
+- 日常开发 CI 可以按 `core.lock` checkout 开源 `cyrene-core` 的精确 tag/commit；
+  发布门禁优先消费已发布 SDK 与 TCK OCI artifact，且必须按 digest 拉取。
+- 插件仓负责运行 Core TCK、自己的契约/集成/E2E 测试，并产出兼容性矩阵。
+- Core CI 不反向依赖任何插件仓；Core 的 breaking-change 检查只针对公开契约和
+  TCK golden fixtures。
+- 不要求 Git submodule。仓库之间只通过版本化 API、SDK、TCK 和签名 OCI
+  artifact 集成，避免源码级耦合。
+
+### 6.6 当前路径到目标路径
 
 | 当前路径 | 目标路径 | 迁移规则 |
 | --- | --- | --- |
-| 根 `Cargo.toml` / `Cargo.lock` | 原路径 | 保持 Rust workspace 根入口 |
-| `kernel/crates/cy-*` | 原路径 | 先增量扩展，不先拆现有 crate |
-| `framework/jvm/README.md` | `framework/jvm/*` | 在既有边界内创建 Gradle 工程 |
-| `framework/crates/cy-extension-registry` | 迁移期保留；长期由 Kotlin plugin-catalog/lifecycle 接管 | Kotlin shadow/conformance 通过前不得删除 |
-| `framework/crates/cy-platform-api` | `sdk/rust/cy-platform-api` | 重新定位为 Rust SDK/受信任静态接口 |
-| `contracts/proto/plugin/v1/*` | `sdk/proto/cy/plugin/v1/*` | 原子迁移，保持 `cy.plugin.v1` wire package |
-| `contracts/proto/ai_service.proto` | `sdk/proto/cy/llm/v0/*` 后逐 App 替代 | 冻结兼容，不直接改 package |
-| `contracts/proto/agent_service.proto` | `sdk/proto/cy/llm/v0/*` | 弃用任意命令接口，保留兼容期 |
-| 无 | `sdk/proto/cyrene/core/v1/cyrene_core.proto` | 新的正式分布式 Core v1 |
-| `contracts/schemas/*` | `sdk/schemas/*` | 与 codegen/build 路径一次迁移 |
-| `contracts/rust/cy-*` | `sdk/rust/cy-*` | 保持 crate 名称与兼容性 |
-| 六大服务私有仓库 | `apps/*` | 先批准仓库边界 ADR，再保留历史导入 |
-| 无 | `shell/`、`infra/`、`tools/`、`tests/` | 纯新增建立 |
+| 根 `Cargo.toml` / `Cargo.lock` | `cyrene-core/` 原路径 | 保持 Rust workspace 根入口 |
+| `kernel/crates/cy-*` | `cyrene-core/kernel/crates/cy-*` | 先增量扩展，不先拆现有 crate |
+| `framework/jvm/README.md` | `cyrene-core/framework/jvm/*` | 按 Pure Kotlin Domain + Spring Boot Adapters 建 Gradle 工程 |
+| `framework/crates/cy-extension-registry` | 迁移期保留；长期由 Kotlin application/domain 接管 | Kotlin shadow/conformance 通过前不得删除 |
+| `framework/crates/cy-platform-api` | `cyrene-core/sdk/rust/cy-platform-api` | 重新定位为 Rust SDK/受信任静态接口 |
+| `contracts/proto/plugin/v1/*` | `cyrene-core/sdk/proto/cy/plugin/v1/*` | 原子迁移，保持 wire package |
+| `contracts/proto/ai_service.proto` | `cyrene-core/sdk/proto/cy/llm/v0/*` 后由各服务契约替代 | 冻结兼容，不直接改 package |
+| `contracts/proto/agent_service.proto` | `cyrene-core/sdk/proto/cy/llm/v0/*` | 弃用任意命令接口，保留兼容期 |
+| 无 | `cyrene-core/sdk/proto/cyrene/core/v1/cyrene_core.proto` | 新的正式分布式 Core v1 |
+| `contracts/schemas/*`、`contracts/rust/cy-*` | `cyrene-core/sdk/*` | 先建可复现 codegen，再原子迁移 |
+| 六大服务现有私有源码 | 六个独立 `cyrene-<service>` 仓库 | 不导入 Core；逐仓补 service manifest、core.lock、TCK 与签名 OCI |
+| 产品 Shell/UI | 相应 `cyrene-<service>/{ui,shell}` | Navigator 提供官方组合壳，其他服务按需提供扩展或独立壳 |
 
-`contracts/` 与 `sdk/` 不能长期双写。先建立可复现 codegen 和兼容门禁，再在
-一个受控变更中更新 Cargo、Gradle、build.rs、CI 和外部消费者，最后原子
-迁移路径。
+`contracts/` 与 `sdk/` 不能长期双写。路径迁移必须在一个受控变更中同步更新
+Cargo、Gradle、build.rs、CI 和外部消费者；服务仓只切换公开版本，不复制
+Core 源码。
+
+### 6.7 分支与发布治理
+
+- `develop` 是所有日常开发、本地提交和持续集成的唯一默认分支。
+- `main` 是受保护的可发布基线，禁止直接开发、直接提交或绕过门禁推送。
+- 只有 `develop` 的候选提交同时通过完整流水线和真实环境测试，才允许合并到
+  `main`；仅有 mock、单元测试或窄范围 smoke 不能视为完成。
+- 真实测试至少覆盖受支持 Linux 节点、实际 GPU/无 GPU 节点、Node 断线重连、
+  多节点调度、签名 OCI 验签、Python 隔离启动、升级与回滚。
+- `main` 合并提交和 release tag 必须可追溯到同一组不可变测试证据与制品 digest。
 
 ## 7. `cyrene_core.proto` 讨论稿
 
@@ -420,8 +479,12 @@ Cyrene-Platform/
 
 职责方向：
 
-- `KernelService` 由每台 Linux 节点上的 Rust Agent 实现，只有认证后的
-  Kotlin 控制面可以调用变更类 RPC。
+- `NodeControlService` 由 Kotlin 控制面实现。默认模式下，Rust Agent 通过
+  mTLS 主动建立双向流，控制面在该流上发送类型化 Kernel 命令，节点回传结果、
+  Operation 事件与心跳。
+- `KernelService` 由每台 Linux 节点上的 Rust Agent 实现，作为完整的逻辑
+  Kernel API 和可选的控制面主动请求入口；直连模式也必须使用 mTLS、相同消息、
+  幂等键、generation 和 fencing 语义。
 - `PluginLifecycleService` 由 Kotlin 控制面实现，Shell、管理员、Rust Agent
   和经过授权的远程 service 插件按角色调用。
 - 本地 Python/JVM/native 子进程继续使用现有 `cy.plugin.v1`，不直接连接
@@ -440,7 +503,16 @@ option java_multiple_files = true;
 option java_package = "io.cyrene.proto.core.v1";
 option java_outer_classname = "CyreneCoreProto";
 
-// Implemented by the Rust Node Agent.
+// Implemented by the Kotlin control plane. This is the default transport:
+// each Rust Node Agent dials out and keeps one authenticated bidirectional
+// control stream for the active node epoch.
+service NodeControlService {
+  rpc Connect(stream NodeToControlPlane)
+      returns (stream ControlPlaneToNode);
+}
+
+// Implemented by the Rust Node Agent. This remains the canonical logical API
+// and is exposed only when optional controller-initiated direct mode is enabled.
 service KernelService {
   rpc GetKernelCapabilities(GetKernelCapabilitiesRequest)
       returns (KernelCapabilities);
@@ -531,13 +603,91 @@ message NodeRef {
   uint64 node_epoch = 2;
 }
 
+message NodeHello {
+  NodeRef node = 1;
+  string agent_version = 2;
+  uint32 min_protocol_version = 3;
+  uint32 max_protocol_version = 4;
+  string resume_token = 5;
+}
+
+message NodeWelcome {
+  string session_id = 1;
+  uint32 selected_protocol_version = 2;
+  uint64 desired_generation = 3;
+  google.protobuf.Duration heartbeat_interval = 4;
+  google.protobuf.Timestamp server_time = 5;
+}
+
+message NodeHeartbeat {
+  NodeRef node = 1;
+  uint64 observed_generation = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+message NodeToControlPlane {
+  string frame_id = 1;
+  uint64 sequence_number = 2;
+
+  oneof payload {
+    NodeHello hello = 10;
+    NodeHeartbeat heartbeat = 11;
+    KernelCommandResult command_result = 12;
+    OperationEvent operation_event = 13;
+  }
+}
+
+message ControlPlaneToNode {
+  string frame_id = 1;
+  uint64 sequence_number = 2;
+
+  oneof payload {
+    NodeWelcome welcome = 10;
+    KernelCommand command = 11;
+  }
+}
+
+message KernelCommand {
+  string command_id = 1;
+
+  oneof request {
+    GetKernelCapabilitiesRequest get_capabilities = 10;
+    ReserveResourcesRequest reserve_resources = 11;
+    ReleaseResourcesRequest release_resources = 12;
+    LaunchPluginRequest launch_plugin = 13;
+    TerminatePluginRequest terminate_plugin = 14;
+    CancelOperationRequest cancel_operation = 15;
+  }
+}
+
+message KernelCommandResult {
+  string command_id = 1;
+
+  oneof outcome {
+    KernelCapabilities capabilities = 10;
+    ResourceLease resource_lease = 11;
+    Operation operation = 12;
+    google.rpc.Status error = 13;
+  }
+}
+
+message OciArtifactRef {
+  string registry = 1;
+  string repository = 2;
+
+  // Required immutable sha256 digest. Tags are discovery metadata only and
+  // must never identify bytes admitted for installation or execution.
+  string digest = 3;
+}
+
 message CatalogPluginRef {
   // A policy-approved catalog record, never an arbitrary download command.
   string catalog_name = 1;
   string plugin_id = 2;
   string version = 3;
   string component_id = 4;
-  string package_digest = 5;
+  OciArtifactRef artifact = 5;
+  string signature_policy_name = 6;
 }
 
 message InstalledPluginRef {
@@ -547,6 +697,8 @@ message InstalledPluginRef {
   string version = 3;
   string component_id = 4;
   string manifest_digest = 5;
+  string artifact_digest = 6;
+  string verified_signature_identity = 7;
 }
 
 message SnapshotRef {
@@ -1032,6 +1184,13 @@ message PluginLifecycleEvent {
 
 ### 7.1 必须冻结的协议语义
 
+- 默认连接模式下，`Connect` 的首个上行帧必须是 `NodeHello`，首个下行帧必须
+  是 `NodeWelcome`；一个 `(node_id, node_epoch)` 同时只能有一个持有 command
+  lease 的活动 session，旧 session 的结果和心跳必须被 fence。
+- 断线重连必须携带 `resume_token`、单调 `sequence_number` 和 observed
+  generation；控制面先恢复/补发可重放事件，再下发新的 desired generation。
+- 可选直连 `KernelService` 模式必须显式配置，不能与 outbound stream 同时成为
+  同一节点的命令权威；两种传输共享同一 admission、幂等与操作日志。
 - 相同作用域内，相同 `idempotency_key` 与相同规范化请求必须返回同一资源或
   Operation；同一 key 配不同请求返回 `ALREADY_EXISTS` 或
   `FAILED_PRECONDITION`。
@@ -1049,6 +1208,8 @@ message PluginLifecycleEvent {
   客户端重新获取快照。
 - 认证来自 mTLS/JWT/SPIFFE 等传输身份，消息体中的 tenant/plugin id 只用于
   路由和审计，不能作为认证依据。
+- `CatalogPluginRef.artifact.digest` 必填；registry tag 只能用于 catalog 发现，
+  不能作为安装、缓存或执行身份。安装记录必须保存验签策略与已验证签名身份。
 - 删除字段必须 `reserved`，禁止复用 field number；发布后不能重编号 enum。
 - `buf lint`、`buf breaking`、Rust/Kotlin/Python/TypeScript 二进制 fixture
   必须进入 CI。
@@ -1071,9 +1232,12 @@ Rust 节点只能从已签名、已校验、按 digest 绑定的本地安装记�
 
 - 保留 `contracts/proto/plugin/v1/*` 作为 Supervisor 与本机 worker 的
   零端口协议，不把其业务 `Invoke` payload 合并进 Core gRPC。
+- `NodeControlService.Connect` 承担默认的 Node 注册、心跳、命令和 Operation
+  事件通道；`KernelService` 保留为同语义的可选直连入口，不另造命令模型。
 - 新 `PluginRuntimeState` 与 Rust 当前状态一一映射。
 - 旧 `cy.llm.AgentService.ExecuteCommandStream` 应弃用，不继续扩展；
-  节点注册与 Journal 后续迁入独立的 `cyrene.node.v1`。
+  节点注册与 Journal 迁入 `cyrene.core.v1.NodeControlService`，规模扩大后可
+  无损拆到独立 `cyrene.node.v1` package。
 - `ai_service.proto` 冻结为 v0 兼容协议，训练、推理、量化分别由 Yield、
   Reactor 等 App 发布新契约。
 - `google/rpc/status.proto` 必须通过锁定版本的 third-party Proto 或 Buf
@@ -1081,12 +1245,12 @@ Rust 节点只能从已签名、已校验、按 digest 绑定的本地安装记�
 
 ## 8. 严格的插件标准
 
-CYRENE 不应允许每个生态自行发明安装方式。平台只接受一种规范模型：
+CYRENE 不应允许每个生态自行发明安装方式。平台只接受签名 OCI artifact：
 
 1. 一个规范化 `plugin.toml` / service manifest；
 2. 一个版本化 `api_version` 和 `protocol_version`；
 3. 受控的 `kind`、capability、permission 和 resource vocabulary；
-4. 内容 digest、签名、SBOM、目标 OS/arch 和不可变依赖锁；
+4. OCI manifest digest、签名、SBOM、provenance、目标 OS/arch 和不可变依赖锁；
 5. 统一的安装、升级、启停、健康、取消、日志和卸载语义；
 6. Rust、Kotlin、Python SDK 全部由同一 Proto 生成；
 7. 官方 TCK 验证所有语言实现。
@@ -1094,6 +1258,25 @@ CYRENE 不应允许每个生态自行发明安装方式。平台只接受一种�
 Python 插件使用固定 digest 的基础镜像和 `uv`，在容器或独立沙盒中执行
 冻结依赖安装。宿主机不能 `pip install`，插件也不能传任意 pip/uv 命令给
 Kernel。缓存是实现细节，lockfile 与 package digest 才是可复现依据。
+
+规范 OCI artifact 至少包含以下可寻址对象：
+
+```text
+cyrene plugin OCI artifact
+├── OCI manifest/index                    # 按 OS/arch 选择，不以 tag 执行
+├── layer: service.json + plugin.toml
+├── layer: worker package + immutable dependency lock
+├── layer: compiled protobuf descriptor set
+├── layer: UI extension/shell assets      # 可选，仍属于服务插件
+├── referrer: SPDX/CycloneDX SBOM
+├── referrer: SLSA-compatible provenance
+└── referrer: signature/attestation       # 绑定 manifest digest
+```
+
+控制面只允许从策略白名单 registry 按 digest 解析 artifact，并在创建安装记录前
+完成签名身份、信任根、provenance、manifest/plugin id、目标平台和 Core API
+兼容性校验。Kernel 只接收已验证的 `InstalledPluginRef`，不能自行信任 tag、URL
+或插件提供的签名声明。验签失败、签名身份不符或 referrer 缺失必须 fail closed。
 
 当前 `plugin_protocol.proto` 同时存在自由字符串 `extension_point/method`
 和类型化 `oneof`，未来必须消除双重事实源：manifest 的 `kind` 决定允许的
@@ -1115,15 +1298,20 @@ Kernel。缓存是实现细节，lockfile 与 package digest 才是可复现依�
 
 ### P0：架构权威与仓库治理
 
-- 用新 ADR 确认完整私有 Monorepo，或继续 core/apps 双仓。
+- 用新 ADR 固化方案 A：开源 `cyrene-core`，每个官方服务一个独立仓库，
+  UI/Shell 归服务插件所有。
 - 用新 ADR 取代“可安装 in-proc Rust/PyO3 插件”的旧定义。
 - 冻结 `cy.llm` 为 v0 compatibility namespace。
+- 固化 `develop` 日常开发、`main` 仅在完整流水线与真实测试通过后接收合并的
+  分支保护规则。
 
-验收：不存在同时生效、互相矛盾的仓库边界或插件运行时规范。
+验收：不存在同时生效、互相矛盾的仓库边界、分支策略或插件运行时规范；
+Core 在不访问任何服务仓的条件下可独立构建。
 
 ### P1：契约与生成链
 
 - 新增 `cyrene.core.v1`；
+- 定义 outbound `NodeControlService.Connect` 与可选 direct `KernelService`；
 - 建立 Buf lint/breaking 和 Rust/Kotlin/Python/TypeScript codegen；
 - 建立跨语言 golden fixture 与 TCK 骨架；
 - 标记任意命令 RPC deprecated。
@@ -1143,26 +1331,32 @@ Kernel。
 
 ### P3：Kotlin 控制面
 
-- Gradle/Kotlin 工程；
-- catalog、installation、lifecycle、scheduler、cluster、policy；
+- 建立 Pure Kotlin `domain` / `application` 与 Spring Boot `adapters` /
+  `bootstrap` 的 Gradle 多模块工程；
+- 在 application ports 后实现 catalog、installation、lifecycle、scheduler、
+  cluster、policy；
 - desired/observed reconciliation；
-- Rust Kernel client 和公开 Shell API。
+- outbound Node session/direct Kernel client，以及公开的 gRPC/HTTP/WebSocket API；
+- 用 architecture tests 禁止 domain/application 依赖 Spring、数据库驱动、
+  gRPC transport 或生成代码。
 
 验收：Kotlin 不链接 Kernel crate/JNI，不直接拉起 worker；控制面重启后能
-根据 generation 收敛。
+根据 generation 收敛；纯 domain tests 无 Spring context 即可运行。
 
 ### P4：插件包与生态
 
-- 固定包格式、manifest、签名、SBOM、base-image/uv 规则；
+- 固定签名 OCI media type、manifest、SBOM/provenance、base-image/uv 规则；
 - 迁移 Python/JVM SDK；
-- 官方六 App 逐个通过 TCK；
+- 六个独立官方服务仓逐个锁定 `core.lock` 并通过对应 Core TCK；
 - Rust 业务插件改为 native subprocess，平台适配器保持编译期链接。
 
-验收：增加第七个 App 不修改 Kernel 或 Framework 源码。
+验收：增加第七个服务仓不修改 Kernel 或 Framework 源码；被篡改、未签名、
+错误签名身份或仅 tag 引用的 artifact 全部拒绝安装。
 
 ### P5：分布式与数据面
 
-- Agent mTLS 身份、长连接、重连和事件恢复；
+- Agent 默认 outbound mTLS 双向流、session fencing、重连和事件恢复；
+- 可选 direct KernelService 经过同一 TCK，且不能与 outbound 模式形成双主；
 - 对象存储/共享内存/UDS 数据面；
 - 多节点故障转移、配额、审计和可观测性。
 
@@ -1170,22 +1364,25 @@ Kernel。
 
 ### P6：Shell 与产品体验
 
-- Tauri desktop shell；
-- Web/PWA 远程入口；
-- 微前端加载与权限；
-- Navigator 作为官方体验插件而不是 Shell 私有逻辑。
+- 在 `cyrene-navigator` 提供官方 Tauri desktop 与 Web/PWA 组合壳；
+- 各服务仓独立提供微前端扩展、权限声明与可选独立 Shell；
+- 所有 UI/Shell 只依赖公开 Control Plane SDK，不进入或反向耦合 Core。
 
-验收：删除全部 `apps/` 后，Kernel、Framework 与空 Shell 仍能独立构建并
-运行。
+验收：Core 不 checkout 任一服务仓仍能独立构建运行；每个服务的 UI/Shell
+可按自己的 `core.lock` 独立构建和通过 E2E。
 
 ## 10. 架构门禁
 
 实现阶段应把下列规则写成自动化检查：
 
-- Kernel 不依赖 `framework/`、`apps/`、`shell/`。
-- Framework 不链接 Kernel 私有 crate，不导入 `apps/`。
-- Apps 只依赖公开 SDK、Proto 和 schema。
-- Shell 只依赖面向客户端的 Control Plane SDK。
+- Core 仓不存在 `apps/`、产品 `shell/` 或官方服务源码，也不以私有凭据拉取
+  服务仓。
+- Kernel 不依赖 `framework/`；Framework 不链接 Kernel 私有 crate。
+- 服务插件仓只依赖 Core 的公开 SDK、Proto、schema 和 TCK，并用 `core.lock`
+  锁定不可变版本/digest。
+- 服务级 Shell/UI 只依赖面向客户端的 Control Plane SDK。
+- Kotlin `domain` 和 `application` 不依赖 Spring、数据库、gRPC transport 或
+  生成代码；Spring Boot 只存在于 adapters/bootstrap。
 - Core Proto 不出现 LoRA、vLLM、训练超参数、模型格式等业务词汇。
 - Core RPC 不接受任意 shell、executable、argv 或 env。
 - Kernel 默认 `forbid(unsafe_code)`；FFI 仅在审计 adapter 中。
@@ -1195,19 +1392,35 @@ Kernel。
 - 未知硬件事实返回 `UNKNOWN/UNSUPPORTED`，禁止伪造默认值。
 - 所有语言插件通过相同 TCK。
 - Shell 不能持有节点凭证或绕过 Kotlin 访问 Kernel。
+- OCI tag 不能作为执行身份；安装前必须按 digest 验证签名、provenance 与 SBOM。
+- 一个 Node epoch 同时只有一个命令权威；outbound 与 direct 模式不得双主。
+- `main` 禁止直接开发；只有完整 CI 和真实环境测试证据齐全的 `develop`
+  候选提交可以合并。
 
-## 11. 仍需通过 ADR 决定的问题
+## 11. 已确认决策与剩余 ADR
 
-1. **仓库治理：** 完整私有 Monorepo，还是公开 Core + 私有 Apps 双仓？
-   本文目录树按前者展示，当前仓库文档仍按后者执行。
-2. **Kotlin 部署框架：** 核心协程 + 轻量适配器，还是统一 Spring Boot？
-   本文建议领域层保持纯 Kotlin，部署/API 层可选择 Spring。
-3. **节点连接方向：** Agent 主动长连接，还是控制面直连 KernelService？
-   本文推荐前者，但保留同一服务语义。
-4. **第一版沙盒基线：** native + cgroup、bwrap，还是直接 OCI 容器？
+以下方向已确认，不再作为二选一问题：
+
+1. **仓库：** 方案 A，开源 Core + 每个官方服务独立仓库。
+2. **界面：** UI 与 Shell 属于服务插件；Navigator 提供官方组合壳，Core 无
+   产品界面。
+3. **Kotlin：** Pure Kotlin Domain/Application + Spring Boot Adapters/Bootstrap。
+4. **分发：** 插件只以按 digest 寻址并通过策略验签的 OCI artifact 安装。
+5. **连接：** Node 默认主动拨号建立 mTLS 双向流；可选 direct KernelService，
+   但两者共享协议语义且不能双主。
+6. **分支：** 所有开发与本地提交进入 `develop`；`main` 只接受完整流水线与
+   真实测试通过后的合并。
+
+仍需单独 ADR 决定的实现细节：
+
+1. **第一版沙盒基线：** native + cgroup、bwrap，还是 OCI container runtime；
    无论选择哪一种，都必须通过同一个 `SandboxBackend`。
-5. **插件分发载体：** 签名 OCI artifact、专用 archive，或二者映射？
-   对外只能有一套规范 manifest 和安装语义。
+2. **签名信任模型：** keyless/OIDC、组织密钥或二者组合，以及离线部署的信任根
+   轮换与撤销策略。
+3. **组合发行仓：** 是否创建可选 `cyrene-distribution`，以及 catalog lock 的
+   schema 和发布责任人。
+4. **直连启用条件：** 哪些网络拓扑允许 direct 模式，以及如何配置单一命令
+   权威和故障切换。
 
 在这些 ADR 通过前，本蓝图用于评审和约束后续脚手架，不表示现有实现已完成
 GPU 强隔离、Docker/uv 运行时、Kotlin 控制面或分布式生产验收。
