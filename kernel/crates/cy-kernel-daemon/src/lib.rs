@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -22,17 +22,20 @@ use std::{
 use cy_adapter_client::{HardwareAdapterEndpoint, UdsHardwareAdapterRegistry};
 use cy_kernel_api::{
     AcceleratorKind, AcceleratorLinkType, AcceleratorProvider, AcceleratorVendor, CgroupLimits,
-    DeviceBinding, EnforcementMode, HostInventoryProvider, InstalledPluginResolver,
+    CleanupReport, DeviceBinding, EnforcementMode, HostInventoryProvider, InstalledPluginResolver,
     InventorySnapshot, LeaseState, ProviderError, ResourceLease, ResourceLeaseManager,
     ResourceRequest, SandboxBackend, VerifiedInstallation,
 };
 use cy_proto::core_v1;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{iter, wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
 
 mod sandboxed_process;
 use sandboxed_process::{SandboxedProcess, SandboxedProcessState};
+
+const OPERATION_EVENT_HISTORY_CAPACITY: usize = 256;
+const OPERATION_EVENT_SUBSCRIBER_CAPACITY: usize = 64;
 
 /// 节点内核守护进程核心结构体
 pub struct KernelDaemon {
@@ -300,17 +303,26 @@ pub struct KernelServiceAdapter {
     resolver: Arc<dyn InstalledPluginResolver>,
     instances: Arc<Mutex<HashMap<String, ManagedProcess>>>,
     operations: Arc<Mutex<HashMap<String, core_v1::Operation>>>,
+    operation_events: Arc<Mutex<VecDeque<core_v1::OperationEvent>>>,
+    operation_event_sender: broadcast::Sender<core_v1::OperationEvent>,
+    next_event_sequence: Arc<AtomicU64>,
     heartbeat: WorkerHeartbeatConfig,
     next_control_connection: Arc<AtomicU64>,
 }
 
 impl KernelServiceAdapter {
     pub fn new(daemon: Arc<KernelDaemon>, resolver: Arc<dyn InstalledPluginResolver>) -> Self {
+        let (operation_event_sender, _) = broadcast::channel(OPERATION_EVENT_HISTORY_CAPACITY);
         Self {
             daemon,
             resolver,
             instances: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(HashMap::new())),
+            operation_events: Arc::new(Mutex::new(VecDeque::with_capacity(
+                OPERATION_EVENT_HISTORY_CAPACITY,
+            ))),
+            operation_event_sender,
+            next_event_sequence: Arc::new(AtomicU64::new(1)),
             heartbeat: WorkerHeartbeatConfig::default(),
             next_control_connection: Arc::new(AtomicU64::new(1)),
         }
@@ -344,7 +356,58 @@ impl KernelServiceAdapter {
     fn remember_operation(&self, operation: core_v1::Operation) -> core_v1::Operation {
         let mut operations = self.operations.lock().expect("operation lock poisoned");
         operations.insert(operation.name.clone(), operation.clone());
+        drop(operations);
+        self.publish_operation_event(operation.clone());
         operation
+    }
+
+    fn publish_operation_event(&self, operation: core_v1::Operation) {
+        self.publish_event(core_v1::OperationEvent {
+            event_id: String::new(),
+            resume_token: String::new(),
+            sequence_number: 0,
+            operation: Some(operation),
+            runtime_event: None,
+        });
+    }
+
+    pub fn publish_runtime_event(
+        &self,
+        event_type: core_v1::RuntimeEventType,
+        target_resource_name: impl Into<String>,
+        reason_code: impl Into<String>,
+        summary: impl Into<String>,
+    ) {
+        self.publish_event(core_v1::OperationEvent {
+            event_id: String::new(),
+            resume_token: String::new(),
+            sequence_number: 0,
+            operation: None,
+            runtime_event: Some(core_v1::RuntimeEvent {
+                r#type: event_type as i32,
+                target_resource_name: target_resource_name.into(),
+                reason_code: reason_code.into(),
+                summary: summary.into(),
+                observed_at: Some(now_timestamp()),
+            }),
+        });
+    }
+
+    fn publish_event(&self, mut event: core_v1::OperationEvent) {
+        let sequence_number = self.next_event_sequence.fetch_add(1, Ordering::Relaxed);
+        event.event_id = format!("operation-event-{sequence_number}");
+        event.resume_token = sequence_number.to_string();
+        event.sequence_number = sequence_number;
+        let mut history = self
+            .operation_events
+            .lock()
+            .expect("operation event history lock poisoned");
+        if history.len() == OPERATION_EVENT_HISTORY_CAPACITY {
+            history.pop_front();
+        }
+        history.push_back(event.clone());
+        drop(history);
+        let _ = self.operation_event_sender.send(event);
     }
 
     fn validate_node(&self, node: Option<&core_v1::NodeRef>) -> Result<(), Status> {
@@ -396,6 +459,51 @@ impl KernelServiceAdapter {
             updated_at: Some(timestamp),
             outcome: None,
         })
+    }
+
+    fn operation_running(&self, name: String, target: String) -> core_v1::Operation {
+        let timestamp = now_timestamp();
+        self.remember_operation(core_v1::Operation {
+            name,
+            state: core_v1::OperationState::Running as i32,
+            target_resource_name: target,
+            cancellable: true,
+            created_at: Some(timestamp.clone()),
+            updated_at: Some(timestamp),
+            outcome: None,
+        })
+    }
+
+    fn operation_cancelled(&self, name: String, target: String) -> core_v1::Operation {
+        let timestamp = now_timestamp();
+        self.remember_operation(core_v1::Operation {
+            name,
+            state: core_v1::OperationState::Cancelled as i32,
+            target_resource_name: target,
+            cancellable: false,
+            created_at: Some(timestamp.clone()),
+            updated_at: Some(timestamp),
+            outcome: None,
+        })
+    }
+
+    fn publish_cleanup_events(&self, target: &str, report: &CleanupReport) {
+        if report.oom_killed {
+            self.publish_runtime_event(
+                core_v1::RuntimeEventType::OomKilled,
+                target,
+                "OOM_KILLED",
+                "sandbox telemetry recorded an OOM kill during cleanup",
+            );
+        }
+        if report.complete {
+            self.publish_runtime_event(
+                core_v1::RuntimeEventType::CleanupCompleted,
+                target,
+                &report.reason_code,
+                "worker process tree was reaped and its sandbox cleanup completed",
+            );
+        }
     }
 
     fn operation_failure(
@@ -671,7 +779,13 @@ impl KernelServiceAdapter {
         };
         for name in overdue {
             let _acknowledged = self.request_worker_shutdown(&name, "HEARTBEAT_TIMEOUT", false);
-            let lease = {
+            self.publish_runtime_event(
+                core_v1::RuntimeEventType::WatchdogTriggered,
+                &name,
+                "HEARTBEAT_TIMEOUT",
+                "worker missed its mandatory heartbeat deadline",
+            );
+            let (lease, report) = {
                 let mut instances = self.instances.lock().expect("instance lock poisoned");
                 let Some(process) = instances.get_mut(&name) else {
                     continue;
@@ -681,10 +795,17 @@ impl KernelServiceAdapter {
                     grace_period: self.heartbeat.graceful_stop,
                     immediate: false,
                 }) {
-                    Ok(report) if report.complete => process.lease.clone(),
-                    Ok(_) | Err(_) => None,
+                    Ok(report) => {
+                        let report = report.clone();
+                        let lease = report.complete.then(|| process.lease.clone()).flatten();
+                        (lease, Some(report))
+                    }
+                    Err(_) => (None, None),
                 }
             };
+            if let Some(report) = report.as_ref() {
+                self.publish_cleanup_events(&name, report);
+            }
             if let Some(lease) = lease {
                 if self
                     .daemon
@@ -876,8 +997,14 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     pending_shutdown: None,
                 },
             );
+        self.publish_runtime_event(
+            core_v1::RuntimeEventType::InstanceStateChanged,
+            &instance_name,
+            "WORKER_LAUNCHED",
+            "worker process started inside its assigned sandbox",
+        );
         Ok(Response::new(
-            self.operation_success(operation_name, instance_name),
+            self.operation_running(operation_name, instance_name),
         ))
     }
 
@@ -898,7 +1025,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let immediate = request.mode == core_v1::StopMode::Immediate as i32;
         let _acknowledged =
             self.request_worker_shutdown(&request.process_name, "TERMINATE_REQUESTED", immediate);
-        let lease = {
+        let (lease, report) = {
             let mut instances = self.instances.lock().expect("instance lock poisoned");
             let process = instances
                 .get_mut(&request.process_name)
@@ -923,8 +1050,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     &error,
                 )));
             }
-            process.lease.clone()
+            (process.lease.clone(), report)
         };
+        self.publish_cleanup_events(&request.process_name, &report);
         if let Some(lease) = lease {
             self.daemon
                 .release(&lease.lease_name, lease.fence_token)
@@ -955,11 +1083,58 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn cancel_operation(
         &self,
-        _request: Request<core_v1::CancelOperationRequest>,
+        request: Request<core_v1::CancelOperationRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
-        Err(Status::unimplemented(
-            "operation cancellation is not implemented yet",
-        ))
+        let name = request.into_inner().name;
+        if name.is_empty() {
+            return Err(Status::invalid_argument("operation name is required"));
+        }
+        let operation = self
+            .operations
+            .lock()
+            .expect("operation lock poisoned")
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| Status::not_found("operation not found"))?;
+        if operation.state != core_v1::OperationState::Running as i32 || !operation.cancellable {
+            return Err(Status::failed_precondition("operation is not cancellable"));
+        }
+        let target = operation.target_resource_name;
+        let _acknowledged = self.request_worker_shutdown(&target, "OPERATION_CANCELLED", false);
+        let (lease, report) = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let process = instances.get_mut(&target).ok_or_else(|| {
+                Status::failed_precondition("operation target is no longer managed")
+            })?;
+            let report = process
+                .instance
+                .stop(&cy_kernel_api::StopRequest {
+                    grace_period: self.heartbeat.graceful_stop,
+                    immediate: false,
+                })
+                .map_err(provider_status)?
+                .clone();
+            if !report.complete {
+                let error = ProviderError::new(
+                    "kernel-daemon",
+                    "RESOURCE_QUARANTINED",
+                    &report.reason_code,
+                );
+                return Ok(Response::new(self.operation_failure(name, target, &error)));
+            }
+            (process.lease.clone(), report)
+        };
+        self.publish_cleanup_events(&target, &report);
+        if let Some(lease) = lease {
+            self.daemon
+                .release(&lease.lease_name, lease.fence_token)
+                .map_err(provider_status)?;
+        }
+        self.instances
+            .lock()
+            .expect("instance lock poisoned")
+            .remove(&target);
+        Ok(Response::new(self.operation_cancelled(name, target)))
     }
 
     type WatchOperationsStream = std::pin::Pin<
@@ -968,11 +1143,64 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn watch_operations(
         &self,
-        _request: Request<core_v1::WatchOperationsRequest>,
+        request: Request<core_v1::WatchOperationsRequest>,
     ) -> Result<Response<Self::WatchOperationsStream>, Status> {
-        Ok(Response::new(Box::pin(iter(Vec::<
-            Result<core_v1::OperationEvent, Status>,
-        >::new()))))
+        let request = request.into_inner();
+        let resume_sequence = if request.resume_token.is_empty() {
+            0
+        } else {
+            request.resume_token.parse::<u64>().map_err(|_| {
+                Status::invalid_argument("resume_token must be an event sequence number")
+            })?
+        };
+        let names = request.operation_names;
+        let receiver = self.operation_event_sender.subscribe();
+        let history = self
+            .operation_events
+            .lock()
+            .expect("operation event history lock poisoned")
+            .iter()
+            .filter(|event| event.sequence_number > resume_sequence)
+            .filter(|event| operation_event_matches(event, &names))
+            .cloned()
+            .collect::<Vec<_>>();
+        let last_sequence = history
+            .last()
+            .map(|event| event.sequence_number)
+            .unwrap_or(resume_sequence);
+        let (sender, stream) = mpsc::channel(OPERATION_EVENT_SUBSCRIBER_CAPACITY);
+        tokio::spawn(async move {
+            let mut receiver = receiver;
+            let mut cursor = last_sequence;
+            for event in history {
+                if sender.send(Ok(event)).await.is_err() {
+                    return;
+                }
+            }
+            loop {
+                match receiver.recv().await {
+                    Ok(event) if event.sequence_number <= cursor => continue,
+                    Ok(event) => {
+                        cursor = event.sequence_number;
+                        if operation_event_matches(&event, &names)
+                            && sender.send(Ok(event)).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = sender
+                            .send(Err(Status::out_of_range(
+                                "operation event subscriber lagged beyond the bounded buffer",
+                            )))
+                            .await;
+                        return;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(stream))))
     }
 }
 
@@ -1512,6 +1740,14 @@ fn to_proto_duration(duration: Duration) -> prost_types::Duration {
     }
 }
 
+fn operation_event_matches(event: &core_v1::OperationEvent, names: &[String]) -> bool {
+    names.is_empty()
+        || event
+            .operation
+            .as_ref()
+            .is_some_and(|operation| names.contains(&operation.name))
+}
+
 fn now_timestamp() -> prost_types::Timestamp {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1531,6 +1767,7 @@ mod tests {
     };
     use cy_resource_manager::InMemoryResourceManager;
     use std::{collections::BTreeMap, path::PathBuf};
+    use tokio_stream::StreamExt;
 
     #[derive(Debug)]
     struct EmptyHardware;
@@ -1866,6 +2103,85 @@ mod tests {
         assert!(pending.drained);
         drop(instances);
         adapter.unregister_worker_control("worker_1", 99, connection_id);
+    }
+
+    #[test]
+    fn watch_operations_replays_bounded_operation_and_runtime_events() {
+        use core_v1::kernel_service_server::KernelService;
+
+        let adapter = heartbeat_adapter();
+        let operation = adapter.operation_running(
+            "operations/launch-worker_1".to_string(),
+            "worker_1".to_string(),
+        );
+        adapter.publish_runtime_event(
+            core_v1::RuntimeEventType::WatchdogTriggered,
+            "worker_1",
+            "TEST_WATCHDOG",
+            "test runtime event",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let response = adapter
+                .watch_operations(Request::new(core_v1::WatchOperationsRequest {
+                    context: None,
+                    operation_names: Vec::new(),
+                    resume_token: String::new(),
+                }))
+                .await
+                .unwrap();
+            let mut stream = response.into_inner();
+            let first = stream.next().await.unwrap().unwrap();
+            assert_eq!(first.operation.unwrap().name, operation.name);
+            assert_eq!(first.sequence_number, 1);
+            let second = stream.next().await.unwrap().unwrap();
+            assert_eq!(
+                second.runtime_event.unwrap().r#type,
+                core_v1::RuntimeEventType::WatchdogTriggered as i32
+            );
+            assert_eq!(second.sequence_number, 2);
+        });
+    }
+
+    #[test]
+    fn cancel_operation_reaps_worker_and_emits_terminal_operation() {
+        use core_v1::kernel_service_server::KernelService;
+
+        let adapter = heartbeat_adapter();
+        let running = adapter.operation_running(
+            "operations/launch-worker_1".to_string(),
+            "worker_1".to_string(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cancelled = runtime
+            .block_on(
+                adapter.cancel_operation(Request::new(core_v1::CancelOperationRequest {
+                    mutation: None,
+                    name: running.name.clone(),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(cancelled.state, core_v1::OperationState::Cancelled as i32);
+        assert!(!adapter.instances.lock().unwrap().contains_key("worker_1"));
+        let events = adapter.operation_events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            event.operation.as_ref().is_some_and(|operation| {
+                operation.name == running.name
+                    && operation.state == core_v1::OperationState::Cancelled as i32
+            })
+        }));
+        assert!(events.iter().any(|event| {
+            event.runtime_event.as_ref().is_some_and(|runtime_event| {
+                runtime_event.r#type == core_v1::RuntimeEventType::CleanupCompleted as i32
+            })
+        }));
     }
 
     #[test]
