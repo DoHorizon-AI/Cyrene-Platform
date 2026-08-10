@@ -16,6 +16,7 @@ uuid = { version = "1.0", features = ["v4"] }
 serde = { version = "1.0", features = ["derive"] }
 cy-manifest = { version = "0.1.0", path = "../../../contracts/rust/cy-manifest" }
 serde_json = "1.0.151"
+cy-kernel-api = { path = "../cy-kernel-api" }
 
 [dev-dependencies]
 tempfile = "3.0"

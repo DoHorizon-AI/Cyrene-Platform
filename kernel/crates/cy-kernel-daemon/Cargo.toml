@@ -1,0 +1,18 @@
+[package]
+name = "cy-kernel-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Rust composition root for the CYRENE node kernel"
+license = "Apache-2.0"
+
+[lib]
+name = "cy_kernel_daemon"
+path = "src/lib.rs"
+
+[dependencies]
+cy-hardware-discovery = { path = "../cy-hardware-discovery" }
+cy-kernel-api = { path = "../cy-kernel-api" }
+cy-proto = { path = "../../../contracts/rust/cy-proto" }
+cy-resource-manager = { path = "../cy-resource-manager" }
+cy-sandbox = { path = "../cy-sandbox" }
+prost-types = "0.12"

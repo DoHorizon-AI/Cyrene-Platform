@@ -1,0 +1,21 @@
+[Unit]
+Description=CYRENE Rust Node Kernel
+After=local-fs.target
+RequiresMountsFor=/sys/fs/cgroup
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cyrene-kernel
+Restart=on-failure
+RestartSec=2s
+
+# Kernel and all instance cgroups share one fate. The Kernel does not adopt
+# workers after a crash; systemd removes the complete service cgroup.
+KillMode=control-group
+Delegate=yes
+TasksMax=infinity
+MemoryAccounting=yes
+CPUAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

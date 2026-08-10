@@ -1,0 +1,440 @@
+//! CYRENE 硬件拓扑与加速卡探测适配器 (Hardware Discovery Adapters).
+//!
+//! 【进程外无侵入式硬件探测设计】
+//! 本模块实现了对宿主机 GPU / 加速芯片的探测。为了避免在 Rust 内核守护进程中直接链接厂商专有的动态链接库
+//! （如 libnvidia-ml.so / NVML C SDK），从而导致内核与特定驱动版本强耦合甚至驱动崩溃带崩内核，
+//! CYRENE 采用「进程外隔离探测（Process-Out-of-Kernel）」策略：
+//! 1. [`NvidiaSmiProvider`]: 通过安全调用系统 `nvidia-smi` 命令行工具解析 CSV 输出获取显卡 UUID、显存、PCI 地址；
+//! 2. 结合 Linux `/sys/bus/pci/devices/` sysfs 树解析 NUMA 亲和性节点；
+//! 3. 扫描 `/dev/nvidia*` 字符设备节点并构建安全绑定的 [`DeviceBinding`]；
+//! 4. [`parse_nvidia_topology`]: 解析 `nvidia-smi topo -m` 互联拓扑矩阵，识别 NVLink 与 PCIe P2P 链路。
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+};
+
+use cy_kernel_api::{
+    AcceleratorDevice, AcceleratorKind, AcceleratorLinkType, AcceleratorProvider,
+    AcceleratorVendor, CapabilityFact, DeviceBinding, DeviceNode, HealthReport,
+    HostInventoryProvider, InventorySnapshot, NodeCapabilities, ProviderError,
+};
+
+/// 命令行执行输出结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutput {
+    /// 进程退出码
+    pub status: i32,
+    /// 标准输出文本
+    pub stdout: String,
+    /// 标准错误文本
+    pub stderr: String,
+}
+
+/// 命令行运行抽象接口（用于依赖注入与 Mock 单测）
+pub trait CommandRunner: Send + Sync {
+    /// 执行指定程序并捕获输出
+    fn run(&self, executable: &Path, args: &[String]) -> Result<CommandOutput, ProviderError>;
+}
+
+/// 基于操作系统标准 `std::process::Command` 的真实命令执行器
+#[derive(Debug, Default)]
+pub struct SystemCommandRunner;
+
+impl CommandRunner for SystemCommandRunner {
+    fn run(&self, executable: &Path, args: &[String]) -> Result<CommandOutput, ProviderError> {
+        let output = Command::new(executable)
+            .args(args)
+            .output()
+            .map_err(|error| {
+                ProviderError::new("nvidia-smi", "PROBE_EXEC_FAILED", &error.to_string())
+            })?;
+        Ok(CommandOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+/// 基于 `nvidia-smi` 的 NVIDIA GPU 硬件探测适配器
+pub struct NvidiaSmiProvider {
+    /// 命令行执行器实例
+    runner: Arc<dyn CommandRunner>,
+    /// `nvidia-smi` 可执行程序路径
+    command: PathBuf,
+    /// 设备文件根目录（默认为 `/dev`）
+    device_root: PathBuf,
+    /// Sysfs 虚拟文件系统根目录（默认为 `/sys`）
+    sysfs_root: PathBuf,
+}
+
+impl NvidiaSmiProvider {
+    /// 创建 NVIDIA 硬件探测适配器实例
+    pub fn new(command: impl Into<PathBuf>) -> Self {
+        Self {
+            runner: Arc::new(SystemCommandRunner),
+            command: command.into(),
+            device_root: PathBuf::from("/dev"),
+            sysfs_root: PathBuf::from("/sys"),
+        }
+    }
+
+    /// 注入自定义命令执行器（主要用于测试）
+    pub fn with_runner(mut self, runner: Arc<dyn CommandRunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+
+    /// 自定义设备节点根路径
+    pub fn with_device_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.device_root = root.into();
+        self
+    }
+
+    /// 自定义 Sysfs 根路径
+    pub fn with_sysfs_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.sysfs_root = root.into();
+        self
+    }
+
+    /// 调用 `nvidia-smi --query-gpu=...` 并解析基础硬件参数
+    fn query(&self) -> Result<Vec<ParsedGpu>, ProviderError> {
+        let args = vec![
+            "--query-gpu=index,uuid,name,pci.bus_id,memory.total,memory.free".to_string(),
+            "--format=csv,noheader,nounits".to_string(),
+        ];
+        let output = self.runner.run(&self.command, &args)?;
+        if output.status != 0 {
+            return Err(ProviderError::new(
+                "nvidia-smi",
+                "PROBE_FAILED",
+                output.stderr.trim(),
+            ));
+        }
+        parse_nvidia_query(&output.stdout)
+    }
+
+    /// 从 `/sys/bus/pci/devices/<pci>/numa_node` 读取 GPU 绑定的 NUMA 节点编号
+    fn numa_node(&self, pci_address: &str) -> Option<i32> {
+        let path = self
+            .sysfs_root
+            .join("bus/pci/devices")
+            .join(pci_address)
+            .join("numa_node");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|value| value.trim().parse::<i32>().ok())
+    }
+
+    /// 扫描并定位指定 GPU 序号关联的操作系统设备文件（如 `/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`）
+    fn nodes_for(&self, index: usize) -> Vec<DeviceNode> {
+        let mut nodes = vec![DeviceNode {
+            path: self.device_root.join(format!("nvidia{index}")),
+            major: None,
+            minor: Some(index as u32),
+            required: true,
+        }];
+        for name in ["nvidiactl", "nvidia-uvm", "nvidia-uvm-tools"] {
+            let path = self.device_root.join(name);
+            if path.exists() {
+                nodes.push(DeviceNode {
+                    path,
+                    major: None,
+                    minor: None,
+                    required: true,
+                });
+            }
+        }
+        nodes
+    }
+}
+
+impl AcceleratorProvider for NvidiaSmiProvider {
+    fn adapter_id(&self) -> &str {
+        "nvidia-smi"
+    }
+
+    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
+        self.query().map(|gpus| {
+            gpus.into_iter()
+                .map(|gpu| AcceleratorDevice {
+                    device_id: gpu.uuid,
+                    kind: AcceleratorKind::Gpu,
+                    vendor: AcceleratorVendor::Nvidia,
+                    device_family: gpu.name,
+                    pci_address: Some(gpu.pci_address.clone()),
+                    numa_node: self.numa_node(&gpu.pci_address),
+                    total_memory_bytes: gpu.total_memory_bytes,
+                    allocatable_memory_bytes: gpu.free_memory_bytes,
+                    features: vec!["cuda".to_string()],
+                    device_nodes: self.nodes_for(gpu.index),
+                    links: Vec::new(),
+                    health: HealthReport {
+                        healthy: Some(true),
+                        reason_code: "NVIDIA_SMI_PROBE_OK".to_string(),
+                        summary: "nvidia-smi returned a complete device row".to_string(),
+                    },
+                })
+                .collect()
+        })
+    }
+
+    fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError> {
+        if device.vendor != AcceleratorVendor::Nvidia {
+            return Err(ProviderError::new(
+                self.adapter_id(),
+                "UNSUPPORTED_VENDOR",
+                "NVIDIA adapter cannot bind a non-NVIDIA device",
+            ));
+        }
+        let missing = device
+            .device_nodes
+            .iter()
+            .filter(|node| node.required && !node.path.exists())
+            .map(|node| node.path.display().to_string())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(ProviderError::new(
+                self.adapter_id(),
+                "DEVICE_NODE_MISSING",
+                &missing.join(", "),
+            ));
+        }
+
+        let mut environment = BTreeMap::new();
+        environment.insert("CUDA_VISIBLE_DEVICES".to_string(), device.device_id.clone());
+        environment.insert(
+            "NVIDIA_VISIBLE_DEVICES".to_string(),
+            device.device_id.clone(),
+        );
+        Ok(DeviceBinding {
+            device_id: device.device_id.clone(),
+            nodes: device.device_nodes.clone(),
+            environment,
+            required_gids: Vec::new(),
+            enforcement: cy_kernel_api::EnforcementMode::VisibilityOnly,
+            adapter_id: self.adapter_id().to_string(),
+            reason_code: "DEVICE_BPF_NOT_CONFIGURED".to_string(),
+        })
+    }
+
+    fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError> {
+        AcceleratorProvider::probe_inventory(self)?
+            .into_iter()
+            .find(|device| device.device_id == device_id)
+            .map(|device| device.health)
+            .ok_or_else(|| {
+                ProviderError::new(self.adapter_id(), "DEVICE_NOT_FOUND", "device is absent")
+            })
+    }
+}
+
+impl HostInventoryProvider for NvidiaSmiProvider {
+    fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+        let devices = <Self as AcceleratorProvider>::probe_inventory(self)?;
+        Ok(InventorySnapshot {
+            generation: 1,
+            devices,
+            capabilities: NodeCapabilities {
+                ready: true,
+                facts: vec![CapabilityFact {
+                    name: "nvidia-smi".to_string(),
+                    available: true,
+                    required: false,
+                    detail: "NVIDIA inventory is supplied by the isolated CLI adapter".to_string(),
+                }],
+                enforcement: Vec::new(),
+            },
+        })
+    }
+}
+
+/// AMD ROCm 硬件探测适配器（预留占位）
+pub struct AmdProvider;
+
+impl AcceleratorProvider for AmdProvider {
+    fn adapter_id(&self) -> &str {
+        "amd-placeholder"
+    }
+
+    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
+        Err(ProviderError::new(
+            self.adapter_id(),
+            "UNSUPPORTED_ADAPTER",
+            "AMD discovery is reserved for the next hardware adapter milestone",
+        ))
+    }
+
+    fn create_binding(&self, _device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError> {
+        Err(ProviderError::new(
+            self.adapter_id(),
+            "UNSUPPORTED_ADAPTER",
+            "AMD binding is not implemented",
+        ))
+    }
+
+    fn read_health(&self, _device_id: &str) -> Result<HealthReport, ProviderError> {
+        Err(ProviderError::new(
+            self.adapter_id(),
+            "UNSUPPORTED_ADAPTER",
+            "AMD health is not implemented",
+        ))
+    }
+}
+
+/// 内部结构体：解析自 `nvidia-smi` CSV 行的 GPU 原始信息
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedGpu {
+    index: usize,
+    uuid: String,
+    name: String,
+    pci_address: String,
+    total_memory_bytes: Option<u64>,
+    free_memory_bytes: Option<u64>,
+}
+
+/// 解析 `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` 的文本行输出
+fn parse_nvidia_query(output: &str) -> Result<Vec<ParsedGpu>, ProviderError> {
+    let mut devices = Vec::new();
+    for (line_number, line) in output.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+        if fields.len() != 6 || fields.iter().any(|field| field.is_empty()) {
+            return Err(ProviderError::new(
+                "nvidia-smi",
+                "PROBE_INCOMPLETE",
+                &format!(
+                    "line {} does not contain six complete fields",
+                    line_number + 1
+                ),
+            ));
+        }
+        let index = fields[0].parse::<usize>().map_err(|_| {
+            ProviderError::new("nvidia-smi", "PROBE_INVALID", "GPU index is not numeric")
+        })?;
+        let total_memory_bytes = parse_mib(fields[4], "total memory")?;
+        let free_memory_bytes = parse_mib(fields[5], "free memory")?;
+        devices.push(ParsedGpu {
+            index,
+            uuid: fields[1].to_string(),
+            name: fields[2].to_string(),
+            pci_address: fields[3].to_string(),
+            total_memory_bytes,
+            free_memory_bytes,
+        });
+    }
+    Ok(devices)
+}
+
+/// 解析 MiB 整数文本并换算为字节数 (Bytes)
+fn parse_mib(value: &str, field: &str) -> Result<Option<u64>, ProviderError> {
+    let value = value.trim();
+    let mib = value.parse::<u64>().map_err(|_| {
+        ProviderError::new(
+            "nvidia-smi",
+            "PROBE_INVALID",
+            &format!("{field} is not an integer MiB value"),
+        )
+    })?;
+    Ok(Some(mib.saturating_mul(1024 * 1024)))
+}
+
+/// 解析 `nvidia-smi topo -m` 互联拓扑矩阵文本，提取 GPU 间的 NVLink / PCIe P2P 链路关系
+pub fn parse_nvidia_topology(output: &str) -> Vec<(String, String, AcceleratorLinkType)> {
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let columns = header.split_whitespace().collect::<Vec<_>>();
+    let mut links = Vec::new();
+    for row in lines {
+        let fields = row.split_whitespace().collect::<Vec<_>>();
+        if fields.len() <= 1 {
+            continue;
+        }
+        let source = fields[0].to_string();
+        for (index, value) in fields.iter().skip(1).enumerate() {
+            let Some(target) = columns.get(index) else {
+                continue;
+            };
+            let link_type = match value.to_ascii_uppercase().as_str() {
+                value if value.starts_with("NV") => Some(AcceleratorLinkType::Nvlink),
+                value if value.starts_with("PIX") || value.starts_with("PHB") => {
+                    Some(AcceleratorLinkType::Pcie)
+                }
+                _ => None,
+            };
+            if let Some(link_type) = link_type {
+                links.push((source.clone(), (*target).to_string(), link_type));
+            }
+        }
+    }
+    links
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeRunner {
+        output: CommandOutput,
+    }
+
+    impl CommandRunner for FakeRunner {
+        fn run(
+            &self,
+            _executable: &Path,
+            _args: &[String],
+        ) -> Result<CommandOutput, ProviderError> {
+            Ok(self.output.clone())
+        }
+    }
+
+    #[test]
+    fn nvidia_probe_keeps_stable_identity_and_does_not_fabricate_topology() {
+        let provider = NvidiaSmiProvider::new("nvidia-smi").with_runner(Arc::new(FakeRunner {
+            output: CommandOutput {
+                status: 0,
+                stdout: "0, GPU-uuid, NVIDIA A100, 00000000:01:00.0, 40960, 40000\n".into(),
+                stderr: String::new(),
+            },
+        }));
+        let devices = AcceleratorProvider::probe_inventory(&provider).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "GPU-uuid");
+        assert_eq!(devices[0].total_memory_bytes, Some(40960 * 1024 * 1024));
+        assert!(devices[0].links.is_empty());
+        assert_eq!(devices[0].numa_node, None);
+    }
+
+    #[test]
+    fn incomplete_nvidia_row_is_rejected() {
+        let result = parse_nvidia_query("0, GPU-uuid, NVIDIA A100, , 40960, 40000");
+        assert_eq!(result.unwrap_err().reason_code, "PROBE_INCOMPLETE");
+    }
+
+    #[test]
+    fn amd_adapter_is_explicitly_unsupported() {
+        let error = AmdProvider.probe_inventory().unwrap_err();
+        assert_eq!(error.reason_code, "UNSUPPORTED_ADAPTER");
+    }
+
+    #[test]
+    fn topology_parser_returns_only_known_links() {
+        let links = parse_nvidia_topology(
+            "GPU0 GPU1 CPU Affinity\nGPU0 X NV1 SYS 0-7\nGPU1 NV1 X SYS 8-15",
+        );
+        assert_eq!(
+            links,
+            vec![
+                ("GPU0".into(), "GPU1".into(), AcceleratorLinkType::Nvlink),
+                ("GPU1".into(), "GPU0".into(), AcceleratorLinkType::Nvlink),
+            ]
+        );
+    }
+}
