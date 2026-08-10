@@ -7,8 +7,17 @@ Do not add first-party service behavior to this repository. Catalyst, Yield,
 Reactor, Exchange, Navigator, Echo, vendor implementations, and enterprise
 bundles belong in the advanced-services repository.
 
-Use develop for daily changes. main is a protected release branch and accepts
-only reviewed pull requests from develop. Core changes must preserve the
+## Development branches
+
+- `develop-kernel` owns Rust Kernel, Node Runtime, Linux adapters, and their
+  contract/code-generation changes.
+- `develop-framework` owns Kotlin Framework and Control Plane work.
+- `develop` is the reviewed integration branch for cross-language changes.
+- `main` is a protected release branch and accepts only reviewed pull requests
+  from `develop`.
+
+Create short-lived feature or fix branches from the relevant development lane,
+then merge the lane into `develop` through review. Core changes must preserve
 versioned contract ownership and must not add legacy version-0 protocol or
 agent-service references.
 

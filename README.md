@@ -9,9 +9,16 @@ Navigator, or Echo product logic. Those products and other closed plugins live
 in the private advanced-services repository and depend on versioned contracts
 from this repository.
 
-Daily development and integration use develop. main is a protected release
-branch and accepts only reviewed pull requests from develop after the required
-Core CI, architecture-governance, and release-evidence checks pass.
+Development is split into language-specific lanes and converges through
+`develop`:
+
+- `develop-kernel` is the Rust Kernel/Node Runtime development branch.
+- `develop-framework` is the Kotlin Framework/Control Plane development branch.
+- `develop` is the reviewed integration branch for cross-language changes.
+
+`main` is a protected release branch and accepts only reviewed pull requests
+from `develop` after the required Core CI, architecture-governance, and
+release-evidence checks pass.
 
 ## Repository layout
 
