@@ -1,9 +1,15 @@
 # ADR-PLUGIN-RUNTIME: CYRENE Local Plugin Runtime Architecture
 
-- **Status:** Approved / Normative
+- **Status:** Superseded / Historical
 - **Date:** 2026-07-24
 - **Authors:** CYRENE Platform Team
 - **Context:** Modularizing CYRENE into a platform architecture with zero-port local process isolation and compile-time Rust extensions.
+
+> This ADR is preserved as historical context. Installable business-plugin
+> runtime decisions are superseded by
+> [ADR-PLUGIN-EXECUTION-BOUNDARY](ADR-PLUGIN-EXECUTION-BOUNDARY.md).
+> In-process Rust remains valid only for audited, statically compiled Core
+> platform adapters and is not an installable manifest runtime.
 
 ---
 
@@ -56,18 +62,18 @@ A host and plugin are compatible iff:
 
 Each of the 10 extension points follows a strictly defined invocation strategy:
 
-| Extension Point | Strategy | Description |
-|---|---|---|
-| `Probe` | `CollectAndRank` / `FirstAvailable` | Gathers hardware facts from active probes; ranks by evidence confidence. |
-| `ModelAnalyzer` | `CollectAndRank` | Evaluates model requirements against analyzer capabilities; ranks best estimates. |
-| `CompatRule` | `FanOut` + `Merge` | Executes rule evaluations concurrently; merges `WhyReport` decision items. |
-| `RuntimeBuilder` | `FirstMatch` | Selects the first healthy builder plugin covering the target runtime stack. |
-| `ExecutionEngine` | `FirstMatch` | Routes inference requests to the active, healthy engine covering model/precision/quant. |
-| `TrainingBackend` | `FirstMatch` | Routes training jobs to the specified backend plugin. |
-| `Quantization` | `FirstMatch` | Selects matching quantization engine plugin. |
-| `GatewayFilter` | `OrderedChain` | Executes middleware filters sequentially in configured priority order; short-circuits on rejection. |
-| `Notification` | `FanOut` | Broadcasts alert messages to all registered notification plugins. |
-| `Storage` | `NamedSingleOwner` | Directs artifact storage operations to the specific declared storage plugin provider. |
+| Extension Point   | Strategy                            | Description                                                                                         |
+| ----------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `Probe`           | `CollectAndRank` / `FirstAvailable` | Gathers hardware facts from active probes; ranks by evidence confidence.                            |
+| `ModelAnalyzer`   | `CollectAndRank`                    | Evaluates model requirements against analyzer capabilities; ranks best estimates.                   |
+| `CompatRule`      | `FanOut` + `Merge`                  | Executes rule evaluations concurrently; merges `WhyReport` decision items.                          |
+| `RuntimeBuilder`  | `FirstMatch`                        | Selects the first healthy builder plugin covering the target runtime stack.                         |
+| `ExecutionEngine` | `FirstMatch`                        | Routes inference requests to the active, healthy engine covering model/precision/quant.             |
+| `TrainingBackend` | `FirstMatch`                        | Routes training jobs to the specified backend plugin.                                               |
+| `Quantization`    | `FirstMatch`                        | Selects matching quantization engine plugin.                                                        |
+| `GatewayFilter`   | `OrderedChain`                      | Executes middleware filters sequentially in configured priority order; short-circuits on rejection. |
+| `Notification`    | `FanOut`                            | Broadcasts alert messages to all registered notification plugins.                                   |
+| `Storage`         | `NamedSingleOwner`                  | Directs artifact storage operations to the specific declared storage plugin provider.               |
 
 ---
 
@@ -89,7 +95,7 @@ Discovered -> Resolved -> Starting -> Handshaking -> Healthy -> Degraded -> Stop
 3. `InvalidInput`: Malformed payload or validation error.
 4. `PermissionDenied`: Unauthorized capability access.
 5. `Timeout`: Operation exceeded deadline.
-6. `Cancelled`: Request cancelled by host.
+6. `Cancelled`: Request canceled by host.
 7. `Retryable`: Temporary transient failure.
 8. `ExecutionFailed`: Internal plugin logic exception.
 9. `ProtocolError`: Framing corruption, invalid stdout content, or JSON/protobuf parse error.

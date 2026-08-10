@@ -49,7 +49,7 @@
     },
     "runtime": {
       "type": "string",
-      "enum": ["in-proc-rust", "subprocess-python", "subprocess-jvm", "service"]
+      "enum": ["subprocess-python", "subprocess-jvm", "service"]
     },
     "apiVersion": {
       "type": "string",
@@ -70,23 +70,20 @@
         "runtime": { "$ref": "#/$defs/runtime" },
         "license_gate": { "type": "boolean" },
         "entrypoint": { "type": "string" },
-        "crate": { "type": "string" },
         "author": { "type": "string" },
         "description": { "type": "string" },
         "license": { "type": "string" },
         "source_target": { "type": "string" },
-        "status": { "type": "string" }
+        "status": { "type": "string" },
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "scope": { "type": "string", "enum": ["target", "project", "system"] },
+        "restart_policy": { "type": "string", "enum": ["never", "on-failure", "always"] }
       },
       "allOf": [
         {
           "$comment": "subprocess runtimes require an entrypoint",
           "if": { "properties": { "runtime": { "enum": ["subprocess-python", "subprocess-jvm"] } }, "required": ["runtime"] },
           "then": { "required": ["entrypoint"] }
-        },
-        {
-          "$comment": "in-proc-rust requires a crate name",
-          "if": { "properties": { "runtime": { "const": "in-proc-rust" } }, "required": ["runtime"] },
-          "then": { "required": ["crate"] }
         }
       ]
     },

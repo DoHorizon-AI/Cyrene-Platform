@@ -1,0 +1,24 @@
+name: Architecture governance
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  contract-freeze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.45.0
+      - name: Check architecture governance
+        run: bash tools/ci/check-architecture-governance.sh
+      - name: Check Core v1 contract
+        run: bash tools/ci/check-core-v1-contract.sh

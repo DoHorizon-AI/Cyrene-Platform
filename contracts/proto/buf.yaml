@@ -1,0 +1,18 @@
+version: v2
+
+modules:
+  - path: .
+
+lint:
+  use:
+    - STANDARD
+  # Core follows the blueprint's typed domain responses and the outbound
+  # Connect envelope, so those RPC message names are intentionally not wrapped
+  # in generated Request/Response shells.
+  except:
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+
+breaking:
+  use:
+    - FILE

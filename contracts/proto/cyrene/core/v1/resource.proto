@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/core/v1/common.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+enum AcceleratorKind {
+  ACCELERATOR_KIND_UNSPECIFIED = 0;
+  ACCELERATOR_KIND_GPU = 1;
+  ACCELERATOR_KIND_NPU = 2;
+  ACCELERATOR_KIND_TPU = 3;
+  ACCELERATOR_KIND_OTHER = 100;
+}
+
+enum AcceleratorVendor {
+  ACCELERATOR_VENDOR_UNSPECIFIED = 0;
+  ACCELERATOR_VENDOR_NVIDIA = 1;
+  ACCELERATOR_VENDOR_AMD = 2;
+  ACCELERATOR_VENDOR_HUAWEI_ASCEND = 3;
+  ACCELERATOR_VENDOR_INTEL = 4;
+  ACCELERATOR_VENDOR_OTHER = 100;
+}
+
+enum AcceleratorIsolation {
+  ACCELERATOR_ISOLATION_UNSPECIFIED = 0;
+  ACCELERATOR_ISOLATION_EXCLUSIVE_DEVICE = 1;
+  ACCELERATOR_ISOLATION_PARTITION = 2;
+  ACCELERATOR_ISOLATION_SHARED_VISIBLE = 3;
+}
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_CPU = 1;
+  RESOURCE_KIND_MEMORY = 2;
+  RESOURCE_KIND_EPHEMERAL_STORAGE = 3;
+  RESOURCE_KIND_ACCELERATOR = 4;
+}
+
+enum EnforcementMode {
+  ENFORCEMENT_MODE_UNSPECIFIED = 0;
+  ENFORCEMENT_MODE_HARD = 1;
+  ENFORCEMENT_MODE_SOFT = 2;
+  ENFORCEMENT_MODE_VISIBILITY_ONLY = 3;
+  ENFORCEMENT_MODE_OBSERVE_ONLY = 4;
+  ENFORCEMENT_MODE_UNENFORCED = 5;
+}
+
+message CpuRequirements {
+  uint32 request_millicores = 1;
+  uint32 limit_millicores = 2;
+}
+
+message MemoryRequirements {
+  uint64 request_bytes = 1;
+  uint64 limit_bytes = 2;
+}
+
+message AcceleratorRequirements {
+  AcceleratorKind kind = 1;
+  AcceleratorVendor vendor = 2;
+  string other_vendor_id = 3;
+  uint32 count = 4;
+  uint64 min_memory_bytes_per_device = 5;
+  AcceleratorIsolation isolation = 6;
+  repeated string required_features = 7;
+}
+
+message ResourceRequirements {
+  CpuRequirements cpu = 1;
+  MemoryRequirements memory = 2;
+  uint64 ephemeral_storage_limit_bytes = 3;
+  repeated AcceleratorRequirements accelerators = 4;
+}
+
+message NodeCapacity {
+  uint32 total_cpu_millicores = 1;
+  uint32 allocatable_cpu_millicores = 2;
+  uint64 total_memory_bytes = 3;
+  uint64 allocatable_memory_bytes = 4;
+  uint64 total_ephemeral_storage_bytes = 5;
+  uint64 allocatable_ephemeral_storage_bytes = 6;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_UNHEALTHY = 3;
+  HEALTH_STATUS_UNKNOWN = 4;
+}
+
+message HealthReport {
+  HealthStatus status = 1;
+  string reason_code = 2;
+  string summary = 3;
+}
+
+message AcceleratorPartition {
+  string partition_id = 1;
+  uint64 total_memory_bytes = 2;
+  uint64 allocatable_memory_bytes = 3;
+  HealthReport health = 4;
+}
+
+enum AcceleratorLinkType {
+  ACCELERATOR_LINK_TYPE_UNSPECIFIED = 0;
+  ACCELERATOR_LINK_TYPE_PCIE = 1;
+  ACCELERATOR_LINK_TYPE_NVLINK = 2;
+  ACCELERATOR_LINK_TYPE_XGMI = 3;
+  ACCELERATOR_LINK_TYPE_OTHER = 100;
+}
+
+message AcceleratorLink {
+  string peer_device_id = 1;
+  AcceleratorLinkType link_type = 2;
+  uint32 link_count = 3;
+  uint32 width = 4;
+  uint64 bandwidth_bytes_per_second = 5;
+  bool stable = 6;
+}
+
+message AcceleratorDevice {
+  string device_id = 1;
+  AcceleratorKind kind = 2;
+  AcceleratorVendor vendor = 3;
+  string other_vendor_id = 4;
+  string device_family = 5;
+  string pci_address = 6;
+  uint64 total_memory_bytes = 7;
+  uint64 allocatable_memory_bytes = 8;
+  repeated string features = 9;
+  repeated AcceleratorPartition partitions = 10;
+  HealthReport health = 11;
+  optional int32 numa_node = 12;
+  repeated AcceleratorLink links = 13;
+}
+
+message EnforcementReport {
+  ResourceKind resource_kind = 1;
+  EnforcementMode mode = 2;
+  string adapter_id = 3;
+  string reason_code = 4;
+}
+
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0;
+  LEASE_STATE_ACTIVE = 1;
+  LEASE_STATE_ATTACHED = 2;
+  LEASE_STATE_RELEASING = 3;
+  LEASE_STATE_RELEASED = 4;
+  LEASE_STATE_EXPIRED = 5;
+  LEASE_STATE_FAILED = 6;
+}
+
+message ResourceLeaseRef {
+  string lease_name = 1;
+  uint64 fence_token = 2;
+}
+
+message AcceleratorAllocation {
+  string allocation_id = 1;
+  string device_id = 2;
+  string partition_id = 3;
+  uint64 granted_memory_bytes = 4;
+  EnforcementMode enforcement = 5;
+}
+
+message ResourceLease {
+  string name = 1;
+  NodeRef node = 2;
+  LeaseState state = 3;
+  ResourceRequirements granted = 4;
+  repeated AcceleratorAllocation accelerators = 5;
+  repeated EnforcementReport enforcement = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  uint64 fence_token = 8;
+  uint64 inventory_generation = 9;
+}
+
+message ReserveResourcesRequest {
+  MutationContext mutation = 1;
+  NodeRef node = 2;
+  ResourceRequirements requirements = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message ReleaseResourcesRequest {
+  MutationContext mutation = 1;
+  ResourceLeaseRef lease = 2;
+}

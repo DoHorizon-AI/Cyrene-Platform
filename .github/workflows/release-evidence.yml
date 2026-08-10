@@ -1,0 +1,35 @@
+name: Release Evidence
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  main-release-entry:
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release entry
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const labels = (pr.labels || []).map((label) => label.name);
+            const body = pr.body || "";
+
+            if (pr.head.ref !== "develop") {
+              core.setFailed("main accepts release PRs only from develop");
+            }
+
+            if (!labels.includes("release-evidence-verified")) {
+              core.setFailed("missing release-evidence-verified label");
+            }
+
+            if (!/Release evidence:\s*https?:\/\/[^\s)]+/i.test(body)) {
+              core.setFailed("PR body must contain a Release evidence URL");
+            }

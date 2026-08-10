@@ -1,8 +1,12 @@
-//! Core CYRENE manifest types and deterministic canonical hashing.
+//! CYRENE 核心清单（Manifest）类型与确定性规范哈希定义。
 //!
-//! The JSON Schemas under `schemas/manifests/` are the single source of truth.
-//! The canonicalization scheme in `schemas/CANONICALIZATION.md` is implemented
-//! here as the core reference for `canonical_bytes` and content identifiers.
+//! 【模块职责与架构定位】
+//! 1. 契约数据结构源头：定义了平台核心实体（硬件、模型、运行时环境、训练修订、检查点、构建产物等）的 Rust 数据模型，
+//!    与 `schemas/manifests/` 下的 JSON Schema 严格对齐。
+//! 2. 确定性内容标识符（Content ID）：基于 RFC 8785 (JCS) 规范哈希，为不可变实体（如 Runtime、Revision、Checkpoint、Artifact）
+//!    计算前缀为 `sha256:` 的内容寻址 ID。
+//! 3. 避免递归哈希污染：在计算自身 ID 时，自动剥离对应的 ID 字段（例如计算 `runtime_id` 时剔除 JSON 中的 `runtime_id` 键），
+//!    确保哈希原像（preimage）纯粹反映内容本身。
 
 mod canonical;
 mod manifest;
@@ -13,37 +17,46 @@ pub use manifest::*;
 use serde::Serialize;
 use serde_json::Value;
 
-/// A manifest that can be canonicalized and hashed.
+/// 支持确定性规范化和哈希计算的清单特征（Trait）。
+///
+/// 任何实现了 `Serialize` 的结构体都可以通过该特征获得：
+/// - 规范化的 JSON AST (`canonical_value`)
+/// - 符合 RFC 8785 的字节流 (`canonical_bytes`)
+/// - SHA-256 小写 16 进制摘要 (`canonical_sha256_hex`)
 pub trait Manifest: Serialize {
-    /// The JSON value tree used as the hash preimage.
+    /// 获取用于哈希计算的 JSON 抽象语法树（哈希原像 preimage）。
     ///
-    /// For most manifests this is the manifest serialized to JSON. For
-    /// [`RuntimeManifest`] the `runtime_id` field is removed (it is an output,
-    /// never part of its own preimage).
+    /// 大多数清单直接序列化为其自身 JSON。而对于包含计算字段的清单（如 [`RuntimeManifest`]），
+    /// 其自身的 `runtime_id` 字段会被移除，因为该 ID 是哈希的输出，不能作为其自身输入的组成部分。
     fn canonical_value(&self) -> Value {
         serde_json::to_value(self).expect("manifest is serializable to JSON")
     }
 
-    /// Canonical byte serialization per `schemas/CANONICALIZATION.md`.
+    /// 根据 `schemas/CANONICALIZATION.md` / RFC 8785 规则生成规范字节流。
     fn canonical_bytes(&self) -> Vec<u8> {
-        canonical::canonicalize(&self.canonical_value())
+        canonicalize(&self.canonical_value())
     }
 
-    /// Lowercase hex SHA-256 of [`Manifest::canonical_bytes`].
+    /// 计算规范字节流的小写十六进制 SHA-256 摘要。
     fn canonical_sha256_hex(&self) -> String {
-        canonical::canonical_sha256_hex(&self.canonical_value())
+        canonical_sha256_hex(&self.canonical_value())
     }
 }
 
+// 为通用静态清单实现 Manifest 特征
 impl Manifest for HardwareManifest {}
 impl Manifest for ModelManifest {}
 impl Manifest for WorkloadRequest {}
-// WhyReport and ValidationResult are not immutable resources and carry no
-// content id, but a canonical hash is still available for change detection.
+// WhyReport（决策原因报告）和 ValidationResult（校验结果）虽然不是不可变资源也不携带内容 ID，
+// 但依然实现 Manifest 以便通过规范哈希快速进行变更检测（Change Detection）。
 impl Manifest for WhyReport {}
 impl Manifest for ValidationResult {}
 
-/// Build the canonical value for a manifest, removing a single computed id key.
+/// 辅助函数：构建清单的规范 JSON 树，并剔除指定的自动计算 ID 键。
+///
+/// # 参数
+/// * `manifest` - 待序列化的清单对象
+/// * `id_key` - 需要剔除的字段名（例如 `"runtime_id"`、`"revision_id"`）
 fn canonical_value_without(manifest: &impl Serialize, id_key: &str) -> Value {
     let mut value = serde_json::to_value(manifest).expect("manifest is serializable to JSON");
     if let Value::Object(ref mut map) = value {
@@ -76,34 +89,34 @@ impl Manifest for ArtifactManifest {
     }
 }
 
-/// Compute the `runtime_id` of a [`RuntimeManifest`].
+/// 计算 [`RuntimeManifest`]（运行时环境清单）的唯一内容标识符 `runtime_id`。
 ///
-/// `runtime_id = "sha256:" + hex(sha256(canonical_bytes(manifest_without_runtime_id)))`.
+/// 计算公式：`runtime_id = "sha256:" + hex(sha256(canonical_bytes(manifest_without_runtime_id)))`
 pub fn runtime_id(manifest: &RuntimeManifest) -> String {
     format!("sha256:{}", manifest.canonical_sha256_hex())
 }
 
-/// Compute the `revision_id` of a [`TrainingRevision`] (content hash, id excluded).
+/// 计算 [`TrainingRevision`]（训练微调修订记录）的唯一内容标识符 `revision_id`。
 pub fn revision_id(manifest: &TrainingRevision) -> String {
     format!("sha256:{}", manifest.canonical_sha256_hex())
 }
 
-/// Compute the `checkpoint_id` of a [`CheckpointMetadata`] (content hash, id excluded).
+/// 计算 [`CheckpointMetadata`]（权重检查点元数据）的唯一内容标识符 `checkpoint_id`。
 pub fn checkpoint_id(manifest: &CheckpointMetadata) -> String {
     format!("sha256:{}", manifest.canonical_sha256_hex())
 }
 
-/// Compute the `artifact_id` of an [`ArtifactManifest`] (content hash, id excluded).
+/// 计算 [`ArtifactManifest`]（产物清单）的唯一内容标识符 `artifact_id`。
 pub fn artifact_id(manifest: &ArtifactManifest) -> String {
     format!("sha256:{}", manifest.canonical_sha256_hex())
 }
 
-/// Parse a [`RuntimeManifest`] from a JSON string.
+/// 从 JSON 字符串反序列化解析出 [`RuntimeManifest`]。
 pub fn runtime_manifest_from_json(s: &str) -> Result<RuntimeManifest, serde_json::Error> {
     serde_json::from_str(s)
 }
 
-/// Parse a [`RuntimeManifest`] from a YAML string.
+/// 从 YAML 字符串反序列化解析出 [`RuntimeManifest`]。
 pub fn runtime_manifest_from_yaml(s: &str) -> Result<RuntimeManifest, serde_yaml::Error> {
     serde_yaml::from_str(s)
 }
@@ -112,6 +125,123 @@ pub fn runtime_manifest_from_yaml(s: &str) -> Result<RuntimeManifest, serde_yaml
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn installable_manifest_rejects_in_process_runtime() {
+        let result = serde_json::from_str::<PluginManifest>(
+            r#"{
+                "plugin": {
+                    "id": "com.cy.legacy",
+                    "name": "legacy",
+                    "version": "0.1.0",
+                    "api_version": "1.0",
+                    "kind": "probe",
+                    "edition": "community",
+                    "runtime": "in-proc-rust",
+                    "crate": "legacy_probe"
+                }
+            }"#,
+        );
+
+        assert!(result.is_err(), "in-proc-rust must not be installable");
+    }
+
+    #[test]
+    fn installable_manifest_accepts_jvm_subprocess() {
+        let manifest = serde_json::from_str::<PluginManifest>(
+            r#"{
+                "plugin": {
+                    "id": "com.cy.reference.jvm",
+                    "name": "reference-jvm",
+                    "version": "0.1.0",
+                    "api_version": "1.0",
+                    "kind": "probe",
+                    "edition": "community",
+                    "runtime": "subprocess-jvm",
+                    "entrypoint": "reference.Main"
+                }
+            }"#,
+        )
+        .expect("subprocess-jvm manifest should parse");
+
+        assert_eq!(manifest.plugin.runtime, Some(Runtime::SubprocessJvm));
+        assert_eq!(
+            manifest.plugin.entrypoint.as_deref(),
+            Some("reference.Main")
+        );
+    }
+
+    fn validate_plugin_schema(value: &Value) -> Result<(), Vec<String>> {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../schemas/plugin.schema.json"))
+                .expect("plugin schema must be valid JSON");
+        let compiled = jsonschema::JSONSchema::compile(&schema)
+            .expect("plugin schema must compile as JSON Schema");
+
+        compiled
+            .validate(value)
+            .map_err(|errors| errors.map(|error| error.to_string()).collect())
+    }
+
+    #[test]
+    fn plugin_manifest_fixture_passes_schema_and_rust_round_trip() {
+        let value: Value = serde_json::from_str(include_str!(
+            "../../../schemas/examples/plugin_manifest.example.json"
+        ))
+        .expect("plugin fixture must be valid JSON");
+
+        validate_plugin_schema(&value).expect("plugin fixture must pass JSON Schema");
+        let manifest: PluginManifest = serde_json::from_value(value).expect("fixture must parse");
+        assert_eq!(manifest.plugin.id, "com.cyrene.reference.nvidia");
+        assert!(matches!(
+            &manifest.plugin.restart_policy,
+            RestartPolicy::OnFailure { .. }
+        ));
+        assert_eq!(
+            manifest.dependencies.optional_plugins,
+            ["com.cyrene.telemetry"]
+        );
+        assert_eq!(
+            manifest.package.as_ref().unwrap().target_arch,
+            ["x86_64", "aarch64"]
+        );
+
+        let round_trip = serde_json::to_value(&manifest).expect("manifest must serialize");
+        validate_plugin_schema(&round_trip).expect("Rust round-trip must pass JSON Schema");
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_schema_and_model_drift() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../schemas/examples/plugin_manifest.example.json"
+        ))
+        .expect("plugin fixture must be valid JSON");
+
+        let mut unknown_field = fixture.clone();
+        unknown_field["plugin"]["unexpected"] = Value::String("bad".to_string());
+        assert!(validate_plugin_schema(&unknown_field).is_err());
+        assert!(serde_json::from_value::<PluginManifest>(unknown_field).is_err());
+
+        let mut wrong_package_type = fixture.clone();
+        wrong_package_type["package"]["target_os"] = Value::String("linux".to_string());
+        assert!(validate_plugin_schema(&wrong_package_type).is_err());
+        assert!(serde_json::from_value::<PluginManifest>(wrong_package_type).is_err());
+
+        let mut wrong_dependency_location = fixture;
+        wrong_dependency_location["optional_plugins"] = serde_json::json!(["bad-location"]);
+        assert!(validate_plugin_schema(&wrong_dependency_location).is_err());
+        assert!(serde_json::from_value::<PluginManifest>(wrong_dependency_location).is_err());
+    }
+
+    #[test]
+    fn reference_jvm_manifest_uses_supported_runtime() {
+        let manifest = include_str!("../../../../examples/plugins/jvm/poc/plugin.toml");
+
+        assert!(manifest
+            .lines()
+            .any(|line| line.trim() == r#"runtime = "subprocess-jvm""#));
+        assert!(!manifest.contains("in-proc-rust"));
+    }
 
     /// Known-answer for `schemas/examples/runtime_manifest.example.json`.
     ///
