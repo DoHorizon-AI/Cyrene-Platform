@@ -273,7 +273,6 @@ dependencies = [
 name = "cy-node-agent"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chrono",
  "cy-manifest",
  "cy-proto",
@@ -284,8 +283,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-stream",
- "tonic",
 ]
 
 [[package]]
@@ -335,6 +332,7 @@ name = "cy-proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "prost-types",
  "protoc-bin-vendored",
  "tonic",
  "tonic-build",

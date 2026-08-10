@@ -1,0 +1,53 @@
+{
+  "descriptor_sha256": "BAF8FFDFC322C7974C460305179F722B57F323C7366BB8033D94F1500E25CFAA",
+  "fixtures": [
+    {
+      "name": "node_hello",
+      "message": "cyrene.core.v1.NodeHello",
+      "wire_hex": "0a0a0a066e6f64652d3110071205302e312e3018012001",
+      "wire_sha256": "22D325819288B056D840087F6603C02659E60EAAB8A33EC626198A7E15208DC6"
+    },
+    {
+      "name": "node_welcome",
+      "message": "cyrene.core.v1.NodeWelcome",
+      "wire_hex": "0a0973657373696f6e2d311001180322020805",
+      "wire_sha256": "0616AFF1B6FED58F4175B820E1E62378C1A70BC8CCE8261406D9747276F95437"
+    },
+    {
+      "name": "reserve_resources",
+      "message": "cyrene.core.v1.ReserveResourcesRequest",
+      "wire_hex": "0a0d1209726573657276652d311807120a0a066e6f64652d3110071a100a0608e80710d00f12060880808080042202083c",
+      "wire_sha256": "EE182D40B9212E0F79B235E5EC1FA5952A9C07CBDF65C7B20862429E9A142E3A"
+    },
+    {
+      "name": "release_resources",
+      "message": "cyrene.core.v1.ReleaseResourcesRequest",
+      "wire_hex": "0a0b120972656c656173652d31120b0a076c656173652d311009",
+      "wire_sha256": "9B48835652C000219F5211680B9AC8E0C378462B90D3E910CA0379824EF8A7EA"
+    },
+    {
+      "name": "inline_resource_claim_launch",
+      "message": "cyrene.core.v1.LaunchPluginRequest",
+      "wire_hex": "0a0c12086c61756e63682d311803120a0a066e6f64652d3110071a3e0a09696e7374616c6c2d311208706c7567696e2d611a03312e302206776f726b65722a0a7368613235363a616263320a7368613235363a6465663a02636922050a0308e80732160a06636f6e66696710021a0a7368613235363a636667",
+      "wire_sha256": "6927B3200C1B355586516EAA403E6465CB4BFA2A2931CD564195F3588FD48D6C"
+    },
+    {
+      "name": "operation_success",
+      "message": "cyrene.core.v1.Operation",
+      "wire_hex": "0a046f702d31100320015200",
+      "wire_sha256": "20E857733A5A96BE0A859647BD1B4371184CF69490279E640AEBE13CB306FFE7"
+    },
+    {
+      "name": "operation_failure",
+      "message": "cyrene.core.v1.Operation",
+      "wire_hex": "0a046f702d3110045a0a080512066661696c6564",
+      "wire_sha256": "49BD72EDAAD7D9A2CDB082C319FCCC321B364F1B59C0A53793154F9524ED97AF"
+    },
+    {
+      "name": "heartbeat_stale_generation",
+      "message": "cyrene.core.v1.ReportHeartbeatResponse",
+      "wire_hex": "0803100a28023004",
+      "wire_sha256": "CF29E0BB6FC555841D8A0CDCD510C111DF591C4E4C44727DFC5D9596C9D3F089"
+    }
+  ]
+}

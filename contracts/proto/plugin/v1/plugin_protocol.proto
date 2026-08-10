@@ -2,16 +2,16 @@ syntax = "proto3";
 
 package cy.plugin.v1;
 
-import "proto/plugin/v1/probe.proto";
-import "proto/plugin/v1/model_analyzer.proto";
-import "proto/plugin/v1/compat_rule.proto";
-import "proto/plugin/v1/runtime_builder.proto";
-import "proto/plugin/v1/execution_engine.proto";
-import "proto/plugin/v1/training_backend.proto";
-import "proto/plugin/v1/quantization.proto";
-import "proto/plugin/v1/gateway_filter.proto";
-import "proto/plugin/v1/notification.proto";
-import "proto/plugin/v1/storage.proto";
+import "plugin/v1/probe.proto";
+import "plugin/v1/model_analyzer.proto";
+import "plugin/v1/compat_rule.proto";
+import "plugin/v1/runtime_builder.proto";
+import "plugin/v1/execution_engine.proto";
+import "plugin/v1/training_backend.proto";
+import "plugin/v1/quantization.proto";
+import "plugin/v1/gateway_filter.proto";
+import "plugin/v1/notification.proto";
+import "plugin/v1/storage.proto";
 
 message Envelope {
   string request_id = 1;
