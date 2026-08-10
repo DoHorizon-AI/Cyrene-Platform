@@ -4,6 +4,9 @@
 //! adapter and one separately supervised Sandbox Adapter Host, then serves Core
 //! v1 over a local UDS endpoint with filesystem permissions as the trust boundary.
 
+#[cfg(unix)]
+mod runtime_journal;
+
 #[cfg(not(unix))]
 fn main() {
     eprintln!("cyrene-kernel is supported only on Linux/Unix cgroup hosts");
@@ -23,22 +26,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cy_kernel_daemon::{KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig};
     use cy_resource_manager::InMemoryResourceManager;
     use cy_sandbox_client::UdsSandboxAdapterClient;
+    use runtime_journal::FileRuntimeJournal;
     use tokio::net::UnixListener;
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::transport::Server;
 
     let args = Args::parse()?;
+    // Persist and advance the epoch before accepting any Kernel request. The
+    // journal is evidence only: it seeds fencing but is never used to adopt a
+    // Worker left by an older sandboxd process.
+    let journal = Arc::new(FileRuntimeJournal::open(&args.runtime_journal)?);
+    let recovery = journal.begin_epoch(&args.node_id)?;
     let sandbox = Arc::new(UdsSandboxAdapterClient::from_endpoint(
         args.sandbox_adapter,
     )?);
 
-    let resources = Arc::new(InMemoryResourceManager::new(&args.node_id, Vec::new()));
+    let resources = Arc::new(InMemoryResourceManager::with_next_fence_token(
+        &args.node_id,
+        Vec::new(),
+        recovery.next_fence_token,
+    ));
     let daemon = Arc::new(KernelDaemon::with_hardware_adapters(
         args.hardware_adapters,
         resources,
         sandbox,
         &args.node_id,
-        node_epoch(),
+        recovery.node_epoch,
     )?);
     if !daemon.preflight_ready() {
         return Err(std::io::Error::other(
@@ -60,7 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
     )
     .with_worker_heartbeat(heartbeat)
-    .with_adapter_poll_interval(args.adapter_poll_interval);
+    .with_adapter_poll_interval(args.adapter_poll_interval)
+    .with_runtime_journal(journal);
     let _watchdog = adapter.start_watchdog();
     let _adapter_monitor = adapter.start_adapter_monitor();
 
@@ -85,6 +99,7 @@ struct Args {
     hardware_adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
     sandbox_adapter: cy_sandbox_client::SandboxAdapterEndpoint,
     installations_root: std::path::PathBuf,
+    runtime_journal: std::path::PathBuf,
     heartbeat_interval: std::time::Duration,
     heartbeat_timeout: std::time::Duration,
     heartbeat_grace: std::time::Duration,
@@ -102,6 +117,7 @@ impl Args {
         let mut hardware_adapters = Vec::new();
         let mut sandbox_adapter = None;
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
+        let mut runtime_journal = PathBuf::from("/var/lib/cyrene/runtime/journal.jsonl");
         let mut heartbeat_interval = Duration::from_secs(5);
         let mut heartbeat_timeout = Duration::from_secs(20);
         let mut heartbeat_grace = Duration::from_secs(10);
@@ -132,12 +148,13 @@ impl Args {
                 }
                 "--sandbox-adapter" => sandbox_adapter = Some(parse_sandbox_adapter(&value()?)?),
                 "--installations-root" => installations_root = PathBuf::from(value()?),
+                "--runtime-journal" => runtime_journal = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-timeout-ms" => heartbeat_timeout = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket PATH] [--installations-root PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -186,6 +203,7 @@ impl Args {
             hardware_adapters,
             sandbox_adapter,
             installations_root,
+            runtime_journal,
             heartbeat_interval,
             heartbeat_timeout,
             heartbeat_grace,
@@ -303,12 +321,4 @@ fn prepare_socket_path(path: &std::path::Path) -> Result<(), Box<dyn std::error:
     }
     fs::remove_file(path)?;
     Ok(())
-}
-
-#[cfg(unix)]
-fn node_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

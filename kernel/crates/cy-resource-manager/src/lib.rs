@@ -49,6 +49,18 @@ pub struct InMemoryResourceManager {
 impl InMemoryResourceManager {
     /// 创建资源管理器实例并初始化可用硬件清单
     pub fn new(node_id: impl Into<String>, devices: Vec<AcceleratorDevice>) -> Self {
+        Self::with_next_fence_token(node_id, devices, 1)
+    }
+
+    /// Creates a fresh in-memory ledger with a persisted lower bound for its
+    /// fence sequence. Runtime composition supplies a value greater than every
+    /// fence recorded before a Kernel restart; old release requests can never
+    /// accidentally match a newly recreated lease name.
+    pub fn with_next_fence_token(
+        node_id: impl Into<String>,
+        devices: Vec<AcceleratorDevice>,
+        next_fence_token: u64,
+    ) -> Self {
         let devices = devices
             .into_iter()
             .map(|device| (device.device_id.clone(), device))
@@ -61,7 +73,7 @@ impl InMemoryResourceManager {
                 allocated: BTreeSet::new(),
                 quarantined: BTreeSet::new(),
                 leases: BTreeMap::new(),
-                next_fence_token: 1,
+                next_fence_token: next_fence_token.max(1),
             })),
         }
     }
@@ -384,6 +396,27 @@ mod tests {
         );
         manager.release(&lease.name, lease.fence_token).unwrap();
         assert!(!manager.is_allocated("gpu-0"));
+    }
+
+    #[test]
+    fn recovered_fence_floor_invalidates_a_prior_kernel_epoch() {
+        let manager =
+            InMemoryResourceManager::with_next_fence_token("node-1", vec![device("gpu-0")], 42);
+        let lease = manager
+            .reserve(ResourceRequest {
+                lease_name: "lease-after-restart".to_string(),
+                expected_inventory_generation: 1,
+                count: 1,
+                vendor: None,
+                min_memory_bytes: None,
+                limits: Default::default(),
+            })
+            .unwrap();
+        assert_eq!(lease.fence_token, 42);
+        assert_eq!(
+            manager.release(&lease.name, 41).unwrap_err().reason_code,
+            "STALE_FENCE_TOKEN"
+        );
     }
 
     #[test]

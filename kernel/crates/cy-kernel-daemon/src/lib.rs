@@ -23,8 +23,9 @@ use cy_adapter_client::{HardwareAdapterEndpoint, UdsHardwareAdapterRegistry};
 use cy_kernel_api::{
     AcceleratorKind, AcceleratorLinkType, AcceleratorProvider, AcceleratorVendor, CgroupLimits,
     CleanupReport, DeviceBinding, EnforcementMode, HostInventoryProvider, InstalledPluginResolver,
-    InventorySnapshot, LeaseState, ProviderError, ResourceLease, ResourceLeaseManager,
-    ResourceRequest, SandboxBackend, VerifiedInstallation,
+    InventorySnapshot, LeaseState, NoopRuntimeJournal, ProviderError, ResourceLease,
+    ResourceLeaseManager, ResourceRequest, RuntimeJournalEvent, RuntimeJournalRecord,
+    RuntimeJournalSink, SandboxBackend, VerifiedInstallation,
 };
 use cy_proto::core_v1;
 use tokio::sync::{broadcast, mpsc};
@@ -319,6 +320,7 @@ pub struct KernelServiceAdapter {
     adapter_poll_interval: Duration,
     heartbeat: WorkerHeartbeatConfig,
     next_control_connection: Arc<AtomicU64>,
+    runtime_journal: Arc<dyn RuntimeJournalSink>,
 }
 
 impl KernelServiceAdapter {
@@ -338,6 +340,7 @@ impl KernelServiceAdapter {
             adapter_poll_interval: Duration::from_secs(5),
             heartbeat: WorkerHeartbeatConfig::default(),
             next_control_connection: Arc::new(AtomicU64::new(1)),
+            runtime_journal: Arc::new(NoopRuntimeJournal),
         }
     }
 
@@ -348,6 +351,11 @@ impl KernelServiceAdapter {
 
     pub fn with_adapter_poll_interval(mut self, interval: Duration) -> Self {
         self.adapter_poll_interval = interval;
+        self
+    }
+
+    pub fn with_runtime_journal(mut self, runtime_journal: Arc<dyn RuntimeJournalSink>) -> Self {
+        self.runtime_journal = runtime_journal;
         self
     }
 
@@ -458,6 +466,24 @@ impl KernelServiceAdapter {
         history.push_back(event.clone());
         drop(history);
         let _ = self.operation_event_sender.send(event);
+    }
+
+    fn record_runtime(
+        &self,
+        event: RuntimeJournalEvent,
+        instance_name: Option<&str>,
+        lease: Option<&core_v1::ResourceLeaseRef>,
+        reason_code: &str,
+    ) {
+        let _ = self.runtime_journal.append(RuntimeJournalRecord {
+            event,
+            node_id: self.daemon.node_id.clone(),
+            node_epoch: self.daemon.node_epoch,
+            instance_name: instance_name.map(str::to_owned),
+            lease_name: lease.map(|lease| lease.lease_name.clone()),
+            fence_token: lease.map(|lease| lease.fence_token),
+            reason_code: reason_code.to_string(),
+        });
     }
 
     fn validate_node(&self, node: Option<&core_v1::NodeRef>) -> Result<(), Status> {
@@ -841,32 +867,51 @@ impl KernelServiceAdapter {
                     continue;
                 };
                 process.watchdog_triggered = true;
+                let lease = process.lease.clone();
                 match process.instance.stop(&cy_kernel_api::StopRequest {
                     grace_period: self.heartbeat.graceful_stop,
                     immediate: false,
                 }) {
-                    Ok(report) => {
-                        let report = report.clone();
-                        let lease = report.complete.then(|| process.lease.clone()).flatten();
-                        (lease, Some(report))
-                    }
-                    Err(_) => (None, None),
+                    Ok(report) => (lease, Some(report.clone())),
+                    Err(_) => (lease, None),
                 }
             };
             if let Some(report) = report.as_ref() {
                 self.publish_cleanup_events(&name, report);
-            }
-            if let Some(lease) = lease {
-                if self
-                    .daemon
-                    .release(&lease.lease_name, lease.fence_token)
-                    .is_ok()
-                {
-                    self.instances
-                        .lock()
-                        .expect("instance lock poisoned")
-                        .remove(&name);
+                if report.complete {
+                    if let Some(lease) = lease.as_ref() {
+                        if self
+                            .daemon
+                            .release(&lease.lease_name, lease.fence_token)
+                            .is_ok()
+                        {
+                            self.record_runtime(
+                                RuntimeJournalEvent::WatchdogReaped,
+                                Some(&name),
+                                Some(lease),
+                                "HEARTBEAT_TIMEOUT_REAPED",
+                            );
+                            self.instances
+                                .lock()
+                                .expect("instance lock poisoned")
+                                .remove(&name);
+                        }
+                    }
+                } else {
+                    self.record_runtime(
+                        RuntimeJournalEvent::InstanceCleanupFailed,
+                        Some(&name),
+                        lease.as_ref(),
+                        &report.reason_code,
+                    );
                 }
+            } else {
+                self.record_runtime(
+                    RuntimeJournalEvent::InstanceCleanupFailed,
+                    Some(&name),
+                    lease.as_ref(),
+                    "WATCHDOG_STOP_FAILED",
+                );
             }
         }
     }
@@ -903,6 +948,16 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .unwrap_or_else(|| self.daemon.resources.inventory().generation);
         let internal = resource_request(&lease_name, generation, &requirements)?;
         let lease = self.daemon.reserve(internal).map_err(provider_status)?;
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReserved,
+            None,
+            Some(&journal_lease),
+            "LEASE_RESERVED",
+        );
         Ok(Response::new(to_proto_lease(
             &self.daemon,
             lease,
@@ -921,6 +976,12 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         self.daemon
             .release(&lease.lease_name, lease.fence_token)
             .map_err(provider_status)?;
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReleased,
+            None,
+            Some(&lease),
+            "LEASE_RELEASED",
+        );
         let lease = self
             .daemon
             .lease(&lease.lease_name)
@@ -1023,6 +1084,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             self.release_owned_lease(owned_lease, &lease);
             return Err(provider_status(error));
         }
+        let lease_ref = core_v1::ResourceLeaseRef {
+            lease_name: lease.name,
+            fence_token: lease.fence_token,
+        };
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -1030,12 +1095,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 instance_name.clone(),
                 ManagedProcess {
                     instance,
-                    lease: Some(core_v1::ResourceLeaseRef {
-                        lease_name: lease.name,
-                        fence_token: lease.fence_token,
-                    }),
+                    lease: Some(lease_ref.clone()),
                     plugin,
-                    generation: lease.fence_token,
+                    generation: lease_ref.fence_token,
                     accepted_sequence: 0,
                     last_heartbeat: Instant::now(),
                     last_heartbeat_at: None,
@@ -1047,6 +1109,12 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     pending_shutdown: None,
                 },
             );
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceLaunched,
+            Some(&instance_name),
+            Some(&lease_ref),
+            "WORKER_LAUNCHED",
+        );
         self.publish_runtime_event(
             core_v1::RuntimeEventType::InstanceStateChanged,
             &instance_name,
@@ -1088,26 +1156,35 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 })
                 .map_err(provider_status)?
                 .clone();
-            if !report.complete {
-                let error = ProviderError::new(
-                    "kernel-daemon",
-                    "RESOURCE_QUARANTINED",
-                    &report.reason_code,
-                );
-                return Ok(Response::new(self.operation_failure(
-                    operation_name,
-                    request.process_name,
-                    &error,
-                )));
-            }
             (process.lease.clone(), report)
         };
         self.publish_cleanup_events(&request.process_name, &report);
-        if let Some(lease) = lease {
+        if !report.complete {
+            self.record_runtime(
+                RuntimeJournalEvent::InstanceCleanupFailed,
+                Some(&request.process_name),
+                lease.as_ref(),
+                &report.reason_code,
+            );
+            let error =
+                ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
+            return Ok(Response::new(self.operation_failure(
+                operation_name,
+                request.process_name,
+                &error,
+            )));
+        }
+        if let Some(lease) = lease.as_ref() {
             self.daemon
                 .release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&request.process_name),
+            lease.as_ref(),
+            "TERMINATE_COMPLETE",
+        );
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -1164,22 +1241,31 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 })
                 .map_err(provider_status)?
                 .clone();
-            if !report.complete {
-                let error = ProviderError::new(
-                    "kernel-daemon",
-                    "RESOURCE_QUARANTINED",
-                    &report.reason_code,
-                );
-                return Ok(Response::new(self.operation_failure(name, target, &error)));
-            }
             (process.lease.clone(), report)
         };
         self.publish_cleanup_events(&target, &report);
-        if let Some(lease) = lease {
+        if !report.complete {
+            self.record_runtime(
+                RuntimeJournalEvent::InstanceCleanupFailed,
+                Some(&target),
+                lease.as_ref(),
+                &report.reason_code,
+            );
+            let error =
+                ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
+            return Ok(Response::new(self.operation_failure(name, target, &error)));
+        }
+        if let Some(lease) = lease.as_ref() {
             self.daemon
                 .release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&target),
+            lease.as_ref(),
+            "CANCEL_COMPLETE",
+        );
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -1938,6 +2024,18 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingRuntimeJournal {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+
+    impl RuntimeJournalSink for RecordingRuntimeJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
     struct UnusedResolver;
 
     impl InstalledPluginResolver for UnusedResolver {
@@ -2220,7 +2318,8 @@ mod tests {
     fn cancel_operation_reaps_worker_and_emits_terminal_operation() {
         use core_v1::kernel_service_server::KernelService;
 
-        let adapter = heartbeat_adapter();
+        let journal = Arc::new(RecordingRuntimeJournal::default());
+        let adapter = heartbeat_adapter().with_runtime_journal(journal.clone());
         let running = adapter.operation_running(
             "operations/launch-worker_1".to_string(),
             "worker_1".to_string(),
@@ -2251,6 +2350,11 @@ mod tests {
             event.runtime_event.as_ref().is_some_and(|runtime_event| {
                 runtime_event.r#type == core_v1::RuntimeEventType::CleanupCompleted as i32
             })
+        }));
+        assert!(journal.records.lock().unwrap().iter().any(|record| {
+            record.event == RuntimeJournalEvent::InstanceTerminated
+                && record.instance_name.as_deref() == Some("worker_1")
+                && record.reason_code == "CANCEL_COMPLETE"
         }));
     }
 

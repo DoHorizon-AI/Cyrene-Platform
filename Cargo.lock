@@ -409,9 +409,13 @@ version = "0.1.0"
 dependencies = [
  "cy-adapter-client",
  "cy-installation-resolver",
+ "cy-kernel-api",
  "cy-kernel-daemon",
  "cy-resource-manager",
  "cy-sandbox-client",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

@@ -58,6 +58,23 @@ Kernel service 不再持有 Worker cgroup。sandboxd service 使用 `KillMode=co
 重启的精确级联语义必须用真实 Linux systemd 测试验证；在该 E2E 测试落地前，不能宣称
 已经具备跨 Kernel 崩溃的完整自动接管能力。
 
+## 重启、日志与围栏
+
+`cyrene-kernel` 在接受任何 API 请求前会同步写入
+`/var/lib/cyrene/runtime/journal.jsonl`（可由 `--runtime-journal` 覆盖）。这是紧凑的
+JSONL 审计证据，不是 Worker 恢复数据库：只包含 node id/epoch、lease 名称、fence token、
+实例名称和生命周期 reason code，绝不保存命令行、环境变量、驱动事实或 Worker 负载。
+
+每一次 Kernel 启动都会产生单调递增的 node epoch；运行时从该节点历史 fence token 的最大值
+开始分配新的 fence。于是旧 epoch 的 `ReleaseResources` 或 Worker 心跳不可能碰巧匹配一次
+重启后重新使用的 lease 名称。journal 无法持久化或出现非末尾损坏记录时，Kernel 必须拒绝启动；
+仅允许忽略断电留下的最后一条不完整记录。
+
+重启流程**绝不**从 journal 恢复 `ManagedProcess`、重连或 Adopt 老 Worker。systemd 的
+`PartOf=cyrene-kernel.service` 使 sandboxd 负责清理它自己能证明拥有的 Worker cgroup；新 epoch
+只恢复空的资源账本并等待控制面重新 reconcile。这样 journal 不会把一次崩溃误解释为可安全
+接管的运行实例。
+
 ## Docker、OCI 与 JVM Worker 的边界
 
 Docker 不与此设计冲突，但它只能作为 sandboxd 的未来后端。每个 Worker 恰有一个
