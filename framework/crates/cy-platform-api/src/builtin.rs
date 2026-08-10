@@ -1,3 +1,9 @@
+//! 内置默认插件实现 (Built-in Plugins).
+//!
+//! 提供系统默认开箱即用的基础实现：
+//! 1. [`BuiltinSystemProbe`]：内置硬件探针默认实现（返回静态硬件清单骨架）；
+//! 2. [`BuiltinInMemoryStorage`]：内置纯内存产物存储适配器（用于单机开发、测试与原型验证）。
+
 use crate::{
     ArtifactManifest, PLUGIN_API_VERSION, Plugin, PluginCapabilities, PluginError, PluginKind,
     Probe, Storage,
@@ -7,8 +13,9 @@ use cy_manifest::{CpuInfo, GpuInfo, HardwareManifest, Interconnect, OsInfo, Prec
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// A built-in system probe that returns static dummy hardware info for now.
+/// 内置系统硬件探针插件
 pub struct BuiltinSystemProbe {
+    /// 声明的能力集
     capabilities: PluginCapabilities,
 }
 
@@ -19,6 +26,7 @@ impl Default for BuiltinSystemProbe {
 }
 
 impl BuiltinSystemProbe {
+    /// 创建内置硬件探针实例
     pub fn new() -> Self {
         Self {
             capabilities: PluginCapabilities::default(),
@@ -81,9 +89,11 @@ impl Probe for BuiltinSystemProbe {
     }
 }
 
-/// A built-in in-memory storage plugin for artifacts.
+/// 内置纯内存产物存储适配器（用于单机本地测试与临时缓存）
 pub struct BuiltinInMemoryStorage {
+    /// 声明的能力集
     capabilities: PluginCapabilities,
+    /// 内存键值存储 (`artifact_id -> binary_bytes`)
     store: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
@@ -94,6 +104,7 @@ impl Default for BuiltinInMemoryStorage {
 }
 
 impl BuiltinInMemoryStorage {
+    /// 创建内存存储插件实例
     pub fn new() -> Self {
         Self {
             capabilities: PluginCapabilities::default(),

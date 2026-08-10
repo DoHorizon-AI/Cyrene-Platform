@@ -1,3 +1,11 @@
+//! CYRENE 插件零端口 IPC 有线协议编解码器 (Plugin Protocol & Length-Prefixed Codec).
+//!
+//! 【零端口通信与二进制封包】
+//! CYRENE 插件进程间通信采用基于 stdio / UDS 的零端口方案，消除网络端口占用与外部嗅探风险：
+//! 1. **4 字节大端长度前缀 (4-Byte Big-Endian Length-Prefixed Framing)**：每个消息帧由 4 字节的负载长度字段与后续紧跟的 Protobuf [`Envelope`] 二进制载荷构成；
+//! 2. **封包容量上限防护**：默认限制单包最大长度为 64 MiB ([`DEFAULT_MAX_MESSAGE_BYTES`])，防止恶意/异常数据导致内存耗尽攻击；
+//! 3. **粘包与半包解析 ([`FramedCodec::decode`])**：基于 `bytes::BytesMut` 缓冲区维护，自动处理流式 I/O 中的分包与合并。
+
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/cy.plugin.v1.rs"));
 }
@@ -8,27 +16,34 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use thiserror::Error;
 
-/// Maximum message size in bytes (default 64 MiB).
+/// 单条消息最大允许字节数（默认 64 MiB）
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
-/// Wire protocol version supported by this crate.
+/// 本 Crate 支持的有线协议版本号
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 
+/// 协议层错误类型
 #[derive(Debug, Error)]
 pub enum ProtocolError {
+    /// 消息负载长度超出最大限制
     #[error("Message length ({0} bytes) exceeds maximum allowed ({1} bytes)")]
     MessageTooLarge(usize, usize),
+    /// Protobuf 反序列化失败
     #[error("Failed to decode Protobuf payload: {0}")]
     DecodeError(#[from] prost::DecodeError),
+    /// Protobuf 序列化失败
     #[error("Failed to encode Protobuf payload: {0}")]
     EncodeError(#[from] prost::EncodeError),
+    /// 帧结构损坏
     #[error("Protocol framing error: {0}")]
     FramingError(String),
+    /// 协议版本不兼容
     #[error("Incompatible protocol version: expected {expected}, got {got}")]
     IncompatibleVersion { expected: u32, got: u32 },
 }
 
-/// Length-Prefixed (4-byte big-endian) encoder and decoder for local stdio/IPC framing.
+/// 4 字节大端长度前缀编解码器 (FramedCodec)
 pub struct FramedCodec {
+    /// 允许的最大单包字节大小
     max_message_bytes: usize,
 }
 
@@ -41,11 +56,12 @@ impl Default for FramedCodec {
 }
 
 impl FramedCodec {
+    /// 创建编解码器实例
     pub fn new(max_message_bytes: usize) -> Self {
         Self { max_message_bytes }
     }
 
-    /// Encode an `Envelope` into a 4-byte big-endian length-prefixed frame.
+    /// 将 [`Envelope`] 消息编码为 4 字节大端长度前缀的完整字节帧
     pub fn encode(&self, envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
         let payload_len = envelope.encoded_len();
         if payload_len > self.max_message_bytes {
@@ -61,9 +77,12 @@ impl FramedCodec {
         Ok(buf)
     }
 
-    /// Try decoding a frame from a byte buffer.
-    /// Returns `Ok(Some((envelope, bytes_consumed)))` if a complete message frame is decoded,
-    /// `Ok(None)` if more data is required, or `Err(ProtocolError)` on malformed/oversized frames.
+    /// 尝试从字节流缓冲区中解码出一个完整的消息帧
+    ///
+    /// # 返回值
+    /// - `Ok(Some((envelope, bytes_consumed)))`: 成功解析出完整 Envelope 及消耗的字节数；
+    /// - `Ok(None)`: 缓冲区数据不足（半包），需等待接收更多数据；
+    /// - `Err(ProtocolError)`: 发生超限或 Protobuf 解析损坏。
     pub fn decode(&self, src: &mut BytesMut) -> Result<Option<(Envelope, usize)>, ProtocolError> {
         if src.len() < 4 {
             return Ok(None);
