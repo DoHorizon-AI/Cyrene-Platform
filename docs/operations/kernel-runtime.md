@@ -21,7 +21,9 @@ Kernel 是租约、fence token、已批准设备绑定、实例状态与心跳�
 ```text
 cyrene-kernel \
   --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
-  --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock
+  --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock \
+  --hardware-adapter-peer-uid nvidia=992 \
+  --hardware-adapter-peer-gid nvidia=992
 ```
 
 - sandboxd UDS 连接、协议版本与 adapter identity 均匹配；
@@ -30,9 +32,13 @@ cyrene-kernel \
 - 请求 HARD 设备隔离时，sandboxd 能真实加载并附加 cgroup-device BPF；失败即拒绝
   启动，绝不降级为 `CUDA_VISIBLE_DEVICES` 后仍声明 HARD。
 
-UDS 文件权限目前是本地身份边界：服务 socket 设置为 `0660`，必须由受信任的
-Kernel/Adapter 服务账户及专用组拥有，绝不能让不受信任 Worker 可写。peer credential
-验证、事实 TTL 和主动健康轮询仍是 P1 工作，不应被此权限模型误称为完成。
+UDS 文件权限与 peer credential 共同构成本地身份边界：服务 socket 设置为 `0660`，必须由
+受信任的 Kernel/Adapter 服务账户及专用组拥有，绝不能让不受信任 Worker 可写。Kernel 可用
+`--hardware-adapter-peer-uid ID=UID` / `--hardware-adapter-peer-gid ID=GID` 对已连接 Adapter
+执行 Linux `SO_PEERCRED` 校验；NVIDIA Adapter 用 `--allowed-client-uid UID` /
+`--allowed-client-gid GID` 对 Kernel 做反向校验。任一已配置校验失败都会在发送协议帧前拒绝。
+部署必须同时配置双方或依赖受保护的 systemd socket 目录；未配置身份策略不是对不受信任
+本地用户的安全边界。
 
 ## 生命周期、心跳和回收
 
@@ -73,9 +79,12 @@ Kernel 以重复的显式参数注册任意多个 Hardware Sidecar。`adapter_id
 设备 ID 时，库存刷新失败并拒绝新租约，绝不任选一方。一个 Worker 的多设备绑定仍必须
 是同一 enforcement 模式；混合 HARD 和 VISIBILITY_ONLY 将失败，不会静默放宽。
 
-Adapter 失联会产生 `ADAPTER_UNAVAILABLE` / `DEGRADED` 证据并阻止新的相关租约；它不会
-因单次断线立即杀死已有 Worker。硬件事实 TTL、主动轮询、已运行设备的 DEGRADED 事件与
-策略处置是 P1，当前仍须在控制面观察到明确的“未知/不可继续分配”状态。
+每个库存响应必须声明 `sampled_at` 和 `expires_at`；Kernel 对过期、倒置或缺失 TTL 的事实
+fail closed。Kernel 每隔 `--adapter-poll-interval-ms`（默认 5 秒）主动刷新并写入资源账本。
+Adapter 失联或事实过期会停止新租约，向 `WatchOperations` 发布 `ADAPTER_DEGRADED`，并把已
+运行实例的可观测健康状态标为 `DEGRADED`；它不会因一次断线立即杀死已有 Worker。恢复当前
+事实时会发布 `KERNEL_RECONCILED`。温度、ECC 和厂商专属诊断仍仅在 Sidecar 采集，Kernel
+只消费这些标准化事实与过期时间。
 
 ## 本地安装记录
 

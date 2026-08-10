@@ -12,7 +12,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use cy_kernel_api::{
@@ -27,6 +27,39 @@ use prost::Message;
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// Optional UDS peer identity constraint from static node configuration. The
+/// Kernel verifies it after connect, before sending an adapter request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerCredentialExpectation {
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+impl PeerCredentialExpectation {
+    pub fn is_configured(self) -> bool {
+        self.uid.is_some() || self.gid.is_some()
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn verify(
+        self,
+        adapter_id: &str,
+        actual_uid: u32,
+        actual_gid: u32,
+    ) -> Result<(), ProviderError> {
+        if self.uid.is_some_and(|uid| uid != actual_uid)
+            || self.gid.is_some_and(|gid| gid != actual_gid)
+        {
+            return Err(ProviderError::new(
+                adapter_id,
+                "ADAPTER_PEER_CREDENTIAL_MISMATCH",
+                "UDS peer credentials do not match the configured adapter identity",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A single external adapter endpoint.  The adapter process remains the fault
 /// boundary; this client does not dynamically load any vendor implementation.
 #[derive(Debug, Clone)]
@@ -34,6 +67,7 @@ pub struct UdsHardwareAdapterClient {
     adapter_id: String,
     socket_path: PathBuf,
     timeout: Duration,
+    peer_credentials: PeerCredentialExpectation,
 }
 
 /// Static Kernel configuration for one external hardware Adapter endpoint.
@@ -44,6 +78,7 @@ pub struct HardwareAdapterEndpoint {
     pub adapter_id: String,
     pub socket_path: PathBuf,
     pub timeout: Duration,
+    pub peer_credentials: PeerCredentialExpectation,
 }
 
 impl HardwareAdapterEndpoint {
@@ -52,7 +87,13 @@ impl HardwareAdapterEndpoint {
             adapter_id: adapter_id.into(),
             socket_path: socket_path.into(),
             timeout: Duration::from_secs(2),
+            peer_credentials: PeerCredentialExpectation::default(),
         }
+    }
+
+    pub fn with_peer_credentials(mut self, peer_credentials: PeerCredentialExpectation) -> Self {
+        self.peer_credentials = peer_credentials;
+        self
     }
 }
 
@@ -82,12 +123,18 @@ impl UdsHardwareAdapterClient {
             adapter_id: adapter_id.into(),
             socket_path: socket_path.into(),
             timeout: Duration::from_secs(2),
+            peer_credentials: PeerCredentialExpectation::default(),
         }
     }
 
     /// Set the bounded per-request adapter round-trip timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_peer_credentials(mut self, peer_credentials: PeerCredentialExpectation) -> Self {
+        self.peer_credentials = peer_credentials;
         self
     }
 
@@ -104,7 +151,13 @@ impl UdsHardwareAdapterClient {
             body: Some(body),
         };
         let payload = request.encode_to_vec();
-        let response = exchange(&self.adapter_id, &self.socket_path, self.timeout, &payload)?;
+        let response = exchange(
+            &self.adapter_id,
+            &self.socket_path,
+            self.timeout,
+            self.peer_credentials,
+            &payload,
+        )?;
         let response =
             hardware_v1::AdapterResponse::decode(response.as_slice()).map_err(|error| {
                 ProviderError::new(
@@ -152,6 +205,7 @@ impl UdsHardwareAdapterClient {
         ))?;
         match response.body {
             Some(hardware_v1::adapter_response::Body::Inventory(inventory)) => {
+                ensure_inventory_fresh(&self.adapter_id, &inventory)?;
                 Ok((self.adapter_id.clone(), inventory))
             }
             _ => Err(ProviderError::new(
@@ -302,7 +356,8 @@ impl UdsHardwareAdapterRegistry {
                         endpoint.adapter_id.clone(),
                         endpoint.socket_path,
                     )
-                    .with_timeout(endpoint.timeout),
+                    .with_timeout(endpoint.timeout)
+                    .with_peer_credentials(endpoint.peer_credentials),
                 );
                 Ok((endpoint.adapter_id, adapter))
             })
@@ -500,6 +555,7 @@ fn exchange(
     adapter_id: &str,
     socket_path: &Path,
     timeout: Duration,
+    peer_credentials: PeerCredentialExpectation,
     payload: &[u8],
 ) -> Result<Vec<u8>, ProviderError> {
     #[cfg(unix)]
@@ -512,6 +568,7 @@ fn exchange(
                 &format!("{}: {error}", socket_path.display()),
             )
         })?;
+        verify_connected_peer(adapter_id, &stream, peer_credentials)?;
         stream.set_read_timeout(Some(timeout)).map_err(|error| {
             ProviderError::new(adapter_id, "ADAPTER_TRANSPORT_CONFIG", &error.to_string())
         })?;
@@ -527,13 +584,102 @@ fn exchange(
     }
     #[cfg(not(unix))]
     {
-        let _ = (socket_path, timeout, payload);
+        let _ = (socket_path, timeout, peer_credentials, payload);
         Err(ProviderError::new(
             adapter_id,
             "ADAPTER_UDS_UNSUPPORTED",
             "Unix domain sockets require a Unix Kernel host",
         ))
     }
+}
+
+#[cfg(unix)]
+fn verify_connected_peer(
+    adapter_id: &str,
+    stream: &std::os::unix::net::UnixStream,
+    expected: PeerCredentialExpectation,
+) -> Result<(), ProviderError> {
+    if !expected.is_configured() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let credentials =
+            nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+                .map_err(|error| {
+                    ProviderError::new(
+                        adapter_id,
+                        "ADAPTER_PEER_CREDENTIAL_UNAVAILABLE",
+                        &error.to_string(),
+                    )
+                })?;
+        return expected.verify(adapter_id, credentials.uid(), credentials.gid());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        Err(ProviderError::new(
+            adapter_id,
+            "ADAPTER_PEER_CREDENTIAL_UNSUPPORTED",
+            "configured UDS peer credential checks require a Linux Kernel host",
+        ))
+    }
+}
+
+fn ensure_inventory_fresh(
+    adapter_id: &str,
+    inventory: &hardware_v1::HardwareInventory,
+) -> Result<(), ProviderError> {
+    let Some(sampled_at) = inventory.sampled_at.as_ref() else {
+        return Err(ProviderError::new(
+            adapter_id,
+            "ADAPTER_FACT_TIMESTAMP_MISSING",
+            "hardware inventory did not include sampled_at",
+        ));
+    };
+    let Some(expires_at) = inventory.expires_at.as_ref() else {
+        return Err(ProviderError::new(
+            adapter_id,
+            "ADAPTER_FACT_TIMESTAMP_MISSING",
+            "hardware inventory did not include expires_at",
+        ));
+    };
+    let sampled = timestamp_nanos(sampled_at).ok_or_else(|| {
+        ProviderError::new(
+            adapter_id,
+            "ADAPTER_FACT_TIMESTAMP_INVALID",
+            "sampled_at is outside the protobuf timestamp range",
+        )
+    })?;
+    let expires = timestamp_nanos(expires_at).ok_or_else(|| {
+        ProviderError::new(
+            adapter_id,
+            "ADAPTER_FACT_TIMESTAMP_INVALID",
+            "expires_at is outside the protobuf timestamp range",
+        )
+    })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    if sampled >= expires || expires <= now {
+        return Err(ProviderError::new(
+            adapter_id,
+            "ADAPTER_FACT_EXPIRED",
+            "hardware inventory fact is expired or has an invalid TTL",
+        ));
+    }
+    Ok(())
+}
+
+fn timestamp_nanos(timestamp: &prost_types::Timestamp) -> Option<u128> {
+    if timestamp.seconds < 0 || !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return None;
+    }
+    u128::try_from(timestamp.seconds)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(timestamp.nanos as u128)
 }
 
 pub fn write_frame(mut writer: impl Write, payload: &[u8]) -> std::io::Result<()> {
@@ -762,6 +908,56 @@ mod tests {
     #[test]
     fn unknown_health_remains_unknown() {
         assert_eq!(health_from_proto(None).healthy, None);
+    }
+
+    #[test]
+    fn peer_credential_policy_rejects_a_mismatched_adapter_peer() {
+        let policy = PeerCredentialExpectation {
+            uid: Some(1000),
+            gid: Some(2000),
+        };
+        assert!(policy.verify("test", 1000, 2000).is_ok());
+        assert_eq!(
+            policy.verify("test", 1001, 2000).unwrap_err().reason_code,
+            "ADAPTER_PEER_CREDENTIAL_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn expired_or_missing_inventory_facts_fail_closed() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64;
+        let valid = hardware_v1::HardwareInventory {
+            generation: 1,
+            devices: Vec::new(),
+            facts: Vec::new(),
+            enforcement: Vec::new(),
+            sampled_at: Some(prost_types::Timestamp {
+                seconds: now.saturating_sub(1),
+                nanos: 0,
+            }),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: now.saturating_add(30),
+                nanos: 0,
+            }),
+        };
+        assert!(ensure_inventory_fresh("test", &valid).is_ok());
+        let expired = hardware_v1::HardwareInventory {
+            expires_at: Some(prost_types::Timestamp {
+                seconds: now.saturating_sub(1),
+                nanos: 0,
+            }),
+            ..valid
+        };
+        assert_eq!(
+            ensure_inventory_fresh("test", &expired)
+                .unwrap_err()
+                .reason_code,
+            "ADAPTER_FACT_EXPIRED"
+        );
     }
 
     #[test]

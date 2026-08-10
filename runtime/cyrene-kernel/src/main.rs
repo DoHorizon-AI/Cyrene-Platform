@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         interval: args.heartbeat_interval,
         timeout: args.heartbeat_timeout,
         graceful_stop: args.heartbeat_grace,
+        shutdown_ack_timeout: args.shutdown_ack_timeout,
     };
     let adapter = KernelServiceAdapter::new(
         daemon,
@@ -58,8 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.installations_root,
         )),
     )
-    .with_worker_heartbeat(heartbeat);
+    .with_worker_heartbeat(heartbeat)
+    .with_adapter_poll_interval(args.adapter_poll_interval);
     let _watchdog = adapter.start_watchdog();
+    let _adapter_monitor = adapter.start_adapter_monitor();
 
     prepare_socket_path(&args.socket)?;
     let listener = StdUnixListener::bind(&args.socket)?;
@@ -85,12 +88,14 @@ struct Args {
     heartbeat_interval: std::time::Duration,
     heartbeat_timeout: std::time::Duration,
     heartbeat_grace: std::time::Duration,
+    shutdown_ack_timeout: std::time::Duration,
+    adapter_poll_interval: std::time::Duration,
 }
 
 #[cfg(unix)]
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
-        use std::{env, path::PathBuf, time::Duration};
+        use std::{collections::BTreeMap, env, path::PathBuf, time::Duration};
         let mut values = env::args().skip(1);
         let mut node_id = env::var("CYRENE_NODE_ID").unwrap_or_else(|_| "cyrene-node".to_string());
         let mut socket = PathBuf::from("/run/cyrene/kernel.sock");
@@ -100,6 +105,10 @@ impl Args {
         let mut heartbeat_interval = Duration::from_secs(5);
         let mut heartbeat_timeout = Duration::from_secs(20);
         let mut heartbeat_grace = Duration::from_secs(10);
+        let mut shutdown_ack_timeout = Duration::from_secs(3);
+        let mut adapter_poll_interval = Duration::from_secs(5);
+        let mut adapter_peer_credentials =
+            BTreeMap::<String, cy_adapter_client::PeerCredentialExpectation>::new();
         while let Some(argument) = values.next() {
             let mut value = || {
                 values.next().ok_or_else(|| {
@@ -113,12 +122,22 @@ impl Args {
                 "--node-id" => node_id = value()?,
                 "--socket" => socket = PathBuf::from(value()?),
                 "--hardware-adapter" => hardware_adapters.push(parse_hardware_adapter(&value()?)?),
+                "--hardware-adapter-peer-uid" => {
+                    let (adapter_id, uid) = parse_adapter_identity_value(&value()?)?;
+                    adapter_peer_credentials.entry(adapter_id).or_default().uid = Some(uid);
+                }
+                "--hardware-adapter-peer-gid" => {
+                    let (adapter_id, gid) = parse_adapter_identity_value(&value()?)?;
+                    adapter_peer_credentials.entry(adapter_id).or_default().gid = Some(gid);
+                }
                 "--sandbox-adapter" => sandbox_adapter = Some(parse_sandbox_adapter(&value()?)?),
                 "--installations-root" => installations_root = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-timeout-ms" => heartbeat_timeout = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--node-id ID] [--socket PATH] [--installations-root PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N]").into()),
+                "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
+                "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket PATH] [--installations-root PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -129,10 +148,29 @@ impl Args {
             )
             .into());
         }
+        if shutdown_ack_timeout.is_zero() || adapter_poll_interval.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "shutdown acknowledgement timeout and adapter polling interval must be non-zero",
+            )
+            .into());
+        }
         if hardware_adapters.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "at least one --hardware-adapter ID=/absolute/socket.sock is required",
+            )
+            .into());
+        }
+        for endpoint in &mut hardware_adapters {
+            if let Some(credentials) = adapter_peer_credentials.remove(&endpoint.adapter_id) {
+                endpoint.peer_credentials = credentials;
+            }
+        }
+        if let Some(adapter_id) = adapter_peer_credentials.keys().next() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("peer credential policy references unknown hardware adapter: {adapter_id}"),
             )
             .into());
         }
@@ -151,8 +189,39 @@ impl Args {
             heartbeat_interval,
             heartbeat_timeout,
             heartbeat_grace,
+            shutdown_ack_timeout,
+            adapter_poll_interval,
         })
     }
+}
+
+#[cfg(unix)]
+fn parse_adapter_identity_value(value: &str) -> Result<(String, u32), std::io::Error> {
+    let (adapter_id, identity) = value.split_once('=').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "adapter peer identity must use ID=NUMBER",
+        )
+    })?;
+    if adapter_id.is_empty()
+        || !adapter_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "adapter peer identity ID must be safe",
+        ));
+    }
+    Ok((
+        adapter_id.to_string(),
+        identity.parse::<u32>().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "adapter peer identity must be an unsigned integer",
+            )
+        })?,
+    ))
 }
 
 #[cfg(unix)]

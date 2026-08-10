@@ -3,7 +3,10 @@
 
 pub mod discovery;
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use cy_kernel_api::{
     AcceleratorDevice, AcceleratorKind, AcceleratorLinkType, AcceleratorProvider,
@@ -57,6 +60,8 @@ pub fn handle_request(
                                 .into_iter()
                                 .map(enforcement_to_proto)
                                 .collect(),
+                            sampled_at: Some(now_timestamp()),
+                            expires_at: Some(timestamp_after(Duration::from_secs(15))),
                         },
                     )),
                 },
@@ -82,6 +87,31 @@ pub fn handle_request(
             false,
         ),
     }
+}
+
+fn now_timestamp() -> prost_types::Timestamp {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    prost_types::Timestamp {
+        seconds: elapsed.as_secs().min(i64::MAX as u64) as i64,
+        nanos: elapsed.subsec_nanos() as i32,
+    }
+}
+
+fn timestamp_after(duration: Duration) -> prost_types::Timestamp {
+    let mut timestamp = now_timestamp();
+    timestamp.seconds = timestamp
+        .seconds
+        .saturating_add(duration.as_secs().min(i64::MAX as u64) as i64);
+    timestamp.nanos = timestamp
+        .nanos
+        .saturating_add(duration.subsec_nanos() as i32);
+    if timestamp.nanos >= 1_000_000_000 {
+        timestamp.seconds = timestamp.seconds.saturating_add(1);
+        timestamp.nanos -= 1_000_000_000;
+    }
+    timestamp
 }
 
 fn create_binding(

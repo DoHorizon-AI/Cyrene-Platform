@@ -16,8 +16,8 @@ fn main() -> std::io::Result<()> {
     };
 
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
-    let socket_path = socket_argument(env::args().skip(1))
-        .unwrap_or_else(|| PathBuf::from("/run/cyrene/nvidia-adapter.sock"));
+    let (socket_path, allowed_client_uid, allowed_client_gid) =
+        adapter_arguments(env::args().skip(1))?;
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -40,20 +40,99 @@ fn main() -> std::io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if let Err(error) =
+                    verify_client_peer(&stream, allowed_client_uid, allowed_client_gid)
+                {
+                    eprintln!("adapter rejected UDS peer: {error}");
+                    continue;
+                }
                 let _ = serve_one(stream, &provider);
             }
             Err(error) => eprintln!("adapter accept failed: {error}"),
         }
     }
 
-    fn socket_argument(arguments: impl Iterator<Item = String>) -> Option<PathBuf> {
+    fn adapter_arguments(
+        arguments: impl Iterator<Item = String>,
+    ) -> std::io::Result<(PathBuf, Option<u32>, Option<u32>)> {
         let mut arguments = arguments;
+        let mut socket_path = PathBuf::from("/run/cyrene/nvidia-adapter.sock");
+        let mut allowed_client_uid = None;
+        let mut allowed_client_gid = None;
         while let Some(argument) = arguments.next() {
-            if argument == "--socket" {
-                return arguments.next().map(PathBuf::from);
+            let mut value = || {
+                arguments.next().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{argument} requires a value"),
+                    )
+                })
+            };
+            match argument.as_str() {
+                "--socket" => socket_path = PathBuf::from(value()?),
+                "--allowed-client-uid" => {
+                    allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "--allowed-client-uid must be an unsigned integer",
+                        )
+                    })?)
+                }
+                "--allowed-client-gid" => {
+                    allowed_client_gid = Some(value()?.parse::<u32>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "--allowed-client-gid must be an unsigned integer",
+                        )
+                    })?)
+                }
+                "--help" | "-h" => {
+                    return Err(std::io::Error::other(
+                        "usage: cyrene-nvidia-adapter [--socket PATH] [--allowed-client-uid UID] [--allowed-client-gid GID]",
+                    ));
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("unknown argument: {argument}"),
+                    ));
+                }
             }
         }
-        None
+        Ok((socket_path, allowed_client_uid, allowed_client_gid))
+    }
+
+    fn verify_client_peer(
+        stream: &UnixStream,
+        expected_uid: Option<u32>,
+        expected_gid: Option<u32>,
+    ) -> std::io::Result<()> {
+        if expected_uid.is_none() && expected_gid.is_none() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let credentials =
+                nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+                    .map_err(std::io::Error::other)?;
+            if expected_uid.is_some_and(|uid| uid != credentials.uid())
+                || expected_gid.is_some_and(|gid| gid != credentials.gid())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "UDS peer credentials do not match configured Kernel identity",
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = stream;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "UDS peer credential checks require Linux",
+            ))
+        }
     }
 
     fn serve_one(mut stream: UnixStream, provider: &NvidiaSmiProvider) -> std::io::Result<()> {

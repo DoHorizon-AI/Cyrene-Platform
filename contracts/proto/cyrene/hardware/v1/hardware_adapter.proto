@@ -3,6 +3,7 @@ syntax = "proto3";
 package cyrene.hardware.v1;
 
 import "cyrene/core/v1/resource.proto";
+import "google/protobuf/timestamp.proto";
 
 // The adapter protocol is local and request/response based.  The Kernel uses
 // it over a Unix domain socket instead of exposing a vendor C ABI itself.
@@ -41,6 +42,8 @@ message HardwareInventory {
   repeated cyrene.core.v1.AcceleratorDevice devices = 2;
   repeated AdapterFact facts = 3;
   repeated cyrene.core.v1.EnforcementReport enforcement = 4;
+  google.protobuf.Timestamp sampled_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
 }
 
 message AdapterFact {

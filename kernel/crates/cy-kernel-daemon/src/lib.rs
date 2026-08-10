@@ -12,7 +12,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -106,6 +106,15 @@ impl KernelDaemon {
     /// 获取最新的硬件清单快照
     pub fn inventory(&self) -> Result<InventorySnapshot, ProviderError> {
         self.inventory_provider.probe_inventory()
+    }
+
+    /// Refreshes only current external hardware facts. A successful probe is
+    /// committed to the resource ledger; a failed or expired fact leaves the
+    /// last allocation state untouched and lets the caller enter DEGRADED.
+    pub fn refresh_inventory_facts(&self) -> Result<InventorySnapshot, ProviderError> {
+        let snapshot = self.inventory()?;
+        self.resources.refresh_inventory(snapshot.clone())?;
+        Ok(snapshot)
     }
 
     /// 申请预留硬件资源租约
@@ -306,6 +315,8 @@ pub struct KernelServiceAdapter {
     operation_events: Arc<Mutex<VecDeque<core_v1::OperationEvent>>>,
     operation_event_sender: broadcast::Sender<core_v1::OperationEvent>,
     next_event_sequence: Arc<AtomicU64>,
+    adapter_available: Arc<AtomicBool>,
+    adapter_poll_interval: Duration,
     heartbeat: WorkerHeartbeatConfig,
     next_control_connection: Arc<AtomicU64>,
 }
@@ -323,6 +334,8 @@ impl KernelServiceAdapter {
             ))),
             operation_event_sender,
             next_event_sequence: Arc::new(AtomicU64::new(1)),
+            adapter_available: Arc::new(AtomicBool::new(true)),
+            adapter_poll_interval: Duration::from_secs(5),
             heartbeat: WorkerHeartbeatConfig::default(),
             next_control_connection: Arc::new(AtomicU64::new(1)),
         }
@@ -330,6 +343,11 @@ impl KernelServiceAdapter {
 
     pub fn with_worker_heartbeat(mut self, heartbeat: WorkerHeartbeatConfig) -> Self {
         self.heartbeat = heartbeat;
+        self
+    }
+
+    pub fn with_adapter_poll_interval(mut self, interval: Duration) -> Self {
+        self.adapter_poll_interval = interval;
         self
     }
 
@@ -350,6 +368,38 @@ impl KernelServiceAdapter {
         thread::spawn(move || loop {
             thread::sleep(adapter.heartbeat.interval.min(Duration::from_secs(1)));
             adapter.enforce_heartbeat_deadlines();
+        })
+    }
+
+    /// Continuously refreshes adapter facts independently of allocation paths.
+    /// The state only transitions when a fact source disconnects/expires or
+    /// subsequently recovers, so callers receive actionable DEGRADED evidence
+    /// without unbounded event noise.
+    pub fn start_adapter_monitor(&self) -> thread::JoinHandle<()> {
+        let adapter = self.clone();
+        thread::spawn(move || loop {
+            thread::sleep(adapter.adapter_poll_interval);
+            let result = adapter.daemon.refresh_inventory_facts();
+            let ready = result.is_ok();
+            let previous = adapter.adapter_available.swap(ready, Ordering::Relaxed);
+            match (previous, ready) {
+                (true, false) => {
+                    let error = result.expect_err("adapter result is known to be an error");
+                    adapter.publish_runtime_event(
+                        core_v1::RuntimeEventType::AdapterDegraded,
+                        "hardware-adapters",
+                        error.reason_code,
+                        error.message,
+                    );
+                }
+                (false, true) => adapter.publish_runtime_event(
+                    core_v1::RuntimeEventType::KernelReconciled,
+                    "hardware-adapters",
+                    "ADAPTER_RECOVERED",
+                    "hardware adapter facts are current again",
+                ),
+                _ => {}
+            }
         })
     }
 
@@ -1256,11 +1306,19 @@ impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for Kernel
         request: Request<core_v1::GetPluginInstanceRequest>,
     ) -> Result<Response<core_v1::PluginInstance>, Status> {
         let name = request.into_inner().name;
+        let adapter_available = self.adapter_available.load(Ordering::Relaxed);
         self.instances
             .lock()
             .expect("instance lock poisoned")
             .get(&name)
-            .map(|process| Response::new(to_plugin_instance(&self.daemon, &name, process)))
+            .map(|process| {
+                Response::new(to_plugin_instance(
+                    &self.daemon,
+                    &name,
+                    process,
+                    adapter_available,
+                ))
+            })
             .ok_or_else(|| Status::not_found("plugin instance is not managed by this Kernel"))
     }
 
@@ -1270,13 +1328,16 @@ impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for Kernel
     ) -> Result<Response<core_v1::ListPluginInstancesResponse>, Status> {
         let request = request.into_inner();
         let filters = request.state_filter;
+        let adapter_available = self.adapter_available.load(Ordering::Relaxed);
         let plugins = self
             .instances
             .lock()
             .expect("instance lock poisoned")
             .iter()
             .filter(|(_, process)| filters.is_empty() || filters.contains(&process.runtime_state))
-            .map(|(name, process)| to_plugin_instance(&self.daemon, name, process))
+            .map(|(name, process)| {
+                to_plugin_instance(&self.daemon, name, process, adapter_available)
+            })
             .collect();
         Ok(Response::new(core_v1::ListPluginInstancesResponse {
             plugins,
@@ -1405,6 +1466,7 @@ fn to_plugin_instance(
     daemon: &KernelDaemon,
     name: &str,
     process: &ManagedProcess,
+    adapter_available: bool,
 ) -> core_v1::PluginInstance {
     core_v1::PluginInstance {
         name: name.to_string(),
@@ -1421,7 +1483,15 @@ fn to_plugin_instance(
             core_v1::DesiredPluginState::Running as i32
         },
         runtime_state: managed_runtime_state(process),
-        health: process.health.clone(),
+        health: if adapter_available {
+            process.health.clone()
+        } else {
+            Some(core_v1::HealthReport {
+                status: core_v1::HealthStatus::Degraded as i32,
+                reason_code: "ADAPTER_DEGRADED".to_string(),
+                summary: "external hardware facts are unavailable or expired".to_string(),
+            })
+        },
         lease: process.lease.clone(),
         restart_count: process.restart_count,
         created_at: None,
@@ -2182,6 +2252,22 @@ mod tests {
                 runtime_event.r#type == core_v1::RuntimeEventType::CleanupCompleted as i32
             })
         }));
+    }
+
+    #[test]
+    fn adapter_degraded_state_is_visible_on_managed_instances() {
+        let adapter = heartbeat_adapter();
+        adapter.adapter_available.store(false, Ordering::Relaxed);
+        let instances = adapter.instances.lock().unwrap();
+        let instance = to_plugin_instance(
+            &adapter.daemon,
+            "worker_1",
+            &instances["worker_1"],
+            adapter.adapter_available.load(Ordering::Relaxed),
+        );
+        let health = instance.health.unwrap();
+        assert_eq!(health.status, core_v1::HealthStatus::Degraded as i32);
+        assert_eq!(health.reason_code, "ADAPTER_DEGRADED");
     }
 
     #[test]
