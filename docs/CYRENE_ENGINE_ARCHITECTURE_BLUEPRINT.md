@@ -3,7 +3,8 @@
 - 状态：Draft / Confirmed Direction
 - 日期：2026-08-10
 - 范围：多仓库规划、内核与框架边界、分布式控制契约
-- 本轮变更：仅修订本文档，不修改源码、构建配置或现有协议
+- 本轮变更：吸收架构讨论稿的实现核查、迁移映射和验收门禁；不修改源码、构建配置或现有协议
+- 文档权威：本文是合并后的唯一架构正文；原讨论稿中的冲突决策以本文已确认的方案 A 为准
 
 ## 1. 结论先行
 
@@ -94,6 +95,34 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 | GPU 按型号聚合 | 无法对单卡、MIG/分区做租约 | 使用稳定设备 ID、PCI 地址、分区和健康状态 |
 | 六大 App 尚未形成各自独立仓库 | 发布、权限和版本边界尚未落地 | 方案 A：Core 开源，六个服务一服务一仓 |
 
+### 2.1 当前实现的补充核查
+
+以下事实用于区分“已有代码”与“目标架构”，不能把现有 scaffold 或单元测试
+误报为分布式闭环已经完成：
+
+- framework/crates/cy-extension-registry 当前直接持有
+  cy-plugin-supervisor::PluginSupervisor，调用链仍是 Rust 同进程调用；这
+  不是 Kotlin 通过 KernelService 驱动 Rust 的进程边界。
+- cy-node-agent 目前仍主要是 AgentService/journal handler scaffold，尚未
+  提供可部署的 node daemon binary、mTLS enrollment、session fencing 或
+  durable desired/observed reconcile。
+- AgentCommandRequest 仍包含自由字符串 command_type/payload/env；该
+  兼容接口不得演化为远程 shell，迁移期只能保留为 legacy v0，并由 typed
+  resource/lifecycle command 替代。
+- GPU inventory 仍以 GpuInfo 的聚合字段为主；probe.rs 还包含失败时的
+  默认版本/能力值。正式 inventory 必须返回 UNKNOWN/UNSUPPORTED、证据来源、
+  观测时间和置信度，不能将猜测写成可分配事实。
+- cy-plugin-supervisor 已有状态枚举和握手骨架，但 EOF、child exit、OOM、
+  health timeout、Shutdown ACK、流式多帧和 wait/reap 尚未形成完整的
+  instance-level watchdog 闭环。
+- cy-platform-api、ai_service.proto、manifest 文档/Schema/Rust model
+  仍存在业务扩展和模型定义的 legacy 入口。它们必须先冻结、统一 fixture，
+  再迁移到独立 extension contract；不能直接成为 Core v1 的第二权威。
+
+因此，Rust crate 能够编译或已有窄范围测试通过，只能证明当前局部实现可运行，
+不能证明资源强隔离、GPU 分配、Kotlin 控制面、断线恢复、签名包安装或生产级
+分布式闭环已经验收。
+
 ## 3. 内核、框架、插件与 Shell 的边界
 
 | 层 | 必须负责 | 明确禁止 |
@@ -169,6 +198,21 @@ token 协商；断线重连后先对账 desired/observed generation，再接收�
 网络可达时可以启用控制面直连，但必须由显式部署策略选择，不能在运行中
 无序混用两种命令通道。若确需故障切换，同一节点同一时刻只能有一个持有效
 session lease 的命令来源。
+
+### 3.4 连接故障与恢复规则
+
+| 场景 | 首期规则 |
+| --- | --- |
+| Controller 暂时失联 | Node 不接受新的 generation；现有实例只运行到 lease/grace 截止 |
+| Resource lease 到期 | 先 drain，再停止并释放资源；不能无限离线运行 |
+| Node session 到期 | Kotlin 将 Node/Instance 标记为 UNKNOWN/LOST，不直接假设进程已死 |
+| Controller 重启 | 从持久化 desired state/outbox 恢复，再与 node snapshot 对账 |
+| Node 重启 | 仅接管 identity、package digest、generation、fencing token 均匹配的进程；其余按 orphan 策略处理 |
+| Plugin 崩溃 | Rust 记录真实 exit/OOM，按 restart policy 更新 attempt，并触发 quarantine 条件 |
+| 旧 Controller 恢复 | generation/fencing token 过期的 mutation 和 heartbeat 必须被拒绝 |
+
+对训练等非幂等任务，Framework 不能在节点刚失联时盲目在另一节点重跑；必须先
+证明旧 lease/fencing 已失效，或由业务扩展协议提供 checkpoint/recovery 语义。
 
 ## 4. Rust、Kotlin 与 C 的范围
 
@@ -260,6 +304,27 @@ GPU 清单至少要包含稳定设备 ID、PCI 地址、厂商、型号、显存
   `HIP_VISIBLE_DEVICES` 等协作式变量；
 - `OBSERVE_ONLY`：只能观察，不能限制；
 - `UNENFORCED`：无法执行，默认应 fail closed。
+
+### 5.1 Supervisor 的实例级生命周期
+
+PluginSupervisor 的目标不是一个共享的进程表，而是由 manager 管理、每个
+实例独占状态的 actor：
+
+    SupervisorManager<InstanceId, InstanceActor>
+      InstanceActor owns:
+        immutable LaunchPlan
+        resource lease + fencing token
+        child handle + wait watcher
+        local transport
+        health/deadline timers
+        pending calls and cancellation tokens
+        desired/observed generation
+        event sink
+
+停止必须遵循 Drain -> Shutdown request -> wait grace -> SIGTERM -> wait ->
+SIGKILL -> wait/reap。只有确认子进程退出、已被 reap 且租约和 cgroup 释放后，
+才能发布 Stopped。stdout EOF、child exit、OOM、lease expiry 和 health
+timeout 都必须主动产生事件，而不是等到下一次 invoke 才发现。
 
 ## 6. 方案 A：多仓库拓扑与文件树
 
@@ -1259,6 +1324,11 @@ Python 插件使用固定 digest 的基础镜像和 `uv`，在容器或独立沙
 冻结依赖安装。宿主机不能 `pip install`，插件也不能传任意 pip/uv 命令给
 Kernel。缓存是实现细节，lockfile 与 package digest 才是可复现依据。
 
+service.json 与 plugin.toml 不能形成两套安装路径：前者只描述官方服务
+bundle 的身份和组件清单，后者描述可安装组件的插件 manifest；二者必须作为同一
+个签名 OCI artifact 的 metadata 一起校验。第三方插件不需要 service.json，
+也不能因此绕过相同的 digest、签名、权限和 conformance 门禁。
+
 规范 OCI artifact 至少包含以下可寻址对象：
 
 ```text
@@ -1371,6 +1441,25 @@ Kernel。
 验收：Core 不 checkout 任一服务仓仍能独立构建运行；每个服务的 UI/Shell
 可按自己的 `core.lock` 独立构建和通过 E2E。
 
+### 9.1 合并后的最小验收纵切
+
+正式迁移的第一个里程碑应是完全无 AI 业务的 mock plugin，而不是先接入某个
+官方产品：
+
+    Kotlin UI/API request
+      -> desired state persisted
+      -> Rust node obtains an exclusive mock resource lease
+      -> Rust launches a sandboxed Python worker from locked OCI+uv environment
+      -> Hello/Ready/Heartbeat
+      -> crash -> restart -> quarantine
+      -> graceful stop
+      -> lease released
+      -> operation and ordered events visible to UI
+
+该纵切必须在 clean Linux、网络短暂断开、controller/node 重启以及宿主没有
+Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架 + 分布式插件”
+边界已经成立。
+
 ## 10. 架构门禁
 
 实现阶段应把下列规则写成自动化检查：
@@ -1396,6 +1485,41 @@ Kernel。
 - 一个 Node epoch 同时只有一个命令权威；outbound 与 direct 模式不得双主。
 - `main` 禁止直接开发；只有完整 CI 和真实环境测试证据齐全的 `develop`
   候选提交可以合并。
+
+### 10.1 当前文件迁移映射
+
+| 当前文件/模块 | 迁移方向 | 删除或替换门禁 |
+| --- | --- | --- |
+| contracts/proto/ai_service.proto | 冻结为 legacy v0；推理、训练、量化迁入版本化 extension contract | 所有消费者迁移且兼容期结束 |
+| contracts/proto/agent_service.proto | 冻结；由 typed node/kernel protocol 替代 | 注册、心跳、reconcile、恢复集成测试通过 |
+| contracts/proto/plugin/v1/* | 保留 POC 兼容；新增 worker v2 package | Python/JVM conformance runner 与迁移 adapter 全绿 |
+| cy-manifest、plugin.schema.json、PLUGIN_SPEC.md | 收敛为一份规范和多语言模型 | Schema/Rust/Kotlin/Python fixture roundtrip 全绿 |
+| cy-local-transport | 抽象 transport factory，补 child event、UDS 和 env policy | EOF、oversize、stdout 污染、关闭/回收覆盖 |
+| cy-plugin-supervisor | 重构为 manager + instance actor，消费 lease/LaunchPlan | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿 |
+| cy-node-agent | 增加 daemon binary、mTLS/session、snapshot/reconcile | 不再把 handler unit test 当成可运行节点证明 |
+| cy-platform-api | AI trait 移到 extension SDK；Core 只留通用插件契约 | 移除官方 App 后 Core 仍能构建运行 |
+| cy-extension-registry | 迁移期保留为 compatibility layer，长期由 Kotlin catalog/router 接管 | Kotlin 行为覆盖后才删除 |
+| framework/jvm | 建立 Pure Kotlin domain/application + Spring adapters | Gradle build、架构测试、reconcile integration test 通过 |
+| apps / shell | 仅按方案 A 在相应服务仓创建或接入 | 先完成 Core API 与最小远程 mock plugin 闭环 |
+
+contracts/ 与 sdk/ 不能长期双写。路径迁移必须同步更新 Cargo、Gradle、build.rs、
+CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码。
+
+### 10.2 分阶段验收最低要求
+
+- **P0/P1：** manifest 文档、Schema、Rust/Kotlin/Python fixture 一致；Buf
+  lint/breaking 和 descriptor drift 检查通过；Core v1 不出现 Prompt、LoRA、
+  Training 等业务类型。
+- **P2/P3：** 并发租约不重复分配；未知硬件不伪造能力；supervisor 能发现
+  idle worker 退出，完成 cancel、stream backpressure、graceful stop 和资源回收；
+  Kotlin domain/application 不依赖 Spring 或直接启动 worker。
+- **P4/P5：** 远程 mock worker 能幂等启动；断线重连不重复创建 instance；旧
+  fencing token 被拒绝；controller/node 任一重启后状态可恢复；控制 RPC 不搬运
+  大 artifact。
+- **P6：** digest/signature/permission 任一不符都在 spawn 前失败；无宿主 Python
+  仍可运行 locked uv worker；Python/JVM 崩溃只产生 instance event。
+- **P7：** UI 只访问公开 Control Plane SDK；删除所有官方 App 后 Core 仍能构建、
+  启动并运行 mock plugin；第三方插件不需要私有启动路径。
 
 ## 11. 已确认决策与剩余 ADR
 
