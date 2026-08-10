@@ -13,7 +13,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use cy_kernel_api::{
@@ -69,6 +69,14 @@ pub struct NvidiaSmiProvider {
     device_root: PathBuf,
     /// Sysfs 虚拟文件系统根目录（默认为 `/sys`）
     sysfs_root: PathBuf,
+    /// Adapter 进程内维护的单调事实代次。相同快照不改变代次。
+    inventory_generation: Mutex<InventoryGeneration>,
+}
+
+#[derive(Debug, Default)]
+struct InventoryGeneration {
+    generation: u64,
+    fingerprint: String,
 }
 
 impl NvidiaSmiProvider {
@@ -79,6 +87,7 @@ impl NvidiaSmiProvider {
             command: command.into(),
             device_root: PathBuf::from("/dev"),
             sysfs_root: PathBuf::from("/sys"),
+            inventory_generation: Mutex::new(InventoryGeneration::default()),
         }
     }
 
@@ -149,6 +158,22 @@ impl NvidiaSmiProvider {
             }
         }
         nodes
+    }
+
+    fn next_inventory_generation(&self, devices: &[AcceleratorDevice]) -> u64 {
+        let fingerprint = devices
+            .iter()
+            .map(|device| format!("{device:?}"))
+            .collect::<String>();
+        let mut state = self
+            .inventory_generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.generation == 0 || state.fingerprint != fingerprint {
+            state.generation = state.generation.saturating_add(1).max(1);
+            state.fingerprint = fingerprint;
+        }
+        state.generation
     }
 }
 
@@ -235,8 +260,9 @@ impl AcceleratorProvider for NvidiaSmiProvider {
 impl HostInventoryProvider for NvidiaSmiProvider {
     fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
         let devices = <Self as AcceleratorProvider>::probe_inventory(self)?;
+        let generation = self.next_inventory_generation(&devices);
         Ok(InventorySnapshot {
-            generation: 1,
+            generation,
             devices,
             capabilities: NodeCapabilities {
                 ready: true,
@@ -249,39 +275,6 @@ impl HostInventoryProvider for NvidiaSmiProvider {
                 enforcement: Vec::new(),
             },
         })
-    }
-}
-
-/// AMD ROCm 硬件探测适配器（预留占位）
-pub struct AmdProvider;
-
-impl AcceleratorProvider for AmdProvider {
-    fn adapter_id(&self) -> &str {
-        "amd-placeholder"
-    }
-
-    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
-        Err(ProviderError::new(
-            self.adapter_id(),
-            "UNSUPPORTED_ADAPTER",
-            "AMD discovery is reserved for the next hardware adapter milestone",
-        ))
-    }
-
-    fn create_binding(&self, _device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError> {
-        Err(ProviderError::new(
-            self.adapter_id(),
-            "UNSUPPORTED_ADAPTER",
-            "AMD binding is not implemented",
-        ))
-    }
-
-    fn read_health(&self, _device_id: &str) -> Result<HealthReport, ProviderError> {
-        Err(ProviderError::new(
-            self.adapter_id(),
-            "UNSUPPORTED_ADAPTER",
-            "AMD health is not implemented",
-        ))
     }
 }
 
@@ -395,6 +388,20 @@ mod tests {
         }
     }
 
+    struct SequenceRunner {
+        outputs: Mutex<Vec<CommandOutput>>,
+    }
+
+    impl CommandRunner for SequenceRunner {
+        fn run(
+            &self,
+            _executable: &Path,
+            _args: &[String],
+        ) -> Result<CommandOutput, ProviderError> {
+            Ok(self.outputs.lock().unwrap().remove(0))
+        }
+    }
+
     #[test]
     fn nvidia_probe_keeps_stable_identity_and_does_not_fabricate_topology() {
         let provider = NvidiaSmiProvider::new("nvidia-smi").with_runner(Arc::new(FakeRunner {
@@ -419,12 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn amd_adapter_is_explicitly_unsupported() {
-        let error = AmdProvider.probe_inventory().unwrap_err();
-        assert_eq!(error.reason_code, "UNSUPPORTED_ADAPTER");
-    }
-
-    #[test]
     fn topology_parser_returns_only_known_links() {
         let links = parse_nvidia_topology(
             "GPU0 GPU1 CPU Affinity\nGPU0 X NV1 SYS 0-7\nGPU1 NV1 X SYS 8-15",
@@ -436,5 +437,27 @@ mod tests {
                 ("GPU1".into(), "GPU0".into(), AcceleratorLinkType::Nvlink),
             ]
         );
+    }
+
+    #[test]
+    fn inventory_generation_changes_only_when_observed_facts_change() {
+        let normal = CommandOutput {
+            status: 0,
+            stdout: "0, GPU-uuid, NVIDIA A100, 00000000:01:00.0, 40960, 40000\n".into(),
+            stderr: String::new(),
+        };
+        let changed = CommandOutput {
+            status: 0,
+            stdout: "0, GPU-uuid, NVIDIA A100, 00000000:01:00.0, 40960, 39000\n".into(),
+            stderr: String::new(),
+        };
+        let provider = NvidiaSmiProvider::new("nvidia-smi").with_runner(Arc::new(SequenceRunner {
+            outputs: Mutex::new(vec![normal.clone(), normal, changed]),
+        }));
+        let first = HostInventoryProvider::probe_inventory(&provider).unwrap();
+        let second = HostInventoryProvider::probe_inventory(&provider).unwrap();
+        let third = HostInventoryProvider::probe_inventory(&provider).unwrap();
+        assert_eq!(first.generation, second.generation);
+        assert!(third.generation > second.generation);
     }
 }

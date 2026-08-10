@@ -43,11 +43,13 @@ two package or installation protocols.
 
 ## Hardware boundary
 
-The Rust kernel discovers devices, reads telemetry, maps permitted device nodes,
-injects vendor visibility variables, and supervises worker processes. CUDA,
-ROCm, Ascend, model execution, training, and quantization stay in out-of-process
-plugins. Vendor-specific discovery is an adapter boundary, not a driver inside
-the kernel.
+The Rust Kernel keeps only node-local leases, cgroup sandboxing, process
+lifecycle, and the generic local-adapter client. Vendor-specific discovery,
+telemetry, device-node enumeration, and C ABI loading run in separately
+supervised hardware-adapter processes under `adapters/hardware/`. CUDA, ROCm,
+Ascend, model execution, training, and quantization stay outside the Kernel.
+The Kernel and an adapter exchange versioned Protobuf frames over UDS; a C ABI
+may exist only inside an adapter process, never as a public Kernel API.
 
 ## Current checkpoint
 

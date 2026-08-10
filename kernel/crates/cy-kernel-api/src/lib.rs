@@ -2,7 +2,7 @@
 //!
 //! 【六边形架构与端口-适配器模式 (Hexagonal Architecture)】
 //! 本 Crate 作为节点内核的核心抽象契约层，**刻意不包含任何特定 Linux 系统调用、特定 GPU 厂商 SDK、gRPC (Tonic) 或底层进程实现的细节**。
-//! 各类适配器（如 NVIDIA 探测适配器、cgroup v2 沙箱、内存租约管理器）通过实现本模块定义的标准端口（Ports / Traits）向内核上报事实（Facts），
+//! 通用端口的实现（如进程外硬件适配器客户端、cgroup v2 沙箱、内存租约管理器）向内核上报事实（Facts），
 //! 内核守护进程组合根将其组装暴露为统一的 Core v1 平台服务：
 //!
 //! - **硬件资产与事实**：[`AcceleratorDevice`], [`DeviceNode`], [`AcceleratorLink`], [`HealthReport`]
@@ -133,7 +133,7 @@ pub struct HealthReport {
     pub summary: String,
 }
 
-/// 操作系统设备字符/块设备节点（例如 `/dev/nvidia0`）
+/// 操作系统设备字符/块设备节点（路径由进程外硬件适配器返回）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceNode {
     /// 设备文件路径
@@ -193,7 +193,7 @@ pub struct DeviceBinding {
     pub device_id: String,
     /// 需要注入沙箱的设备节点
     pub nodes: Vec<DeviceNode>,
-    /// 内核注入的设备可见性环境变量（如 `CUDA_VISIBLE_DEVICES=0`）
+    /// Adapter 返回、由 Kernel 受控注入的设备环境变量
     pub environment: BTreeMap<String, String>,
     /// 访问该设备必需的系统用户组 GID 列表
     pub required_gids: Vec<u32>,
@@ -209,23 +209,20 @@ impl DeviceBinding {
     /// 合并用户自定义环境变量与内核设备绑定环境变量。
     ///
     /// # 安全保护（核心约束）
-    /// 严格禁止插件/用户代码覆盖内核保留的设备可见性环境变量（如 `CUDA_VISIBLE_DEVICES`）。
+    /// 严格禁止插件/用户代码覆盖 Adapter 已为设备绑定声明的环境变量。
     /// 一旦发现冲突立即报错，防止越权访问未分配的 GPU 设备。
     pub fn merge_environment(
         &self,
         requested: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, String>, ProviderError> {
-        let reserved = [
-            "CUDA_VISIBLE_DEVICES",
-            "HIP_VISIBLE_DEVICES",
-            "ROCR_VISIBLE_DEVICES",
-            "NVIDIA_VISIBLE_DEVICES",
-        ];
-        if requested.keys().any(|key| reserved.contains(&key.as_str())) {
+        if requested
+            .keys()
+            .any(|key| self.environment.contains_key(key))
+        {
             return Err(ProviderError::new(
                 &self.adapter_id,
                 "RESERVED_ENVIRONMENT",
-                "plugin attempted to override a Kernel-owned device variable",
+                "plugin attempted to override an Adapter-owned device variable",
             ));
         }
 
@@ -390,12 +387,23 @@ pub trait HostInventoryProvider: Send + Sync {
 
 /// 端口 Trait 2：特定厂商硬件加速卡适配器
 pub trait AcceleratorProvider: Send + Sync {
-    /// 适配器唯一 ID（例如："nvidia-smi-provider"）
+    /// 适配器唯一 ID（例如："hardware-adapter-uds"）
     fn adapter_id(&self) -> &str;
     /// 探测该厂商下的所有加速设备
     fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError>;
     /// 为指定设备创建安全隔离绑定规则
     fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError>;
+    /// 为指定库存代次创建绑定。
+    ///
+    /// 旧的或纯静态实现可以安全地沿用无代次的默认实现；进程外 Adapter Host
+    /// 必须覆盖此方法并将代次传给其协议端点。
+    fn create_binding_for_generation(
+        &self,
+        device: &AcceleratorDevice,
+        _expected_inventory_generation: u64,
+    ) -> Result<DeviceBinding, ProviderError> {
+        self.create_binding(device)
+    }
     /// 读取指定设备的健康状态
     fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError>;
 }
@@ -404,6 +412,10 @@ pub trait AcceleratorProvider: Send + Sync {
 pub trait ResourceLeaseManager: Send + Sync {
     /// 获取当前最新硬件清单快照
     fn inventory(&self) -> InventorySnapshot;
+    /// 以经过边界校验的节点快照刷新可分配库存。
+    ///
+    /// 实现必须保留已分配设备的可释放记录，并拒绝发生回退的事实代数。
+    fn refresh_inventory(&self, snapshot: InventorySnapshot) -> Result<(), ProviderError>;
     /// 申请预留硬件资源租约
     fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError>;
     /// 读取租约当前状态，用于启动/停止流程的 fencing 与结果回报
@@ -458,4 +470,31 @@ pub trait NodeIdentityProvider: Send + Sync {
     fn node_id(&self) -> Result<String, ProviderError>;
     /// 获取节点启动代数周期 (Epoch)
     fn node_epoch(&self) -> Result<u64, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_binding_environment_is_reserved_without_vendor_knowledge() {
+        let binding = DeviceBinding {
+            device_id: "accelerator-1".to_string(),
+            nodes: Vec::new(),
+            environment: BTreeMap::from([("ADAPTER_VISIBLE_DEVICE".to_string(), "1".to_string())]),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::VisibilityOnly,
+            adapter_id: "test-adapter".to_string(),
+            reason_code: "TEST".to_string(),
+        };
+        let requested =
+            BTreeMap::from([("ADAPTER_VISIBLE_DEVICE".to_string(), "other".to_string())]);
+        assert_eq!(
+            binding
+                .merge_environment(&requested)
+                .unwrap_err()
+                .reason_code,
+            "RESERVED_ENVIRONMENT"
+        );
+    }
 }

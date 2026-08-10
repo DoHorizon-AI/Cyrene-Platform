@@ -1,9 +1,9 @@
 # CYRENE Engine 初始架构与协议蓝图
 
-- 状态：Draft / Confirmed Direction
+- 状态：Normative / P2 boundary implemented in Core
 - 日期：2026-08-10
 - 范围：多仓库规划、内核与框架边界、分布式控制契约
-- 本轮变更：吸收架构讨论稿的实现核查、迁移映射和验收门禁；不修改源码、构建配置或现有协议
+- 本轮变更：落实硬件适配器进程外化、版本化 UDS 协议和 Kernel 边界门禁；不将厂商 C ABI 放入 Kernel
 - 文档权威：本文是合并后的唯一架构正文；原讨论稿中的冲突决策以本文已确认的方案 A 为准
 
 ## 1. 结论先行
@@ -26,11 +26,13 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
    是插件目录、安装、期望状态、集群调度、权限和工作流的唯一控制面。
 3. **生态插件默认全部进程外运行。**
    Python、JVM 和第三方 Rust 插件都不能进入 Kernel 或 Kotlin 进程。
-4. **Kernel 进程内只允许受信任的编译期平台适配器。**
-   例如 Linux cgroup、procfs、GPU 发现、bwrap、OCI 和传输适配器；它们不是
-   可安装的业务插件。
-5. **当前阶段不需要 C 核心。**
-   Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离适配器中。
+4. **Kernel 进程内只允许通用、无厂商依赖的基础机制。**
+   例如 Linux cgroup、pidfd、进程回收和本地传输。GPU 发现、厂商 CLI、驱动
+   C ABI、厂商 sysfs/procfs 与设备节点枚举必须位于独立 Adapter Host；它们既
+   不是可安装业务插件，也不在 Kernel 地址空间。
+5. **当前阶段不需要 C 核心或 Kernel C ABI。**
+   Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离 Adapter Host
+   内部，Kernel 对外保持版本化 Protobuf 契约。
 6. **控制流、事件流和数据流分离。**
    模型、数据集、checkpoint 和张量不经过普通 Kernel RPC 或 Kotlin 控制面。
 7. **采用方案 A：Core 单独开源，官方服务插件各自独立建仓。**
@@ -80,8 +82,8 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 - Supervisor 已定义
   `Discovered -> Resolved -> Starting -> Handshaking -> Healthy` 等 13 个
   生命周期状态，并具备重启与崩溃隔离骨架。
-- 当前 GPU 探测主要通过 `sysinfo`、`nvidia-smi`、procfs 和环境变量，
-  没有链接 CUDA/C++ 计算运行时，方向符合本蓝图。
+- 当前 NVIDIA 探测已迁入独立 Adapter Host，通过 CLI、sysfs 和设备节点事实
+  上报版本化 UDS 快照；Kernel 不链接 CUDA/C++ 计算运行时。
 
 当前实现与目标边界之间的主要差距：
 
@@ -90,8 +92,8 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 | `cy-extension-registry` 直接依赖 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面         | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
 | `ai_service.proto` 包含 LoRA、训练、推理、量化和脚本执行            | Core 与 Yield/Reactor 业务耦合 | 业务 RPC 迁入各 App 的版本化协议                              |
 | `AgentService` 使用自由字符串 `command_type/payload/env`   | 可能演化成远程命令注入面              | 只保留类型化资源和生命周期命令                                    |
-| `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑               | 没有 OS/GPU provider 抽象     | 原始事实经 provider/adapter 暴露                          |
-| `BuiltinSystemProbe` 又硬编码另一份硬件事实                    | 双重库存权威                    | 可分配资源只由 Kernel 报告                                  |
+| `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑               | 驱动故障可进入 Node Runtime    | 已迁出 Kernel；原始事实只经进程外 Adapter Host 暴露          |
+| `BuiltinSystemProbe` 又硬编码另一份硬件事实                    | 双重库存权威                    | 已移除默认实现；可分配资源只由 Kernel 报告                    |
 | `StdioTransport::spawn(executable, args)` 裸启动进程     | 没有 cgroup、沙盒、设备映射或资源环境注入  | 所有进程经 `ProcessRuntime` 与 `SandboxBackend`          |
 | 当前 ADR 允许 `in-proc-rust` 业务插件和 PyO3                 | 业务崩溃可能影响可信核心              | 进程内仅限平台适配器；PyO3 只能存在于外部 worker                     |
 | GPU 按型号聚合                                           | 无法对单卡、MIG/分区做租约           | 使用稳定设备 ID、PCI 地址、分区和健康状态                           |
@@ -111,9 +113,9 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 - AgentCommandRequest 仍包含自由字符串 command_type/payload/env；该
   兼容接口不得演化为远程 shell，迁移期只能保留为 legacy v0，并由 typed
   resource/lifecycle command 替代。
-- GPU inventory 仍以 GpuInfo 的聚合字段为主；probe.rs 还包含失败时的
-  默认版本/能力值。正式 inventory 必须返回 UNKNOWN/UNSUPPORTED、证据来源、
-  观测时间和置信度，不能将猜测写成可分配事实。
+- 已移除 Node Agent 的 `probe.rs` 与其默认版本/能力猜测。正式 inventory 由
+  外部 Adapter Host 返回版本化快照；未知或失联必须返回
+  `UNKNOWN/UNSUPPORTED/DEGRADED`，不能将猜测写成可分配事实。
 - cy-plugin-supervisor 已有状态枚举和握手骨架，但 EOF、child exit、OOM、
   health timeout、Shutdown ACK、流式多帧和 wait/reap 尚未形成完整的
   instance-level watchdog 闭环。
@@ -129,7 +131,8 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 
 | 层                                | 必须负责                                                                                                   | 明确禁止                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Rust Kernel / Node Runtime       | 主机资源发现；设备清单；资源租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；本地 IPC；节点观察状态 | 训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Rust Kernel / Node Runtime       | 节点本地租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；通用本地 IPC；节点观察状态 | 厂商 CLI/C ABI、厂商 sysfs/procfs、设备枚举、训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Hardware Adapter Host            | 厂商硬件发现、健康遥测、拓扑与设备节点事实、厂商 C ABI 包装；通过 UDS 上报版本化事实和绑定 | 租约权威、cgroup 生命周期、全局策略、业务执行、直接暴露给 Kotlin/插件                                      |
 | Kotlin Framework / Control Plane | 插件目录与安装；依赖解析；期望状态；集群拓扑；节点选择；权限、租户与配额策略；工作流；配置；分布式状态协调；面向 Shell 的 API                                   | 直接调用 CUDA/NVML；直接操作 cgroup/device node；用 `ProcessBuilder` 启动计算插件；加载 Python 到 JVM |
 | App / Plugin                     | Catalyst、Yield、Reactor 等全部 AI 和产品能力；PyTorch、vLLM、uv；数据、训练、推理、网关、评估和微前端                                 | 依赖 Kernel 私有 crate；绕过租约；自行选择未授权 GPU；修改控制面全局状态                                    |
 | 服务插件 UI / Shell                  | UI extension、窗口/托盘、安全存储、认证会话、公开 API 客户端和远程控制体验；Navigator 可提供官方组合壳                                      | 进入 Core 仓库；直接调用 KernelService；启动节点进程；扫描 GPU；持有节点管理凭证                             |
@@ -259,17 +262,18 @@ Core Framework 导入任何服务插件仓库。
 3. 厂商管理 API：仅在 CLI/标准接口不足时采用；
 4. Linux 内核模块：只作为独立、可选、平台限定的未来项目。
 
-如果未来必须使用 NVML、ROCm SMI、Ascend 管理 API 等 C ABI，优先放入
-独立 adapter 进程。若必须进程内 FFI，则只允许存在于明确命名的 vendor
-adapter crate，通过稳定 Rust trait 暴露能力。厂商适配器崩溃只能使能力
-变为 `DEGRADED/UNAVAILABLE`，不能带崩主 Kernel。
+如果未来必须使用 NVML、ROCm SMI、Ascend 管理 API 等 C ABI，必须放入独立
+Adapter Host 进程或其私有动态库。禁止在 Kernel 内进程 FFI，也禁止把 C ABI
+作为 Kernel 对 Kotlin/Python/插件的公开 API。Kernel 与 Adapter Host 只通过
+版本化 `cyrene.hardware.v1` Protobuf over UDS 通信；适配器崩溃只能使能力变为
+`DEGRADED/UNAVAILABLE`，不能带崩主 Kernel。
 
 Kernel 依赖树中不得出现 CUDA、cuDNN、PyTorch、vLLM、PyO3 等计算运行时。
 PyO3 如有必要，只能用于一个独立 worker 进程内部。
 
 ## 5. Kernel 应提前定义的抽象
 
-即使第一版实现仍依赖系统命令与环境变量，也应先稳定内部端口：
+Kernel 只稳定通用端口；厂商实现位于进程外 Host：
 
 ```rust
 trait HostInventoryProvider {}
@@ -287,9 +291,9 @@ trait NodeIdentityProvider {}
 - `linux-procfs`
 - `linux-sysfs`
 - `linux-cgroup-v2`
-- `nvidia-cli`
-- `amd-sysfs`
-- `ascend-cli`
+- `hardware/nvidia`（独立进程；当前实现）
+- `hardware/amd`（独立进程；未来）
+- `hardware/ascend`（独立进程；未来）
 - `native-process`
 - `bwrap`
 - `oci-container`
@@ -366,24 +370,21 @@ cyrene-core/
 │
 ├── kernel/                              # Rust 用户态微内核 / Node Runtime
 │   ├── crates/
-│   │   ├── cy-kernel-api/               # OS/GPU/process/sandbox 抽象 traits
+│   │   ├── cy-kernel-api/               # 通用 process/sandbox/lease 抽象 traits
 │   │   ├── cy-kernel-daemon/            # KernelService 与 Node outbound client
+│   │   ├── cy-adapter-client/           # 通用 UDS 硬件适配器客户端
 │   │   ├── cy-resource-manager/         # 原子配额、租约、fencing
-│   │   ├── cy-hardware-discovery/       # 只读硬件事实和遥测
 │   │   ├── cy-sandbox/                  # runtime/backend 编排
 │   │   ├── cy-local-transport/          # 已存在
 │   │   ├── cy-plugin-supervisor/        # 已存在
 │   │   └── cy-node-agent/               # 已存在
-│   ├── adapters/
-│   │   ├── os/linux-procfs/
-│   │   ├── os/linux-sysfs/
-│   │   ├── os/linux-cgroup-v2/
-│   │   ├── gpu/generic/
-│   │   ├── gpu/nvidia-cli/
-│   │   ├── gpu/amd-sysfs/
-│   │   ├── gpu/ascend-cli/
-│   │   └── sandbox/{native,bwrap,oci}/
 │   └── tests/
+│
+├── adapters/                            # 独立进程；不属于 Kernel 地址空间
+│   └── hardware/
+│       ├── nvidia/                      # 当前：CLI/拓扑/设备节点 -> UDS Host
+│       ├── amd/                         # 未来独立 Adapter Host
+│       └── ascend/                      # 未来独立 Adapter Host
 │
 ├── framework/jvm/                       # Kotlin/JVM 控制面
 │   ├── settings.gradle.kts
@@ -1399,15 +1400,20 @@ golden fixture 一致。
 
 ### P2：Rust Kernel 抽象
 
-- 增加 provider/adapter traits 和 Linux pre-flight 能力报告；
-- NVIDIA 单卡身份、分区、NUMA/拓扑、完整设备节点、资源租约和 fence token；
+- 保留通用 provider ports、资源租约、fencing 和 Linux pre-flight；
+- 移除 Kernel 内的硬件发现与旧 Node Agent GPU probe；通过 `cy-adapter-client`
+  连接独立 Adapter Host，使用版本化 UDS Protobuf 返回单卡身份、NUMA/拓扑、
+  设备节点与健康事实；
 - 以 cgroup v2 + native process 为首版执行后端，预留但不实现 bwrap/OCI；
-- Supervisor 正确处理 cgroup 进程树、wait/reap 超时、主动 health、OOM、优雅停止和资源回收；
+- Supervisor 正确处理 cgroup 进程树、wait/reap 超时、OOM、优雅停止和资源回收；
+  IPC 心跳看门狗必须在生产验收前完成，不能以 PID 存活替代；
 - 生产部署采用 systemd control-group fate sharing，不在 P2 认领孤儿实例；
 - `LaunchPlugin` 只能引用已验证安装。
 
-验收：并发租约不重复分配；未知硬件不伪造能力；启动失败、OOM、D 状态和
-节点断联都有事实状态；cgroup 进程树可清理；Python 崩溃不影响 Kernel。
+验收：并发租约不重复分配；未知硬件不伪造能力；Adapter 失联阻止新租约且不
+崩溃 Kernel；启动失败、OOM、D 状态和节点断联都有事实状态；cgroup 进程树可
+按已证明所有权清理；Python 或厂商驱动崩溃不影响 Kernel；强制 IPC 心跳超时
+按 Drain -> SIGTERM -> SIGKILL -> reap 闭环。
 
 ### P3：Kotlin 控制面
 

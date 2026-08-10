@@ -1,0 +1,11 @@
+[package]
+name = "cyrene-nvidia-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Out-of-process NVIDIA hardware adapter for the CYRENE Kernel"
+license = "Apache-2.0"
+
+[dependencies]
+cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
+cy-proto = { path = "../../../contracts/rust/cy-proto" }
+prost = "0.12"

@@ -479,7 +479,7 @@ mod tests {
             environment: BTreeMap::new(),
             required_gids: Vec::new(),
             enforcement: EnforcementMode::VisibilityOnly,
-            adapter_id: "nvidia-smi".to_string(),
+            adapter_id: "test-hardware-adapter".to_string(),
             reason_code: "test".to_string(),
         };
         assert_eq!(

@@ -8,11 +8,12 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cy_hardware_discovery::NvidiaSmiProvider;
+use cy_adapter_client::UdsHardwareAdapterClient;
 use cy_kernel_api::{
     AcceleratorKind, AcceleratorLinkType, AcceleratorProvider, AcceleratorVendor, DeviceBinding,
     EnforcementMode, HostInventoryProvider, InventorySnapshot, LaunchPlan, LeaseState,
@@ -59,9 +60,35 @@ impl KernelDaemon {
         }
     }
 
+    /// 通过版本化 UDS 连接进程外硬件适配器。
+    ///
+    /// 该组合根不加载厂商动态库，也不执行任何厂商探测命令。适配器失联时，端口
+    /// 返回 `ADAPTER_UNAVAILABLE`，由上层将节点转为不可继续分配的降级状态。
+    pub fn with_hardware_adapter(
+        adapter_id: impl Into<String>,
+        socket_path: impl Into<PathBuf>,
+        resources: Arc<dyn ResourceLeaseManager>,
+        sandbox: Arc<dyn SandboxBackend>,
+        node_id: impl Into<String>,
+        node_epoch: u64,
+    ) -> Self {
+        let adapter = Arc::new(UdsHardwareAdapterClient::new(adapter_id, socket_path));
+        Self::new(
+            adapter.clone(),
+            adapter,
+            resources,
+            sandbox,
+            node_id,
+            node_epoch,
+        )
+    }
+
     /// 检查节点基础沙箱环境是否已就绪
     pub fn preflight_ready(&self) -> bool {
         self.sandbox.preflight().ready
+            && self
+                .inventory()
+                .is_ok_and(|snapshot| snapshot.capabilities.ready)
     }
 
     /// 获取最新的硬件清单快照
@@ -71,6 +98,15 @@ impl KernelDaemon {
 
     /// 申请预留硬件资源租约
     pub fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
+        let snapshot = self.inventory()?;
+        if !snapshot.capabilities.ready {
+            return Err(ProviderError::new(
+                "kernel-daemon",
+                "ADAPTER_DEGRADED",
+                "required hardware adapter capability is not ready",
+            ));
+        }
+        self.resources.refresh_inventory(snapshot)?;
         self.resources.reserve(request)
     }
 
@@ -103,7 +139,10 @@ impl KernelDaemon {
                         &allocation.device_id,
                     )
                 })?;
-            bindings.push(self.accelerator_provider.create_binding(device)?);
+            bindings.push(
+                self.accelerator_provider
+                    .create_binding_for_generation(device, lease.inventory_generation)?,
+            );
         }
         merge_bindings(bindings)
     }
@@ -189,11 +228,6 @@ impl KernelDaemon {
                 .map(|fact| fact.name)
                 .collect(),
         })
-    }
-
-    /// 获取内置 NVIDIA 适配器引用
-    pub fn nvidia_provider(&self) -> &Arc<dyn AcceleratorProvider> {
-        &self.accelerator_provider
     }
 }
 
@@ -781,9 +815,4 @@ fn now_timestamp() -> prost_types::Timestamp {
         seconds: elapsed.as_secs() as i64,
         nanos: elapsed.subsec_nanos() as i32,
     }
-}
-
-#[allow(dead_code)]
-fn _default_nvidia_provider() -> Arc<dyn AcceleratorProvider> {
-    Arc::new(NvidiaSmiProvider::new("nvidia-smi"))
 }

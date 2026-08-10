@@ -10,7 +10,7 @@ name = "cy_kernel_daemon"
 path = "src/lib.rs"
 
 [dependencies]
-cy-hardware-discovery = { path = "../cy-hardware-discovery" }
+cy-adapter-client = { path = "../cy-adapter-client" }
 cy-kernel-api = { path = "../cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 cy-plugin-supervisor = { path = "../cy-plugin-supervisor" }

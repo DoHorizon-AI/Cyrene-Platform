@@ -23,14 +23,22 @@ pub mod cyrene {
             tonic::include_proto!("cyrene.core.v1");
         }
     }
+
+    pub mod hardware {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.hardware.v1");
+        }
+    }
 }
 
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
 pub use cyrene::core::v1 as core_v1;
+/// Versioned local protocol between the Kernel and external hardware adapters.
+pub use cyrene::hardware::v1 as hardware_v1;
 
 #[cfg(test)]
 mod tests {
-    use super::core_v1;
+    use super::{core_v1, hardware_v1};
     use prost::Message;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
@@ -170,5 +178,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hardware_adapter_request_round_trips() {
+        let request = hardware_v1::AdapterRequest {
+            protocol_version: 1,
+            body: Some(hardware_v1::adapter_request::Body::CreateBinding(
+                hardware_v1::CreateBindingRequest {
+                    device_id: "device-1".to_string(),
+                    expected_inventory_generation: 42,
+                },
+            )),
+        };
+        let encoded = request.encode_to_vec();
+        let decoded = hardware_v1::AdapterRequest::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.protocol_version, 1);
+        assert!(matches!(
+            decoded.body,
+            Some(hardware_v1::adapter_request::Body::CreateBinding(binding))
+                if binding.device_id == "device-1" && binding.expected_inventory_generation == 42
+        ));
     }
 }

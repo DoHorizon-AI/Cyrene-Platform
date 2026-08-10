@@ -21,7 +21,7 @@ use cy_kernel_api::{
 /// 内部受互斥锁保护的资源状态集
 #[derive(Debug)]
 struct State {
-    /// 硬件清单版本代数（每次 refresh_inventory 加 1）
+    /// 硬件清单版本代数（由外部事实源单调提供）
     generation: u64,
     /// 当前受管的所有加速卡设备字典 (`device_id -> AcceleratorDevice`)
     devices: BTreeMap<String, AcceleratorDevice>,
@@ -64,15 +64,72 @@ impl InMemoryResourceManager {
         }
     }
 
-    /// 刷新硬件清单并递增代数版本号
-    pub fn refresh_inventory(&self, devices: Vec<AcceleratorDevice>) -> u64 {
+    /// 刷新硬件清单并使用 Adapter Host 提供的事实代数。
+    pub fn refresh_inventory(&self, snapshot: InventorySnapshot) -> Result<(), ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
-        state.generation = state.generation.saturating_add(1);
-        state.devices = devices
+        if snapshot.generation == 0 {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "INVENTORY_GENERATION_INVALID",
+                "adapter inventory generation must be non-zero",
+            ));
+        }
+        if snapshot.generation < state.generation {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "INVENTORY_GENERATION_REGRESSION",
+                &format!(
+                    "incoming={}, current={}",
+                    snapshot.generation, state.generation
+                ),
+            ));
+        }
+        let mut devices = snapshot
+            .devices
             .into_iter()
             .map(|device| (device.device_id.clone(), device))
-            .collect();
-        state.generation
+            .collect::<BTreeMap<_, _>>();
+
+        if snapshot.generation == state.generation
+            && !state.devices.is_empty()
+            && state.devices != devices
+        {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "INVENTORY_GENERATION_CONFLICT",
+                "adapter changed inventory without advancing generation",
+            ));
+        }
+
+        let allocated = state.allocated.iter().cloned().collect::<Vec<_>>();
+        for device_id in allocated {
+            if let Some(device) = devices.get_mut(&device_id) {
+                if device.health.healthy != Some(true) {
+                    state.quarantined.insert(device_id.clone());
+                }
+                continue;
+            }
+            if let Some(previous) = state.devices.get(&device_id).cloned() {
+                let mut retained = previous;
+                retained.health.healthy = Some(false);
+                retained.health.reason_code = "DEVICE_MISSING_FROM_ADAPTER".to_string();
+                retained.health.summary =
+                    "retained only until the active lease is released".to_string();
+                devices.insert(device_id.clone(), retained);
+                state.quarantined.insert(device_id.clone());
+            }
+        }
+        for (device_id, device) in &devices {
+            if device.health.healthy != Some(true) {
+                state.quarantined.insert(device_id.clone());
+            }
+        }
+        state
+            .quarantined
+            .retain(|device_id| devices.contains_key(device_id));
+        state.generation = snapshot.generation;
+        state.devices = devices;
+        Ok(())
     }
 
     /// 将指定设备置入隔离封锁状态（如硬件掉卡、ECC 错误、过热等）
@@ -116,6 +173,10 @@ impl ResourceLeaseManager for InMemoryResourceManager {
                 enforcement: Vec::new(),
             },
         }
+    }
+
+    fn refresh_inventory(&self, snapshot: InventorySnapshot) -> Result<(), ProviderError> {
+        InMemoryResourceManager::refresh_inventory(self, snapshot)
     }
 
     /// 原子申请并预留硬件资源租约
@@ -317,5 +378,35 @@ mod tests {
         );
         manager.release(&lease.name, lease.fence_token).unwrap();
         assert!(!manager.is_allocated("gpu-0"));
+    }
+
+    #[test]
+    fn adapter_generation_regression_and_unversioned_changes_are_rejected() {
+        let manager = InMemoryResourceManager::new("node-1", vec![device("gpu-0")]);
+        let error = manager
+            .refresh_inventory(InventorySnapshot {
+                generation: 0,
+                devices: vec![device("gpu-0")],
+                capabilities: NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                },
+            })
+            .unwrap_err();
+        assert_eq!(error.reason_code, "INVENTORY_GENERATION_INVALID");
+
+        let error = manager
+            .refresh_inventory(InventorySnapshot {
+                generation: 1,
+                devices: vec![device("gpu-other")],
+                capabilities: NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                },
+            })
+            .unwrap_err();
+        assert_eq!(error.reason_code, "INVENTORY_GENERATION_CONFLICT");
     }
 }

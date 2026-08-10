@@ -8,6 +8,7 @@ failed=0
 
 required_files=(
   "docs/adr/ADR-CORE-REPOSITORY-GOVERNANCE.md"
+  "docs/adr/ADR-HARDWARE-ADAPTER-BOUNDARY.md"
   "docs/adr/ADR-PLUGIN-EXECUTION-BOUNDARY.md"
   "docs/adr/ADR-LEGACY-CY-LLM-CUTOVER.md"
 )

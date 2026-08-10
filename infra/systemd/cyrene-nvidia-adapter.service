@@ -1,0 +1,23 @@
+[Unit]
+Description=CYRENE NVIDIA Hardware Adapter Host
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock
+Restart=on-failure
+RestartSec=2s
+
+# This is deliberately a separate service from the Kernel.  It may read the
+# vendor-facing device and sysfs state, but it never shares the Kernel address
+# space or cgroup fate with workload workers.
+RuntimeDirectory=cyrene
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cyrene
+
+[Install]
+WantedBy=multi-user.target

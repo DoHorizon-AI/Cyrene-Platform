@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package cyrene.hardware.v1;
+
+import "cyrene/core/v1/resource.proto";
+
+// The adapter protocol is local and request/response based.  The Kernel uses
+// it over a Unix domain socket instead of exposing a vendor C ABI itself.
+message AdapterRequest {
+  uint32 protocol_version = 1;
+
+  oneof body {
+    GetInventoryRequest get_inventory = 2;
+    CreateBindingRequest create_binding = 3;
+  }
+}
+
+message GetInventoryRequest {
+  string node_id = 1;
+  uint64 known_generation = 2;
+}
+
+message CreateBindingRequest {
+  string device_id = 1;
+  uint64 expected_inventory_generation = 2;
+}
+
+message AdapterResponse {
+  uint32 protocol_version = 1;
+  string adapter_id = 2;
+
+  oneof body {
+    HardwareInventory inventory = 3;
+    DeviceBinding binding = 4;
+    AdapterError error = 5;
+  }
+}
+
+message HardwareInventory {
+  uint64 generation = 1;
+  repeated cyrene.core.v1.AcceleratorDevice devices = 2;
+  repeated AdapterFact facts = 3;
+  repeated cyrene.core.v1.EnforcementReport enforcement = 4;
+}
+
+message AdapterFact {
+  string name = 1;
+  bool available = 2;
+  bool required = 3;
+  string detail = 4;
+}
+
+message DeviceNode {
+  string path = 1;
+  optional uint32 major = 2;
+  optional uint32 minor = 3;
+  bool required = 4;
+}
+
+message DeviceBinding {
+  string device_id = 1;
+  repeated DeviceNode nodes = 2;
+  map<string, string> environment = 3;
+  repeated uint32 required_gids = 4;
+  cyrene.core.v1.EnforcementMode enforcement = 5;
+  string reason_code = 6;
+}
+
+message AdapterError {
+  string reason_code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
