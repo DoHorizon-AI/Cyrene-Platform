@@ -313,6 +313,12 @@ impl KernelServiceAdapter {
             )),
         })
     }
+
+    fn release_owned_lease(&self, owned_lease: bool, lease: &ResourceLease) {
+        if owned_lease {
+            let _ = self.daemon.release(&lease.name, lease.fence_token);
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -415,34 +421,26 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let binding = match self.daemon.binding_for_lease(&lease) {
             Ok(binding) => binding,
             Err(error) => {
-                if owned_lease {
-                    let _ = self.daemon.release(&lease.name, lease.fence_token);
-                }
+                self.release_owned_lease(owned_lease, &lease);
                 return Err(provider_status(error));
             }
         };
         let mut plan = match self.resolver.resolve_launch_plan(&plugin, &instance_name) {
             Ok(plan) => plan,
             Err(error) => {
-                if owned_lease {
-                    let _ = self.daemon.release(&lease.name, lease.fence_token);
-                }
+                self.release_owned_lease(owned_lease, &lease);
                 return Err(provider_status(error));
             }
         };
         plan.environment = binding
             .merge_environment(&plan.environment)
             .map_err(|error| {
-                if owned_lease {
-                    let _ = self.daemon.release(&lease.name, lease.fence_token);
-                }
+                self.release_owned_lease(owned_lease, &lease);
                 provider_status(error)
             })?;
         let mut instance = ManagedInstance::new(self.daemon.sandbox.clone(), plan, binding);
         if let Err(error) = instance.start() {
-            if owned_lease {
-                let _ = self.daemon.release(&lease.name, lease.fence_token);
-            }
+            self.release_owned_lease(owned_lease, &lease);
             return Err(provider_status(error));
         }
         self.instances

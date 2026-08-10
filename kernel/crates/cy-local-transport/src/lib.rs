@@ -41,7 +41,7 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     /// Launch an out-of-process plugin via explicit binary executable and argument array.
-    /// SHELL STRING CONCATENATION IS STRICTLY PROHIBITED.
+    /// Do not concatenate a shell command string.
     pub fn spawn(executable: &str, args: &[&str]) -> Result<Self, TransportError> {
         let mut cmd = Command::new(executable);
         cmd.args(args)

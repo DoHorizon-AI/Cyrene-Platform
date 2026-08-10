@@ -234,7 +234,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Capacity is 5, so only lines 6..=10 remain
+        // Capacity is 5, so only lines 6 through 10 remain.
         assert_eq!(journal.len(), 5);
 
         let req = JournalQuery {

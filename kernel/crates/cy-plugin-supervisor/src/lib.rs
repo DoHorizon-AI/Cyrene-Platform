@@ -275,7 +275,7 @@ impl PluginSupervisor {
                 RestartPolicy::OnFailure { max_restarts, .. } => self.restart_count < *max_restarts,
             };
 
-            if should_restart {
+            return if should_restart {
                 self.restart_count += 1;
                 let backoff = match &self.restart_policy {
                     RestartPolicy::OnFailure {
@@ -303,12 +303,12 @@ impl PluginSupervisor {
                 self.pending_requests = Arc::new(AsyncMutex::new(HashMap::new()));
 
                 self.start(timeout).await?;
-                return Ok(());
+                Ok(())
             } else {
-                return Err(SupervisorError::LaunchFailed(
+                Err(SupervisorError::LaunchFailed(
                     "Plugin crashed and restart policy exhausted or disabled".to_string(),
-                ));
-            }
+                ))
+            };
         }
 
         Err(SupervisorError::LaunchFailed(format!(

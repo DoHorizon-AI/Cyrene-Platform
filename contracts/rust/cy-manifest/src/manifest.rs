@@ -477,7 +477,7 @@ pub struct TrainingRevision {
     /// 父级修订版本 ID（用于构成调整历史链条，可选）
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub parent_revision_id: Option<String>,
-    /// 调整原因说明（例如："Loss spike detected, reducing learning rate"）
+    /// 调整原因说明（例如：`Loss spike detected, reducing learning rate`）
     pub reason: String,
     /// 触发调整时的输入指标快照（如 loss, grad_norm, lr 等）
     pub input_metrics: ObjectSnapshot,

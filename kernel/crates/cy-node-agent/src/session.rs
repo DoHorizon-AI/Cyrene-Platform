@@ -175,6 +175,20 @@ impl NodeControlSession {
 mod tests {
     use super::*;
 
+    fn welcome_frame() -> ControlPlaneToNode {
+        ControlPlaneToNode {
+            frame_id: "welcome-1".into(),
+            sequence_number: 1,
+            body: Some(control_plane_to_node::Body::Welcome(NodeWelcome {
+                session_id: "session-1".into(),
+                selected_protocol_version: 1,
+                desired_generation: 3,
+                heartbeat_interval: None,
+                server_time: None,
+            })),
+        }
+    }
+
     #[test]
     fn connect_starts_with_hello_then_accepts_welcome() {
         let mut session = NodeControlSession::new("node-1", 7, "0.1.0", 1, 1, "resume-1");
@@ -187,19 +201,7 @@ mod tests {
         ));
         assert_eq!(session.session_id(), None);
 
-        let welcome = session
-            .accept_welcome(ControlPlaneToNode {
-                frame_id: "welcome-1".into(),
-                sequence_number: 1,
-                body: Some(control_plane_to_node::Body::Welcome(NodeWelcome {
-                    session_id: "session-1".into(),
-                    selected_protocol_version: 1,
-                    desired_generation: 3,
-                    heartbeat_interval: None,
-                    server_time: None,
-                })),
-            })
-            .unwrap();
+        let welcome = session.accept_welcome(welcome_frame()).unwrap();
 
         assert_eq!(welcome.session_id, "session-1");
         assert_eq!(session.session_id(), Some("session-1"));
@@ -215,19 +217,7 @@ mod tests {
         );
 
         session.hello();
-        session
-            .accept_welcome(ControlPlaneToNode {
-                frame_id: "welcome-1".into(),
-                sequence_number: 1,
-                body: Some(control_plane_to_node::Body::Welcome(NodeWelcome {
-                    session_id: "session-1".into(),
-                    selected_protocol_version: 1,
-                    desired_generation: 3,
-                    heartbeat_interval: None,
-                    server_time: None,
-                })),
-            })
-            .unwrap();
+        session.accept_welcome(welcome_frame()).unwrap();
 
         let heartbeat = session.heartbeat(4).unwrap();
         assert_eq!(heartbeat.sequence_number, 2);
