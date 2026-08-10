@@ -12,16 +12,27 @@ fi
 
 core_root="contracts/proto/cyrene/core/v1"
 descriptor="contracts/descriptors/cyrene-core-v1.pb"
+fixture_manifest="contracts/fixtures/core/v1/manifest.json"
 tmp_descriptor="$(mktemp)"
 trap 'rm -f "$tmp_descriptor"' EXIT
 
 "$buf_bin" lint contracts/proto
-"$buf_bin" breaking contracts/proto --against "$descriptor"
-"$buf_bin" build contracts/proto --path cyrene/core/v1 \
-  --as-file-descriptor-set --output "$tmp_descriptor"
+"$buf_bin" breaking contracts/proto --against "$descriptor#format=binpb"
+(
+  cd contracts/proto
+  "$buf_bin" build . --path cyrene/core/v1 \
+    --as-file-descriptor-set --output "$tmp_descriptor"
+)
 
 if ! cmp -s "$tmp_descriptor" "$descriptor"; then
   echo "Core v1 descriptor drift detected; regenerate the checked-in baseline" >&2
+  exit 1
+fi
+
+expected_descriptor_sha="$(rg -o '"descriptor_sha256": "[A-F0-9]+' "$fixture_manifest" | sed 's/.*"//')"
+actual_descriptor_sha="$(sha256sum "$descriptor" | awk '{print toupper($1)}')"
+if [[ "$expected_descriptor_sha" != "$actual_descriptor_sha" ]]; then
+  echo "Core v1 fixture manifest descriptor SHA-256 does not match baseline" >&2
   exit 1
 fi
 

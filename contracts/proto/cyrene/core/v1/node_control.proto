@@ -23,6 +23,9 @@ message NodeWelcome {
   uint64 desired_generation = 3;
   google.protobuf.Duration heartbeat_interval = 4;
   google.protobuf.Timestamp server_time = 5;
+  // Opaque control-plane cursor presented by the Agent on its next reconnect.
+  // It has no authority without the mutually authenticated stream identity.
+  string resume_token = 6;
 }
 
 message NodeHeartbeat {
@@ -34,6 +37,9 @@ message NodeHeartbeat {
 message NodeToControlPlane {
   string frame_id = 1;
   uint64 sequence_number = 2;
+  // Empty only on the initial NodeHello. Every later frame is bound to the
+  // session selected by NodeWelcome so stale reconnects cannot report state.
+  string session_id = 3;
 
   oneof body {
     NodeHello hello = 10;
@@ -46,6 +52,8 @@ message NodeToControlPlane {
 message ControlPlaneToNode {
   string frame_id = 1;
   uint64 sequence_number = 2;
+  // Must equal NodeWelcome.session_id for the welcome and every later command.
+  string session_id = 3;
 
   oneof body {
     NodeWelcome welcome = 10;

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cy-plugin-supervisor = { path = "../../../kernel/crates/cy-plugin-supervisor" }
+cy-plugin-supervisor = { path = "../cy-plugin-supervisor" }
 cy-plugin-protocol = { path = "../../../contracts/rust/cy-plugin-protocol" }
 cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
 async-trait = "0.1"

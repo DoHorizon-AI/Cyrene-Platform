@@ -2,13 +2,15 @@
 //!
 //! 【六边形架构与端口-适配器模式 (Hexagonal Architecture)】
 //! 本 Crate 作为节点内核的核心抽象契约层，**刻意不包含任何特定 Linux 系统调用、特定 GPU 厂商 SDK、gRPC (Tonic) 或底层进程实现的细节**。
-//! 各类适配器（如 NVIDIA 探测适配器、cgroup v2 沙箱、内存租约管理器）通过实现本模块定义的标准端口（Ports / Traits）向内核上报事实（Facts），
+//! 通用端口的实现（如进程外硬件适配器客户端、cgroup v2 沙箱、内存租约管理器）向内核上报事实（Facts），
 //! 内核守护进程组合根将其组装暴露为统一的 Core v1 平台服务：
 //!
 //! - **硬件资产与事实**：[`AcceleratorDevice`], [`DeviceNode`], [`AcceleratorLink`], [`HealthReport`]
 //! - **资源租约与围栏**：[`ResourceLease`], [`ResourceRequest`], [`DeviceBinding`], [`EnforcementMode`]
 //! - **沙箱与进程生命周期**：[`LaunchPlan`], [`ProcessHandle`], [`CleanupReport`], [`StopRequest`]
 //! - **核心端口 Trait**：[`AcceleratorProvider`], [`ResourceLeaseManager`], [`ProcessRuntime`], [`SandboxBackend`] 等
+
+#![forbid(unsafe_code)]
 
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, time::Duration};
 
@@ -133,7 +135,7 @@ pub struct HealthReport {
     pub summary: String,
 }
 
-/// 操作系统设备字符/块设备节点（例如 `/dev/nvidia0`）
+/// 操作系统设备字符/块设备节点（路径由进程外硬件适配器返回）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceNode {
     /// 设备文件路径
@@ -151,6 +153,11 @@ pub struct DeviceNode {
 pub struct AcceleratorDevice {
     /// 设备全局唯一标识（例如："gpu-0000:01:00.0"）
     pub device_id: String,
+    /// 产生此不可变硬件事实的外部 Adapter 标识。
+    ///
+    /// 这不是厂商 API，而是 Kernel 用于把设备绑定请求路由回同一 UDS
+    /// Sidecar 的来源证明。资源账本不能根据 `vendor` 猜测路由。
+    pub adapter_id: String,
     /// 设备类型（GPU/NPU 等）
     pub kind: AcceleratorKind,
     /// 硬件厂商
@@ -193,7 +200,7 @@ pub struct DeviceBinding {
     pub device_id: String,
     /// 需要注入沙箱的设备节点
     pub nodes: Vec<DeviceNode>,
-    /// 内核注入的设备可见性环境变量（如 `CUDA_VISIBLE_DEVICES=0`）
+    /// Adapter 返回、由 Kernel 受控注入的设备环境变量
     pub environment: BTreeMap<String, String>,
     /// 访问该设备必需的系统用户组 GID 列表
     pub required_gids: Vec<u32>,
@@ -209,23 +216,20 @@ impl DeviceBinding {
     /// 合并用户自定义环境变量与内核设备绑定环境变量。
     ///
     /// # 安全保护（核心约束）
-    /// 严格禁止插件/用户代码覆盖内核保留的设备可见性环境变量（如 `CUDA_VISIBLE_DEVICES`）。
+    /// 严格禁止插件/用户代码覆盖 Adapter 已为设备绑定声明的环境变量。
     /// 一旦发现冲突立即报错，防止越权访问未分配的 GPU 设备。
     pub fn merge_environment(
         &self,
         requested: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, String>, ProviderError> {
-        let reserved = [
-            "CUDA_VISIBLE_DEVICES",
-            "HIP_VISIBLE_DEVICES",
-            "ROCR_VISIBLE_DEVICES",
-            "NVIDIA_VISIBLE_DEVICES",
-        ];
-        if requested.keys().any(|key| reserved.contains(&key.as_str())) {
+        if requested
+            .keys()
+            .any(|key| self.environment.contains_key(key))
+        {
             return Err(ProviderError::new(
                 &self.adapter_id,
                 "RESERVED_ENVIRONMENT",
-                "plugin attempted to override a Kernel-owned device variable",
+                "plugin attempted to override an Adapter-owned device variable",
             ));
         }
 
@@ -263,6 +267,22 @@ pub struct ResourceRequest {
     pub vendor: Option<AcceleratorVendor>,
     /// 单卡最低显存要求（字节数，可选）
     pub min_memory_bytes: Option<u64>,
+    /// 进程 cgroup 应执行的 CPU、内存与 CPU 集合限制。
+    pub limits: CgroupLimits,
+}
+
+/// 由 Kernel 执行的 cgroup v2 配额。
+///
+/// 这些字段是纯数值契约；具体的 `cpu.max`、`memory.max` 与 `cpuset.cpus`
+/// 写入属于 Linux Sandbox 适配器，避免资源账本依赖宿主机实现细节。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgroupLimits {
+    /// CPU 上限，单位为 millicores；`None` 表示不设置 `cpu.max`。
+    pub cpu_max_millicores: Option<u32>,
+    /// 内存上限，单位为字节；`None` 表示不设置 `memory.max`。
+    pub memory_max_bytes: Option<u64>,
+    /// 可运行 CPU 集合，例如 `"0-3,8-11"`；`None` 表示不设置 `cpuset.cpus`。
+    pub cpuset_cpus: Option<String>,
 }
 
 /// 单项设备资源分配结果
@@ -291,6 +311,8 @@ pub struct ResourceLease {
     pub inventory_generation: u64,
     /// 隔离围栏令牌（Fence Token：递增的单调计数器，防止旧任务迟到的写操作污染新租约）
     pub fence_token: u64,
+    /// 与该租约绑定、启动时必须写入 cgroup 的资源上限。
+    pub limits: CgroupLimits,
 }
 
 /// 进程沙箱启动计划 (Launch Plan)
@@ -306,6 +328,58 @@ pub struct LaunchPlan {
     pub environment: BTreeMap<String, String>,
     /// 分配给该进程的 cgroup 作用域组名
     pub cgroup_name: String,
+    /// 进程启动前必须生效的 cgroup 配额。
+    pub limits: CgroupLimits,
+}
+
+/// Immutable identity of an installation that has already passed installer
+/// verification. It deliberately contains no product/plugin implementation
+/// details, executable path, arguments, or environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedInstallation {
+    pub installation_name: String,
+    pub manifest_digest: String,
+    pub artifact_digest: String,
+    pub verified_signature_identity: String,
+}
+
+/// A launch plan accompanied by the exact immutable installation identity the
+/// outer resolver verified. Kernel code compares this binding with the
+/// `InstalledPluginRef` before it can hand the plan to sandboxd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLaunchPlan {
+    pub installation: VerifiedInstallation,
+    pub plan: LaunchPlan,
+}
+
+/// Port for obtaining a launch plan from a previously verified installation.
+///
+/// Install layout and record parsing belong to an outer adapter. Before the
+/// result is launched, the Kernel still overlays lease limits, reserved
+/// heartbeat values, and device-binding environment restrictions.
+pub trait InstalledPluginResolver: Send + Sync {
+    fn resolve_launch_plan(
+        &self,
+        installation: &VerifiedInstallation,
+        instance_name: &str,
+    ) -> Result<ResolvedLaunchPlan, ProviderError>;
+}
+
+/// 由 cgroup v2 直接读取的真实物理消耗量。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgroupTelemetry {
+    /// `memory.current`，单位为字节。
+    pub memory_current_bytes: Option<u64>,
+    /// `memory.peak`，单位为字节；旧内核不可用时为 `None`。
+    pub memory_peak_bytes: Option<u64>,
+    /// `cpu.stat` 的总使用时间，单位为微秒。
+    pub cpu_usage_usec: Option<u64>,
+    /// `cpu.stat` 的用户态使用时间，单位为微秒。
+    pub cpu_user_usec: Option<u64>,
+    /// `cpu.stat` 的内核态使用时间，单位为微秒。
+    pub cpu_system_usec: Option<u64>,
+    /// `memory.events.local` 的 `oom_kill` 计数。
+    pub oom_kill_count: u64,
 }
 
 /// 已启动沙箱进程的句柄引用 (Process Handle)
@@ -390,12 +464,23 @@ pub trait HostInventoryProvider: Send + Sync {
 
 /// 端口 Trait 2：特定厂商硬件加速卡适配器
 pub trait AcceleratorProvider: Send + Sync {
-    /// 适配器唯一 ID（例如："nvidia-smi-provider"）
+    /// 适配器唯一 ID（例如："hardware-adapter-uds"）
     fn adapter_id(&self) -> &str;
     /// 探测该厂商下的所有加速设备
     fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError>;
     /// 为指定设备创建安全隔离绑定规则
     fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError>;
+    /// 为指定库存代次创建绑定。
+    ///
+    /// 旧的或纯静态实现可以安全地沿用无代次的默认实现；进程外 Adapter Host
+    /// 必须覆盖此方法并将代次传给其协议端点。
+    fn create_binding_for_generation(
+        &self,
+        device: &AcceleratorDevice,
+        _expected_inventory_generation: u64,
+    ) -> Result<DeviceBinding, ProviderError> {
+        self.create_binding(device)
+    }
     /// 读取指定设备的健康状态
     fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError>;
 }
@@ -404,12 +489,57 @@ pub trait AcceleratorProvider: Send + Sync {
 pub trait ResourceLeaseManager: Send + Sync {
     /// 获取当前最新硬件清单快照
     fn inventory(&self) -> InventorySnapshot;
+    /// 以经过边界校验的节点快照刷新可分配库存。
+    ///
+    /// 实现必须保留已分配设备的可释放记录，并拒绝发生回退的事实代数。
+    fn refresh_inventory(&self, snapshot: InventorySnapshot) -> Result<(), ProviderError>;
     /// 申请预留硬件资源租约
     fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError>;
     /// 读取租约当前状态，用于启动/停止流程的 fencing 与结果回报
     fn get_lease(&self, lease_name: &str) -> Result<ResourceLease, ProviderError>;
     /// 凭围栏令牌释放已占用的资源租约
     fn release(&self, lease_name: &str, fence_token: u64) -> Result<(), ProviderError>;
+}
+
+/// A compact lifecycle record that the pure Kernel can emit to an outer
+/// durable journal. The record deliberately carries only node identity,
+/// fencing and terminal lifecycle facts; it never serializes launch commands,
+/// environment variables, driver data, or Worker payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeJournalRecord {
+    pub event: RuntimeJournalEvent,
+    pub node_id: String,
+    pub node_epoch: u64,
+    pub instance_name: Option<String>,
+    pub lease_name: Option<String>,
+    pub fence_token: Option<u64>,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeJournalEvent {
+    KernelStarted,
+    LeaseReserved,
+    LeaseReleased,
+    InstanceLaunched,
+    InstanceTerminated,
+    InstanceCleanupFailed,
+    WatchdogReaped,
+}
+
+/// Outer runtime persistence port. Implementations belong in `runtime/` or an
+/// external service; Kernel decision code never opens journal files itself.
+pub trait RuntimeJournalSink: Send + Sync {
+    fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopRuntimeJournal;
+
+impl RuntimeJournalSink for NoopRuntimeJournal {
+    fn append(&self, _record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 /// 端口 Trait 4：沙箱进程运行时生命周期管理
@@ -428,6 +558,14 @@ pub trait ProcessRuntime: Send + Sync {
         handle: &ProcessHandle,
         request: &StopRequest,
     ) -> Result<CleanupReport, ProviderError>;
+    /// 读取运行时可提供的物理资源遥测。后端不支持时返回明确错误，绝不估算。
+    fn telemetry(&self, _handle: &ProcessHandle) -> Result<CgroupTelemetry, ProviderError> {
+        Err(ProviderError::new(
+            "process-runtime",
+            "TELEMETRY_UNAVAILABLE",
+            "this runtime does not expose physical cgroup telemetry",
+        ))
+    }
 }
 
 /// 端口 Trait 5：沙箱隔离后端标识
@@ -458,4 +596,31 @@ pub trait NodeIdentityProvider: Send + Sync {
     fn node_id(&self) -> Result<String, ProviderError>;
     /// 获取节点启动代数周期 (Epoch)
     fn node_epoch(&self) -> Result<u64, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_binding_environment_is_reserved_without_vendor_knowledge() {
+        let binding = DeviceBinding {
+            device_id: "accelerator-1".to_string(),
+            nodes: Vec::new(),
+            environment: BTreeMap::from([("ADAPTER_VISIBLE_DEVICE".to_string(), "1".to_string())]),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::VisibilityOnly,
+            adapter_id: "test-adapter".to_string(),
+            reason_code: "TEST".to_string(),
+        };
+        let requested =
+            BTreeMap::from([("ADAPTER_VISIBLE_DEVICE".to_string(), "other".to_string())]);
+        assert_eq!(
+            binding
+                .merge_environment(&requested)
+                .unwrap_err()
+                .reason_code,
+            "RESERVED_ENVIRONMENT"
+        );
+    }
 }

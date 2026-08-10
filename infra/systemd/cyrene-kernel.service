@@ -1,21 +1,33 @@
 [Unit]
 Description=CYRENE Rust Node Kernel
-After=local-fs.target
-RequiresMountsFor=/sys/fs/cgroup
+After=local-fs.target cyrene-sandboxd.service
+Requires=cyrene-sandboxd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/cyrene-kernel
+User=cyrene-kernel
+Group=cyrene
+# Each deployment supplies one or more generic UDS adapters. This example
+# registers the NVIDIA Sidecar; AMD/Ascend/custom adapters use the same flag.
+ExecStart=/usr/bin/cyrene-kernel --socket /run/cyrene/kernel.sock --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock --runtime-journal /var/lib/cyrene/runtime/journal.jsonl
 Restart=on-failure
 RestartSec=2s
+RuntimeDirectory=cyrene
+RuntimeDirectoryMode=0750
+StateDirectory=cyrene
+StateDirectoryMode=0750
+UMask=0007
 
-# Kernel and all instance cgroups share one fate. The Kernel does not adopt
-# workers after a crash; systemd removes the complete service cgroup.
-KillMode=control-group
-Delegate=yes
-TasksMax=infinity
-MemoryAccounting=yes
-CPUAccounting=yes
+# Kernel never owns workers or a cgroup delegation. `cyrene-sandboxd` owns the
+# delegated subtree and worker fate; this service contains only safe decisions
+# and local UDS clients. The `cyrene` group is the explicit trust boundary for
+# sandboxd, hardware adapters, and the external Node Agent; never add Workers.
+KillMode=process
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cyrene /var/lib/cyrene
 
 [Install]
 WantedBy=multi-user.target

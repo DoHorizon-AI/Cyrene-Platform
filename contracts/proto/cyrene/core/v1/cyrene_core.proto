@@ -53,6 +53,8 @@ service PluginLifecycleService {
       returns (ListPluginInstancesResponse);
   rpc ReportHeartbeat(ReportHeartbeatRequest)
       returns (ReportHeartbeatResponse);
+  rpc ConnectWorker(stream WorkerToKernel)
+      returns (stream KernelToWorker);
   rpc WatchPluginEvents(WatchPluginEventsRequest)
       returns (stream PluginLifecycleEvent);
 }

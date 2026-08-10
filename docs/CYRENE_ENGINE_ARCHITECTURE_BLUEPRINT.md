@@ -1,9 +1,9 @@
 # CYRENE Engine 初始架构与协议蓝图
 
-- 状态：Draft / Confirmed Direction
+- 状态：Normative / P2 boundary implemented in Core
 - 日期：2026-08-10
 - 范围：多仓库规划、内核与框架边界、分布式控制契约
-- 本轮变更：吸收架构讨论稿的实现核查、迁移映射和验收门禁；不修改源码、构建配置或现有协议
+- 本轮变更：落实硬件适配器进程外化、版本化 UDS 协议和 Kernel 边界门禁；不将厂商 C ABI 放入 Kernel
 - 文档权威：本文是合并后的唯一架构正文；原讨论稿中的冲突决策以本文已确认的方案 A 为准
 
 ## 1. 结论先行
@@ -21,16 +21,20 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 具体决策如下：
 
 1. **Rust Kernel / Node Runtime**
-   是每个 Linux 节点上资源、租约、沙盒、进程和本地运行状态的唯一事实源。
+   是每个 Linux 节点上资源、租约、fence、生命周期决策和本地运行状态的唯一事实源；
+   特权沙盒执行通过独立 sandboxd 完成。
 2. **Kotlin Framework / Control Plane**
    是插件目录、安装、期望状态、集群调度、权限和工作流的唯一控制面。
 3. **生态插件默认全部进程外运行。**
    Python、JVM 和第三方 Rust 插件都不能进入 Kernel 或 Kotlin 进程。
-4. **Kernel 进程内只允许受信任的编译期平台适配器。**
-   例如 Linux cgroup、procfs、GPU 发现、bwrap、OCI 和传输适配器；它们不是
-   可安装的业务插件。
-5. **当前阶段不需要 C 核心。**
-   Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离适配器中。
+4. **Kernel 进程内只允许纯安全、无厂商和无宿主特权依赖的基础机制。**
+   例如租约状态机、fence、协议校验和本地传输客户端。Linux cgroup、pidfd、进程
+   回收、device BPF 与 namespace 由独立 sandboxd 执行；GPU 发现、厂商 CLI、驱动
+   C ABI、厂商 sysfs/procfs 与设备节点枚举由独立 Hardware Adapter Host 执行；它们
+   既不是可安装业务插件，也不在 Kernel 地址空间。
+5. **当前阶段不需要 C 核心或 Kernel C ABI。**
+   Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离 Adapter Host
+   内部，Kernel 对外保持版本化 Protobuf 契约。
 6. **控制流、事件流和数据流分离。**
    模型、数据集、checkpoint 和张量不经过普通 Kernel RPC 或 Kotlin 控制面。
 7. **采用方案 A：Core 单独开源，官方服务插件各自独立建仓。**
@@ -59,8 +63,8 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 模块、依赖、关键符号、现有 Proto 和 IDE 诊断，得到以下事实：
 
 - 根 Cargo workspace 已包含 8 个 Rust crate。
-- `kernel/` 已有 `cy-local-transport`、`cy-node-agent` 和
-  `cy-plugin-supervisor`。
+- 初始盘点时 `cy-local-transport` 与 `cy-plugin-supervisor` 位于 `kernel/`；
+  现已迁为 `framework/` 的历史兼容层，Kernel 仅保留通用沙盒生命周期。
 - `framework/` 已有 Rust 的 `cy-extension-registry` 与 `cy-platform-api`，
   但 `framework/jvm/` 只有占位 README，没有 Kotlin/Gradle 工程。
 - `contracts/` 已有 manifest/schema、Rust bindings、旧的 `cy.llm`
@@ -80,19 +84,19 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 - Supervisor 已定义
   `Discovered -> Resolved -> Starting -> Handshaking -> Healthy` 等 13 个
   生命周期状态，并具备重启与崩溃隔离骨架。
-- 当前 GPU 探测主要通过 `sysinfo`、`nvidia-smi`、procfs 和环境变量，
-  没有链接 CUDA/C++ 计算运行时，方向符合本蓝图。
+- 当前 NVIDIA 探测已迁入独立 Adapter Host，通过 CLI、sysfs 和设备节点事实
+  上报版本化 UDS 快照；Kernel 不链接 CUDA/C++ 计算运行时。
 
 当前实现与目标边界之间的主要差距：
 
 | 现状                                                  | 风险                        | 目标                                                 |
 | --------------------------------------------------- | ------------------------- | -------------------------------------------------- |
-| `cy-extension-registry` 直接依赖 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面         | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
+| `cy-extension-registry` 直接依赖 framework 的 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面         | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
 | `ai_service.proto` 包含 LoRA、训练、推理、量化和脚本执行            | Core 与 Yield/Reactor 业务耦合 | 业务 RPC 迁入各 App 的版本化协议                              |
 | `AgentService` 使用自由字符串 `command_type/payload/env`   | 可能演化成远程命令注入面              | 只保留类型化资源和生命周期命令                                    |
-| `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑               | 没有 OS/GPU provider 抽象     | 原始事实经 provider/adapter 暴露                          |
-| `BuiltinSystemProbe` 又硬编码另一份硬件事实                    | 双重库存权威                    | 可分配资源只由 Kernel 报告                                  |
-| `StdioTransport::spawn(executable, args)` 裸启动进程     | 没有 cgroup、沙盒、设备映射或资源环境注入  | 所有进程经 `ProcessRuntime` 与 `SandboxBackend`          |
+| `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑               | 驱动故障可进入 Node Runtime    | 已迁出 Kernel；原始事实只经进程外 Adapter Host 暴露          |
+| `BuiltinSystemProbe` 又硬编码另一份硬件事实                    | 双重库存权威                    | 已移除默认实现；可分配资源只由 Kernel 报告                    |
+| framework 的 `StdioTransport::spawn(executable, args)` 裸启动进程     | 可绕过 cgroup、沙盒、设备映射或资源环境注入  | 生产 Worker 一律经 Kernel `ProcessRuntime` 与 `SandboxBackend`；该兼容层不得成为 Kernel 依赖          |
 | 当前 ADR 允许 `in-proc-rust` 业务插件和 PyO3                 | 业务崩溃可能影响可信核心              | 进程内仅限平台适配器；PyO3 只能存在于外部 worker                     |
 | GPU 按型号聚合                                           | 无法对单卡、MIG/分区做租约           | 使用稳定设备 ID、PCI 地址、分区和健康状态                           |
 | 六大 App 尚未形成各自独立仓库                                   | 发布、权限和版本边界尚未落地            | 方案 A：Core 开源，六个服务一服务一仓                             |
@@ -102,21 +106,23 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 以下事实用于区分“已有代码”与“目标架构”，不能把现有 scaffold 或单元测试
 误报为分布式闭环已经完成：
 
-- framework/crates/cy-extension-registry 当前直接持有
+- framework/crates/cy-extension-registry 当前直接持有 framework 的
   cy-plugin-supervisor::PluginSupervisor，调用链仍是 Rust 同进程调用；这
   不是 Kotlin 通过 KernelService 驱动 Rust 的进程边界。
-- cy-node-agent 目前仍主要是 AgentService/journal handler scaffold，尚未
-  提供可部署的 node daemon binary、mTLS enrollment、session fencing 或
-  durable desired/observed reconcile。
+- agents/node/cy-node-agent 已提供可部署的 node daemon binary、outbound mTLS、
+  受 `session_id` 与严格序号约束的 session fencing、指数退避重连，以及到本机
+  KernelService UDS 的 typed command bridge。它仍不承担控制面的 durable
+  desired/observed reconcile、升级编排或业务日志；断线后的 Operation event 补发
+  仍需随 Kotlin 控制面和事件存储共同验收。
 - AgentCommandRequest 仍包含自由字符串 command_type/payload/env；该
   兼容接口不得演化为远程 shell，迁移期只能保留为 legacy v0，并由 typed
   resource/lifecycle command 替代。
-- GPU inventory 仍以 GpuInfo 的聚合字段为主；probe.rs 还包含失败时的
-  默认版本/能力值。正式 inventory 必须返回 UNKNOWN/UNSUPPORTED、证据来源、
-  观测时间和置信度，不能将猜测写成可分配事实。
-- cy-plugin-supervisor 已有状态枚举和握手骨架，但 EOF、child exit、OOM、
-  health timeout、Shutdown ACK、流式多帧和 wait/reap 尚未形成完整的
-  instance-level watchdog 闭环。
+- 已移除 Node Agent 的 `probe.rs` 与其默认版本/能力猜测。正式 inventory 由
+  外部 Adapter Host 返回版本化快照；未知或失联必须返回
+  `UNKNOWN/UNSUPPORTED/DEGRADED`，不能将猜测写成可分配事实。
+- framework 的 cy-plugin-supervisor 仍有状态枚举和握手骨架，但 EOF、child
+  exit、OOM、health timeout、Shutdown ACK、流式多帧和 wait/reap 尚未形成完整的
+  instance-level watchdog 闭环；它是待淘汰的兼容 runner，禁止作为 Kernel 生产启动路径。
 - cy-platform-api、ai_service.proto、manifest 文档/Schema/Rust model
   仍存在业务扩展和模型定义的 legacy 入口。它们必须先冻结、统一 fixture，
   再迁移到独立 extension contract；不能直接成为 Core v1 的第二权威。
@@ -129,7 +135,9 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 
 | 层                                | 必须负责                                                                                                   | 明确禁止                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Rust Kernel / Node Runtime       | 主机资源发现；设备清单；资源租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；本地 IPC；节点观察状态 | 训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Rust Kernel / Node Runtime       | 节点本地租约、fence、启动/停止授权、watchdog 决策、通用本地 IPC 客户端、节点观察状态 | cgroup/namespace/device 映射、进程 spawn/reap、pidfd/BPF、厂商 CLI/C ABI、厂商 sysfs/procfs、设备枚举、训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Sandbox Adapter Host (`sandboxd`) | 受委托 cgroup/namespace/device 强制；native/OCI/systemd 后端；Worker 启停、reap、OOM/退出码与物理遥测；仅经 UDS 接收已批准计划 | 租约权威、GPU 厂商发现、全局策略、业务执行、直接暴露给 Kotlin/插件                                      |
+| Hardware Adapter Host            | 厂商硬件发现、健康遥测、拓扑与设备节点事实、厂商 C ABI 包装；通过 UDS 上报版本化事实和绑定 | 租约权威、cgroup 生命周期、全局策略、业务执行、直接暴露给 Kotlin/插件                                      |
 | Kotlin Framework / Control Plane | 插件目录与安装；依赖解析；期望状态；集群拓扑；节点选择；权限、租户与配额策略；工作流；配置；分布式状态协调；面向 Shell 的 API                                   | 直接调用 CUDA/NVML；直接操作 cgroup/device node；用 `ProcessBuilder` 启动计算插件；加载 Python 到 JVM |
 | App / Plugin                     | Catalyst、Yield、Reactor 等全部 AI 和产品能力；PyTorch、vLLM、uv；数据、训练、推理、网关、评估和微前端                                 | 依赖 Kernel 私有 crate；绕过租约；自行选择未授权 GPU；修改控制面全局状态                                    |
 | 服务插件 UI / Shell                  | UI extension、窗口/托盘、安全存储、认证会话、公开 API 客户端和远程控制体验；Navigator 可提供官方组合壳                                      | 进入 Core 仓库；直接调用 KernelService；启动节点进程；扫描 GPU；持有节点管理凭证                             |
@@ -159,6 +167,7 @@ sequenceDiagram
     participant UI as Plugin-owned UI / Navigator Shell
     participant CP as Kotlin Control Plane
     participant K as Rust Kernel / Node Agent
+    participant S as Sandbox Adapter Host
     participant P as Out-of-process Plugin
     participant D as Artifact/Data Plane
 
@@ -167,8 +176,9 @@ sequenceDiagram
     UI->>CP: StartPlugin / workload request
     CP->>CP: manifest、权限、依赖、节点调度
     CP-->>K: LaunchPlugin command over outbound stream
-    K->>K: 原子租约 + cgroup/device/sandbox
-    K->>P: 启动并注入可见设备，执行本地握手
+    K->>K: 原子租约 + fence + 已批准 binding
+    K->>S: LaunchPlan + binding（本地 UDS）
+    S->>P: 启动、cgroup/device 强制与本地握手
     P-->>K: cy.plugin.v1 Health/Invoke
     K->>CP: command result / observed state / heartbeat
     CP-->>UI: lifecycle event
@@ -222,15 +232,17 @@ session lease 的命令来源。
 
 Rust 负责最小可信执行基座：
 
-- Linux 主机与设备抽象；
-- 节点 Agent；
+- 纯安全节点状态与设备抽象；
+- 外层节点 Agent（不属于 Kernel crate）；
 - 资源租约与本地强制执行；
-- 进程、沙盒与 watchdog；
+- 生命周期与 watchdog 决策；
 - 本地 IPC 和 KernelService；
 - 审计友好的运行事件。
 
-Kernel 默认应使用 `forbid(unsafe_code)`。确需 unsafe/FFI 的 crate 必须被
-依赖边界隔离，并且不能把 unsafe 扩散到资源管理、Supervisor 或协议层。
+所有 Kernel crate 必须 `forbid(unsafe_code)`。cgroup、pidfd、`prctl` 与
+cgroup-device eBPF 的最小 Linux syscall 包装仅能存在于进程外 sandboxd，并启用
+`deny(unsafe_op_in_unsafe_fn)`；厂商 FFI、动态库和任何 vendor C ABI 仅能存在于
+进程外 Hardware Adapter Host，不能扩散到资源管理、生命周期或协议层。
 
 ### 4.2 Kotlin 的范围
 
@@ -259,17 +271,18 @@ Core Framework 导入任何服务插件仓库。
 3. 厂商管理 API：仅在 CLI/标准接口不足时采用；
 4. Linux 内核模块：只作为独立、可选、平台限定的未来项目。
 
-如果未来必须使用 NVML、ROCm SMI、Ascend 管理 API 等 C ABI，优先放入
-独立 adapter 进程。若必须进程内 FFI，则只允许存在于明确命名的 vendor
-adapter crate，通过稳定 Rust trait 暴露能力。厂商适配器崩溃只能使能力
-变为 `DEGRADED/UNAVAILABLE`，不能带崩主 Kernel。
+如果未来必须使用 NVML、ROCm SMI、Ascend 管理 API 等 C ABI，必须放入独立
+Adapter Host 进程或其私有动态库。禁止在 Kernel 内进程 FFI，也禁止把 C ABI
+作为 Kernel 对 Kotlin/Python/插件的公开 API。Kernel 与 Adapter Host 只通过
+版本化 `cyrene.hardware.v1` Protobuf over UDS 通信；适配器崩溃只能使能力变为
+`DEGRADED/UNAVAILABLE`，不能带崩主 Kernel。
 
 Kernel 依赖树中不得出现 CUDA、cuDNN、PyTorch、vLLM、PyO3 等计算运行时。
 PyO3 如有必要，只能用于一个独立 worker 进程内部。
 
 ## 5. Kernel 应提前定义的抽象
 
-即使第一版实现仍依赖系统命令与环境变量，也应先稳定内部端口：
+Kernel 只稳定通用端口；厂商实现位于进程外 Host：
 
 ```rust
 trait HostInventoryProvider {}
@@ -287,9 +300,9 @@ trait NodeIdentityProvider {}
 - `linux-procfs`
 - `linux-sysfs`
 - `linux-cgroup-v2`
-- `nvidia-cli`
-- `amd-sysfs`
-- `ascend-cli`
+- `hardware/nvidia`（独立进程；当前实现）
+- `hardware/amd`（独立进程；未来）
+- `hardware/ascend`（独立进程；未来）
 - `native-process`
 - `bwrap`
 - `oci-container`
@@ -366,42 +379,47 @@ cyrene-core/
 │
 ├── kernel/                              # Rust 用户态微内核 / Node Runtime
 │   ├── crates/
-│   │   ├── cy-kernel-api/               # OS/GPU/process/sandbox 抽象 traits
-│   │   ├── cy-kernel-daemon/            # KernelService 与 Node outbound client
+│   │   ├── cy-kernel-api/               # 通用 process/sandbox/lease 抽象 traits
+│   │   ├── cy-adapter-client/           # 通用 UDS 硬件适配器客户端
+│   │   ├── cy-sandbox-client/           # 通用 UDS sandboxd 客户端
 │   │   ├── cy-resource-manager/         # 原子配额、租约、fencing
-│   │   ├── cy-hardware-discovery/       # 只读硬件事实和遥测
-│   │   ├── cy-sandbox/                  # runtime/backend 编排
-│   │   ├── cy-local-transport/          # 已存在
-│   │   ├── cy-plugin-supervisor/        # 已存在
-│   │   └── cy-node-agent/               # 已存在
-│   ├── adapters/
-│   │   ├── os/linux-procfs/
-│   │   ├── os/linux-sysfs/
-│   │   ├── os/linux-cgroup-v2/
-│   │   ├── gpu/generic/
-│   │   ├── gpu/nvidia-cli/
-│   │   ├── gpu/amd-sysfs/
-│   │   ├── gpu/ascend-cli/
-│   │   └── sandbox/{native,bwrap,oci}/
+│   │   └── cy-kernel-daemon/            # KernelService 与生命周期状态机
 │   └── tests/
 │
-├── framework/jvm/                       # Kotlin/JVM 控制面
-│   ├── settings.gradle.kts
-│   ├── build.gradle.kts
-│   ├── gradle/libs.versions.toml
-│   ├── domain/                           # 纯 Kotlin/JDK 领域模型与规则
-│   ├── application/                      # use case 与 inbound/outbound ports
-│   ├── adapters/
-│   │   ├── inbound-grpc/
-│   │   ├── inbound-http/
-│   │   ├── inbound-websocket/
-│   │   ├── outbound-kernel/
-│   │   ├── outbound-persistence/
-│   │   ├── outbound-events/
-│   │   ├── outbound-oci/
-│   │   └── outbound-signature/
-│   ├── bootstrap/                        # Spring Boot 装配和部署入口
-│   └── architecture-tests/               # 强制依赖方向与禁用依赖
+├── runtime/cyrene-kernel/                # Linux 进程组合：UDS、安装记录 adapter、systemd 入口
+├── agents/node/cy-node-agent/            # 外层节点控制/日志/升级；不属于 Kernel
+│
+├── adapters/                            # 独立进程；不属于 Kernel 地址空间
+│   ├── execution/sandboxd/              # cgroup/BPF/pidfd/Worker 特权执行 Host
+│   └── hardware/
+│       ├── nvidia/                      # 当前：CLI/拓扑/设备节点 -> UDS Host
+│       ├── amd/                         # 未来独立 Adapter Host
+│       └── ascend/                      # 未来独立 Adapter Host
+│
+├── framework/
+│   ├── crates/                           # Rust 迁移期兼容层；不属于 Kernel
+│   │   ├── cy-extension-registry/        # 待 Kotlin catalog/router 接管
+│   │   ├── cy-installation-resolver/     # 已验证安装记录的文件系统/JSON adapter
+│   │   ├── cy-local-transport/           # 历史 stdio transport；禁止 Kernel 使用
+│   │   ├── cy-platform-api/              # legacy extension API
+│   │   └── cy-plugin-supervisor/         # 历史 runner；必须迁移至 KernelService
+│   └── jvm/                              # Kotlin/JVM 控制面
+│       ├── settings.gradle.kts
+│       ├── build.gradle.kts
+│       ├── gradle/libs.versions.toml
+│       ├── domain/                       # 纯 Kotlin/JDK 领域模型与规则
+│       ├── application/                  # use case 与 inbound/outbound ports
+│       ├── adapters/
+│       │   ├── inbound-grpc/
+│       │   ├── inbound-http/
+│       │   ├── inbound-websocket/
+│       │   ├── outbound-kernel/
+│       │   ├── outbound-persistence/
+│       │   ├── outbound-events/
+│       │   ├── outbound-oci/
+│       │   └── outbound-signature/
+│       ├── bootstrap/                    # Spring Boot 装配和部署入口
+│       └── architecture-tests/           # 强制依赖方向与禁用依赖
 │
 ├── sdk/                                  # 唯一公开跨语言契约边界
 │   ├── proto/
@@ -1296,8 +1314,9 @@ message PluginLifecycleEvent {
 - manifest JSON、内联 secret；
 - 模型、数据集、checkpoint、大块 bytes、日志正文、stdout/stderr。
 
-Rust 节点只能从已签名、已校验、按 digest 绑定的本地安装记录解析入口点，
-使用 argv 数组启动进程，并拒绝插件覆盖 `CUDA_VISIBLE_DEVICES`、
+外层安装记录 adapter 只能从已签名、已校验、按 digest 绑定的本地安装记录解析
+入口点；Kernel 接收其端口返回的 `LaunchPlan` 后使用 argv 数组启动进程，并拒绝
+插件覆盖 `CUDA_VISIBLE_DEVICES`、
 `HIP_VISIBLE_DEVICES` 等 Kernel 保留变量。
 
 ### 7.3 与现有协议的关系
@@ -1390,8 +1409,8 @@ Core 在不访问任何服务仓的条件下可独立构建。
 - 新增 `cyrene.core.v1`；
 - 定义 outbound `NodeControlService.Connect` 与可选 direct `KernelService`；
 - 建立 Buf lint/breaking、Core descriptor 和 Rust codegen；
-- 建立 Rust golden fixture；Kotlin/Python/TypeScript SDK 与跨语言 TCK 延后到
-  P3/P4 的控制面和插件生态阶段；
+- 建立 Rust golden fixture；Worker-control 的 Python/Kotlin 无依赖 TCK 已与
+  Core v1 wire fixtures 同步，完整 SDK 发布与各服务仓 E2E 仍在 P3/P4；
 - 标记任意命令 RPC deprecated。
 
 验收：干净环境一次命令可构建 Rust Core、生成结果无漂移，descriptor 与
@@ -1399,15 +1418,21 @@ golden fixture 一致。
 
 ### P2：Rust Kernel 抽象
 
-- 增加 provider/adapter traits 和 Linux pre-flight 能力报告；
-- NVIDIA 单卡身份、分区、NUMA/拓扑、完整设备节点、资源租约和 fence token；
+- 保留通用 provider ports、资源租约、fencing 和 Linux pre-flight；
+- 移除 Kernel 内的硬件发现与旧 Node Agent GPU probe；通过 `cy-adapter-client`
+  连接独立 Adapter Host，使用版本化 UDS Protobuf 返回单卡身份、NUMA/拓扑、
+  设备节点与健康事实；
 - 以 cgroup v2 + native process 为首版执行后端，预留但不实现 bwrap/OCI；
-- Supervisor 正确处理 cgroup 进程树、wait/reap 超时、主动 health、OOM、优雅停止和资源回收；
+- Supervisor 正确处理 cgroup 进程树、wait/reap 超时、OOM、优雅停止和资源回收；
+  IPC 心跳看门狗必须在生产验收前完成，不能以 PID 存活替代；
 - 生产部署采用 systemd control-group fate sharing，不在 P2 认领孤儿实例；
-- `LaunchPlugin` 只能引用已验证安装。
+- `LaunchPlugin` 只能引用已验证安装；外层 resolver 返回的 LaunchPlan 必须带回
+  manifest/artifact digest 与签名身份的同一绑定，SBOM/provenance evidence 不符即拒绝。
 
-验收：并发租约不重复分配；未知硬件不伪造能力；启动失败、OOM、D 状态和
-节点断联都有事实状态；cgroup 进程树可清理；Python 崩溃不影响 Kernel。
+验收：并发租约不重复分配；未知硬件不伪造能力；Adapter 失联阻止新租约且不
+崩溃 Kernel；启动失败、OOM、D 状态和节点断联都有事实状态；cgroup 进程树可
+按已证明所有权清理；Python 或厂商驱动崩溃不影响 Kernel；强制 IPC 心跳超时
+按 Drain -> SIGTERM -> SIGKILL -> reap 闭环。
 
 ### P3：Kotlin 控制面
 
@@ -1435,7 +1460,8 @@ golden fixture 一致。
 
 ### P5：分布式与数据面
 
-- Agent 默认 outbound mTLS 双向流、session fencing、重连和事件恢复；
+- Agent 默认 outbound mTLS 双向流、session fencing、重连已落地；补齐与 Kotlin
+  事件存储协作的 event recovery 和 durable desired/observed reconcile；
 - 可选 direct KernelService 经过同一 TCK，且不能与 outbound 模式形成双主；
 - 对象存储/共享内存/UDS 数据面；
 - 多节点故障转移、配额、审计和可观测性。
@@ -1484,7 +1510,8 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
   生成代码；Spring Boot 只存在于 adapters/bootstrap。
 - Core Proto 不出现 LoRA、vLLM、训练超参数、模型格式等业务词汇。
 - Core RPC 不接受任意 shell、executable、argv 或 env。
-- Kernel 默认 `forbid(unsafe_code)`；FFI 仅在审计 adapter 中。
+- Kernel crate 一律 `forbid(unsafe_code)`；Linux syscall 包装仅在进程外
+  sandboxd，厂商 FFI 仅在进程外审计 adapter 中。
 - Kernel 依赖树不包含 AI 计算运行时。
 - 所有资源状态带 generation/revision；所有变更 RPC 可幂等重放。
 - `VISIBILITY_ONLY` 与硬隔离在 API 上可区分。
@@ -1504,9 +1531,10 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
 | contracts/proto/agent_service.proto           | 冻结；由 typed node/kernel protocol 替代                      | 注册、心跳、reconcile、恢复集成测试通过                               |
 | contracts/proto/plugin/v1/*                   | 保留 POC 兼容；新增 worker v2 package                          | Python/JVM conformance runner 与迁移 adapter 全绿           |
 | cy-manifest、plugin.schema.json、PLUGIN_SPEC.md | 收敛为一份规范和多语言模型                                           | Schema/Rust/Kotlin/Python fixture roundtrip 全绿         |
-| cy-local-transport                            | 抽象 transport factory，补 child event、UDS 和 env policy     | EOF、oversize、stdout 污染、关闭/回收覆盖                         |
-| cy-plugin-supervisor                          | 重构为 manager + instance actor，消费 lease/LaunchPlan        | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿 |
-| cy-node-agent                                 | 增加 daemon binary、mTLS/session、snapshot/reconcile        | 不再把 handler unit test 当成可运行节点证明                        |
+| framework/crates/cy-local-transport           | 保留为历史兼容 transport；生产 Worker 迁移到 KernelService/UDS | EOF、oversize、stdout 污染、关闭/回收覆盖，且 Kernel 依赖树中不存在该 crate |
+| framework/crates/cy-plugin-supervisor          | 保留为历史兼容 runner；生产启动迁移到 Kernel `SandboxedProcess` + sandboxd/KernelService | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿，且 Kernel 不直接 spawn stdio child |
+| framework/crates/cy-installation-resolver      | 持有安装布局/JSON 解析；只经 `InstalledPluginResolver` 给出 LaunchPlan | 安装服务的签名、digest、路径逃逸集成测试全绿；Kernel 不解析安装记录 |
+| agents/node/cy-node-agent                      | 外层 node control、日志与升级进程；增加 daemon binary、mTLS/session、snapshot/reconcile | 不再把 handler unit test 当成可运行节点证明，且 Kernel crate 不依赖该 agent |
 | cy-platform-api                               | AI trait 移到 extension SDK；Core 只留通用插件契约                 | 移除官方 App 后 Core 仍能构建运行                                 |
 | cy-extension-registry                         | 迁移期保留为 compatibility layer，长期由 Kotlin catalog/router 接管 | Kotlin 行为覆盖后才删除                                        |
 | framework/jvm                                 | 建立 Pure Kotlin domain/application + Spring adapters     | Gradle build、架构测试、reconcile integration test 通过        |
@@ -1554,10 +1582,10 @@ CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码�
 
 仍需单独 ADR 决定的实现细节：
 
-1. **第一版沙盒基线：** 已确定为 native process + cgroup v2；bwrap/OCI
-   后端继续通过同一个 `SandboxBackend` 预留到后续阶段。
-2. **Kernel 崩溃策略：** P2 采用 systemd control-group fate sharing；重启时
-   清理残留 cgroup，不做进程 Adopt。
+1. **第一版沙盒基线：** 已确定为 sandboxd 内的 native process + cgroup v2；
+   bwrap/OCI/systemd-scope 后端继续通过同一个 UDS SandboxAdapter 契约预留到后续阶段。
+2. **Kernel 崩溃策略：** sandboxd 持有 systemd delegated control-group，Kernel
+   不做进程 Adopt；service 级联和崩溃恢复须以真实 Linux E2E 验证为准。
 3. **签名信任模型：** keyless/OIDC、组织密钥或二者组合，以及离线部署的信任根
    轮换与撤销策略。
 4. **组合发行仓：** 是否创建可选 `cyrene-distribution`，以及 catalog lock 的

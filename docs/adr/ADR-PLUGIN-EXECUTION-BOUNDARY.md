@@ -17,9 +17,13 @@ Local subprocess plugins use the existing zero-port stdio protocol as the
 mandatory baseline. UDS or platform-specific local transports may be added
 later without changing the lifecycle contract.
 
-In-process Rust code is permitted only as a statically compiled, audited Core
-platform adapter for host, device, transport, or sandbox integration. It is not
+In-process Rust code is permitted only for pure-safe Kernel mechanisms such as
+state machines, contract validation, and local transport framing. Privileged
+cgroup enforcement and pidfd lifecycle control belong to sandboxd. It is not
 an installable plugin runtime and cannot be selected through plugin.toml.
+Vendor hardware adapters are governed by
+[ADR-HARDWARE-ADAPTER-BOUNDARY](ADR-HARDWARE-ADAPTER-BOUNDARY.md) and always
+run outside the Kernel process.
 
 The Core repository must not link PyO3, PyTorch, vLLM, CUDA/ROCm compute
 runtimes, or model execution libraries. Python and JVM business code remains in

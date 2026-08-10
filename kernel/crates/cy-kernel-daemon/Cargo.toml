@@ -10,10 +10,11 @@ name = "cy_kernel_daemon"
 path = "src/lib.rs"
 
 [dependencies]
-cy-hardware-discovery = { path = "../cy-hardware-discovery" }
+cy-adapter-client = { path = "../cy-adapter-client" }
 cy-kernel-api = { path = "../cy-kernel-api" }
+cy-resource-manager = { path = "../cy-resource-manager" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
-cy-plugin-supervisor = { path = "../cy-plugin-supervisor" }
 prost-types = "0.12"
-tokio-stream = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = "0.11"

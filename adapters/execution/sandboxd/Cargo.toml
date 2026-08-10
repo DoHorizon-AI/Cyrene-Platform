@@ -1,0 +1,16 @@
+[package]
+name = "cyrene-sandboxd"
+version = "0.1.0"
+edition = "2021"
+description = "Privileged Linux cgroup v2 Sandbox Adapter Host for CYRENE"
+license = "Apache-2.0"
+
+[lib]
+name = "cyrene_sandboxd"
+path = "src/lib.rs"
+
+[dependencies]
+cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
+cy-proto = { path = "../../../contracts/rust/cy-proto" }
+libc = "0.2"
+prost = "0.12"

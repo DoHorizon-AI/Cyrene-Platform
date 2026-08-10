@@ -1,0 +1,15 @@
+[package]
+name = "cy-sandbox-client"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-safe Kernel client for the external CYRENE Sandbox Adapter Host"
+license = "Apache-2.0"
+
+[lib]
+name = "cy_sandbox_client"
+path = "src/lib.rs"
+
+[dependencies]
+cy-kernel-api = { path = "../cy-kernel-api" }
+cy-proto = { path = "../../../contracts/rust/cy-proto" }
+prost = "0.12"

@@ -6,22 +6,37 @@
 //! 2. **绝不猜测（No Guessing Invariant）**：对于探测不到的显存容量、NUMA 节点或拓扑链路，严格上报未知，绝不用启发式猜测伪造数据；
 //! 3. **职责边界**：内核守护进程专职负责单机节点物理事实与资源隔离，不包含远程制品下载、全局调度仲裁或跨重启接管僵尸进程的逻辑。
 
+#![forbid(unsafe_code)]
+
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    collections::{BTreeMap, HashMap, VecDeque},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use cy_hardware_discovery::NvidiaSmiProvider;
+use cy_adapter_client::{HardwareAdapterEndpoint, UdsHardwareAdapterRegistry};
 use cy_kernel_api::{
-    AcceleratorKind, AcceleratorLinkType, AcceleratorProvider, AcceleratorVendor, DeviceBinding,
-    EnforcementMode, HostInventoryProvider, InventorySnapshot, LaunchPlan, LeaseState,
-    ProviderError, ResourceLease, ResourceLeaseManager, ResourceRequest, SandboxBackend,
+    AcceleratorKind, AcceleratorLinkType, AcceleratorProvider, AcceleratorVendor, CgroupLimits,
+    CleanupReport, DeviceBinding, EnforcementMode, HostInventoryProvider, InstalledPluginResolver,
+    InventorySnapshot, LeaseState, NoopRuntimeJournal, ProviderError, ResourceLease,
+    ResourceLeaseManager, ResourceRequest, RuntimeJournalEvent, RuntimeJournalRecord,
+    RuntimeJournalSink, SandboxBackend, VerifiedInstallation,
 };
-use cy_plugin_supervisor::ManagedInstance;
 use cy_proto::core_v1;
-use tokio_stream::{iter, Stream};
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::{iter, wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
+
+mod sandboxed_process;
+use sandboxed_process::{SandboxedProcess, SandboxedProcessState};
+
+const OPERATION_EVENT_HISTORY_CAPACITY: usize = 256;
+const OPERATION_EVENT_SUBSCRIBER_CAPACITY: usize = 64;
 
 /// 节点内核守护进程核心结构体
 pub struct KernelDaemon {
@@ -59,9 +74,34 @@ impl KernelDaemon {
         }
     }
 
+    /// 通过版本化 UDS 连接进程外硬件适配器注册表。
+    ///
+    /// 该组合根不加载厂商动态库，也不执行任何厂商探测命令。适配器失联时，端口
+    /// 返回 `ADAPTER_UNAVAILABLE`，由上层将节点转为不可继续分配的降级状态。
+    pub fn with_hardware_adapters(
+        endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
+        resources: Arc<dyn ResourceLeaseManager>,
+        sandbox: Arc<dyn SandboxBackend>,
+        node_id: impl Into<String>,
+        node_epoch: u64,
+    ) -> Result<Self, ProviderError> {
+        let adapters = Arc::new(UdsHardwareAdapterRegistry::from_endpoints(endpoints)?);
+        Ok(Self::new(
+            adapters.clone(),
+            adapters,
+            resources,
+            sandbox,
+            node_id,
+            node_epoch,
+        ))
+    }
+
     /// 检查节点基础沙箱环境是否已就绪
     pub fn preflight_ready(&self) -> bool {
         self.sandbox.preflight().ready
+            && self
+                .inventory()
+                .is_ok_and(|snapshot| snapshot.capabilities.ready)
     }
 
     /// 获取最新的硬件清单快照
@@ -69,8 +109,26 @@ impl KernelDaemon {
         self.inventory_provider.probe_inventory()
     }
 
+    /// Refreshes only current external hardware facts. A successful probe is
+    /// committed to the resource ledger; a failed or expired fact leaves the
+    /// last allocation state untouched and lets the caller enter DEGRADED.
+    pub fn refresh_inventory_facts(&self) -> Result<InventorySnapshot, ProviderError> {
+        let snapshot = self.inventory()?;
+        self.resources.refresh_inventory(snapshot.clone())?;
+        Ok(snapshot)
+    }
+
     /// 申请预留硬件资源租约
     pub fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
+        let snapshot = self.inventory()?;
+        if !snapshot.capabilities.ready {
+            return Err(ProviderError::new(
+                "kernel-daemon",
+                "ADAPTER_DEGRADED",
+                "required hardware adapter capability is not ready",
+            ));
+        }
+        self.resources.refresh_inventory(snapshot)?;
         self.resources.reserve(request)
     }
 
@@ -103,7 +161,10 @@ impl KernelDaemon {
                         &allocation.device_id,
                     )
                 })?;
-            bindings.push(self.accelerator_provider.create_binding(device)?);
+            bindings.push(
+                self.accelerator_provider
+                    .create_binding_for_generation(device, lease.inventory_generation)?,
+            );
         }
         merge_bindings(bindings)
     }
@@ -190,53 +251,239 @@ impl KernelDaemon {
                 .collect(),
         })
     }
+}
 
-    /// 获取内置 NVIDIA 适配器引用
-    pub fn nvidia_provider(&self) -> &Arc<dyn AcceleratorProvider> {
-        &self.accelerator_provider
+/// Worker heartbeat policy injected into every managed worker process.
+#[derive(Debug, Clone)]
+pub struct WorkerHeartbeatConfig {
+    pub socket_path: PathBuf,
+    pub interval: Duration,
+    pub timeout: Duration,
+    pub graceful_stop: Duration,
+    /// Maximum time reserved for a Worker protocol-level ShutdownAck before
+    /// sandboxd begins SIGTERM -> cgroup.kill -> reap.
+    pub shutdown_ack_timeout: Duration,
+}
+
+impl Default for WorkerHeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: PathBuf::from("/run/cyrene/kernel.sock"),
+            interval: Duration::from_secs(5),
+            timeout: Duration::from_secs(20),
+            graceful_stop: Duration::from_secs(10),
+            shutdown_ack_timeout: Duration::from_secs(3),
+        }
     }
 }
 
-/// 已验证安装记录解析器。P2 只消费安装阶段已经校验过的记录，不负责 OCI 下载或签名验证。
-pub trait InstalledPluginResolver: Send + Sync {
-    fn resolve_launch_plan(
-        &self,
-        plugin: &core_v1::InstalledPluginRef,
-        instance_name: &str,
-    ) -> Result<LaunchPlan, ProviderError>;
+struct ManagedProcess {
+    instance: SandboxedProcess,
+    lease: Option<core_v1::ResourceLeaseRef>,
+    plugin: core_v1::InstalledPluginRef,
+    generation: u64,
+    accepted_sequence: u64,
+    last_heartbeat: Instant,
+    last_heartbeat_at: Option<prost_types::Timestamp>,
+    runtime_state: i32,
+    health: Option<core_v1::HealthReport>,
+    restart_count: u32,
+    watchdog_triggered: bool,
+    control: Option<WorkerControlSession>,
+    pending_shutdown: Option<PendingWorkerShutdown>,
 }
 
-struct ManagedProcess {
-    instance: ManagedInstance,
-    lease: Option<core_v1::ResourceLeaseRef>,
+type WorkerControlSender = mpsc::Sender<Result<core_v1::KernelToWorker, Status>>;
+
+struct WorkerControlSession {
+    connection_id: u64,
+    outbound: WorkerControlSender,
+}
+
+struct PendingWorkerShutdown {
+    shutdown_id: String,
+    acknowledged: bool,
+    drained: bool,
 }
 
 /// Core v1 KernelService 到真实资源管理器与 SandboxBackend 的最小服务适配层。
+#[derive(Clone)]
 pub struct KernelServiceAdapter {
     daemon: Arc<KernelDaemon>,
     resolver: Arc<dyn InstalledPluginResolver>,
-    instances: Mutex<HashMap<String, ManagedProcess>>,
-    operations: Mutex<HashMap<String, core_v1::Operation>>,
+    instances: Arc<Mutex<HashMap<String, ManagedProcess>>>,
+    operations: Arc<Mutex<HashMap<String, core_v1::Operation>>>,
+    operation_events: Arc<Mutex<VecDeque<core_v1::OperationEvent>>>,
+    operation_event_sender: broadcast::Sender<core_v1::OperationEvent>,
+    next_event_sequence: Arc<AtomicU64>,
+    adapter_available: Arc<AtomicBool>,
+    adapter_poll_interval: Duration,
+    heartbeat: WorkerHeartbeatConfig,
+    next_control_connection: Arc<AtomicU64>,
+    runtime_journal: Arc<dyn RuntimeJournalSink>,
 }
 
 impl KernelServiceAdapter {
     pub fn new(daemon: Arc<KernelDaemon>, resolver: Arc<dyn InstalledPluginResolver>) -> Self {
+        let (operation_event_sender, _) = broadcast::channel(OPERATION_EVENT_HISTORY_CAPACITY);
         Self {
             daemon,
             resolver,
-            instances: Mutex::new(HashMap::new()),
-            operations: Mutex::new(HashMap::new()),
+            instances: Arc::new(Mutex::new(HashMap::new())),
+            operations: Arc::new(Mutex::new(HashMap::new())),
+            operation_events: Arc::new(Mutex::new(VecDeque::with_capacity(
+                OPERATION_EVENT_HISTORY_CAPACITY,
+            ))),
+            operation_event_sender,
+            next_event_sequence: Arc::new(AtomicU64::new(1)),
+            adapter_available: Arc::new(AtomicBool::new(true)),
+            adapter_poll_interval: Duration::from_secs(5),
+            heartbeat: WorkerHeartbeatConfig::default(),
+            next_control_connection: Arc::new(AtomicU64::new(1)),
+            runtime_journal: Arc::new(NoopRuntimeJournal),
         }
     }
 
-    pub fn server(self) -> core_v1::kernel_service_server::KernelServiceServer<Self> {
-        core_v1::kernel_service_server::KernelServiceServer::new(self)
+    pub fn with_worker_heartbeat(mut self, heartbeat: WorkerHeartbeatConfig) -> Self {
+        self.heartbeat = heartbeat;
+        self
+    }
+
+    pub fn with_adapter_poll_interval(mut self, interval: Duration) -> Self {
+        self.adapter_poll_interval = interval;
+        self
+    }
+
+    pub fn with_runtime_journal(mut self, runtime_journal: Arc<dyn RuntimeJournalSink>) -> Self {
+        self.runtime_journal = runtime_journal;
+        self
+    }
+
+    pub fn server(&self) -> core_v1::kernel_service_server::KernelServiceServer<Self> {
+        core_v1::kernel_service_server::KernelServiceServer::new(self.clone())
+    }
+
+    pub fn lifecycle_server(
+        &self,
+    ) -> core_v1::plugin_lifecycle_service_server::PluginLifecycleServiceServer<Self> {
+        core_v1::plugin_lifecycle_service_server::PluginLifecycleServiceServer::new(self.clone())
+    }
+
+    /// Starts the bounded watchdog loop. A missing heartbeat executes the same
+    /// SIGTERM -> cgroup.kill cleanup path as an explicit termination.
+    pub fn start_watchdog(&self) -> thread::JoinHandle<()> {
+        let adapter = self.clone();
+        thread::spawn(move || loop {
+            thread::sleep(adapter.heartbeat.interval.min(Duration::from_secs(1)));
+            adapter.enforce_heartbeat_deadlines();
+        })
+    }
+
+    /// Continuously refreshes adapter facts independently of allocation paths.
+    /// The state only transitions when a fact source disconnects/expires or
+    /// subsequently recovers, so callers receive actionable DEGRADED evidence
+    /// without unbounded event noise.
+    pub fn start_adapter_monitor(&self) -> thread::JoinHandle<()> {
+        let adapter = self.clone();
+        thread::spawn(move || loop {
+            thread::sleep(adapter.adapter_poll_interval);
+            let result = adapter.daemon.refresh_inventory_facts();
+            let ready = result.is_ok();
+            let previous = adapter.adapter_available.swap(ready, Ordering::Relaxed);
+            match (previous, ready) {
+                (true, false) => {
+                    let error = result.expect_err("adapter result is known to be an error");
+                    adapter.publish_runtime_event(
+                        core_v1::RuntimeEventType::AdapterDegraded,
+                        "hardware-adapters",
+                        error.reason_code,
+                        error.message,
+                    );
+                }
+                (false, true) => adapter.publish_runtime_event(
+                    core_v1::RuntimeEventType::KernelReconciled,
+                    "hardware-adapters",
+                    "ADAPTER_RECOVERED",
+                    "hardware adapter facts are current again",
+                ),
+                _ => {}
+            }
+        })
     }
 
     fn remember_operation(&self, operation: core_v1::Operation) -> core_v1::Operation {
         let mut operations = self.operations.lock().expect("operation lock poisoned");
         operations.insert(operation.name.clone(), operation.clone());
+        drop(operations);
+        self.publish_operation_event(operation.clone());
         operation
+    }
+
+    fn publish_operation_event(&self, operation: core_v1::Operation) {
+        self.publish_event(core_v1::OperationEvent {
+            event_id: String::new(),
+            resume_token: String::new(),
+            sequence_number: 0,
+            operation: Some(operation),
+            runtime_event: None,
+        });
+    }
+
+    pub fn publish_runtime_event(
+        &self,
+        event_type: core_v1::RuntimeEventType,
+        target_resource_name: impl Into<String>,
+        reason_code: impl Into<String>,
+        summary: impl Into<String>,
+    ) {
+        self.publish_event(core_v1::OperationEvent {
+            event_id: String::new(),
+            resume_token: String::new(),
+            sequence_number: 0,
+            operation: None,
+            runtime_event: Some(core_v1::RuntimeEvent {
+                r#type: event_type as i32,
+                target_resource_name: target_resource_name.into(),
+                reason_code: reason_code.into(),
+                summary: summary.into(),
+                observed_at: Some(now_timestamp()),
+            }),
+        });
+    }
+
+    fn publish_event(&self, mut event: core_v1::OperationEvent) {
+        let sequence_number = self.next_event_sequence.fetch_add(1, Ordering::Relaxed);
+        event.event_id = format!("operation-event-{sequence_number}");
+        event.resume_token = sequence_number.to_string();
+        event.sequence_number = sequence_number;
+        let mut history = self
+            .operation_events
+            .lock()
+            .expect("operation event history lock poisoned");
+        if history.len() == OPERATION_EVENT_HISTORY_CAPACITY {
+            history.pop_front();
+        }
+        history.push_back(event.clone());
+        drop(history);
+        let _ = self.operation_event_sender.send(event);
+    }
+
+    fn record_runtime(
+        &self,
+        event: RuntimeJournalEvent,
+        instance_name: Option<&str>,
+        lease: Option<&core_v1::ResourceLeaseRef>,
+        reason_code: &str,
+    ) {
+        let _ = self.runtime_journal.append(RuntimeJournalRecord {
+            event,
+            node_id: self.daemon.node_id.clone(),
+            node_epoch: self.daemon.node_epoch,
+            instance_name: instance_name.map(str::to_owned),
+            lease_name: lease.map(|lease| lease.lease_name.clone()),
+            fence_token: lease.map(|lease| lease.fence_token),
+            reason_code: reason_code.to_string(),
+        });
     }
 
     fn validate_node(&self, node: Option<&core_v1::NodeRef>) -> Result<(), Status> {
@@ -290,6 +537,51 @@ impl KernelServiceAdapter {
         })
     }
 
+    fn operation_running(&self, name: String, target: String) -> core_v1::Operation {
+        let timestamp = now_timestamp();
+        self.remember_operation(core_v1::Operation {
+            name,
+            state: core_v1::OperationState::Running as i32,
+            target_resource_name: target,
+            cancellable: true,
+            created_at: Some(timestamp.clone()),
+            updated_at: Some(timestamp),
+            outcome: None,
+        })
+    }
+
+    fn operation_cancelled(&self, name: String, target: String) -> core_v1::Operation {
+        let timestamp = now_timestamp();
+        self.remember_operation(core_v1::Operation {
+            name,
+            state: core_v1::OperationState::Cancelled as i32,
+            target_resource_name: target,
+            cancellable: false,
+            created_at: Some(timestamp.clone()),
+            updated_at: Some(timestamp),
+            outcome: None,
+        })
+    }
+
+    fn publish_cleanup_events(&self, target: &str, report: &CleanupReport) {
+        if report.oom_killed {
+            self.publish_runtime_event(
+                core_v1::RuntimeEventType::OomKilled,
+                target,
+                "OOM_KILLED",
+                "sandbox telemetry recorded an OOM kill during cleanup",
+            );
+        }
+        if report.complete {
+            self.publish_runtime_event(
+                core_v1::RuntimeEventType::CleanupCompleted,
+                target,
+                &report.reason_code,
+                "worker process tree was reaped and its sandbox cleanup completed",
+            );
+        }
+    }
+
     fn operation_failure(
         &self,
         name: String,
@@ -317,6 +609,310 @@ impl KernelServiceAdapter {
     fn release_owned_lease(&self, owned_lease: bool, lease: &ResourceLease) {
         if owned_lease {
             let _ = self.daemon.release(&lease.name, lease.fence_token);
+        }
+    }
+
+    fn heartbeat_response(
+        &self,
+        disposition: core_v1::HeartbeatDisposition,
+        sequence: u64,
+        generation: u64,
+    ) -> core_v1::ReportHeartbeatResponse {
+        core_v1::ReportHeartbeatResponse {
+            disposition: disposition as i32,
+            accepted_sequence_number: sequence,
+            server_time: Some(now_timestamp()),
+            next_heartbeat_after: Some(prost_types::Duration {
+                seconds: self.heartbeat.interval.as_secs() as i64,
+                nanos: self.heartbeat.interval.subsec_nanos() as i32,
+            }),
+            desired_state: core_v1::DesiredPluginState::Running as i32,
+            desired_generation: generation,
+        }
+    }
+
+    fn accept_heartbeat(
+        &self,
+        plugin_instance_name: &str,
+        generation: u64,
+        sequence_number: u64,
+        observed_at: Option<prost_types::Timestamp>,
+        runtime_state: i32,
+        health: Option<core_v1::HealthReport>,
+        restart_count: u32,
+    ) -> Result<core_v1::ReportHeartbeatResponse, Status> {
+        if plugin_instance_name.is_empty() || sequence_number == 0 {
+            return Err(Status::invalid_argument(
+                "plugin_instance_name and a non-zero sequence_number are required",
+            ));
+        }
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let Some(process) = instances.get_mut(plugin_instance_name) else {
+            return Ok(self.heartbeat_response(
+                core_v1::HeartbeatDisposition::UnknownInstance,
+                0,
+                generation,
+            ));
+        };
+        if generation != process.generation {
+            return Ok(self.heartbeat_response(
+                core_v1::HeartbeatDisposition::StaleGeneration,
+                process.accepted_sequence,
+                process.generation,
+            ));
+        }
+        if process.watchdog_triggered {
+            return Ok(core_v1::ReportHeartbeatResponse {
+                disposition: core_v1::HeartbeatDisposition::Duplicate as i32,
+                accepted_sequence_number: process.accepted_sequence,
+                server_time: Some(now_timestamp()),
+                next_heartbeat_after: None,
+                desired_state: core_v1::DesiredPluginState::Stopped as i32,
+                desired_generation: process.generation,
+            });
+        }
+        if sequence_number <= process.accepted_sequence {
+            return Ok(self.heartbeat_response(
+                core_v1::HeartbeatDisposition::Duplicate,
+                process.accepted_sequence,
+                process.generation,
+            ));
+        }
+        process.accepted_sequence = sequence_number;
+        process.last_heartbeat = Instant::now();
+        process.last_heartbeat_at = observed_at.or_else(|| Some(now_timestamp()));
+        process.runtime_state = runtime_state;
+        process.health = health;
+        process.restart_count = restart_count;
+        Ok(self.heartbeat_response(
+            core_v1::HeartbeatDisposition::Accepted,
+            process.accepted_sequence,
+            process.generation,
+        ))
+    }
+
+    fn register_worker_control(
+        &self,
+        hello: &core_v1::WorkerHello,
+        outbound: WorkerControlSender,
+    ) -> Result<(u64, core_v1::WorkerWelcome), Status> {
+        if hello.plugin_instance_name.is_empty()
+            || hello.generation == 0
+            || hello.protocol_version != 1
+        {
+            return Err(Status::invalid_argument(
+                "WorkerHello requires instance name, non-zero generation, and protocol_version=1",
+            ));
+        }
+        let connection_id = self.next_control_connection.fetch_add(1, Ordering::Relaxed);
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances
+            .get_mut(&hello.plugin_instance_name)
+            .ok_or_else(|| Status::not_found("worker instance is not managed by this Kernel"))?;
+        if process.generation != hello.generation {
+            return Err(Status::failed_precondition("worker generation is stale"));
+        }
+        process.control = Some(WorkerControlSession {
+            connection_id,
+            outbound,
+        });
+        Ok((
+            connection_id,
+            core_v1::WorkerWelcome {
+                desired_state: if process.watchdog_triggered {
+                    core_v1::DesiredPluginState::Stopped as i32
+                } else {
+                    core_v1::DesiredPluginState::Running as i32
+                },
+                desired_generation: process.generation,
+                next_heartbeat_after: Some(to_proto_duration(self.heartbeat.interval)),
+            },
+        ))
+    }
+
+    fn unregister_worker_control(&self, instance_name: &str, generation: u64, connection_id: u64) {
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let Some(process) = instances.get_mut(instance_name) else {
+            return;
+        };
+        if process.generation == generation
+            && process
+                .control
+                .as_ref()
+                .is_some_and(|control| control.connection_id == connection_id)
+        {
+            process.control = None;
+        }
+    }
+
+    fn accept_shutdown_ack(&self, ack: &core_v1::WorkerShutdownAck) -> Result<(), Status> {
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances
+            .get_mut(&ack.plugin_instance_name)
+            .ok_or_else(|| Status::not_found("worker instance is not managed by this Kernel"))?;
+        if ack.generation != process.generation {
+            return Err(Status::failed_precondition("worker generation is stale"));
+        }
+        let pending = process.pending_shutdown.as_mut().ok_or_else(|| {
+            Status::failed_precondition("Kernel did not request a worker shutdown")
+        })?;
+        if pending.shutdown_id != ack.shutdown_id {
+            return Err(Status::failed_precondition(
+                "worker shutdown acknowledgement is stale",
+            ));
+        }
+        pending.acknowledged = true;
+        pending.drained = ack.drained;
+        Ok(())
+    }
+
+    fn request_worker_shutdown(
+        &self,
+        instance_name: &str,
+        reason_code: &str,
+        immediate: bool,
+    ) -> bool {
+        if immediate {
+            return false;
+        }
+        let shutdown_id = format!(
+            "shutdown-{}",
+            self.next_control_connection.fetch_add(1, Ordering::Relaxed)
+        );
+        let outbound = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let Some(process) = instances.get_mut(instance_name) else {
+                return false;
+            };
+            let Some(control) = process.control.as_ref() else {
+                return false;
+            };
+            process.pending_shutdown = Some(PendingWorkerShutdown {
+                shutdown_id: shutdown_id.clone(),
+                acknowledged: false,
+                drained: false,
+            });
+            control.outbound.clone()
+        };
+        let sent = outbound.try_send(Ok(core_v1::KernelToWorker {
+            body: Some(core_v1::kernel_to_worker::Body::Shutdown(
+                core_v1::WorkerShutdown {
+                    shutdown_id: shutdown_id.clone(),
+                    mode: core_v1::StopMode::Graceful as i32,
+                    ack_deadline: Some(to_proto_duration(self.heartbeat.shutdown_ack_timeout)),
+                    reason_code: reason_code.to_string(),
+                },
+            )),
+        }));
+        if sent.is_err() {
+            self.unregister_pending_shutdown(instance_name, &shutdown_id);
+            return false;
+        }
+        let deadline = Instant::now() + self.heartbeat.shutdown_ack_timeout;
+        loop {
+            let acknowledged = self
+                .instances
+                .lock()
+                .expect("instance lock poisoned")
+                .get(instance_name)
+                .and_then(|process| process.pending_shutdown.as_ref())
+                .is_some_and(|pending| pending.shutdown_id == shutdown_id && pending.acknowledged);
+            if acknowledged || Instant::now() >= deadline {
+                return acknowledged;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn unregister_pending_shutdown(&self, instance_name: &str, shutdown_id: &str) {
+        if let Some(process) = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get_mut(instance_name)
+        {
+            if process
+                .pending_shutdown
+                .as_ref()
+                .is_some_and(|pending| pending.shutdown_id == shutdown_id)
+            {
+                process.pending_shutdown = None;
+            }
+        }
+    }
+
+    fn enforce_heartbeat_deadlines(&self) {
+        let overdue = {
+            let instances = self.instances.lock().expect("instance lock poisoned");
+            instances
+                .iter()
+                .filter(|(_, process)| {
+                    !process.watchdog_triggered
+                        && process.last_heartbeat.elapsed() > self.heartbeat.timeout
+                })
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        for name in overdue {
+            let _acknowledged = self.request_worker_shutdown(&name, "HEARTBEAT_TIMEOUT", false);
+            self.publish_runtime_event(
+                core_v1::RuntimeEventType::WatchdogTriggered,
+                &name,
+                "HEARTBEAT_TIMEOUT",
+                "worker missed its mandatory heartbeat deadline",
+            );
+            let (lease, report) = {
+                let mut instances = self.instances.lock().expect("instance lock poisoned");
+                let Some(process) = instances.get_mut(&name) else {
+                    continue;
+                };
+                process.watchdog_triggered = true;
+                let lease = process.lease.clone();
+                match process.instance.stop(&cy_kernel_api::StopRequest {
+                    grace_period: self.heartbeat.graceful_stop,
+                    immediate: false,
+                }) {
+                    Ok(report) => (lease, Some(report.clone())),
+                    Err(_) => (lease, None),
+                }
+            };
+            if let Some(report) = report.as_ref() {
+                self.publish_cleanup_events(&name, report);
+                if report.complete {
+                    if let Some(lease) = lease.as_ref() {
+                        if self
+                            .daemon
+                            .release(&lease.lease_name, lease.fence_token)
+                            .is_ok()
+                        {
+                            self.record_runtime(
+                                RuntimeJournalEvent::WatchdogReaped,
+                                Some(&name),
+                                Some(lease),
+                                "HEARTBEAT_TIMEOUT_REAPED",
+                            );
+                            self.instances
+                                .lock()
+                                .expect("instance lock poisoned")
+                                .remove(&name);
+                        }
+                    }
+                } else {
+                    self.record_runtime(
+                        RuntimeJournalEvent::InstanceCleanupFailed,
+                        Some(&name),
+                        lease.as_ref(),
+                        &report.reason_code,
+                    );
+                }
+            } else {
+                self.record_runtime(
+                    RuntimeJournalEvent::InstanceCleanupFailed,
+                    Some(&name),
+                    lease.as_ref(),
+                    "WATCHDOG_STOP_FAILED",
+                );
+            }
         }
     }
 }
@@ -352,6 +948,16 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .unwrap_or_else(|| self.daemon.resources.inventory().generation);
         let internal = resource_request(&lease_name, generation, &requirements)?;
         let lease = self.daemon.reserve(internal).map_err(provider_status)?;
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReserved,
+            None,
+            Some(&journal_lease),
+            "LEASE_RESERVED",
+        );
         Ok(Response::new(to_proto_lease(
             &self.daemon,
             lease,
@@ -370,6 +976,12 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         self.daemon
             .release(&lease.lease_name, lease.fence_token)
             .map_err(provider_status)?;
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReleased,
+            None,
+            Some(&lease),
+            "LEASE_RELEASED",
+        );
         let lease = self
             .daemon
             .lease(&lease.lease_name)
@@ -389,6 +1001,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         if plugin.installation_name.is_empty()
             || plugin.manifest_digest.is_empty()
             || plugin.artifact_digest.is_empty()
+            || plugin.verified_signature_identity.is_empty()
         {
             return Err(Status::failed_precondition(
                 "LaunchPlugin accepts only a verified InstalledPluginRef",
@@ -396,6 +1009,16 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         }
         let instance_name = plugin.installation_name.clone();
         let operation_name = self.operation_name("launch", &instance_name);
+        if self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .contains_key(&instance_name)
+        {
+            return Err(Status::already_exists(
+                "plugin instance is already managed by this Kernel",
+            ));
+        }
         let (lease, owned_lease) = match request.allocation {
             Some(core_v1::launch_plugin_request::Allocation::ExistingLease(lease_ref)) => (
                 self.daemon
@@ -425,24 +1048,55 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 return Err(provider_status(error));
             }
         };
-        let mut plan = match self.resolver.resolve_launch_plan(&plugin, &instance_name) {
+        let installation = VerifiedInstallation {
+            installation_name: plugin.installation_name.clone(),
+            manifest_digest: plugin.manifest_digest.clone(),
+            artifact_digest: plugin.artifact_digest.clone(),
+            verified_signature_identity: plugin.verified_signature_identity.clone(),
+        };
+        let resolved = match self
+            .resolver
+            .resolve_launch_plan(&installation, &instance_name)
+        {
             Ok(plan) => plan,
             Err(error) => {
                 self.release_owned_lease(owned_lease, &lease);
                 return Err(provider_status(error));
             }
         };
+        if resolved.installation != installation {
+            self.release_owned_lease(owned_lease, &lease);
+            return Err(Status::failed_precondition(
+                "resolver returned a launch plan for another verified installation",
+            ));
+        }
+        let mut plan = resolved.plan;
+        plan.limits = lease.limits.clone();
+        plan.environment = inject_heartbeat_environment(
+            plan.environment,
+            &self.heartbeat,
+            &instance_name,
+            lease.fence_token,
+        )
+        .map_err(|error| {
+            self.release_owned_lease(owned_lease, &lease);
+            provider_status(error)
+        })?;
         plan.environment = binding
             .merge_environment(&plan.environment)
             .map_err(|error| {
                 self.release_owned_lease(owned_lease, &lease);
                 provider_status(error)
             })?;
-        let mut instance = ManagedInstance::new(self.daemon.sandbox.clone(), plan, binding);
+        let mut instance = SandboxedProcess::new(self.daemon.sandbox.clone(), plan, binding);
         if let Err(error) = instance.start() {
             self.release_owned_lease(owned_lease, &lease);
             return Err(provider_status(error));
         }
+        let lease_ref = core_v1::ResourceLeaseRef {
+            lease_name: lease.name,
+            fence_token: lease.fence_token,
+        };
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -450,14 +1104,34 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 instance_name.clone(),
                 ManagedProcess {
                     instance,
-                    lease: Some(core_v1::ResourceLeaseRef {
-                        lease_name: lease.name,
-                        fence_token: lease.fence_token,
-                    }),
+                    lease: Some(lease_ref.clone()),
+                    plugin,
+                    generation: lease_ref.fence_token,
+                    accepted_sequence: 0,
+                    last_heartbeat: Instant::now(),
+                    last_heartbeat_at: None,
+                    runtime_state: core_v1::PluginRuntimeState::Starting as i32,
+                    health: None,
+                    restart_count: 0,
+                    watchdog_triggered: false,
+                    control: None,
+                    pending_shutdown: None,
                 },
             );
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceLaunched,
+            Some(&instance_name),
+            Some(&lease_ref),
+            "WORKER_LAUNCHED",
+        );
+        self.publish_runtime_event(
+            core_v1::RuntimeEventType::InstanceStateChanged,
+            &instance_name,
+            "WORKER_LAUNCHED",
+            "worker process started inside its assigned sandbox",
+        );
         Ok(Response::new(
-            self.operation_success(operation_name, instance_name),
+            self.operation_running(operation_name, instance_name),
         ))
     }
 
@@ -476,7 +1150,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .transpose()?
             .unwrap_or(Duration::from_secs(30));
         let immediate = request.mode == core_v1::StopMode::Immediate as i32;
-        let lease = {
+        let _acknowledged =
+            self.request_worker_shutdown(&request.process_name, "TERMINATE_REQUESTED", immediate);
+        let (lease, report) = {
             let mut instances = self.instances.lock().expect("instance lock poisoned");
             let process = instances
                 .get_mut(&request.process_name)
@@ -489,25 +1165,35 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 })
                 .map_err(provider_status)?
                 .clone();
-            if !report.complete {
-                let error = ProviderError::new(
-                    "kernel-daemon",
-                    "RESOURCE_QUARANTINED",
-                    &report.reason_code,
-                );
-                return Ok(Response::new(self.operation_failure(
-                    operation_name,
-                    request.process_name,
-                    &error,
-                )));
-            }
-            process.lease.clone()
+            (process.lease.clone(), report)
         };
-        if let Some(lease) = lease {
+        self.publish_cleanup_events(&request.process_name, &report);
+        if !report.complete {
+            self.record_runtime(
+                RuntimeJournalEvent::InstanceCleanupFailed,
+                Some(&request.process_name),
+                lease.as_ref(),
+                &report.reason_code,
+            );
+            let error =
+                ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
+            return Ok(Response::new(self.operation_failure(
+                operation_name,
+                request.process_name,
+                &error,
+            )));
+        }
+        if let Some(lease) = lease.as_ref() {
             self.daemon
                 .release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&request.process_name),
+            lease.as_ref(),
+            "TERMINATE_COMPLETE",
+        );
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -533,11 +1219,67 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn cancel_operation(
         &self,
-        _request: Request<core_v1::CancelOperationRequest>,
+        request: Request<core_v1::CancelOperationRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
-        Err(Status::unimplemented(
-            "operation cancellation is not part of the P2 kernel baseline",
-        ))
+        let name = request.into_inner().name;
+        if name.is_empty() {
+            return Err(Status::invalid_argument("operation name is required"));
+        }
+        let operation = self
+            .operations
+            .lock()
+            .expect("operation lock poisoned")
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| Status::not_found("operation not found"))?;
+        if operation.state != core_v1::OperationState::Running as i32 || !operation.cancellable {
+            return Err(Status::failed_precondition("operation is not cancellable"));
+        }
+        let target = operation.target_resource_name;
+        let _acknowledged = self.request_worker_shutdown(&target, "OPERATION_CANCELLED", false);
+        let (lease, report) = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let process = instances.get_mut(&target).ok_or_else(|| {
+                Status::failed_precondition("operation target is no longer managed")
+            })?;
+            let report = process
+                .instance
+                .stop(&cy_kernel_api::StopRequest {
+                    grace_period: self.heartbeat.graceful_stop,
+                    immediate: false,
+                })
+                .map_err(provider_status)?
+                .clone();
+            (process.lease.clone(), report)
+        };
+        self.publish_cleanup_events(&target, &report);
+        if !report.complete {
+            self.record_runtime(
+                RuntimeJournalEvent::InstanceCleanupFailed,
+                Some(&target),
+                lease.as_ref(),
+                &report.reason_code,
+            );
+            let error =
+                ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
+            return Ok(Response::new(self.operation_failure(name, target, &error)));
+        }
+        if let Some(lease) = lease.as_ref() {
+            self.daemon
+                .release(&lease.lease_name, lease.fence_token)
+                .map_err(provider_status)?;
+        }
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&target),
+            lease.as_ref(),
+            "CANCEL_COMPLETE",
+        );
+        self.instances
+            .lock()
+            .expect("instance lock poisoned")
+            .remove(&target);
+        Ok(Response::new(self.operation_cancelled(name, target)))
     }
 
     type WatchOperationsStream = std::pin::Pin<
@@ -546,11 +1288,321 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn watch_operations(
         &self,
-        _request: Request<core_v1::WatchOperationsRequest>,
+        request: Request<core_v1::WatchOperationsRequest>,
     ) -> Result<Response<Self::WatchOperationsStream>, Status> {
+        let request = request.into_inner();
+        let resume_sequence = if request.resume_token.is_empty() {
+            0
+        } else {
+            request.resume_token.parse::<u64>().map_err(|_| {
+                Status::invalid_argument("resume_token must be an event sequence number")
+            })?
+        };
+        let names = request.operation_names;
+        let receiver = self.operation_event_sender.subscribe();
+        let history = self
+            .operation_events
+            .lock()
+            .expect("operation event history lock poisoned")
+            .iter()
+            .filter(|event| event.sequence_number > resume_sequence)
+            .filter(|event| operation_event_matches(event, &names))
+            .cloned()
+            .collect::<Vec<_>>();
+        let last_sequence = history
+            .last()
+            .map(|event| event.sequence_number)
+            .unwrap_or(resume_sequence);
+        let (sender, stream) = mpsc::channel(OPERATION_EVENT_SUBSCRIBER_CAPACITY);
+        tokio::spawn(async move {
+            let mut receiver = receiver;
+            let mut cursor = last_sequence;
+            for event in history {
+                if sender.send(Ok(event)).await.is_err() {
+                    return;
+                }
+            }
+            loop {
+                match receiver.recv().await {
+                    Ok(event) if event.sequence_number <= cursor => continue,
+                    Ok(event) => {
+                        cursor = event.sequence_number;
+                        if operation_event_matches(&event, &names)
+                            && sender.send(Ok(event)).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = sender
+                            .send(Err(Status::out_of_range(
+                                "operation event subscriber lagged beyond the bounded buffer",
+                            )))
+                            .await;
+                        return;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(stream))))
+    }
+}
+
+#[tonic::async_trait]
+impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for KernelServiceAdapter {
+    async fn install_plugin(
+        &self,
+        _request: Request<core_v1::InstallPluginRequest>,
+    ) -> Result<Response<core_v1::Operation>, Status> {
+        Err(Status::unimplemented(
+            "installation is an out-of-kernel adapter responsibility",
+        ))
+    }
+
+    async fn uninstall_plugin(
+        &self,
+        _request: Request<core_v1::UninstallPluginRequest>,
+    ) -> Result<Response<core_v1::Operation>, Status> {
+        Err(Status::unimplemented(
+            "installation is an out-of-kernel adapter responsibility",
+        ))
+    }
+
+    async fn set_plugin_enabled(
+        &self,
+        _request: Request<core_v1::SetPluginEnabledRequest>,
+    ) -> Result<Response<core_v1::PluginInstallation>, Status> {
+        Err(Status::unimplemented(
+            "plugin enablement policy belongs to the control plane",
+        ))
+    }
+
+    async fn start_plugin(
+        &self,
+        _request: Request<core_v1::StartPluginRequest>,
+    ) -> Result<Response<core_v1::Operation>, Status> {
+        Err(Status::unimplemented(
+            "use KernelService.LaunchPlugin after policy and installation validation",
+        ))
+    }
+
+    async fn stop_plugin(
+        &self,
+        _request: Request<core_v1::StopPluginRequest>,
+    ) -> Result<Response<core_v1::Operation>, Status> {
+        Err(Status::unimplemented(
+            "use KernelService.TerminatePlugin for node-local process termination",
+        ))
+    }
+
+    async fn get_plugin_instance(
+        &self,
+        request: Request<core_v1::GetPluginInstanceRequest>,
+    ) -> Result<Response<core_v1::PluginInstance>, Status> {
+        let name = request.into_inner().name;
+        let adapter_available = self.adapter_available.load(Ordering::Relaxed);
+        self.instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&name)
+            .map(|process| {
+                Response::new(to_plugin_instance(
+                    &self.daemon,
+                    &name,
+                    process,
+                    adapter_available,
+                ))
+            })
+            .ok_or_else(|| Status::not_found("plugin instance is not managed by this Kernel"))
+    }
+
+    async fn list_plugin_instances(
+        &self,
+        request: Request<core_v1::ListPluginInstancesRequest>,
+    ) -> Result<Response<core_v1::ListPluginInstancesResponse>, Status> {
+        let request = request.into_inner();
+        let filters = request.state_filter;
+        let adapter_available = self.adapter_available.load(Ordering::Relaxed);
+        let plugins = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .iter()
+            .filter(|(_, process)| filters.is_empty() || filters.contains(&process.runtime_state))
+            .map(|(name, process)| {
+                to_plugin_instance(&self.daemon, name, process, adapter_available)
+            })
+            .collect();
+        Ok(Response::new(core_v1::ListPluginInstancesResponse {
+            plugins,
+            next_page_token: String::new(),
+        }))
+    }
+
+    async fn report_heartbeat(
+        &self,
+        request: Request<core_v1::ReportHeartbeatRequest>,
+    ) -> Result<Response<core_v1::ReportHeartbeatResponse>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(self.accept_heartbeat(
+            &request.plugin_instance_name,
+            request.generation,
+            request.sequence_number,
+            request.observed_at,
+            request.runtime_state,
+            request.health,
+            request.restart_count,
+        )?))
+    }
+
+    type ConnectWorkerStream = std::pin::Pin<
+        Box<dyn Stream<Item = Result<core_v1::KernelToWorker, Status>> + Send + 'static>,
+    >;
+
+    async fn connect_worker(
+        &self,
+        request: Request<tonic::Streaming<core_v1::WorkerToKernel>>,
+    ) -> Result<Response<Self::ConnectWorkerStream>, Status> {
+        let mut inbound = request.into_inner();
+        let hello = inbound.message().await?.ok_or_else(|| {
+            Status::invalid_argument("WorkerHello must be the first control frame")
+        })?;
+        let Some(core_v1::worker_to_kernel::Body::Hello(hello)) = hello.body else {
+            return Err(Status::invalid_argument(
+                "WorkerHello must be the first control frame",
+            ));
+        };
+        let (outbound, receiver) = mpsc::channel(16);
+        let (connection_id, welcome) = self.register_worker_control(&hello, outbound.clone())?;
+        outbound
+            .send(Ok(core_v1::KernelToWorker {
+                body: Some(core_v1::kernel_to_worker::Body::Welcome(welcome)),
+            }))
+            .await
+            .map_err(|_| Status::unavailable("worker control receiver closed during handshake"))?;
+
+        let adapter = self.clone();
+        let instance_name = hello.plugin_instance_name.clone();
+        let generation = hello.generation;
+        tokio::spawn(async move {
+            while let Ok(Some(frame)) = inbound.message().await {
+                let result = match frame.body {
+                    Some(core_v1::worker_to_kernel::Body::Heartbeat(heartbeat)) => adapter
+                        .accept_heartbeat(
+                            &heartbeat.plugin_instance_name,
+                            heartbeat.generation,
+                            heartbeat.sequence_number,
+                            heartbeat.observed_at,
+                            heartbeat.runtime_state,
+                            heartbeat.health,
+                            heartbeat.restart_count,
+                        )
+                        .map(|response| core_v1::KernelToWorker {
+                            body: Some(core_v1::kernel_to_worker::Body::HeartbeatAck(
+                                core_v1::WorkerHeartbeatAck {
+                                    disposition: response.disposition,
+                                    accepted_sequence_number: response.accepted_sequence_number,
+                                    desired_state: response.desired_state,
+                                    desired_generation: response.desired_generation,
+                                },
+                            )),
+                        }),
+                    Some(core_v1::worker_to_kernel::Body::ShutdownAck(ack)) => adapter
+                        .accept_shutdown_ack(&ack)
+                        .map(|_| core_v1::KernelToWorker {
+                            body: Some(core_v1::kernel_to_worker::Body::HeartbeatAck(
+                                core_v1::WorkerHeartbeatAck {
+                                    disposition: core_v1::HeartbeatDisposition::Accepted as i32,
+                                    accepted_sequence_number: 0,
+                                    desired_state: core_v1::DesiredPluginState::Stopped as i32,
+                                    desired_generation: ack.generation,
+                                },
+                            )),
+                        }),
+                    Some(core_v1::worker_to_kernel::Body::Hello(_)) | None => {
+                        Err(Status::invalid_argument(
+                            "WorkerHello is valid only as the first control frame",
+                        ))
+                    }
+                };
+                match result {
+                    Ok(response) => {
+                        if outbound.send(Ok(response)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = outbound.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
+            adapter.unregister_worker_control(&instance_name, generation, connection_id);
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+    }
+
+    type WatchPluginEventsStream = std::pin::Pin<
+        Box<dyn Stream<Item = Result<core_v1::PluginLifecycleEvent, Status>> + Send + 'static>,
+    >;
+
+    async fn watch_plugin_events(
+        &self,
+        _request: Request<core_v1::WatchPluginEventsRequest>,
+    ) -> Result<Response<Self::WatchPluginEventsStream>, Status> {
         Ok(Response::new(Box::pin(iter(Vec::<
-            Result<core_v1::OperationEvent, Status>,
+            Result<core_v1::PluginLifecycleEvent, Status>,
         >::new()))))
+    }
+}
+
+fn to_plugin_instance(
+    daemon: &KernelDaemon,
+    name: &str,
+    process: &ManagedProcess,
+    adapter_available: bool,
+) -> core_v1::PluginInstance {
+    core_v1::PluginInstance {
+        name: name.to_string(),
+        plugin: Some(process.plugin.clone()),
+        node: Some(core_v1::NodeRef {
+            node_id: daemon.node_id.clone(),
+            node_epoch: daemon.node_epoch,
+        }),
+        generation: process.generation,
+        observed_generation: process.generation,
+        desired_state: if process.watchdog_triggered {
+            core_v1::DesiredPluginState::Stopped as i32
+        } else {
+            core_v1::DesiredPluginState::Running as i32
+        },
+        runtime_state: managed_runtime_state(process),
+        health: if adapter_available {
+            process.health.clone()
+        } else {
+            Some(core_v1::HealthReport {
+                status: core_v1::HealthStatus::Degraded as i32,
+                reason_code: "ADAPTER_DEGRADED".to_string(),
+                summary: "external hardware facts are unavailable or expired".to_string(),
+            })
+        },
+        lease: process.lease.clone(),
+        restart_count: process.restart_count,
+        created_at: None,
+        updated_at: Some(now_timestamp()),
+        last_heartbeat_at: process.last_heartbeat_at.clone(),
+    }
+}
+
+fn managed_runtime_state(process: &ManagedProcess) -> i32 {
+    match process.instance.state() {
+        SandboxedProcessState::Discovered => core_v1::PluginRuntimeState::Discovered as i32,
+        SandboxedProcessState::Starting => core_v1::PluginRuntimeState::Starting as i32,
+        SandboxedProcessState::Healthy => process.runtime_state,
+        SandboxedProcessState::Stopping => core_v1::PluginRuntimeState::Stopping as i32,
+        SandboxedProcessState::Stopped => core_v1::PluginRuntimeState::Stopped as i32,
+        SandboxedProcessState::Quarantined => core_v1::PluginRuntimeState::Quarantined as i32,
     }
 }
 
@@ -612,15 +1664,18 @@ fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, Provide
     let mut environment = first.environment;
     let mut required_gids = first.required_gids;
     let enforcement = first.enforcement;
-    let adapter_id = first.adapter_id.clone();
+    let mut adapter_ids = vec![first.adapter_id.clone()];
     let mut device_ids = vec![first.device_id];
     for binding in bindings.into_iter().skip(1) {
-        if binding.enforcement != enforcement || binding.adapter_id != adapter_id {
+        if binding.enforcement != enforcement {
             return Err(ProviderError::new(
                 "kernel-daemon",
                 "MIXED_DEVICE_ENFORCEMENT",
-                "a multi-device binding must have one adapter and enforcement mode",
+                "a multi-device binding must use one enforcement mode",
             ));
+        }
+        if !adapter_ids.contains(&binding.adapter_id) {
+            adapter_ids.push(binding.adapter_id.clone());
         }
         device_ids.push(binding.device_id);
         for node in binding.nodes {
@@ -647,14 +1702,15 @@ fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, Provide
             }
         }
     }
+    adapter_ids.sort();
     Ok(DeviceBinding {
         device_id: device_ids.join(","),
         nodes,
         environment,
         required_gids,
         enforcement,
-        adapter_id,
-        reason_code: "DEVICE_BINDING_CREATED".to_string(),
+        adapter_id: adapter_ids.join(","),
+        reason_code: "DEVICE_BINDING_CREATED_BY_UDS_ADAPTERS".to_string(),
     })
 }
 
@@ -694,13 +1750,82 @@ fn resource_request(
             None => Some(accelerator.min_memory_bytes_per_device),
         };
     }
+    let cpu_max_millicores = requirements
+        .cpu
+        .as_ref()
+        .and_then(|cpu| (cpu.limit_millicores > 0).then_some(cpu.limit_millicores));
+    if let Some(cpu) = requirements.cpu.as_ref() {
+        if cpu.limit_millicores > 0
+            && cpu.request_millicores > 0
+            && cpu.request_millicores > cpu.limit_millicores
+        {
+            return Err(Status::invalid_argument(
+                "cpu request_millicores cannot exceed limit_millicores",
+            ));
+        }
+    }
+    let memory_max_bytes = requirements
+        .memory
+        .as_ref()
+        .and_then(|memory| (memory.limit_bytes > 0).then_some(memory.limit_bytes));
+    if let Some(memory) = requirements.memory.as_ref() {
+        if memory.limit_bytes > 0
+            && memory.request_bytes > 0
+            && memory.request_bytes > memory.limit_bytes
+        {
+            return Err(Status::invalid_argument(
+                "memory request_bytes cannot exceed limit_bytes",
+            ));
+        }
+    }
     Ok(ResourceRequest {
         lease_name: lease_name.to_string(),
         expected_inventory_generation: generation,
         count,
         vendor,
         min_memory_bytes: min_memory_bytes.filter(|value| *value > 0),
+        limits: CgroupLimits {
+            cpu_max_millicores,
+            memory_max_bytes,
+            cpuset_cpus: None,
+        },
     })
+}
+
+fn inject_heartbeat_environment(
+    mut environment: BTreeMap<String, String>,
+    heartbeat: &WorkerHeartbeatConfig,
+    instance_name: &str,
+    generation: u64,
+) -> Result<BTreeMap<String, String>, ProviderError> {
+    let injected = [
+        (
+            "CYRENE_HEARTBEAT_SOCKET",
+            heartbeat.socket_path.to_string_lossy().into_owned(),
+        ),
+        (
+            "CYRENE_WORKER_CONTROL_SOCKET",
+            heartbeat.socket_path.to_string_lossy().into_owned(),
+        ),
+        ("CYRENE_PLUGIN_INSTANCE_NAME", instance_name.to_string()),
+        ("CYRENE_PLUGIN_INSTANCE_GENERATION", generation.to_string()),
+        (
+            "CYRENE_HEARTBEAT_INTERVAL_MS",
+            heartbeat.interval.as_millis().to_string(),
+        ),
+    ];
+    if injected
+        .iter()
+        .any(|(key, _)| environment.contains_key(*key))
+    {
+        return Err(ProviderError::new(
+            "kernel-daemon",
+            "RESERVED_HEARTBEAT_ENVIRONMENT",
+            "installation record attempted to override Kernel heartbeat configuration",
+        ));
+    }
+    environment.extend(injected.map(|(key, value)| (key.to_string(), value)));
+    Ok(environment)
 }
 
 fn to_proto_lease(
@@ -773,6 +1898,21 @@ fn proto_duration(duration: prost_types::Duration) -> Result<Duration, Status> {
         .saturating_add(Duration::from_nanos(duration.nanos as u64)))
 }
 
+fn to_proto_duration(duration: Duration) -> prost_types::Duration {
+    prost_types::Duration {
+        seconds: duration.as_secs().min(i64::MAX as u64) as i64,
+        nanos: duration.subsec_nanos() as i32,
+    }
+}
+
+fn operation_event_matches(event: &core_v1::OperationEvent, names: &[String]) -> bool {
+    names.is_empty()
+        || event
+            .operation
+            .as_ref()
+            .is_some_and(|operation| names.contains(&operation.name))
+}
+
 fn now_timestamp() -> prost_types::Timestamp {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -783,7 +1923,520 @@ fn now_timestamp() -> prost_types::Timestamp {
     }
 }
 
-#[allow(dead_code)]
-fn _default_nvidia_provider() -> Arc<dyn AcceleratorProvider> {
-    Arc::new(NvidiaSmiProvider::new("nvidia-smi"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cy_kernel_api::{
+        CapabilityFact, CleanupReport, LaunchPlan, NodeCapabilities, ProcessCondition,
+        ProcessHandle, ProcessRuntime, StopRequest,
+    };
+    use cy_resource_manager::InMemoryResourceManager;
+    use std::{collections::BTreeMap, path::PathBuf};
+    use tokio_stream::StreamExt;
+
+    #[derive(Debug)]
+    struct EmptyHardware;
+
+    impl HostInventoryProvider for EmptyHardware {
+        fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+            Ok(InventorySnapshot {
+                generation: 1,
+                devices: Vec::new(),
+                capabilities: NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                },
+            })
+        }
+    }
+
+    impl AcceleratorProvider for EmptyHardware {
+        fn adapter_id(&self) -> &str {
+            "test-adapter"
+        }
+
+        fn probe_inventory(&self) -> Result<Vec<cy_kernel_api::AcceleratorDevice>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn create_binding(
+            &self,
+            _device: &cy_kernel_api::AcceleratorDevice,
+        ) -> Result<DeviceBinding, ProviderError> {
+            Err(ProviderError::new(
+                "test-adapter",
+                "UNUSED",
+                "no accelerators",
+            ))
+        }
+
+        fn read_health(
+            &self,
+            _device_id: &str,
+        ) -> Result<cy_kernel_api::HealthReport, ProviderError> {
+            Err(ProviderError::new(
+                "test-adapter",
+                "UNUSED",
+                "no accelerators",
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeSandbox;
+
+    impl ProcessRuntime for FakeSandbox {
+        fn preflight(&self) -> NodeCapabilities {
+            NodeCapabilities {
+                ready: true,
+                facts: vec![CapabilityFact {
+                    name: "test".to_string(),
+                    available: true,
+                    required: true,
+                    detail: "test".to_string(),
+                }],
+                enforcement: Vec::new(),
+            }
+        }
+
+        fn launch(
+            &self,
+            _plan: &LaunchPlan,
+            _binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            Ok(ProcessHandle {
+                pid: 1,
+                cgroup_path: PathBuf::from("/test"),
+                start_time_ticks: None,
+            })
+        }
+
+        fn stop(
+            &self,
+            _handle: &ProcessHandle,
+            _request: &StopRequest,
+        ) -> Result<CleanupReport, ProviderError> {
+            Ok(CleanupReport {
+                complete: true,
+                exit_code: Some(0),
+                oom_killed: false,
+                conditions: Vec::<ProcessCondition>::new(),
+                reason_code: "TEST_STOP".to_string(),
+            })
+        }
+    }
+
+    impl SandboxBackend for FakeSandbox {
+        fn backend_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRuntimeJournal {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+
+    impl RuntimeJournalSink for RecordingRuntimeJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    struct UnusedResolver;
+
+    impl InstalledPluginResolver for UnusedResolver {
+        fn resolve_launch_plan(
+            &self,
+            _installation: &VerifiedInstallation,
+            _instance_name: &str,
+        ) -> Result<cy_kernel_api::ResolvedLaunchPlan, ProviderError> {
+            Err(ProviderError::new(
+                "test",
+                "UNUSED",
+                "not launched in this test",
+            ))
+        }
+    }
+
+    fn heartbeat_adapter() -> KernelServiceAdapter {
+        let hardware = Arc::new(EmptyHardware);
+        let daemon = Arc::new(KernelDaemon::new(
+            hardware.clone(),
+            hardware,
+            Arc::new(InMemoryResourceManager::new("node", Vec::new())),
+            Arc::new(FakeSandbox),
+            "node",
+            7,
+        ));
+        let adapter = KernelServiceAdapter::new(daemon, Arc::new(UnusedResolver))
+            .with_worker_heartbeat(WorkerHeartbeatConfig {
+                socket_path: PathBuf::from("/run/cyrene/test.sock"),
+                interval: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                graceful_stop: Duration::from_secs(1),
+                shutdown_ack_timeout: Duration::from_millis(50),
+            });
+        adapter.instances.lock().unwrap().insert(
+            "worker_1".to_string(),
+            ManagedProcess {
+                instance: SandboxedProcess::new(
+                    Arc::new(FakeSandbox),
+                    LaunchPlan {
+                        instance_name: "worker_1".to_string(),
+                        executable: PathBuf::from("worker"),
+                        args: Vec::new(),
+                        environment: BTreeMap::new(),
+                        cgroup_name: "instance-worker_1".to_string(),
+                        limits: CgroupLimits::default(),
+                    },
+                    DeviceBinding {
+                        device_id: "none".to_string(),
+                        nodes: Vec::new(),
+                        environment: BTreeMap::new(),
+                        required_gids: Vec::new(),
+                        enforcement: EnforcementMode::Unenforced,
+                        adapter_id: "test".to_string(),
+                        reason_code: "TEST".to_string(),
+                    },
+                ),
+                lease: None,
+                plugin: core_v1::InstalledPluginRef {
+                    installation_name: "worker_1".to_string(),
+                    plugin_id: "test".to_string(),
+                    version: "1".to_string(),
+                    component_id: "test".to_string(),
+                    manifest_digest: "sha256:test".to_string(),
+                    artifact_digest: "sha256:test".to_string(),
+                    verified_signature_identity: "test".to_string(),
+                },
+                generation: 99,
+                accepted_sequence: 0,
+                last_heartbeat: Instant::now(),
+                last_heartbeat_at: None,
+                runtime_state: core_v1::PluginRuntimeState::Starting as i32,
+                health: None,
+                restart_count: 0,
+                watchdog_triggered: false,
+                control: None,
+                pending_shutdown: None,
+            },
+        );
+        adapter
+    }
+
+    #[test]
+    fn resource_limits_are_mapped_without_relaxing_request_validation() {
+        let request = resource_request(
+            "lease-1",
+            4,
+            &core_v1::ResourceRequirements {
+                cpu: Some(core_v1::CpuRequirements {
+                    request_millicores: 500,
+                    limit_millicores: 750,
+                }),
+                memory: Some(core_v1::MemoryRequirements {
+                    request_bytes: 1024,
+                    limit_bytes: 2048,
+                }),
+                ephemeral_storage_limit_bytes: 0,
+                accelerators: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(request.limits.cpu_max_millicores, Some(750));
+        assert_eq!(request.limits.memory_max_bytes, Some(2048));
+
+        let error = resource_request(
+            "lease-2",
+            4,
+            &core_v1::ResourceRequirements {
+                cpu: Some(core_v1::CpuRequirements {
+                    request_millicores: 751,
+                    limit_millicores: 750,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn heartbeat_requires_generation_and_monotonic_sequence() {
+        use core_v1::plugin_lifecycle_service_server::PluginLifecycleService;
+        let adapter = heartbeat_adapter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let accepted = runtime
+            .block_on(
+                adapter.report_heartbeat(Request::new(core_v1::ReportHeartbeatRequest {
+                    context: None,
+                    plugin_instance_name: "worker_1".to_string(),
+                    generation: 99,
+                    sequence_number: 1,
+                    observed_at: None,
+                    runtime_state: core_v1::PluginRuntimeState::Healthy as i32,
+                    health: None,
+                    restart_count: 0,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            accepted.disposition,
+            core_v1::HeartbeatDisposition::Accepted as i32
+        );
+        let duplicate = runtime
+            .block_on(
+                adapter.report_heartbeat(Request::new(core_v1::ReportHeartbeatRequest {
+                    context: None,
+                    plugin_instance_name: "worker_1".to_string(),
+                    generation: 99,
+                    sequence_number: 1,
+                    observed_at: None,
+                    runtime_state: core_v1::PluginRuntimeState::Healthy as i32,
+                    health: None,
+                    restart_count: 0,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            duplicate.disposition,
+            core_v1::HeartbeatDisposition::Duplicate as i32
+        );
+        let stale = runtime
+            .block_on(
+                adapter.report_heartbeat(Request::new(core_v1::ReportHeartbeatRequest {
+                    context: None,
+                    plugin_instance_name: "worker_1".to_string(),
+                    generation: 98,
+                    sequence_number: 2,
+                    observed_at: None,
+                    runtime_state: core_v1::PluginRuntimeState::Healthy as i32,
+                    health: None,
+                    restart_count: 0,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            stale.disposition,
+            core_v1::HeartbeatDisposition::StaleGeneration as i32
+        );
+    }
+
+    #[test]
+    fn worker_control_shutdown_waits_for_matching_ack() {
+        let adapter = heartbeat_adapter();
+        let (outbound, mut inbound) = mpsc::channel(1);
+        let (connection_id, welcome) = adapter
+            .register_worker_control(
+                &core_v1::WorkerHello {
+                    plugin_instance_name: "worker_1".to_string(),
+                    generation: 99,
+                    protocol_version: 1,
+                },
+                outbound,
+            )
+            .unwrap();
+        assert_eq!(
+            welcome.desired_state,
+            core_v1::DesiredPluginState::Running as i32
+        );
+
+        let acknowledger = {
+            let adapter = adapter.clone();
+            thread::spawn(move || {
+                let frame = inbound
+                    .blocking_recv()
+                    .expect("Kernel must send Shutdown")
+                    .expect("Kernel control stream must remain healthy");
+                let Some(core_v1::kernel_to_worker::Body::Shutdown(shutdown)) = frame.body else {
+                    panic!("expected WorkerShutdown frame");
+                };
+                adapter
+                    .accept_shutdown_ack(&core_v1::WorkerShutdownAck {
+                        plugin_instance_name: "worker_1".to_string(),
+                        generation: 99,
+                        shutdown_id: shutdown.shutdown_id,
+                        drained: true,
+                        detail: "drained".to_string(),
+                    })
+                    .unwrap();
+            })
+        };
+
+        assert!(adapter.request_worker_shutdown("worker_1", "TEST_STOP", false));
+        acknowledger.join().unwrap();
+        let instances = adapter.instances.lock().unwrap();
+        let pending = instances["worker_1"].pending_shutdown.as_ref().unwrap();
+        assert!(pending.acknowledged);
+        assert!(pending.drained);
+        drop(instances);
+        adapter.unregister_worker_control("worker_1", 99, connection_id);
+    }
+
+    #[test]
+    fn watch_operations_replays_bounded_operation_and_runtime_events() {
+        use core_v1::kernel_service_server::KernelService;
+
+        let adapter = heartbeat_adapter();
+        let operation = adapter.operation_running(
+            "operations/launch-worker_1".to_string(),
+            "worker_1".to_string(),
+        );
+        adapter.publish_runtime_event(
+            core_v1::RuntimeEventType::WatchdogTriggered,
+            "worker_1",
+            "TEST_WATCHDOG",
+            "test runtime event",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let response = adapter
+                .watch_operations(Request::new(core_v1::WatchOperationsRequest {
+                    context: None,
+                    operation_names: Vec::new(),
+                    resume_token: String::new(),
+                }))
+                .await
+                .unwrap();
+            let mut stream = response.into_inner();
+            let first = stream.next().await.unwrap().unwrap();
+            assert_eq!(first.operation.unwrap().name, operation.name);
+            assert_eq!(first.sequence_number, 1);
+            let second = stream.next().await.unwrap().unwrap();
+            assert_eq!(
+                second.runtime_event.unwrap().r#type,
+                core_v1::RuntimeEventType::WatchdogTriggered as i32
+            );
+            assert_eq!(second.sequence_number, 2);
+        });
+    }
+
+    #[test]
+    fn cancel_operation_reaps_worker_and_emits_terminal_operation() {
+        use core_v1::kernel_service_server::KernelService;
+
+        let journal = Arc::new(RecordingRuntimeJournal::default());
+        let adapter = heartbeat_adapter().with_runtime_journal(journal.clone());
+        let running = adapter.operation_running(
+            "operations/launch-worker_1".to_string(),
+            "worker_1".to_string(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cancelled = runtime
+            .block_on(
+                adapter.cancel_operation(Request::new(core_v1::CancelOperationRequest {
+                    mutation: None,
+                    name: running.name.clone(),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(cancelled.state, core_v1::OperationState::Cancelled as i32);
+        assert!(!adapter.instances.lock().unwrap().contains_key("worker_1"));
+        let events = adapter.operation_events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            event.operation.as_ref().is_some_and(|operation| {
+                operation.name == running.name
+                    && operation.state == core_v1::OperationState::Cancelled as i32
+            })
+        }));
+        assert!(events.iter().any(|event| {
+            event.runtime_event.as_ref().is_some_and(|runtime_event| {
+                runtime_event.r#type == core_v1::RuntimeEventType::CleanupCompleted as i32
+            })
+        }));
+        assert!(journal.records.lock().unwrap().iter().any(|record| {
+            record.event == RuntimeJournalEvent::InstanceTerminated
+                && record.instance_name.as_deref() == Some("worker_1")
+                && record.reason_code == "CANCEL_COMPLETE"
+        }));
+    }
+
+    #[test]
+    fn adapter_degraded_state_is_visible_on_managed_instances() {
+        let adapter = heartbeat_adapter();
+        adapter.adapter_available.store(false, Ordering::Relaxed);
+        let instances = adapter.instances.lock().unwrap();
+        let instance = to_plugin_instance(
+            &adapter.daemon,
+            "worker_1",
+            &instances["worker_1"],
+            adapter.adapter_available.load(Ordering::Relaxed),
+        );
+        let health = instance.health.unwrap();
+        assert_eq!(health.status, core_v1::HealthStatus::Degraded as i32);
+        assert_eq!(health.reason_code, "ADAPTER_DEGRADED");
+    }
+
+    #[test]
+    fn multi_adapter_bindings_preserve_provenance_without_relaxing_enforcement() {
+        let merged = merge_bindings(vec![
+            DeviceBinding {
+                device_id: "nvidia-0".to_string(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: vec![44],
+                enforcement: EnforcementMode::Hard,
+                adapter_id: "nvidia".to_string(),
+                reason_code: "TEST".to_string(),
+            },
+            DeviceBinding {
+                device_id: "amd-0".to_string(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: vec![45],
+                enforcement: EnforcementMode::Hard,
+                adapter_id: "amd".to_string(),
+                reason_code: "TEST".to_string(),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(merged.device_id, "nvidia-0,amd-0");
+        assert_eq!(merged.adapter_id, "amd,nvidia");
+        assert_eq!(merged.required_gids, vec![44, 45]);
+        assert_eq!(merged.enforcement, EnforcementMode::Hard);
+    }
+
+    #[test]
+    fn multi_adapter_bindings_reject_mixed_enforcement() {
+        let error = merge_bindings(vec![
+            DeviceBinding {
+                device_id: "nvidia-0".to_string(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: Vec::new(),
+                enforcement: EnforcementMode::Hard,
+                adapter_id: "nvidia".to_string(),
+                reason_code: "TEST".to_string(),
+            },
+            DeviceBinding {
+                device_id: "virtual-0".to_string(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: Vec::new(),
+                enforcement: EnforcementMode::VisibilityOnly,
+                adapter_id: "virtual".to_string(),
+                reason_code: "TEST".to_string(),
+            },
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.reason_code, "MIXED_DEVICE_ENFORCEMENT");
+    }
 }

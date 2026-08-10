@@ -3,7 +3,6 @@ syntax = "proto3";
 package cyrene.core.v1;
 
 import "google/protobuf/any.proto";
-import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "google/rpc/status.proto";
 
@@ -89,6 +88,26 @@ message OperationEvent {
   string resume_token = 2;
   uint64 sequence_number = 3;
   Operation operation = 4;
+  RuntimeEvent runtime_event = 5;
+}
+
+enum RuntimeEventType {
+  RUNTIME_EVENT_TYPE_UNSPECIFIED = 0;
+  RUNTIME_EVENT_TYPE_INSTANCE_STATE_CHANGED = 1;
+  RUNTIME_EVENT_TYPE_WATCHDOG_TRIGGERED = 2;
+  RUNTIME_EVENT_TYPE_OOM_KILLED = 3;
+  RUNTIME_EVENT_TYPE_ADAPTER_DEGRADED = 4;
+  RUNTIME_EVENT_TYPE_CLEANUP_COMPLETED = 5;
+  RUNTIME_EVENT_TYPE_KERNEL_RECONCILED = 6;
+}
+
+// Bounded event-stream record for runtime evidence that is not itself an LRO.
+message RuntimeEvent {
+  RuntimeEventType type = 1;
+  string target_resource_name = 2;
+  string reason_code = 3;
+  string summary = 4;
+  google.protobuf.Timestamp observed_at = 5;
 }
 
 message GetOperationRequest {

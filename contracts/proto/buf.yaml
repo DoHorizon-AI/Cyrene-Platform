@@ -12,6 +12,21 @@ lint:
   except:
     - RPC_REQUEST_STANDARD_NAME
     - RPC_RESPONSE_STANDARD_NAME
+    # Core intentionally reuses typed domain responses (Operation,
+    # ResourceLease) across lifecycle RPCs rather than generating wrappers.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    # These Java options were inconsistent in the original v1 descriptor.
+    # Changing them rewrites existing Kotlin/Java generated APIs, so normalise
+    # only in a coordinated future major version rather than silently breaking
+    # consumers during a Core v1 contract change.
+    - PACKAGE_SAME_JAVA_MULTIPLE_FILES
+    - PACKAGE_SAME_JAVA_PACKAGE
+  # `google.rpc.Status` and `cy.plugin.v1` are imported compatibility
+  # contracts. Core v1 is the governed module; these external/frozen packages
+  # cannot be renamed merely to satisfy its lint profile.
+  ignore:
+    - google/rpc/status.proto
+    - plugin/v1
 
 breaking:
   use:
