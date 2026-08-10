@@ -340,6 +340,16 @@ pub struct VerifiedInstallation {
     pub installation_name: String,
     pub manifest_digest: String,
     pub artifact_digest: String,
+    pub verified_signature_identity: String,
+}
+
+/// A launch plan accompanied by the exact immutable installation identity the
+/// outer resolver verified. Kernel code compares this binding with the
+/// `InstalledPluginRef` before it can hand the plan to sandboxd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLaunchPlan {
+    pub installation: VerifiedInstallation,
+    pub plan: LaunchPlan,
 }
 
 /// Port for obtaining a launch plan from a previously verified installation.
@@ -352,7 +362,7 @@ pub trait InstalledPluginResolver: Send + Sync {
         &self,
         installation: &VerifiedInstallation,
         instance_name: &str,
-    ) -> Result<LaunchPlan, ProviderError>;
+    ) -> Result<ResolvedLaunchPlan, ProviderError>;
 }
 
 /// 由 cgroup v2 直接读取的真实物理消耗量。

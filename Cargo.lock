@@ -282,6 +282,7 @@ dependencies = [
  "cy-kernel-api",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

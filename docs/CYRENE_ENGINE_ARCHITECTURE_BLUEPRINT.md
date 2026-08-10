@@ -1409,8 +1409,8 @@ Core 在不访问任何服务仓的条件下可独立构建。
 - 新增 `cyrene.core.v1`；
 - 定义 outbound `NodeControlService.Connect` 与可选 direct `KernelService`；
 - 建立 Buf lint/breaking、Core descriptor 和 Rust codegen；
-- 建立 Rust golden fixture；Kotlin/Python/TypeScript SDK 与跨语言 TCK 延后到
-  P3/P4 的控制面和插件生态阶段；
+- 建立 Rust golden fixture；Worker-control 的 Python/Kotlin 无依赖 TCK 已与
+  Core v1 wire fixtures 同步，完整 SDK 发布与各服务仓 E2E 仍在 P3/P4；
 - 标记任意命令 RPC deprecated。
 
 验收：干净环境一次命令可构建 Rust Core、生成结果无漂移，descriptor 与
@@ -1426,7 +1426,8 @@ golden fixture 一致。
 - Supervisor 正确处理 cgroup 进程树、wait/reap 超时、OOM、优雅停止和资源回收；
   IPC 心跳看门狗必须在生产验收前完成，不能以 PID 存活替代；
 - 生产部署采用 systemd control-group fate sharing，不在 P2 认领孤儿实例；
-- `LaunchPlugin` 只能引用已验证安装。
+- `LaunchPlugin` 只能引用已验证安装；外层 resolver 返回的 LaunchPlan 必须带回
+  manifest/artifact digest 与签名身份的同一绑定，SBOM/provenance evidence 不符即拒绝。
 
 验收：并发租约不重复分配；未知硬件不伪造能力；Adapter 失联阻止新租约且不
 崩溃 Kernel；启动失败、OOM、D 状态和节点断联都有事实状态；cgroup 进程树可

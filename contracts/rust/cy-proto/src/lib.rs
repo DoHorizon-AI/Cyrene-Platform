@@ -160,6 +160,96 @@ mod tests {
     }
 
     #[test]
+    fn worker_control_tck_fixtures_round_trip() {
+        let hello =
+            core_v1::WorkerToKernel::decode(fixture_bytes("worker_control_hello").as_slice())
+                .unwrap();
+        assert!(matches!(
+            hello.body,
+            Some(core_v1::worker_to_kernel::Body::Hello(core_v1::WorkerHello {
+                ref plugin_instance_name,
+                generation: 7,
+                protocol_version: 1,
+            })) if plugin_instance_name == "worker-1"
+        ));
+
+        let heartbeat =
+            core_v1::WorkerToKernel::decode(fixture_bytes("worker_control_heartbeat").as_slice())
+                .unwrap();
+        assert!(matches!(
+            heartbeat.body,
+            Some(core_v1::worker_to_kernel::Body::Heartbeat(
+                core_v1::WorkerHeartbeat {
+                    generation: 7,
+                    sequence_number: 1,
+                    runtime_state: 5,
+                    ..
+                }
+            ))
+        ));
+
+        let shutdown_ack = core_v1::WorkerToKernel::decode(
+            fixture_bytes("worker_control_shutdown_ack").as_slice(),
+        )
+        .unwrap();
+        assert!(matches!(
+            shutdown_ack.body,
+            Some(core_v1::worker_to_kernel::Body::ShutdownAck(core_v1::WorkerShutdownAck {
+                ref shutdown_id,
+                generation: 7,
+                drained: true,
+                ..
+            })) if shutdown_id == "shutdown-1"
+        ));
+
+        let welcome =
+            core_v1::KernelToWorker::decode(fixture_bytes("worker_control_welcome").as_slice())
+                .unwrap();
+        assert!(matches!(
+            welcome.body,
+            Some(core_v1::kernel_to_worker::Body::Welcome(
+                core_v1::WorkerWelcome {
+                    desired_state: 1,
+                    desired_generation: 7,
+                    next_heartbeat_after: Some(prost_types::Duration {
+                        seconds: 5,
+                        nanos: 0
+                    }),
+                }
+            ))
+        ));
+
+        let heartbeat_ack = core_v1::KernelToWorker::decode(
+            fixture_bytes("worker_control_heartbeat_ack").as_slice(),
+        )
+        .unwrap();
+        assert!(matches!(
+            heartbeat_ack.body,
+            Some(core_v1::kernel_to_worker::Body::HeartbeatAck(
+                core_v1::WorkerHeartbeatAck {
+                    disposition: 1,
+                    accepted_sequence_number: 1,
+                    desired_state: 1,
+                    desired_generation: 7,
+                }
+            ))
+        ));
+
+        let shutdown =
+            core_v1::KernelToWorker::decode(fixture_bytes("worker_control_shutdown").as_slice())
+                .unwrap();
+        assert!(matches!(
+            shutdown.body,
+            Some(core_v1::kernel_to_worker::Body::Shutdown(core_v1::WorkerShutdown {
+                ref shutdown_id,
+                mode: 1,
+                ack_deadline: Some(prost_types::Duration { seconds: 3, nanos: 0 }),
+                ref reason_code,
+            })) if shutdown_id == "shutdown-1" && reason_code == "TERMINATE_REQUESTED"
+        ));
+    }
+
+    #[test]
     fn core_v1_does_not_expose_process_or_large_artifact_inputs() {
         let core_dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto/cyrene/core/v1");

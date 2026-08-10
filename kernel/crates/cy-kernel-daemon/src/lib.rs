@@ -1001,6 +1001,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         if plugin.installation_name.is_empty()
             || plugin.manifest_digest.is_empty()
             || plugin.artifact_digest.is_empty()
+            || plugin.verified_signature_identity.is_empty()
         {
             return Err(Status::failed_precondition(
                 "LaunchPlugin accepts only a verified InstalledPluginRef",
@@ -1051,8 +1052,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             installation_name: plugin.installation_name.clone(),
             manifest_digest: plugin.manifest_digest.clone(),
             artifact_digest: plugin.artifact_digest.clone(),
+            verified_signature_identity: plugin.verified_signature_identity.clone(),
         };
-        let mut plan = match self
+        let resolved = match self
             .resolver
             .resolve_launch_plan(&installation, &instance_name)
         {
@@ -1062,6 +1064,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 return Err(provider_status(error));
             }
         };
+        if resolved.installation != installation {
+            self.release_owned_lease(owned_lease, &lease);
+            return Err(Status::failed_precondition(
+                "resolver returned a launch plan for another verified installation",
+            ));
+        }
+        let mut plan = resolved.plan;
         plan.limits = lease.limits.clone();
         plan.environment = inject_heartbeat_environment(
             plan.environment,
@@ -2043,7 +2052,7 @@ mod tests {
             &self,
             _installation: &VerifiedInstallation,
             _instance_name: &str,
-        ) -> Result<LaunchPlan, ProviderError> {
+        ) -> Result<cy_kernel_api::ResolvedLaunchPlan, ProviderError> {
             Err(ProviderError::new(
                 "test",
                 "UNUSED",

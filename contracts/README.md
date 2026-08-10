@@ -5,6 +5,9 @@
 - `proto/` defines control and plugin RPC messages.
 - `schemas/` defines manifests and canonical resources.
 - `rust/` contains Rust mirrors and generated bindings.
+- `tck/` contains language-neutral protocol vectors and reference conformance
+  runners; plugin implementations must consume these rather than inventing
+  worker-control semantics.
 
 Advanced services may depend on released contract artifacts or a checked-out
 core repository. They must not depend on private paths inside the kernel or

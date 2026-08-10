@@ -1,0 +1,5 @@
+# name|expected|direction:type:generation:sequence:identifier;...
+graceful_shutdown|ACCEPT|W2K:HELLO:7:0:;K2W:WELCOME:7:0:;W2K:HEARTBEAT:7:1:;K2W:HEARTBEAT_ACK:7:1:;K2W:SHUTDOWN:0:0:shutdown-1;W2K:SHUTDOWN_ACK:7:0:shutdown-1
+heartbeat_before_hello|HELLO_REQUIRED|W2K:HEARTBEAT:7:1:
+duplicate_heartbeat|HEARTBEAT_SEQUENCE_INVALID|W2K:HELLO:7:0:;K2W:WELCOME:7:0:;W2K:HEARTBEAT:7:1:;W2K:HEARTBEAT:7:1:
+wrong_shutdown_ack|SHUTDOWN_ID_MISMATCH|W2K:HELLO:7:0:;K2W:WELCOME:7:0:;K2W:SHUTDOWN:0:0:shutdown-1;W2K:SHUTDOWN_ACK:7:0:shutdown-old

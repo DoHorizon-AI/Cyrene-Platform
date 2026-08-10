@@ -107,7 +107,8 @@ Adapter 失联或事实过期会停止新租约，向 `WatchOperations` 发布 `
 
 Kernel 不下载、安装或解析插件安装记录。外层
 `framework/crates/cy-installation-resolver` 读取安装服务已验证的
-`/var/lib/cyrene/installations/<installation>/launch.json`，校验 digest 并拒绝解析到
-安装目录外的可执行文件；它只经 `InstalledPluginResolver` 端口交给 Kernel 一个
-`LaunchPlan`。安装记录不能覆盖 Kernel 注入的保留心跳变量，也不能越过 sandboxd 的
-资源与设备强制执行。
+`/var/lib/cyrene/installations/<installation>/launch.json`，校验 manifest/artifact digest、
+签名身份、SBOM/provenance evidence，并拒绝解析到安装目录外的可执行文件；它只经
+`InstalledPluginResolver` 端口交给 Kernel 一个携带相同不可变身份的 `ResolvedLaunchPlan`。
+具体 OCI、签名与安装器契约见 `docs/operations/verified-installation-record.md`。安装记录
+不能覆盖 Kernel 注入的保留心跳变量，也不能越过 sandboxd 的资源与设备强制执行。
