@@ -48,8 +48,10 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 12. **Node 默认主动拨号，直连模式可选。**
     默认由 Rust Agent 建立到 Kotlin 的 mTLS 双向流；网络可达且经策略允许时，
     Kotlin 也可直接请求 Node 的 `KernelService`。两种模式复用同一命令消息。
-13. **开发统一进入 `develop`，`main` 只保存通过完整验收的可发布基线。**
-    禁止在 `main` 直接开发；完整流水线和真实环境测试缺一不可。
+13. **Rust 与 Kotlin 分线开发，`develop` 负责集成。**
+    Rust Kernel/Node Runtime 使用 `develop-kernel`，Kotlin Framework/Control
+    Plane 使用 `develop-framework`；跨语言变更合并到 `develop` 后，才形成
+    可发布候选。禁止在 `main` 直接开发；完整流水线和真实环境测试缺一不可。
 
 ## 2. RustRover 对当前仓库的只读检查结果
 
@@ -525,7 +527,12 @@ Core 源码。
 
 ### 6.7 分支与发布治理
 
-- `develop` 是所有日常开发、本地提交和持续集成的唯一默认分支。
+- `develop-kernel` 是 Rust Kernel/Node Runtime 的开发分支，负责 Rust
+  实现、Linux 适配器和相关契约生成链。
+- `develop-framework` 是 Kotlin Framework/Control Plane 的开发分支，负责
+  Pure Kotlin domain/application 与 Spring Boot adapters。
+- `develop` 是跨语言评审后的集成分支；两个开发分支的可合并变更都必须在
+  `develop` 汇合后再作为候选基线。
 - `main` 是受保护的可发布基线，禁止直接开发、直接提交或绕过门禁推送。
 - 只有 `develop` 的候选提交同时通过完整流水线和真实环境测试，才允许合并到
   `main`；仅有 mock、单元测试或窄范围 smoke 不能视为完成。
@@ -1372,8 +1379,8 @@ cyrene plugin OCI artifact
   UI/Shell 归服务插件所有。
 - 用新 ADR 取代“可安装 in-proc Rust/PyO3 插件”的旧定义。
 - 冻结 `cy.llm` 为 v0 compatibility namespace。
-- 固化 `develop` 日常开发、`main` 仅在完整流水线与真实测试通过后接收合并的
-  分支保护规则。
+- 固化 `develop-kernel`、`develop-framework` 分线开发，`develop` 集成，
+  `main` 仅在完整流水线与真实测试通过后接收合并的分支保护规则。
 
 验收：不存在同时生效、互相矛盾的仓库边界、分支策略或插件运行时规范；
 Core 在不访问任何服务仓的条件下可独立构建。
@@ -1541,8 +1548,9 @@ CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码�
 4. **分发：** 插件只以按 digest 寻址并通过策略验签的 OCI artifact 安装。
 5. **连接：** Node 默认主动拨号建立 mTLS 双向流；可选 direct KernelService，
    但两者共享协议语义且不能双主。
-6. **分支：** 所有开发与本地提交进入 `develop`；`main` 只接受完整流水线与
-   真实测试通过后的合并。
+6. **分支：** Rust 使用 `develop-kernel`，Kotlin 使用 `develop-framework`，
+   跨语言变更汇合到 `develop`；`main` 只接受完整流水线与真实测试通过后的
+   合并。
 
 仍需单独 ADR 决定的实现细节：
 

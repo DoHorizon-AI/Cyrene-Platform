@@ -23,10 +23,12 @@ artifact and are not separate installation channels.
 
 ## Branch and release policy
 
-- develop is the daily development and integration branch.
-- main is the release branch and accepts only pull requests whose head branch
-  is develop.
-- Both branches require pull requests, one independent approval, current
+- `develop-kernel` is the Rust Kernel/Node Runtime development branch.
+- `develop-framework` is the Kotlin Framework/Control Plane development branch.
+- `develop` is the reviewed cross-language integration branch.
+- `main` is the release branch and accepts only pull requests whose head branch
+  is `develop`.
+- `develop` and `main` require pull requests, one independent approval, current
   required checks, resolved conversations, and no force-push or deletion.
 - The main release PR additionally requires a release-evidence-verified label
   and a linked verification record.
