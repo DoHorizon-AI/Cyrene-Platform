@@ -279,11 +279,8 @@ dependencies = [
  "cy-platform-api",
  "cy-plugin-protocol",
  "cy-plugin-supervisor",
- "serde",
  "serde_json",
- "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -305,8 +302,6 @@ dependencies = [
  "cy-kernel-api",
  "cy-plugin-supervisor",
  "cy-proto",
- "cy-resource-manager",
- "cy-sandbox",
  "prost-types",
  "tokio-stream",
  "tonic",
@@ -319,7 +314,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "cy-plugin-protocol",
- "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -360,7 +354,6 @@ dependencies = [
  "async-trait",
  "cy-manifest",
  "serde",
- "tokio",
 ]
 
 [[package]]
@@ -371,17 +364,13 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
- "serde",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
 name = "cy-plugin-supervisor"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "bytes",
  "chrono",
  "cy-kernel-api",
  "cy-local-transport",
@@ -389,7 +378,6 @@ dependencies = [
  "cy-plugin-protocol",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
  "tokio",
  "tracing",

@@ -588,13 +588,13 @@ fn to_proto_link_type(link_type: AcceleratorLinkType) -> core_v1::AcceleratorLin
 }
 
 /// 将内部隔离执行模式转换为 Protobuf 协议枚举
-fn to_proto_enforcement(mode: cy_kernel_api::EnforcementMode) -> core_v1::EnforcementMode {
+fn to_proto_enforcement(mode: EnforcementMode) -> core_v1::EnforcementMode {
     match mode {
-        cy_kernel_api::EnforcementMode::Hard => core_v1::EnforcementMode::Hard,
-        cy_kernel_api::EnforcementMode::Soft => core_v1::EnforcementMode::Soft,
-        cy_kernel_api::EnforcementMode::VisibilityOnly => core_v1::EnforcementMode::VisibilityOnly,
-        cy_kernel_api::EnforcementMode::ObserveOnly => core_v1::EnforcementMode::ObserveOnly,
-        cy_kernel_api::EnforcementMode::Unenforced => core_v1::EnforcementMode::Unenforced,
+        EnforcementMode::Hard => core_v1::EnforcementMode::Hard,
+        EnforcementMode::Soft => core_v1::EnforcementMode::Soft,
+        EnforcementMode::VisibilityOnly => core_v1::EnforcementMode::VisibilityOnly,
+        EnforcementMode::ObserveOnly => core_v1::EnforcementMode::ObserveOnly,
+        EnforcementMode::Unenforced => core_v1::EnforcementMode::Unenforced,
     }
 }
 

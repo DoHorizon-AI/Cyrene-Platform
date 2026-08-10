@@ -34,12 +34,12 @@ pub trait Manifest: Serialize {
 
     /// 根据 `schemas/CANONICALIZATION.md` / RFC 8785 规则生成规范字节流。
     fn canonical_bytes(&self) -> Vec<u8> {
-        canonical::canonicalize(&self.canonical_value())
+        canonicalize(&self.canonical_value())
     }
 
     /// 计算规范字节流的小写十六进制 SHA-256 摘要。
     fn canonical_sha256_hex(&self) -> String {
-        canonical::canonical_sha256_hex(&self.canonical_value())
+        canonical_sha256_hex(&self.canonical_value())
     }
 }
 

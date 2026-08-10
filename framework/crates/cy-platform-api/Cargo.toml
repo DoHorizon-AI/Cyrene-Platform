@@ -7,4 +7,3 @@ edition = "2024"
 async-trait = "0.1.91"
 cy-manifest = { version = "0.1.0", path = "../../../contracts/rust/cy-manifest" }
 serde = { version = "1.0.229", features = ["derive"] }
-tokio = "1.53.1"
