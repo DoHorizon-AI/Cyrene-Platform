@@ -14,6 +14,108 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, time::Duration};
 
+/// Canonical, transport-independent Kernel vocabulary. New public ports must
+/// use these nouns; the remaining device/process structs below are internal
+/// compatibility and adapter-port types during migration.
+pub use cy_kernel_contract as semantic;
+
+/// Stable authority port implemented by a Kernel generation and projected by
+/// UDS/gRPC, C ABI and JVM clients. Principal identity is supplied by an
+/// authenticated transport adapter, never trusted from caller-controlled data.
+pub trait KernelAuthority: Send + Sync {
+    /// Return the semantic contract revision implemented by this authority.
+    fn contract_version(&self) -> &'static str {
+        semantic::CONTRACT_VERSION
+    }
+
+    /// Publish or reconcile one complete, expiring Provider observation.
+    fn reconcile_provider(
+        &self,
+        principal: &semantic::Principal,
+        snapshot: semantic::ProviderSnapshot,
+    ) -> Result<(), ProviderError>;
+
+    /// Atomically acquire resources for a holder under the authenticated
+    /// principal. Policy must already be compiled into the bounded query.
+    fn acquire_lease(
+        &self,
+        principal: &semantic::Principal,
+        holder: semantic::Identity,
+        query: semantic::ResourceQuery,
+        expires_at_unix_ms: u64,
+    ) -> Result<semantic::Lease, ProviderError>;
+
+    /// Renew an active lease without changing its resource authority.
+    fn renew_lease(
+        &self,
+        principal: &semantic::Principal,
+        lease: &semantic::Identity,
+        fence_token: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<semantic::Lease, ProviderError>;
+
+    /// Revoke or release a lease using its current fencing authority.
+    fn release_lease(
+        &self,
+        principal: &semantic::Principal,
+        lease: &semantic::Identity,
+        fence_token: u64,
+    ) -> Result<semantic::Lease, ProviderError>;
+
+    /// Start a Worker from an immutable externally verified execution
+    /// reference. The implementation delegates process work to a Provider.
+    fn start_worker(
+        &self,
+        principal: &semantic::Principal,
+        worker: semantic::Worker,
+    ) -> Result<semantic::Operation, ProviderError>;
+
+    /// Drain or stop one Worker using its generation and lease fence.
+    fn stop_worker(
+        &self,
+        principal: &semantic::Principal,
+        worker: &semantic::Identity,
+        lease: &semantic::Identity,
+        fence_token: u64,
+    ) -> Result<semantic::Operation, ProviderError>;
+
+    /// Cancel a managed Operation using its current identity generation.
+    fn cancel_operation(
+        &self,
+        principal: &semantic::Principal,
+        operation: &semantic::Identity,
+    ) -> Result<semantic::Operation, ProviderError>;
+
+    /// Publish Endpoint authorization metadata. Data remains outside Kernel.
+    fn publish_endpoint(
+        &self,
+        principal: &semantic::Principal,
+        endpoint: semantic::Endpoint,
+    ) -> Result<semantic::Endpoint, ProviderError>;
+
+    /// Authorize one grantee while its lease/fence authority remains valid.
+    fn authorize_endpoint(
+        &self,
+        principal: &semantic::Principal,
+        grant: semantic::EndpointGrant,
+    ) -> Result<semantic::EndpointGrant, ProviderError>;
+
+    /// Revoke a previously issued Endpoint grant.
+    fn revoke_endpoint(
+        &self,
+        principal: &semantic::Principal,
+        grant: &semantic::Identity,
+    ) -> Result<(), ProviderError>;
+
+    /// Replay immutable facts after a node-local sequence cursor.
+    fn events_after(
+        &self,
+        principal: &semantic::Principal,
+        sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<semantic::Event>, ProviderError>;
+}
+
 /// 资源隔离与限制的强制执行模式 (Enforcement Mode)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnforcementMode {

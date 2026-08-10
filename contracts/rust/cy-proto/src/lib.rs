@@ -35,6 +35,12 @@ pub mod cyrene {
             tonic::include_proto!("cyrene.sandbox.v1");
         }
     }
+
+    pub mod semantic {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.semantic.v1");
+        }
+    }
 }
 
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
@@ -43,10 +49,12 @@ pub use cyrene::core::v1 as core_v1;
 pub use cyrene::hardware::v1 as hardware_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.
 pub use cyrene::sandbox::v1 as sandbox_v1;
+/// Transport projection of the Kernel Semantic Contract v1 nouns.
+pub use cyrene::semantic::v1 as semantic_v1;
 
 #[cfg(test)]
 mod tests {
-    use super::{core_v1, hardware_v1, sandbox_v1};
+    use super::{core_v1, hardware_v1, sandbox_v1, semantic_v1};
     use prost::Message;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
@@ -314,5 +322,31 @@ mod tests {
             decoded.body,
             Some(sandbox_v1::sandbox_request::Body::Preflight(_))
         ));
+    }
+
+    #[test]
+    fn semantic_contract_projection_round_trips_generic_resources() {
+        let resource = semantic_v1::Resource {
+            identity: Some(semantic_v1::Identity {
+                id: "resource-1".to_string(),
+                generation: 7,
+            }),
+            provider: Some(semantic_v1::Identity {
+                id: "provider-1".to_string(),
+                generation: 3,
+            }),
+            resource_class: "accelerator".to_string(),
+            capabilities: vec![semantic_v1::Capability {
+                id: "accelerator.compute".to_string(),
+                revision: 1,
+                properties: Default::default(),
+            }],
+            capacity: Default::default(),
+            attributes: Default::default(),
+        };
+        let encoded = resource.encode_to_vec();
+        let decoded = semantic_v1::Resource::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded, resource);
+        assert_eq!(decoded.resource_class, "accelerator");
     }
 }

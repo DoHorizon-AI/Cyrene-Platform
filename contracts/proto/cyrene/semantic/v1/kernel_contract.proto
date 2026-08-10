@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+package cyrene.semantic.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.semantic.v1";
+option java_outer_classname = "CyreneKernelSemanticContractProto";
+
+message Identity {
+  string id = 1;
+  uint64 generation = 2;
+}
+
+message Principal {
+  Identity identity = 1;
+}
+
+message Capability {
+  string id = 1;
+  uint32 revision = 2;
+  map<string, string> properties = 3;
+}
+
+message CapabilityRequirement {
+  string id = 1;
+  uint32 minimum_revision = 2;
+  map<string, string> required_properties = 3;
+}
+
+message Quantity {
+  uint64 value = 1;
+  string unit = 2;
+}
+
+enum ProviderState {
+  PROVIDER_STATE_UNSPECIFIED = 0;
+  PROVIDER_STATE_READY = 1;
+  PROVIDER_STATE_DEGRADED = 2;
+  PROVIDER_STATE_UNAVAILABLE = 3;
+}
+
+message Provider {
+  Identity identity = 1;
+  ProviderState state = 2;
+  repeated Capability capabilities = 3;
+}
+
+message Resource {
+  Identity identity = 1;
+  Identity provider = 2;
+  string resource_class = 3;
+  repeated Capability capabilities = 4;
+  map<string, Quantity> capacity = 5;
+  map<string, string> attributes = 6;
+}
+
+message ResourceQuery {
+  string resource_class = 1;
+  uint32 count = 2;
+  repeated CapabilityRequirement required_capabilities = 3;
+  map<string, Quantity> minimum_capacity = 4;
+}
+
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0;
+  LEASE_STATE_ACTIVE = 1;
+  LEASE_STATE_RELEASING = 2;
+  LEASE_STATE_RELEASED = 3;
+  LEASE_STATE_EXPIRED = 4;
+  LEASE_STATE_REVOKED = 5;
+  LEASE_STATE_FAILED = 6;
+}
+
+message Lease {
+  Identity identity = 1;
+  Identity holder = 2;
+  repeated Identity resources = 3;
+  LeaseState state = 4;
+  uint64 fence_token = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+enum WorkerState {
+  WORKER_STATE_UNSPECIFIED = 0;
+  WORKER_STATE_REGISTERED = 1;
+  WORKER_STATE_STARTING = 2;
+  WORKER_STATE_RUNNING = 3;
+  WORKER_STATE_DRAINING = 4;
+  WORKER_STATE_STOPPED = 5;
+  WORKER_STATE_FAILED = 6;
+  WORKER_STATE_LOST = 7;
+}
+
+message Worker {
+  Identity identity = 1;
+  Identity principal = 2;
+  Identity provider = 3;
+  Identity lease = 4;
+  WorkerState state = 5;
+  string execution_ref = 6;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_CREATED = 1;
+  OPERATION_STATE_PENDING = 2;
+  OPERATION_STATE_RUNNING = 3;
+  OPERATION_STATE_SUCCEEDED = 4;
+  OPERATION_STATE_FAILED = 5;
+  OPERATION_STATE_CANCELLING = 6;
+  OPERATION_STATE_CANCELLED = 7;
+  OPERATION_STATE_LOST = 8;
+}
+
+message Operation {
+  Identity identity = 1;
+  Identity owner = 2;
+  Identity executor = 3;
+  string kind = 4;
+  OperationState state = 5;
+  google.protobuf.Timestamp deadline = 6;
+  Identity parent = 7;
+  map<string, string> metadata = 8;
+}
+
+message Endpoint {
+  Identity identity = 1;
+  Identity provider = 2;
+  Identity owner = 3;
+  string transport = 4;
+  string schema_id = 5;
+  repeated Capability capabilities = 6;
+  map<string, string> public_attributes = 7;
+}
+
+message EndpointGrant {
+  Identity identity = 1;
+  Identity endpoint = 2;
+  Identity grantee = 3;
+  Identity lease = 4;
+  uint64 fence_token = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message Event {
+  uint64 sequence = 1;
+  Identity subject = 2;
+  string kind = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  string schema_id = 5;
+  bytes body = 6;
+}
+
+message ProviderSnapshot {
+  Identity provider = 1;
+  uint64 snapshot_generation = 2;
+  repeated Resource resources = 3;
+  repeated Worker workers = 4;
+  repeated Endpoint endpoints = 5;
+  google.protobuf.Timestamp sampled_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}

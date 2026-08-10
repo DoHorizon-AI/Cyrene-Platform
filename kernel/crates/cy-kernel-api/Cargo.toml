@@ -8,3 +8,6 @@ license = "Apache-2.0"
 [lib]
 name = "cy_kernel_api"
 path = "src/lib.rs"
+
+[dependencies]
+cy-kernel-contract = { path = "../../../contracts/rust/cy-kernel-contract" }

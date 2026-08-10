@@ -22,3 +22,5 @@ jobs:
         run: bash tools/ci/check-architecture-governance.sh
       - name: Check Core v1 contract
         run: bash tools/ci/check-core-v1-contract.sh
+      - name: Check Kernel semantic contract
+        run: bash tools/ci/check-kernel-semantic-contract.sh
