@@ -192,6 +192,8 @@ All fields optional, default empty:
 ```toml
 [dependencies]
 required_plugins     = []   # other plugin ids that must be present
+optional_plugins     = []   # other plugin ids used when available
+conflicts            = []   # plugin ids that cannot coexist
 required_capabilities = []  # feature strings that must be provided
 system_dependencies  = []   # host binaries (e.g. "nvidia-smi")
 python_packages      = []   # pip package names

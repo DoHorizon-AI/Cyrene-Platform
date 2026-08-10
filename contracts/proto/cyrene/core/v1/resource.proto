@@ -104,6 +104,23 @@ message AcceleratorPartition {
   HealthReport health = 4;
 }
 
+enum AcceleratorLinkType {
+  ACCELERATOR_LINK_TYPE_UNSPECIFIED = 0;
+  ACCELERATOR_LINK_TYPE_PCIE = 1;
+  ACCELERATOR_LINK_TYPE_NVLINK = 2;
+  ACCELERATOR_LINK_TYPE_XGMI = 3;
+  ACCELERATOR_LINK_TYPE_OTHER = 100;
+}
+
+message AcceleratorLink {
+  string peer_device_id = 1;
+  AcceleratorLinkType link_type = 2;
+  uint32 link_count = 3;
+  uint32 width = 4;
+  uint64 bandwidth_bytes_per_second = 5;
+  bool stable = 6;
+}
+
 message AcceleratorDevice {
   string device_id = 1;
   AcceleratorKind kind = 2;
@@ -116,6 +133,8 @@ message AcceleratorDevice {
   repeated string features = 9;
   repeated AcceleratorPartition partitions = 10;
   HealthReport health = 11;
+  optional int32 numa_node = 12;
+  repeated AcceleratorLink links = 13;
 }
 
 message EnforcementReport {
@@ -157,6 +176,7 @@ message ResourceLease {
   repeated EnforcementReport enforcement = 6;
   google.protobuf.Timestamp expires_at = 7;
   uint64 fence_token = 8;
+  uint64 inventory_generation = 9;
 }
 
 message ReserveResourcesRequest {

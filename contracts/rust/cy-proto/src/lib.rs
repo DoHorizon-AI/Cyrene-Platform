@@ -1,8 +1,14 @@
-//! Generated CYRENE Core v1 protocol types.
+//! 自动生成的 CYRENE Core v1 平台核心网络协议与 gRPC 类型。
 //!
-//! The schema is compiled from `contracts/proto/cyrene/core/v1/` by
-//! `build.rs` (tonic-build) and included here. Proto files are the single
-//! contract source; do not hand-edit generated code.
+//! 【协议契约源头】
+//! 本模块中的代码是在编译期由 `build.rs` 通过 `tonic-build` 编译 `contracts/proto/cyrene/core/v1/`
+//! 下的 Protobuf 文件生成的。
+//! Proto 文件是整个平台的单一契约事实来源（Single Source of Truth），包含：
+//! - 节点问候与握手协议 ([`core_v1::NodeHello`], [`core_v1::NodeWelcome`])
+//! - 硬件加速卡拓扑与设备信息 ([`core_v1::AcceleratorDevice`])
+//! - 资源租约管理与围栏令牌 ([`core_v1::ReserveResourcesRequest`], [`core_v1::ResourceLease`])
+//! - 插件进程生命周期与清理状态 ([`core_v1::PluginProcess`])
+//! - 控制面下发指令与心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportHeartbeatResponse`])
 
 pub mod google {
     pub mod rpc {
@@ -10,7 +16,7 @@ pub mod google {
     }
 }
 
-/// Generated Core v1 messages, enums, clients, and servers.
+/// 自动生成的 Core v1 消息、枚举、客户端及服务器端定义模块。
 pub mod cyrene {
     pub mod core {
         pub mod v1 {
@@ -19,7 +25,7 @@ pub mod cyrene {
     }
 }
 
-/// Short alias for callers that only need Core v1 symbols.
+/// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
 pub use cyrene::core::v1 as core_v1;
 
 #[cfg(test)]
@@ -109,6 +115,32 @@ mod tests {
             stale.disposition,
             core_v1::HeartbeatDisposition::StaleGeneration as i32
         );
+
+        let device_bytes = fixture_bytes("accelerator_topology");
+        let device = core_v1::AcceleratorDevice::decode(device_bytes.as_slice()).unwrap();
+        assert_eq!(device.encode_to_vec(), device_bytes);
+        assert_eq!(device.device_id, "gpu-0");
+        assert_eq!(device.numa_node, Some(1));
+        assert_eq!(device.links[0].peer_device_id, "gpu-1");
+        assert_eq!(
+            device.links[0].link_type,
+            core_v1::AcceleratorLinkType::Nvlink as i32
+        );
+
+        let lease_bytes = fixture_bytes("lease_inventory_generation");
+        let lease = core_v1::ResourceLease::decode(lease_bytes.as_slice()).unwrap();
+        assert_eq!(lease.encode_to_vec(), lease_bytes);
+        assert_eq!(lease.fence_token, 9);
+        assert_eq!(lease.inventory_generation, 42);
+
+        let process_bytes = fixture_bytes("process_cleanup_stuck");
+        let process = core_v1::PluginProcess::decode(process_bytes.as_slice()).unwrap();
+        assert_eq!(process.encode_to_vec(), process_bytes);
+        assert_eq!(
+            process.cleanup_state,
+            core_v1::ProcessCleanupState::Stuck as i32
+        );
+        assert_eq!(process.conditions[0].reason_code, "REAP_TIMEOUT");
     }
 
     #[test]

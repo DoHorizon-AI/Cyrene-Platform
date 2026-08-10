@@ -1382,22 +1382,25 @@ Core 在不访问任何服务仓的条件下可独立构建。
 
 - 新增 `cyrene.core.v1`；
 - 定义 outbound `NodeControlService.Connect` 与可选 direct `KernelService`；
-- 建立 Buf lint/breaking 和 Rust/Kotlin/Python/TypeScript codegen；
-- 建立跨语言 golden fixture 与 TCK 骨架；
+- 建立 Buf lint/breaking、Core descriptor 和 Rust codegen；
+- 建立 Rust golden fixture；Kotlin/Python/TypeScript SDK 与跨语言 TCK 延后到
+  P3/P4 的控制面和插件生态阶段；
 - 标记任意命令 RPC deprecated。
 
-验收：干净环境一次命令可生成全部 SDK，生成结果无漂移。
+验收：干净环境一次命令可构建 Rust Core、生成结果无漂移，descriptor 与
+golden fixture 一致。
 
 ### P2：Rust Kernel 抽象
 
-- 增加 provider/adapter traits；
-- 单卡身份、分区、资源租约和 fence token；
-- cgroup v2、native、bwrap/OCI 后端；
-- Supervisor 正确 wait/reap、主动 health、优雅停止和资源回收；
+- 增加 provider/adapter traits 和 Linux pre-flight 能力报告；
+- NVIDIA 单卡身份、分区、NUMA/拓扑、完整设备节点、资源租约和 fence token；
+- 以 cgroup v2 + native process 为首版执行后端，预留但不实现 bwrap/OCI；
+- Supervisor 正确处理 cgroup 进程树、wait/reap 超时、主动 health、OOM、优雅停止和资源回收；
+- 生产部署采用 systemd control-group fate sharing，不在 P2 认领孤儿实例；
 - `LaunchPlugin` 只能引用已验证安装。
 
-验收：并发租约不重复分配；启动失败和节点断联可回收；Python 崩溃不影响
-Kernel。
+验收：并发租约不重复分配；未知硬件不伪造能力；启动失败、OOM、D 状态和
+节点断联都有事实状态；cgroup 进程树可清理；Python 崩溃不影响 Kernel。
 
 ### P3：Kotlin 控制面
 
@@ -1507,7 +1510,7 @@ CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码�
 
 ### 10.2 分阶段验收最低要求
 
-- **P0/P1：** manifest 文档、Schema、Rust/Kotlin/Python fixture 一致；Buf
+- **P0/P1：** manifest 文档、Schema、Rust 模型和 Rust fixture 一致；Buf
   lint/breaking 和 descriptor drift 检查通过；Core v1 不出现 Prompt、LoRA、
   Training 等业务类型。
 - **P2/P3：** 并发租约不重复分配；未知硬件不伪造能力；supervisor 能发现
@@ -1543,13 +1546,15 @@ CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码�
 
 仍需单独 ADR 决定的实现细节：
 
-1. **第一版沙盒基线：** native + cgroup、bwrap，还是 OCI container runtime；
-   无论选择哪一种，都必须通过同一个 `SandboxBackend`。
-2. **签名信任模型：** keyless/OIDC、组织密钥或二者组合，以及离线部署的信任根
+1. **第一版沙盒基线：** 已确定为 native process + cgroup v2；bwrap/OCI
+   后端继续通过同一个 `SandboxBackend` 预留到后续阶段。
+2. **Kernel 崩溃策略：** P2 采用 systemd control-group fate sharing；重启时
+   清理残留 cgroup，不做进程 Adopt。
+3. **签名信任模型：** keyless/OIDC、组织密钥或二者组合，以及离线部署的信任根
    轮换与撤销策略。
-3. **组合发行仓：** 是否创建可选 `cyrene-distribution`，以及 catalog lock 的
+4. **组合发行仓：** 是否创建可选 `cyrene-distribution`，以及 catalog lock 的
    schema 和发布责任人。
-4. **直连启用条件：** 哪些网络拓扑允许 direct 模式，以及如何配置单一命令
+5. **直连启用条件：** 哪些网络拓扑允许 direct 模式，以及如何配置单一命令
    权威和故障切换。
 
 在这些 ADR 通过前，本蓝图用于评审和约束后续脚手架，不表示现有实现已完成

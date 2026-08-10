@@ -76,6 +76,20 @@ message ExitStatus {
   google.protobuf.Timestamp exited_at = 4;
 }
 
+enum ProcessCleanupState {
+  PROCESS_CLEANUP_STATE_UNSPECIFIED = 0;
+  PROCESS_CLEANUP_STATE_NOT_STARTED = 1;
+  PROCESS_CLEANUP_STATE_IN_PROGRESS = 2;
+  PROCESS_CLEANUP_STATE_COMPLETE = 3;
+  PROCESS_CLEANUP_STATE_STUCK = 4;
+}
+
+message RuntimeCondition {
+  string reason_code = 1;
+  string summary = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
 message PluginProcess {
   string name = 1;
   InstalledPluginRef plugin = 2;
@@ -87,4 +101,6 @@ message PluginProcess {
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
   ExitStatus last_exit = 10;
+  ProcessCleanupState cleanup_state = 11;
+  repeated RuntimeCondition conditions = 12;
 }
