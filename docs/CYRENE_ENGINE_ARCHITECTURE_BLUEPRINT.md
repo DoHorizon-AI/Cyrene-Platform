@@ -1523,6 +1523,12 @@ CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码�
 
 ## 11. 已确认决策与剩余 ADR
 
+本蓝图的治理落地由以下 ADR 约束：
+
+- [Core 仓库治理](adr/ADR-CORE-REPOSITORY-GOVERNANCE.md)
+- [插件执行边界](adr/ADR-PLUGIN-EXECUTION-BOUNDARY.md)
+- [cy.llm 迁移切换](adr/ADR-LEGACY-CY-LLM-CUTOVER.md)
+
 以下方向已确认，不再作为二选一问题：
 
 1. **仓库：** 方案 A，开源 Core + 每个官方服务独立仓库。

@@ -45,9 +45,12 @@ worker code.
 
 ### Worker and advanced-service plugins
 
-Python, JVM, Rust, and web assets run outside the kernel. They implement concrete
-data, training, inference, gateway, UI, and evaluation behavior. A worker crash
-must become a lifecycle event, not a core crash.
+Python, JVM, and third-party Rust business code run outside the kernel. They
+implement concrete data, training, inference, gateway, UI, and evaluation
+behavior. A worker crash must become a lifecycle event, not a core crash.
+Statically compiled Rust code is allowed inside Core only for audited host,
+device, transport, and sandbox adapters; it is not an installable plugin
+runtime. The Core repository does not link PyO3 or AI compute runtimes.
 
 ## Communication planes
 
@@ -62,6 +65,10 @@ Every advanced service declares its identity, protocol version, required
 extension points, and source roots in `service.json`. Other plugins continue to
 use `plugin.toml`. The framework discovers declarations; it never imports one of
 the six product packages by name.
+
+service.json is first-party service-bundle metadata. plugin.toml is component
+manifest metadata inside the same signed package; the two files are not
+alternative installation protocols.
 
 ## UI boundary
 

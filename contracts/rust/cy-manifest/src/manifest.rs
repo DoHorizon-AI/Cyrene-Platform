@@ -427,7 +427,6 @@ impl std::fmt::Display for Edition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Runtime {
-    InProcRust,
     SubprocessPython,
     SubprocessJvm,
     Service,
@@ -436,7 +435,6 @@ pub enum Runtime {
 impl Runtime {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Runtime::InProcRust => "in-proc-rust",
             Runtime::SubprocessPython => "subprocess-python",
             Runtime::SubprocessJvm => "subprocess-jvm",
             Runtime::Service => "service",
@@ -542,8 +540,6 @@ pub struct PluginMetadata {
     pub license_gate: bool,
     #[serde(default)]
     pub entrypoint: Option<String>,
-    #[serde(default, rename = "crate")]
-    pub krate: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]

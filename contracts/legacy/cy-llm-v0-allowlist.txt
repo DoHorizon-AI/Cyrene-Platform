@@ -1,0 +1,6 @@
+# P0 transition allowlist.
+# P0 freezes these paths; P1 must migrate them and make this list empty.
+contracts/proto/ai_service.proto
+contracts/proto/agent_service.proto
+contracts/rust/cy-proto/**
+kernel/crates/cy-node-agent/**

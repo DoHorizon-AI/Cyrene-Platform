@@ -9,6 +9,10 @@ Navigator, or Echo product logic. Those products and other closed plugins live
 in the private advanced-services repository and depend on versioned contracts
 from this repository.
 
+Daily development and integration use develop. main is a protected release
+branch and accepts only reviewed pull requests from develop after the required
+Core CI, architecture-governance, and release-evidence checks pass.
+
 ## Repository layout
 
 | Directory | Responsibility |
@@ -25,6 +29,10 @@ advanced-services migration archive rather than published as core. The target
 framework may evolve toward Kotlin/JVM, but it must continue to consume the
 language-neutral contracts in `contracts/`; business behavior must not move
 back into the kernel.
+
+service.json describes a first-party service bundle. plugin.toml describes an
+installable component inside the signed package; these are metadata levels, not
+two package or installation protocols.
 
 ## Hardware boundary
 

@@ -1,9 +1,15 @@
 # ADR-PLUGIN-RUNTIME: CYRENE Local Plugin Runtime Architecture
 
-- **Status:** Approved / Normative
+- **Status:** Superseded / Historical
 - **Date:** 2026-07-24
 - **Authors:** CYRENE Platform Team
 - **Context:** Modularizing CYRENE into a platform architecture with zero-port local process isolation and compile-time Rust extensions.
+
+> This ADR is preserved as historical context. Installable business-plugin
+> runtime decisions are superseded by
+> [ADR-PLUGIN-EXECUTION-BOUNDARY](ADR-PLUGIN-EXECUTION-BOUNDARY.md).
+> In-process Rust remains valid only for audited, statically compiled Core
+> platform adapters and is not an installable manifest runtime.
 
 ---
 

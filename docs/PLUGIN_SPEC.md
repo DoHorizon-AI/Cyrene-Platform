@@ -30,6 +30,10 @@ are **two forms** of a manifest, both validated by the same schema:
 A manifest is **single-plugin** iff it has no `[[components]]`. It is a **bundle**
 iff it declares `kind = "bundle"` and one or more `[[components]]`.
 
+For a first-party service bundle, `service.json` records the bundle identity and
+component inventory while each installable component still uses `plugin.toml`.
+These are two metadata levels of one artifact, not two installation paths.
+
 ---
 
 ## 2. The `[plugin]` table
@@ -45,7 +49,6 @@ iff it declares `kind = "bundle"` and one or more `[[components]]`.
 | `runtime`     | enum   | single: yes / bundle: optional | See §5. On a bundle the top-level `runtime` is omitted; each component declares its own. |
 | `license_gate`| bool   | no (default `false`) | `true` means the host must clear the license gate before activating. Community plugins are `false`; Pro is `true`. |
 | `entrypoint`  | string | conditional | **Required** when `runtime` is `subprocess-python` or `subprocess-jvm`. Import/entry path, e.g. `vllm_engine.vllm_engine:VllmExecutionEngine`. |
-| `crate`       | string | conditional | **Required** when `runtime` is `in-proc-rust`. Cargo crate name providing the extension-point impl. |
 | `author`      | string | no       | |
 | `description` | string | no       | |
 | `license`     | string | no       | SPDX id, e.g. `Apache-2.0`. |
@@ -55,8 +58,9 @@ iff it declares `kind = "bundle"` and one or more `[[components]]`.
 | `scope`       | string | no (default `"target"`) | Target / Project / System scope. |
 | `restart_policy` | string | no (default `"on-failure"`) | Process restart policy (`never`, `on-failure`, `always`). |
 
-The `entrypoint` **XOR** `crate` requirement is keyed off `runtime` (§5). A
-`service` runtime requires neither (it is reached over the network).
+The `entrypoint` requirement is keyed off `runtime` (§5). A `service`
+runtime requires no entrypoint because it is reached over the network. Static
+Core platform adapters are not represented in this manifest.
 
 ---
 
@@ -97,7 +101,7 @@ themselves extension points and are not used for capability matching:
 |-------------------------|---------|
 | `bundle`                | Top-level marker for a multi-component manifest (§7). |
 | `service`               | A long-running networked service component (e.g. gateway, coordinator, sidecar). |
-| `library`               | A linked library component (e.g. the Rust scheduler exposed via PyO3). |
+| `library`               | Non-runtime SDK or support metadata; it is never loaded into the Core process. |
 | `python-package`        | A Python package component of a bundle. |
 | `protocol-and-services` | A protocol + its services (e.g. telemetry). |
 | `deployment-assets`     | Deployment/ops assets (compose files, images, dashboards). |
@@ -135,12 +139,15 @@ Kebab-case enum describing how the host executes the plugin:
 
 | `runtime`            | Requires      | Meaning |
 |----------------------|---------------|---------|
-| `in-proc-rust`       | `crate`       | Loaded in-process as a Rust extension (incl. PyO3). |
 | `subprocess-python`  | `entrypoint`  | Launched as an out-of-process Python subprocess. |
 | `subprocess-jvm`     | `entrypoint`  | Launched as an out-of-process JVM (Kotlin/Java) subprocess. |
 | `service`            | (neither)     | Reached as an already-running network service. |
 
 All community Python plugins are `subprocess-python`.
+
+The removed `in-proc-rust` value is not a valid installable runtime.
+Rust platform adapters may be statically compiled into Core, but cannot be
+selected by plugin.toml.
 
 ---
 

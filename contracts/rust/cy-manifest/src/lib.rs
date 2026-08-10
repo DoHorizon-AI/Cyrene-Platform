@@ -113,6 +113,59 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn installable_manifest_rejects_in_process_runtime() {
+        let result = serde_json::from_str::<PluginManifest>(
+            r#"{
+                "plugin": {
+                    "name": "legacy",
+                    "version": "0.1.0",
+                    "api_version": "1.0",
+                    "kind": "probe",
+                    "edition": "community",
+                    "runtime": "in-proc-rust",
+                    "crate": "legacy_probe"
+                }
+            }"#,
+        );
+
+        assert!(result.is_err(), "in-proc-rust must not be installable");
+    }
+
+    #[test]
+    fn installable_manifest_accepts_jvm_subprocess() {
+        let manifest = serde_json::from_str::<PluginManifest>(
+            r#"{
+                "plugin": {
+                    "name": "reference-jvm",
+                    "version": "0.1.0",
+                    "api_version": "1.0",
+                    "kind": "probe",
+                    "edition": "community",
+                    "runtime": "subprocess-jvm",
+                    "entrypoint": "reference.Main"
+                }
+            }"#,
+        )
+        .expect("subprocess-jvm manifest should parse");
+
+        assert_eq!(manifest.plugin.runtime, Some(Runtime::SubprocessJvm));
+        assert_eq!(
+            manifest.plugin.entrypoint.as_deref(),
+            Some("reference.Main")
+        );
+    }
+
+    #[test]
+    fn reference_jvm_manifest_uses_supported_runtime() {
+        let manifest = include_str!("../../../../examples/plugins/jvm/poc/plugin.toml");
+
+        assert!(manifest
+            .lines()
+            .any(|line| line.trim() == r#"runtime = "subprocess-jvm""#));
+        assert!(!manifest.contains("in-proc-rust"));
+    }
+
     /// Known-answer for `schemas/examples/runtime_manifest.example.json`.
     ///
     /// If the sample or canonicalization scheme changes, update this value and
