@@ -11,7 +11,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -24,7 +27,8 @@ use cy_kernel_api::{
     ResourceRequest, SandboxBackend, VerifiedInstallation,
 };
 use cy_proto::core_v1;
-use tokio_stream::{iter, Stream};
+use tokio::sync::mpsc;
+use tokio_stream::{iter, wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
 
 mod sandboxed_process;
@@ -243,6 +247,9 @@ pub struct WorkerHeartbeatConfig {
     pub interval: Duration,
     pub timeout: Duration,
     pub graceful_stop: Duration,
+    /// Maximum time reserved for a Worker protocol-level ShutdownAck before
+    /// sandboxd begins SIGTERM -> cgroup.kill -> reap.
+    pub shutdown_ack_timeout: Duration,
 }
 
 impl Default for WorkerHeartbeatConfig {
@@ -252,6 +259,7 @@ impl Default for WorkerHeartbeatConfig {
             interval: Duration::from_secs(5),
             timeout: Duration::from_secs(20),
             graceful_stop: Duration::from_secs(10),
+            shutdown_ack_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -268,6 +276,21 @@ struct ManagedProcess {
     health: Option<core_v1::HealthReport>,
     restart_count: u32,
     watchdog_triggered: bool,
+    control: Option<WorkerControlSession>,
+    pending_shutdown: Option<PendingWorkerShutdown>,
+}
+
+type WorkerControlSender = mpsc::Sender<Result<core_v1::KernelToWorker, Status>>;
+
+struct WorkerControlSession {
+    connection_id: u64,
+    outbound: WorkerControlSender,
+}
+
+struct PendingWorkerShutdown {
+    shutdown_id: String,
+    acknowledged: bool,
+    drained: bool,
 }
 
 /// Core v1 KernelService 到真实资源管理器与 SandboxBackend 的最小服务适配层。
@@ -278,6 +301,7 @@ pub struct KernelServiceAdapter {
     instances: Arc<Mutex<HashMap<String, ManagedProcess>>>,
     operations: Arc<Mutex<HashMap<String, core_v1::Operation>>>,
     heartbeat: WorkerHeartbeatConfig,
+    next_control_connection: Arc<AtomicU64>,
 }
 
 impl KernelServiceAdapter {
@@ -288,6 +312,7 @@ impl KernelServiceAdapter {
             instances: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(HashMap::new())),
             heartbeat: WorkerHeartbeatConfig::default(),
+            next_control_connection: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -422,6 +447,216 @@ impl KernelServiceAdapter {
         }
     }
 
+    fn accept_heartbeat(
+        &self,
+        plugin_instance_name: &str,
+        generation: u64,
+        sequence_number: u64,
+        observed_at: Option<prost_types::Timestamp>,
+        runtime_state: i32,
+        health: Option<core_v1::HealthReport>,
+        restart_count: u32,
+    ) -> Result<core_v1::ReportHeartbeatResponse, Status> {
+        if plugin_instance_name.is_empty() || sequence_number == 0 {
+            return Err(Status::invalid_argument(
+                "plugin_instance_name and a non-zero sequence_number are required",
+            ));
+        }
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let Some(process) = instances.get_mut(plugin_instance_name) else {
+            return Ok(self.heartbeat_response(
+                core_v1::HeartbeatDisposition::UnknownInstance,
+                0,
+                generation,
+            ));
+        };
+        if generation != process.generation {
+            return Ok(self.heartbeat_response(
+                core_v1::HeartbeatDisposition::StaleGeneration,
+                process.accepted_sequence,
+                process.generation,
+            ));
+        }
+        if process.watchdog_triggered {
+            return Ok(core_v1::ReportHeartbeatResponse {
+                disposition: core_v1::HeartbeatDisposition::Duplicate as i32,
+                accepted_sequence_number: process.accepted_sequence,
+                server_time: Some(now_timestamp()),
+                next_heartbeat_after: None,
+                desired_state: core_v1::DesiredPluginState::Stopped as i32,
+                desired_generation: process.generation,
+            });
+        }
+        if sequence_number <= process.accepted_sequence {
+            return Ok(self.heartbeat_response(
+                core_v1::HeartbeatDisposition::Duplicate,
+                process.accepted_sequence,
+                process.generation,
+            ));
+        }
+        process.accepted_sequence = sequence_number;
+        process.last_heartbeat = Instant::now();
+        process.last_heartbeat_at = observed_at.or_else(|| Some(now_timestamp()));
+        process.runtime_state = runtime_state;
+        process.health = health;
+        process.restart_count = restart_count;
+        Ok(self.heartbeat_response(
+            core_v1::HeartbeatDisposition::Accepted,
+            process.accepted_sequence,
+            process.generation,
+        ))
+    }
+
+    fn register_worker_control(
+        &self,
+        hello: &core_v1::WorkerHello,
+        outbound: WorkerControlSender,
+    ) -> Result<(u64, core_v1::WorkerWelcome), Status> {
+        if hello.plugin_instance_name.is_empty()
+            || hello.generation == 0
+            || hello.protocol_version != 1
+        {
+            return Err(Status::invalid_argument(
+                "WorkerHello requires instance name, non-zero generation, and protocol_version=1",
+            ));
+        }
+        let connection_id = self.next_control_connection.fetch_add(1, Ordering::Relaxed);
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances
+            .get_mut(&hello.plugin_instance_name)
+            .ok_or_else(|| Status::not_found("worker instance is not managed by this Kernel"))?;
+        if process.generation != hello.generation {
+            return Err(Status::failed_precondition("worker generation is stale"));
+        }
+        process.control = Some(WorkerControlSession {
+            connection_id,
+            outbound,
+        });
+        Ok((
+            connection_id,
+            core_v1::WorkerWelcome {
+                desired_state: if process.watchdog_triggered {
+                    core_v1::DesiredPluginState::Stopped as i32
+                } else {
+                    core_v1::DesiredPluginState::Running as i32
+                },
+                desired_generation: process.generation,
+                next_heartbeat_after: Some(to_proto_duration(self.heartbeat.interval)),
+            },
+        ))
+    }
+
+    fn unregister_worker_control(&self, instance_name: &str, generation: u64, connection_id: u64) {
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let Some(process) = instances.get_mut(instance_name) else {
+            return;
+        };
+        if process.generation == generation
+            && process
+                .control
+                .as_ref()
+                .is_some_and(|control| control.connection_id == connection_id)
+        {
+            process.control = None;
+        }
+    }
+
+    fn accept_shutdown_ack(&self, ack: &core_v1::WorkerShutdownAck) -> Result<(), Status> {
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances
+            .get_mut(&ack.plugin_instance_name)
+            .ok_or_else(|| Status::not_found("worker instance is not managed by this Kernel"))?;
+        if ack.generation != process.generation {
+            return Err(Status::failed_precondition("worker generation is stale"));
+        }
+        let pending = process.pending_shutdown.as_mut().ok_or_else(|| {
+            Status::failed_precondition("Kernel did not request a worker shutdown")
+        })?;
+        if pending.shutdown_id != ack.shutdown_id {
+            return Err(Status::failed_precondition(
+                "worker shutdown acknowledgement is stale",
+            ));
+        }
+        pending.acknowledged = true;
+        pending.drained = ack.drained;
+        Ok(())
+    }
+
+    fn request_worker_shutdown(
+        &self,
+        instance_name: &str,
+        reason_code: &str,
+        immediate: bool,
+    ) -> bool {
+        if immediate {
+            return false;
+        }
+        let shutdown_id = format!(
+            "shutdown-{}",
+            self.next_control_connection.fetch_add(1, Ordering::Relaxed)
+        );
+        let outbound = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let Some(process) = instances.get_mut(instance_name) else {
+                return false;
+            };
+            let Some(control) = process.control.as_ref() else {
+                return false;
+            };
+            process.pending_shutdown = Some(PendingWorkerShutdown {
+                shutdown_id: shutdown_id.clone(),
+                acknowledged: false,
+                drained: false,
+            });
+            control.outbound.clone()
+        };
+        let sent = outbound.try_send(Ok(core_v1::KernelToWorker {
+            body: Some(core_v1::kernel_to_worker::Body::Shutdown(
+                core_v1::WorkerShutdown {
+                    shutdown_id: shutdown_id.clone(),
+                    mode: core_v1::StopMode::Graceful as i32,
+                    ack_deadline: Some(to_proto_duration(self.heartbeat.shutdown_ack_timeout)),
+                    reason_code: reason_code.to_string(),
+                },
+            )),
+        }));
+        if sent.is_err() {
+            self.unregister_pending_shutdown(instance_name, &shutdown_id);
+            return false;
+        }
+        let deadline = Instant::now() + self.heartbeat.shutdown_ack_timeout;
+        loop {
+            let acknowledged = self
+                .instances
+                .lock()
+                .expect("instance lock poisoned")
+                .get(instance_name)
+                .and_then(|process| process.pending_shutdown.as_ref())
+                .is_some_and(|pending| pending.shutdown_id == shutdown_id && pending.acknowledged);
+            if acknowledged || Instant::now() >= deadline {
+                return acknowledged;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn unregister_pending_shutdown(&self, instance_name: &str, shutdown_id: &str) {
+        if let Some(process) = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get_mut(instance_name)
+        {
+            if process
+                .pending_shutdown
+                .as_ref()
+                .is_some_and(|pending| pending.shutdown_id == shutdown_id)
+            {
+                process.pending_shutdown = None;
+            }
+        }
+    }
+
     fn enforce_heartbeat_deadlines(&self) {
         let overdue = {
             let instances = self.instances.lock().expect("instance lock poisoned");
@@ -435,6 +670,7 @@ impl KernelServiceAdapter {
                 .collect::<Vec<_>>()
         };
         for name in overdue {
+            let _acknowledged = self.request_worker_shutdown(&name, "HEARTBEAT_TIMEOUT", false);
             let lease = {
                 let mut instances = self.instances.lock().expect("instance lock poisoned");
                 let Some(process) = instances.get_mut(&name) else {
@@ -636,6 +872,8 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     health: None,
                     restart_count: 0,
                     watchdog_triggered: false,
+                    control: None,
+                    pending_shutdown: None,
                 },
             );
         Ok(Response::new(
@@ -658,6 +896,8 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .transpose()?
             .unwrap_or(Duration::from_secs(30));
         let immediate = request.mode == core_v1::StopMode::Immediate as i32;
+        let _acknowledged =
+            self.request_worker_shutdown(&request.process_name, "TERMINATE_REQUESTED", immediate);
         let lease = {
             let mut instances = self.instances.lock().expect("instance lock poisoned");
             let process = instances
@@ -718,7 +958,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         _request: Request<core_v1::CancelOperationRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
         Err(Status::unimplemented(
-            "operation cancellation is not part of the P2 kernel baseline",
+            "operation cancellation is not implemented yet",
         ))
     }
 
@@ -821,54 +1061,102 @@ impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for Kernel
         request: Request<core_v1::ReportHeartbeatRequest>,
     ) -> Result<Response<core_v1::ReportHeartbeatResponse>, Status> {
         let request = request.into_inner();
-        if request.plugin_instance_name.is_empty() || request.sequence_number == 0 {
+        Ok(Response::new(self.accept_heartbeat(
+            &request.plugin_instance_name,
+            request.generation,
+            request.sequence_number,
+            request.observed_at,
+            request.runtime_state,
+            request.health,
+            request.restart_count,
+        )?))
+    }
+
+    type ConnectWorkerStream = std::pin::Pin<
+        Box<dyn Stream<Item = Result<core_v1::KernelToWorker, Status>> + Send + 'static>,
+    >;
+
+    async fn connect_worker(
+        &self,
+        request: Request<tonic::Streaming<core_v1::WorkerToKernel>>,
+    ) -> Result<Response<Self::ConnectWorkerStream>, Status> {
+        let mut inbound = request.into_inner();
+        let hello = inbound.message().await?.ok_or_else(|| {
+            Status::invalid_argument("WorkerHello must be the first control frame")
+        })?;
+        let Some(core_v1::worker_to_kernel::Body::Hello(hello)) = hello.body else {
             return Err(Status::invalid_argument(
-                "plugin_instance_name and a non-zero sequence_number are required",
+                "WorkerHello must be the first control frame",
             ));
-        }
-        let mut instances = self.instances.lock().expect("instance lock poisoned");
-        let Some(process) = instances.get_mut(&request.plugin_instance_name) else {
-            return Ok(Response::new(self.heartbeat_response(
-                core_v1::HeartbeatDisposition::UnknownInstance,
-                0,
-                request.generation,
-            )));
         };
-        if request.generation != process.generation {
-            return Ok(Response::new(self.heartbeat_response(
-                core_v1::HeartbeatDisposition::StaleGeneration,
-                process.accepted_sequence,
-                process.generation,
-            )));
-        }
-        if process.watchdog_triggered {
-            return Ok(Response::new(core_v1::ReportHeartbeatResponse {
-                disposition: core_v1::HeartbeatDisposition::Duplicate as i32,
-                accepted_sequence_number: process.accepted_sequence,
-                server_time: Some(now_timestamp()),
-                next_heartbeat_after: None,
-                desired_state: core_v1::DesiredPluginState::Stopped as i32,
-                desired_generation: process.generation,
-            }));
-        }
-        if request.sequence_number <= process.accepted_sequence {
-            return Ok(Response::new(self.heartbeat_response(
-                core_v1::HeartbeatDisposition::Duplicate,
-                process.accepted_sequence,
-                process.generation,
-            )));
-        }
-        process.accepted_sequence = request.sequence_number;
-        process.last_heartbeat = Instant::now();
-        process.last_heartbeat_at = request.observed_at.or_else(|| Some(now_timestamp()));
-        process.runtime_state = request.runtime_state;
-        process.health = request.health;
-        process.restart_count = request.restart_count;
-        Ok(Response::new(self.heartbeat_response(
-            core_v1::HeartbeatDisposition::Accepted,
-            process.accepted_sequence,
-            process.generation,
-        )))
+        let (outbound, receiver) = mpsc::channel(16);
+        let (connection_id, welcome) = self.register_worker_control(&hello, outbound.clone())?;
+        outbound
+            .send(Ok(core_v1::KernelToWorker {
+                body: Some(core_v1::kernel_to_worker::Body::Welcome(welcome)),
+            }))
+            .await
+            .map_err(|_| Status::unavailable("worker control receiver closed during handshake"))?;
+
+        let adapter = self.clone();
+        let instance_name = hello.plugin_instance_name.clone();
+        let generation = hello.generation;
+        tokio::spawn(async move {
+            while let Ok(Some(frame)) = inbound.message().await {
+                let result = match frame.body {
+                    Some(core_v1::worker_to_kernel::Body::Heartbeat(heartbeat)) => adapter
+                        .accept_heartbeat(
+                            &heartbeat.plugin_instance_name,
+                            heartbeat.generation,
+                            heartbeat.sequence_number,
+                            heartbeat.observed_at,
+                            heartbeat.runtime_state,
+                            heartbeat.health,
+                            heartbeat.restart_count,
+                        )
+                        .map(|response| core_v1::KernelToWorker {
+                            body: Some(core_v1::kernel_to_worker::Body::HeartbeatAck(
+                                core_v1::WorkerHeartbeatAck {
+                                    disposition: response.disposition,
+                                    accepted_sequence_number: response.accepted_sequence_number,
+                                    desired_state: response.desired_state,
+                                    desired_generation: response.desired_generation,
+                                },
+                            )),
+                        }),
+                    Some(core_v1::worker_to_kernel::Body::ShutdownAck(ack)) => adapter
+                        .accept_shutdown_ack(&ack)
+                        .map(|_| core_v1::KernelToWorker {
+                            body: Some(core_v1::kernel_to_worker::Body::HeartbeatAck(
+                                core_v1::WorkerHeartbeatAck {
+                                    disposition: core_v1::HeartbeatDisposition::Accepted as i32,
+                                    accepted_sequence_number: 0,
+                                    desired_state: core_v1::DesiredPluginState::Stopped as i32,
+                                    desired_generation: ack.generation,
+                                },
+                            )),
+                        }),
+                    Some(core_v1::worker_to_kernel::Body::Hello(_)) | None => {
+                        Err(Status::invalid_argument(
+                            "WorkerHello is valid only as the first control frame",
+                        ))
+                    }
+                };
+                match result {
+                    Ok(response) => {
+                        if outbound.send(Ok(response)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = outbound.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
+            adapter.unregister_worker_control(&instance_name, generation, connection_id);
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
 
     type WatchPluginEventsStream = std::pin::Pin<
@@ -1122,6 +1410,10 @@ fn inject_heartbeat_environment(
             "CYRENE_HEARTBEAT_SOCKET",
             heartbeat.socket_path.to_string_lossy().into_owned(),
         ),
+        (
+            "CYRENE_WORKER_CONTROL_SOCKET",
+            heartbeat.socket_path.to_string_lossy().into_owned(),
+        ),
         ("CYRENE_PLUGIN_INSTANCE_NAME", instance_name.to_string()),
         ("CYRENE_PLUGIN_INSTANCE_GENERATION", generation.to_string()),
         (
@@ -1211,6 +1503,13 @@ fn proto_duration(duration: prost_types::Duration) -> Result<Duration, Status> {
     }
     Ok(Duration::from_secs(duration.seconds as u64)
         .saturating_add(Duration::from_nanos(duration.nanos as u64)))
+}
+
+fn to_proto_duration(duration: Duration) -> prost_types::Duration {
+    prost_types::Duration {
+        seconds: duration.as_secs().min(i64::MAX as u64) as i64,
+        nanos: duration.subsec_nanos() as i32,
+    }
 }
 
 fn now_timestamp() -> prost_types::Timestamp {
@@ -1364,6 +1663,7 @@ mod tests {
                 interval: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 graceful_stop: Duration::from_secs(1),
+                shutdown_ack_timeout: Duration::from_millis(50),
             });
         adapter.instances.lock().unwrap().insert(
             "worker_1".to_string(),
@@ -1406,6 +1706,8 @@ mod tests {
                 health: None,
                 restart_count: 0,
                 watchdog_triggered: false,
+                control: None,
+                pending_shutdown: None,
             },
         );
         adapter
@@ -1513,6 +1815,57 @@ mod tests {
             stale.disposition,
             core_v1::HeartbeatDisposition::StaleGeneration as i32
         );
+    }
+
+    #[test]
+    fn worker_control_shutdown_waits_for_matching_ack() {
+        let adapter = heartbeat_adapter();
+        let (outbound, mut inbound) = mpsc::channel(1);
+        let (connection_id, welcome) = adapter
+            .register_worker_control(
+                &core_v1::WorkerHello {
+                    plugin_instance_name: "worker_1".to_string(),
+                    generation: 99,
+                    protocol_version: 1,
+                },
+                outbound,
+            )
+            .unwrap();
+        assert_eq!(
+            welcome.desired_state,
+            core_v1::DesiredPluginState::Running as i32
+        );
+
+        let acknowledger = {
+            let adapter = adapter.clone();
+            thread::spawn(move || {
+                let frame = inbound
+                    .blocking_recv()
+                    .expect("Kernel must send Shutdown")
+                    .expect("Kernel control stream must remain healthy");
+                let Some(core_v1::kernel_to_worker::Body::Shutdown(shutdown)) = frame.body else {
+                    panic!("expected WorkerShutdown frame");
+                };
+                adapter
+                    .accept_shutdown_ack(&core_v1::WorkerShutdownAck {
+                        plugin_instance_name: "worker_1".to_string(),
+                        generation: 99,
+                        shutdown_id: shutdown.shutdown_id,
+                        drained: true,
+                        detail: "drained".to_string(),
+                    })
+                    .unwrap();
+            })
+        };
+
+        assert!(adapter.request_worker_shutdown("worker_1", "TEST_STOP", false));
+        acknowledger.join().unwrap();
+        let instances = adapter.instances.lock().unwrap();
+        let pending = instances["worker_1"].pending_shutdown.as_ref().unwrap();
+        assert!(pending.acknowledged);
+        assert!(pending.drained);
+        drop(instances);
+        adapter.unregister_worker_control("worker_1", 99, connection_id);
     }
 
     #[test]

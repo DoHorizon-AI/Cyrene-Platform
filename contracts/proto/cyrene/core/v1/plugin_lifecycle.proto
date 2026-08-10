@@ -129,6 +129,70 @@ message ReportHeartbeatResponse {
   uint64 desired_generation = 6;
 }
 
+// Preferred local Worker control transport. It is a bidirectional UDS/gRPC
+// session so Kernel shutdown intent and the Worker drain acknowledgement share
+// one authenticated instance/generation boundary. The unary heartbeat RPC is
+// retained only for migration compatibility.
+message WorkerToKernel {
+  oneof body {
+    WorkerHello hello = 1;
+    WorkerHeartbeat heartbeat = 2;
+    WorkerShutdownAck shutdown_ack = 3;
+  }
+}
+
+message WorkerHello {
+  string plugin_instance_name = 1;
+  uint64 generation = 2;
+  uint32 protocol_version = 3;
+}
+
+message WorkerHeartbeat {
+  string plugin_instance_name = 1;
+  uint64 generation = 2;
+  uint64 sequence_number = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  PluginRuntimeState runtime_state = 5;
+  HealthReport health = 6;
+  uint32 restart_count = 7;
+}
+
+message WorkerShutdownAck {
+  string plugin_instance_name = 1;
+  uint64 generation = 2;
+  string shutdown_id = 3;
+  bool drained = 4;
+  string detail = 5;
+}
+
+message KernelToWorker {
+  oneof body {
+    WorkerWelcome welcome = 1;
+    WorkerHeartbeatAck heartbeat_ack = 2;
+    WorkerShutdown shutdown = 3;
+  }
+}
+
+message WorkerWelcome {
+  DesiredPluginState desired_state = 1;
+  uint64 desired_generation = 2;
+  google.protobuf.Duration next_heartbeat_after = 3;
+}
+
+message WorkerHeartbeatAck {
+  HeartbeatDisposition disposition = 1;
+  uint64 accepted_sequence_number = 2;
+  DesiredPluginState desired_state = 3;
+  uint64 desired_generation = 4;
+}
+
+message WorkerShutdown {
+  string shutdown_id = 1;
+  StopMode mode = 2;
+  google.protobuf.Duration ack_deadline = 3;
+  string reason_code = 4;
+}
+
 enum PluginLifecycleEventType {
   PLUGIN_LIFECYCLE_EVENT_TYPE_UNSPECIFIED = 0;
   PLUGIN_LIFECYCLE_EVENT_TYPE_SNAPSHOT = 1;

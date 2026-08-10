@@ -16,6 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
+
 use cy_kernel_api::{
     CapabilityFact, CgroupLimits, CgroupTelemetry, CleanupReport, DeviceBinding, DeviceMapper,
     EnforcementMode, EnforcementReport, LaunchPlan, NodeCapabilities, ProcessCondition,
@@ -94,7 +97,29 @@ pub struct OwnedCgroupCleanupReport {
 #[derive(Debug)]
 pub struct CgroupV2Runtime {
     config: CgroupV2Config,
-    children: Mutex<BTreeMap<u32, Child>>,
+    children: Mutex<BTreeMap<u32, TrackedChild>>,
+}
+
+/// A child and its Linux wait handle. The pidfd is opened immediately after
+/// spawn, so a later PID reuse cannot make a cleanup path wait for the wrong
+/// process. Platforms without pidfd retain the bounded Child fallback.
+#[derive(Debug)]
+struct TrackedChild {
+    child: Child,
+    #[cfg(target_os = "linux")]
+    pidfd: Option<OwnedFd>,
+}
+
+impl TrackedChild {
+    fn new(child: Child) -> Self {
+        #[cfg(target_os = "linux")]
+        let pidfd = open_pidfd(child.id());
+        Self {
+            child,
+            #[cfg(target_os = "linux")]
+            pidfd,
+        }
+    }
 }
 
 impl CgroupV2Runtime {
@@ -411,12 +436,17 @@ impl CgroupV2Runtime {
     }
 
     fn wait_child(&self, pid: u32, timeout: Duration) -> Option<i32> {
+        #[cfg(target_os = "linux")]
+        if let Some(result) = self.wait_child_with_pidfd(pid, timeout) {
+            return result;
+        }
+
         let deadline = Instant::now() + timeout;
         loop {
             let result = self.children.lock().ok().and_then(|mut children| {
                 children
                     .get_mut(&pid)
-                    .and_then(|child| child.try_wait().ok())
+                    .and_then(|child| child.child.try_wait().ok())
                     .flatten()
             });
             if let Some(status) = result {
@@ -432,6 +462,41 @@ impl CgroupV2Runtime {
         }
     }
 
+    /// Returns `Some` only when a tracked child had a pidfd. A pidfd readiness
+    /// notification is then followed by `Child::wait` to reap the zombie;
+    /// timeout leaves the child tracked for the cgroup.kill phase or a later
+    /// cleanup attempt.
+    #[cfg(target_os = "linux")]
+    fn wait_child_with_pidfd(&self, pid: u32, timeout: Duration) -> Option<Option<i32>> {
+        let mut tracked = self
+            .children
+            .lock()
+            .ok()
+            .and_then(|mut children| children.remove(&pid))?;
+        let Some(pidfd) = tracked.pidfd.as_ref() else {
+            if let Ok(mut children) = self.children.lock() {
+                children.insert(pid, tracked);
+            }
+            return None;
+        };
+        let mut descriptor = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(pidfd),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout_millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
+        // SAFETY: descriptor points to the owned pidfd, and poll only observes
+        // readiness. The adapter owns this file descriptor for this call.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_millis) };
+        if ready > 0 {
+            return Some(tracked.child.wait().ok().and_then(|status| status.code()));
+        }
+        if let Ok(mut children) = self.children.lock() {
+            children.insert(pid, tracked);
+        }
+        Some(None)
+    }
+
     fn terminate_pid(&self, pid: u32) {
         #[cfg(unix)]
         unsafe {
@@ -440,7 +505,7 @@ impl CgroupV2Runtime {
         #[cfg(windows)]
         if let Ok(mut children) = self.children.lock() {
             if let Some(child) = children.get_mut(&pid) {
-                let _ = child.kill();
+                let _ = child.child.kill();
             }
         }
     }
@@ -516,7 +581,7 @@ impl ProcessRuntime for CgroupV2Runtime {
         self.children
             .lock()
             .map_err(|_| ProviderError::new("native-process", "LOCK_POISONED", "child table"))?
-            .insert(pid, child);
+            .insert(pid, TrackedChild::new(child));
         Ok(ProcessHandle {
             pid,
             cgroup_path,
@@ -949,16 +1014,21 @@ pub fn read_oom_kill_count(cgroup_path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: u32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open has no pointer arguments. The returned descriptor is
+    // immediately transferred into OwnedFd, which closes it exactly once.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    (fd >= 0).then(|| {
+        // SAFETY: fd is a newly returned, owned descriptor from pidfd_open.
+        unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) }
+    })
+}
+
 fn pidfd_available() -> bool {
     #[cfg(target_os = "linux")]
-    unsafe {
-        let fd = libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0);
-        if fd < 0 {
-            false
-        } else {
-            libc::close(fd as libc::c_int);
-            true
-        }
+    {
+        open_pidfd(std::process::id()).is_some()
     }
     #[cfg(not(target_os = "linux"))]
     {
