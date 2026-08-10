@@ -8,3 +8,7 @@ protoc and tonic-build to generate bindings into `OUT_DIR`.
 The `plugin/v1/` module remains a separate local stdio protocol. Its imports
 are module-relative, while its `cy.plugin.v1` package and wire semantics stay
 unchanged.
+
+Core service responses intentionally use the typed domain messages from the
+blueprint, and `Connect` intentionally streams the node/control envelopes;
+Buf's generic RPC Request/Response naming rules are excluded for that reason.

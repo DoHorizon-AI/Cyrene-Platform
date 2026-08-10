@@ -17,7 +17,8 @@ trap 'rm -f "$tmp_descriptor"' EXIT
 
 "$buf_bin" lint contracts/proto
 "$buf_bin" breaking contracts/proto --against "$descriptor"
-"$buf_bin" build contracts/proto --as-file-descriptor-set --output "$tmp_descriptor"
+"$buf_bin" build contracts/proto --path cyrene/core/v1 \
+  --as-file-descriptor-set --output "$tmp_descriptor"
 
 if ! cmp -s "$tmp_descriptor" "$descriptor"; then
   echo "Core v1 descriptor drift detected; regenerate the checked-in baseline" >&2
