@@ -8,6 +8,20 @@ option java_multiple_files = true;
 option java_package = "io.cyrene.proto.semantic.v1";
 option java_outer_classname = "CyreneKernelSemanticContractProto";
 
+// Semantic compatibility is negotiated independently from any transport.
+message ContractRevision {
+  string contract_id = 1;
+  uint32 major = 2;
+  uint32 minor = 3;
+}
+
+// Transport projections preserve reason_code and may map it to local status
+// mechanisms. Human-readable message is never authorization authority.
+message Rejection {
+  string reason_code = 1;
+  string message = 2;
+}
+
 message Identity {
   string id = 1;
   uint64 generation = 2;
@@ -117,6 +131,9 @@ message Worker {
   Identity lease = 4;
   WorkerState state = 5;
   string execution_ref = 6;
+  // Generic enforced ceilings such as cpu.time or memory.bytes. These are
+  // launch constraints, not allocatable Resource authority.
+  map<string, Quantity> limits = 7;
 }
 
 enum OperationState {
@@ -168,6 +185,31 @@ message Event {
   google.protobuf.Timestamp observed_at = 4;
   string schema_id = 5;
   bytes body = 6;
+  // Kernel/node authority incarnation that owns the sequence space.
+  Identity source = 7;
+}
+
+message EventCursor {
+  Identity source = 1;
+  // Last sequence already observed by the caller. Zero means none observed.
+  uint64 sequence = 2;
+}
+
+enum ReplayStatus {
+  REPLAY_STATUS_UNSPECIFIED = 0;
+  REPLAY_STATUS_CURRENT = 1;
+  REPLAY_STATUS_GAP = 2;
+  REPLAY_STATUS_SOURCE_CHANGED = 3;
+}
+
+message EventPage {
+  Identity source = 1;
+  ReplayStatus status = 2;
+  repeated Event events = 3;
+  uint64 oldest_available_sequence = 4;
+  uint64 latest_available_sequence = 5;
+  // Last sequence returned, or the input cursor sequence for an empty page.
+  uint64 next_sequence = 6;
 }
 
 message ProviderSnapshot {

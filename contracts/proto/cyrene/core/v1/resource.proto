@@ -204,6 +204,8 @@ message AcquireLeaseRequest {
   cyrene.semantic.v1.Identity holder = 3;
   cyrene.semantic.v1.ResourceQuery query = 4;
   google.protobuf.Duration ttl = 5;
+  // Deprecated compatibility launch limits. Canonical semantic Workers carry
+  // generic limits; these fields do not expand Lease resource authority.
   CpuRequirements cpu = 6;
   MemoryRequirements memory = 7;
 }

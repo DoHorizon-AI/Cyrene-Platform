@@ -1,0 +1,7 @@
+# name|local_id|local_major|local_minor|offered_id|offered_major|offered_minor|expected
+exact|cyrene.kernel.semantic|1|0|cyrene.kernel.semantic|1|0|1.0
+lower_peer_minor|cyrene.kernel.semantic|1|3|cyrene.kernel.semantic|1|1|1.1
+lower_local_minor|cyrene.kernel.semantic|1|1|cyrene.kernel.semantic|1|3|1.1
+different_major|cyrene.kernel.semantic|1|0|cyrene.kernel.semantic|2|0|INCOMPATIBLE
+different_contract|cyrene.kernel.semantic|1|0|other.kernel.semantic|1|0|INCOMPATIBLE
+invalid_zero_major|cyrene.kernel.semantic|1|0|cyrene.kernel.semantic|0|0|INCOMPATIBLE

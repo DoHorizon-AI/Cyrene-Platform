@@ -771,7 +771,7 @@ pub fn resource_from_proto(resource: semantic_v1::Resource) -> Result<Resource, 
             })
             .collect(),
         attributes: resource.attributes.into_iter().collect(),
-        state: resource_state_from_proto(resource.state),
+        state: resource_state_from_proto(resource.state)?,
         reason_code: resource.reason_code,
         summary: resource.summary,
         links: resource
@@ -817,13 +817,16 @@ fn identity_from_proto(identity: semantic_v1::Identity) -> semantic::Identity {
     }
 }
 
-fn resource_state_from_proto(value: i32) -> ResourceState {
-    match semantic_v1::ResourceState::try_from(value)
-        .unwrap_or(semantic_v1::ResourceState::Unavailable)
-    {
-        semantic_v1::ResourceState::Ready => ResourceState::Ready,
-        semantic_v1::ResourceState::Degraded => ResourceState::Degraded,
-        _ => ResourceState::Unavailable,
+fn resource_state_from_proto(value: i32) -> Result<ResourceState, ProviderError> {
+    match semantic_v1::ResourceState::try_from(value) {
+        Ok(semantic_v1::ResourceState::Ready) => Ok(ResourceState::Ready),
+        Ok(semantic_v1::ResourceState::Degraded) => Ok(ResourceState::Degraded),
+        Ok(semantic_v1::ResourceState::Unavailable) => Ok(ResourceState::Unavailable),
+        Ok(semantic_v1::ResourceState::Unspecified) | Err(_) => Err(ProviderError::new(
+            "hardware-adapter-protocol",
+            "UNKNOWN_ENUM_VALUE",
+            "resource state must be a known, specified semantic value",
+        )),
     }
 }
 
@@ -953,10 +956,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_resource_state_remains_unavailable() {
+    fn unknown_resource_state_is_rejected() {
         assert_eq!(
-            resource_state_from_proto(semantic_v1::ResourceState::Unspecified as i32),
-            ResourceState::Unavailable
+            resource_state_from_proto(semantic_v1::ResourceState::Unspecified as i32)
+                .unwrap_err()
+                .reason_code,
+            "UNKNOWN_ENUM_VALUE"
         );
     }
 

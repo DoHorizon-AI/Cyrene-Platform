@@ -1,0 +1,18 @@
+# name|kind|value|expected
+namespaced_capability|namespaced|vendor.nvidia.cuda|ACCEPT
+namespaced_transport|namespaced|local.uds|ACCEPT
+namespaced_hyphen|namespaced|schema-v1|ACCEPT
+namespaced_uppercase|namespaced|Vendor.cuda|NAMESPACED_ID_INVALID
+namespaced_empty_segment|namespaced|vendor..cuda|NAMESPACED_ID_INVALID
+namespaced_leading_separator|namespaced|.vendor|NAMESPACED_ID_INVALID
+namespaced_trailing_separator|namespaced|vendor-|NAMESPACED_ID_INVALID
+namespaced_digit_start|namespaced|1vendor.cuda|NAMESPACED_ID_INVALID
+identity_ascii|identity|worker-01|ACCEPT
+identity_unicode|identity|worker-资源-01|ACCEPT
+identity_empty|identity|<empty>|TEXT_INVALID
+identity_c0_control|identity|<c0>|TEXT_INVALID
+identity_c1_control|identity|<c1>|TEXT_INVALID
+timestamp_minimum|timestamp|1|ACCEPT
+timestamp_maximum|timestamp|253402300799999|ACCEPT
+timestamp_zero|timestamp|0|TIMESTAMP_INVALID
+timestamp_overflow|timestamp|253402300800000|TIMESTAMP_INVALID
