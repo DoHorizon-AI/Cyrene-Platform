@@ -35,7 +35,7 @@ message NodeToControlPlane {
   string frame_id = 1;
   uint64 sequence_number = 2;
 
-  oneof payload {
+  oneof body {
     NodeHello hello = 10;
     NodeHeartbeat heartbeat = 11;
     KernelCommandResult command_result = 12;
@@ -47,7 +47,7 @@ message ControlPlaneToNode {
   string frame_id = 1;
   uint64 sequence_number = 2;
 
-  oneof payload {
+  oneof body {
     NodeWelcome welcome = 10;
     KernelCommand command = 11;
   }

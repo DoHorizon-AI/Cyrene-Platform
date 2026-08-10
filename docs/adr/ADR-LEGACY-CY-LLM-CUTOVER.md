@@ -1,37 +1,37 @@
 # ADR-LEGACY-CY-LLM-CUTOVER: Internal Legacy Contract Cutover
 
-- Status: Approved / Migration Governance
+- Status: Implemented / Historical
 - Date: 2026-08-10
-- Scope: contracts/proto/ai_service.proto, contracts/proto/agent_service.proto, and their generated Rust binding
+- Scope: former version-0 Proto files, generated Rust binding, and Node Agent
+  service scaffold
 
 ## Decision
 
-cy.llm is an internal migration artifact, not a public compatibility contract.
-The project has no external consumers that require preserving its API shape.
-P0 therefore freezes it: no new RPC, message, field, command, consumer, or
-business behavior may be added.
+The former version-0 package was an internal migration artifact, not a public
+compatibility contract. P0 froze it: no new RPC, message, field, command,
+consumer, or business behavior could be added.
 
-P0 keeps the existing files compiling so the current workspace remains
-verifiable. P1 must introduce the replacement Core v1 contract, migrate the
-remaining Rust node and binding code, and delete the legacy Proto files and
-generated binding in one reviewed cutover.
+P1 replaced the public Rust surface with `cyrene::core::v1`, migrated Node
+Agent state to the transport-free `NodeControlSession`, and removed the old
+Proto files, generated binding, and transition allowlist. Any reintroduction
+of the former names in runtime or contract source is now a governance
+failure.
 
-The legacy allowlist under contracts/legacy is the only permitted source
-reference set during the transition. Any new cy.llm or AgentService consumer is
-a governance failure.
+The separate `cy.plugin.v1` stdio protocol was intentionally left outside this
+cutover.
 
 ## Non-goals
 
-This ADR does not change the cy.llm wire numbers, implement Core v1, create a
-Buf generation pipeline, or change Node Agent behavior. Those changes belong to
-P1 and later.
+This historical ADR does not define Core v1 service behavior, network
+transport, mTLS/UDS, lease admission, sandboxing, or plugin startup. Those are
+P2/P3 work.
 
 ## Deletion gate
 
-Legacy deletion is allowed only when:
+The P1 deletion gate was satisfied when:
 
 1. Core v1 contracts and generated bindings build from a clean checkout;
-2. cy-node-agent and all remaining Core consumers use the replacement contract;
-3. no tracked source path remains on the legacy allowlist;
-4. full Rust CI and the replacement contract conformance tests pass;
-5. the cutover is one atomic, reviewed change with a documented rollback point.
+2. cy-node-agent uses the replacement contract and has no remote command echo;
+3. no runtime or contract source path contains the former legacy references;
+4. Rust CI and the replacement fixture tests pass;
+5. deletion is one local reviewed cutover commit after the Core v1 baseline.

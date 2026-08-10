@@ -1,7 +1,6 @@
-//! Node Agent hardware probing, heartbeat generation, and hardware manifest construction.
+//! Node Agent hardware probing and hardware manifest construction.
 
 use cy_manifest::{CpuInfo, GpuInfo, HardwareManifest, Interconnect, OsInfo, PrecisionSupport};
-use cy_proto::{AgentHeartbeatRequest, TargetRegistrationRequest};
 use std::collections::HashMap;
 use sysinfo::{Disks, System};
 
@@ -81,104 +80,6 @@ impl HardwareProbe {
                 pcie_gen: Some(4),
             },
             precision_support,
-        }
-    }
-
-    /// Probe local node hardware and construct a `TargetRegistrationRequest`.
-    pub fn probe_target(&self, target_id: &str, agent_version: &str) -> TargetRegistrationRequest {
-        let manifest = self.probe_hardware_manifest();
-
-        let mut sys = System::new_all();
-        sys.refresh_all();
-
-        let free_mem_bytes = sys.available_memory();
-        let free_ram_gb =
-            (free_mem_bytes as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
-
-        let hostname = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "localhost".to_string());
-
-        let mut capabilities = vec!["cpu".to_string()];
-
-        if !manifest.gpus.is_empty()
-            || std::env::var("CUDA_VISIBLE_DEVICES").is_ok()
-            || std::path::Path::new("/proc/driver/nvidia").exists()
-        {
-            capabilities.push("cuda".to_string());
-        }
-        if std::env::var("ROCR_VISIBLE_DEVICES").is_ok()
-            || std::path::Path::new("/dev/kfd").exists()
-        {
-            capabilities.push("rocm".to_string());
-        }
-
-        let mut labels = HashMap::new();
-        labels.insert("num_cpus".to_string(), manifest.cpu.cores.to_string());
-        labels.insert(
-            "num_threads".to_string(),
-            manifest
-                .cpu
-                .threads
-                .unwrap_or(manifest.cpu.cores)
-                .to_string(),
-        );
-        labels.insert("total_ram_gb".to_string(), manifest.memory_gb.to_string());
-        labels.insert("free_ram_gb".to_string(), free_ram_gb.to_string());
-        labels.insert("disk_gb".to_string(), manifest.disk_gb.to_string());
-        labels.insert("os".to_string(), manifest.os.name.clone());
-        labels.insert("kernel".to_string(), manifest.os.kernel.clone());
-        labels.insert("arch".to_string(), manifest.cpu.arch.clone());
-        labels.insert(
-            "driver_version".to_string(),
-            manifest.driver_version.clone(),
-        );
-        labels.insert(
-            "cuda_max_supported".to_string(),
-            manifest.cuda_max_supported.clone(),
-        );
-
-        let total_gpu_count: u32 = manifest.gpus.iter().map(|g| g.count).sum();
-        labels.insert("gpu_count".to_string(), total_gpu_count.to_string());
-        let gpu_models = if manifest.gpus.is_empty() {
-            "none".to_string()
-        } else {
-            manifest
-                .gpus
-                .iter()
-                .map(|g| format!("{}x {}", g.count, g.model))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        labels.insert("gpu_models".to_string(), gpu_models);
-
-        TargetRegistrationRequest {
-            target_id: target_id.to_string(),
-            hostname,
-            ip_address: get_local_ip(),
-            arch: manifest.cpu.arch,
-            os: manifest.os.name,
-            capabilities,
-            labels,
-            agent_version: agent_version.to_string(),
-        }
-    }
-
-    /// Generate an `AgentHeartbeatRequest`.
-    pub fn create_heartbeat(
-        &self,
-        agent_id: &str,
-        target_id: &str,
-        status: &str,
-        metrics: HashMap<String, String>,
-    ) -> AgentHeartbeatRequest {
-        let timestamp = chrono::Utc::now().timestamp();
-        AgentHeartbeatRequest {
-            agent_id: agent_id.to_string(),
-            target_id: target_id.to_string(),
-            timestamp,
-            status: status.to_string(),
-            metrics,
         }
     }
 }
@@ -378,11 +279,6 @@ fn determine_precision_support(gpus: &[GpuInfo]) -> PrecisionSupport {
     }
 }
 
-/// Best effort helper to fetch primary non-loopback IP address or fallback to 127.0.0.1.
-fn get_local_ip() -> String {
-    std::env::var("NODE_IP").unwrap_or_else(|_| "127.0.0.1".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,19 +293,7 @@ mod tests {
         assert!(manifest.cpu.cores > 0);
         assert!(manifest.memory_gb > 0.0);
 
-        let target_req = probe.probe_target("test-target-1", "0.1.0");
-
-        assert_eq!(target_req.target_id, "test-target-1");
-        assert_eq!(target_req.agent_version, "0.1.0");
-        assert!(target_req.capabilities.contains(&"cpu".to_string()));
-        assert!(!target_req.hostname.is_empty());
-        assert!(target_req.labels.contains_key("num_cpus"));
-        assert!(target_req.labels.contains_key("total_ram_gb"));
-
-        let heartbeat =
-            probe.create_heartbeat("agent-1", "test-target-1", "HEALTHY", HashMap::new());
-        assert_eq!(heartbeat.agent_id, "agent-1");
-        assert_eq!(heartbeat.status, "HEALTHY");
+        assert!(manifest.cpu.threads.unwrap_or_default() > 0);
     }
 
     #[test]

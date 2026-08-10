@@ -8,8 +8,9 @@ Reactor, Exchange, Navigator, Echo, vendor implementations, and enterprise
 bundles belong in the advanced-services repository.
 
 Use develop for daily changes. main is a protected release branch and accepts
-only reviewed pull requests from develop. A pull request that changes the
-legacy cy.llm contract or adds a new consumer is not valid P0 work.
+only reviewed pull requests from develop. Core changes must preserve the
+versioned contract ownership and must not add legacy version-0 protocol or
+agent-service references.
 
 Before handing off a core change, run:
 

@@ -10,7 +10,6 @@ required_files=(
   "docs/adr/ADR-CORE-REPOSITORY-GOVERNANCE.md"
   "docs/adr/ADR-PLUGIN-EXECUTION-BOUNDARY.md"
   "docs/adr/ADR-LEGACY-CY-LLM-CUTOVER.md"
-  "contracts/legacy/cy-llm-v0-allowlist.txt"
 )
 
 for path in "${required_files[@]}"; do
@@ -47,7 +46,6 @@ mapfile -t legacy_refs < <(
     -g '!target/**' \
     -g '!.git/**' \
     -g '!**/*.md' \
-    -g '!contracts/legacy/**' \
     -g '!tools/ci/check-architecture-governance.sh' \
     'cy\.llm|AgentService|AiService|ai_service\.proto|agent_service\.proto' . || true
 )
@@ -56,21 +54,8 @@ while IFS= read -r path; do
   [[ -z "$path" ]] && continue
   normalized="${path//\\//}"
   normalized="${normalized#./}"
-  allowed=0
-  while IFS= read -r pattern; do
-    [[ -z "$pattern" || "$pattern" == \#* ]] && continue
-    case "$normalized" in
-      $pattern)
-        allowed=1
-        break
-        ;;
-    esac
-  done < contracts/legacy/cy-llm-v0-allowlist.txt
-
-  if [[ "$allowed" -ne 1 ]]; then
-    echo "legacy cy.llm reference outside allowlist: $normalized"
-    failed=1
-  fi
+  echo "legacy cy.llm reference in runtime or contract source: $normalized"
+  failed=1
 done < <(printf '%s\n' "${legacy_refs[@]}")
 
 if [[ "$failed" -ne 0 ]]; then

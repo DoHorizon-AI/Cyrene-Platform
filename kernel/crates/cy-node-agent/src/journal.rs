@@ -1,7 +1,7 @@
 //! Node Agent Local Persistent & Buffered Journal.
 //!
 //! Provides ring-buffered log entries, disk persistence, sequence tracking,
-//! filtering, and real-time streaming support for AgentService.StreamJournal.
+//! filtering, and real-time local subscriptions.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -9,7 +9,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use cy_proto::{JournalEntry, JournalStreamRequest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -23,7 +22,16 @@ pub enum JournalError {
     SerializationError(#[from] serde_json::Error),
 }
 
-/// Persistent record wrapping a JournalEntry with an auto-incrementing sequence number.
+/// Query options for the local journal. This is intentionally not a Core RPC
+/// request; remote watch/query semantics belong to a later control-plane API.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JournalQuery {
+    pub tail_lines: usize,
+    pub filter_unit: String,
+    pub since_timestamp: i64,
+}
+
+/// Persistent record with an auto-incrementing sequence number.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JournalEntryRecord {
     pub sequence_number: u64,
@@ -38,19 +46,6 @@ pub struct JournalEntryInternal {
     pub log_level: String,
     pub message: String,
     pub metadata: HashMap<String, String>,
-}
-
-impl From<JournalEntryInternal> for JournalEntry {
-    fn from(val: JournalEntryInternal) -> Self {
-        JournalEntry {
-            target_id: val.target_id,
-            timestamp: val.timestamp,
-            source: val.source,
-            log_level: val.log_level,
-            message: val.message,
-            metadata: val.metadata,
-        }
-    }
 }
 
 /// Local persistent and buffered journal for Node Agent.
@@ -142,8 +137,8 @@ impl AgentJournal {
         Ok(seq)
     }
 
-    /// Query historical log entries matching request filters.
-    pub fn query(&self, req: &JournalStreamRequest) -> Vec<JournalEntryRecord> {
+    /// Query historical log entries matching local filters.
+    pub fn query(&self, req: &JournalQuery) -> Vec<JournalEntryRecord> {
         let mut filtered: Vec<JournalEntryRecord> = self
             .ring_buffer
             .iter()
@@ -159,8 +154,8 @@ impl AgentJournal {
             .cloned()
             .collect();
 
-        if req.tail_lines > 0 && filtered.len() > (req.tail_lines as usize) {
-            let start = filtered.len() - (req.tail_lines as usize);
+        if req.tail_lines > 0 && filtered.len() > req.tail_lines {
+            let start = filtered.len() - req.tail_lines;
             filtered = filtered.split_off(start);
         }
 
@@ -242,9 +237,7 @@ mod tests {
         // Capacity is 5, so only lines 6..=10 remain
         assert_eq!(journal.len(), 5);
 
-        let req = JournalStreamRequest {
-            target_id: "target-1".into(),
-            follow: false,
+        let req = JournalQuery {
             tail_lines: 3,
             filter_unit: "cy-engine".into(),
             since_timestamp: 0,
@@ -276,9 +269,7 @@ mod tests {
         let mut reloaded = AgentJournal::new("target-disk", 100, Some(path));
         assert_eq!(reloaded.len(), 2);
 
-        let req = JournalStreamRequest {
-            target_id: "target-disk".into(),
-            follow: false,
+        let req = JournalQuery {
             tail_lines: 0,
             filter_unit: "".into(),
             since_timestamp: 0,

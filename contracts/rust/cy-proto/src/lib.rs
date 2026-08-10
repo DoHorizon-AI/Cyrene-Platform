@@ -1,8 +1,8 @@
-//! Generated CYRENE protocol types.
+//! Generated CYRENE Core v1 protocol types.
 //!
-//! The schema is compiled from `contracts/proto/` by `build.rs` (tonic-build)
-//! and included here. Proto files are the single contract source; do not
-//! hand-edit generated code.
+//! The schema is compiled from `contracts/proto/cyrene/core/v1/` by
+//! `build.rs` (tonic-build) and included here. Proto files are the single
+//! contract source; do not hand-edit generated code.
 
 pub mod google {
     pub mod rpc {
@@ -10,14 +10,7 @@ pub mod google {
     }
 }
 
-/// Generated types under their proto package path (`cy.llm`).
-pub mod cy {
-    pub mod llm {
-        tonic::include_proto!("cy.llm");
-    }
-}
-
-/// Core v1 generated types under their proto package path.
+/// Generated Core v1 messages, enums, clients, and servers.
 pub mod cyrene {
     pub mod core {
         pub mod v1 {
@@ -26,19 +19,12 @@ pub mod cyrene {
     }
 }
 
-/// Convenience re-export of every generated message, enum, client and server
-/// type so downstream crates can `use cy_proto::*;` or `use cy_proto::llm::*;`.
-pub use cy::llm;
-pub use cy::llm::*;
+/// Short alias for callers that only need Core v1 symbols.
 pub use cyrene::core::v1 as core_v1;
-
-pub mod ai_service_client {
-    pub use crate::cy::llm::ai_inference_client::AiInferenceClient as AiServiceClient;
-}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::core_v1;
     use prost::Message;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
@@ -59,60 +45,20 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_proto_types() {
-        let req = AgentHeartbeatRequest {
-            agent_id: "agent-1".into(),
-            target_id: "target-1".into(),
-            timestamp: 123456789,
-            status: "HEALTHY".into(),
-            metrics: std::collections::HashMap::new(),
-        };
-        assert_eq!(req.agent_id, "agent-1");
-
-        let reg = TargetRegistrationRequest {
-            target_id: "t-100".into(),
-            hostname: "node1".into(),
-            ip_address: "192.168.1.10".into(),
-            arch: "x86_64".into(),
-            os: "linux".into(),
-            capabilities: vec!["cuda".into()],
-            labels: std::collections::HashMap::new(),
-            agent_version: "1.0.0".into(),
-        };
-        assert_eq!(reg.target_id, "t-100");
-
-        let cmd = AgentCommandRequest {
-            command_id: "cmd-1".into(),
-            target_id: "t-100".into(),
-            command_type: "exec".into(),
-            payload: "echo hi".into(),
-            timeout_seconds: 30,
-            env: std::collections::HashMap::new(),
-        };
-        assert_eq!(cmd.command_id, "cmd-1");
-
-        let journal = JournalStreamRequest {
-            target_id: "t-100".into(),
-            follow: true,
-            tail_lines: 100,
-            filter_unit: "cy-engine".into(),
-            since_timestamp: 0,
-        };
-        assert_eq!(journal.target_id, "t-100");
-    }
-
-    #[test]
     fn core_v1_fixtures_round_trip() {
-        let hello = core_v1::NodeHello::decode(fixture_bytes("node_hello").as_slice()).unwrap();
+        let hello_bytes = fixture_bytes("node_hello");
+        let hello = core_v1::NodeHello::decode(hello_bytes.as_slice()).unwrap();
+        assert_eq!(hello.encode_to_vec(), hello_bytes);
         assert_eq!(hello.node.unwrap().node_id, "node-1");
 
-        let welcome =
-            core_v1::NodeWelcome::decode(fixture_bytes("node_welcome").as_slice()).unwrap();
+        let welcome_bytes = fixture_bytes("node_welcome");
+        let welcome = core_v1::NodeWelcome::decode(welcome_bytes.as_slice()).unwrap();
+        assert_eq!(welcome.encode_to_vec(), welcome_bytes);
         assert_eq!(welcome.selected_protocol_version, 1);
 
-        let reserve =
-            core_v1::ReserveResourcesRequest::decode(fixture_bytes("reserve_resources").as_slice())
-                .unwrap();
+        let reserve_bytes = fixture_bytes("reserve_resources");
+        let reserve = core_v1::ReserveResourcesRequest::decode(reserve_bytes.as_slice()).unwrap();
+        assert_eq!(reserve.encode_to_vec(), reserve_bytes);
         assert_eq!(reserve.node.unwrap().node_epoch, 7);
         assert_eq!(
             reserve
@@ -124,44 +70,73 @@ mod tests {
             1000
         );
 
-        let release =
-            core_v1::ReleaseResourcesRequest::decode(fixture_bytes("release_resources").as_slice())
-                .unwrap();
+        let release_bytes = fixture_bytes("release_resources");
+        let release = core_v1::ReleaseResourcesRequest::decode(release_bytes.as_slice()).unwrap();
+        assert_eq!(release.encode_to_vec(), release_bytes);
         assert_eq!(release.lease.unwrap().fence_token, 9);
 
-        let launch = core_v1::LaunchPluginRequest::decode(
-            fixture_bytes("inline_resource_claim_launch").as_slice(),
-        )
-        .unwrap();
+        let launch_bytes = fixture_bytes("inline_resource_claim_launch");
+        let launch = core_v1::LaunchPluginRequest::decode(launch_bytes.as_slice()).unwrap();
+        assert_eq!(launch.encode_to_vec(), launch_bytes);
         assert_eq!(launch.plugin.unwrap().plugin_id, "plugin-a");
         assert!(matches!(
             launch.allocation,
             Some(core_v1::launch_plugin_request::Allocation::ResourceClaim(_))
         ));
 
-        let success =
-            core_v1::Operation::decode(fixture_bytes("operation_success").as_slice()).unwrap();
+        let success_bytes = fixture_bytes("operation_success");
+        let success = core_v1::Operation::decode(success_bytes.as_slice()).unwrap();
+        assert_eq!(success.encode_to_vec(), success_bytes);
         assert_eq!(success.state, core_v1::OperationState::Succeeded as i32);
         assert!(matches!(
             success.outcome,
             Some(core_v1::operation::Outcome::Result(_))
         ));
 
-        let failure =
-            core_v1::Operation::decode(fixture_bytes("operation_failure").as_slice()).unwrap();
+        let failure_bytes = fixture_bytes("operation_failure");
+        let failure = core_v1::Operation::decode(failure_bytes.as_slice()).unwrap();
+        assert_eq!(failure.encode_to_vec(), failure_bytes);
         assert_eq!(failure.state, core_v1::OperationState::Failed as i32);
         assert!(matches!(
             failure.outcome,
             Some(core_v1::operation::Outcome::Error(_))
         ));
 
-        let stale = core_v1::ReportHeartbeatResponse::decode(
-            fixture_bytes("heartbeat_stale_generation").as_slice(),
-        )
-        .unwrap();
+        let stale_bytes = fixture_bytes("heartbeat_stale_generation");
+        let stale = core_v1::ReportHeartbeatResponse::decode(stale_bytes.as_slice()).unwrap();
+        assert_eq!(stale.encode_to_vec(), stale_bytes);
         assert_eq!(
             stale.disposition,
             core_v1::HeartbeatDisposition::StaleGeneration as i32
         );
+    }
+
+    #[test]
+    fn core_v1_does_not_expose_process_or_large_artifact_inputs() {
+        let core_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto/cyrene/core/v1");
+        for entry in std::fs::read_dir(core_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|value| value.to_str()) != Some("proto") {
+                continue;
+            }
+            let source = std::fs::read_to_string(path).unwrap().to_ascii_lowercase();
+            for forbidden in [
+                " shell ",
+                " argv ",
+                " env ",
+                " model ",
+                " dataset ",
+                " checkpoint ",
+                " stdout ",
+                " stderr ",
+                " payload ",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "forbidden field token: {forbidden}"
+                );
+            }
+        }
     }
 }
