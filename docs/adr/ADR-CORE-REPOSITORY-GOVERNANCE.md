@@ -36,7 +36,7 @@ artifact and are not separate installation channels.
 
 Core can be built and tested without checking out any first-party service.
 Cross-repository changes are coordinated through versioned contracts, TCK
-artifacts, signed packages, and the service core.lock rather than source
+artifacts, signed packages, and the service's `core.lock` rather than source
 imports or Git submodules.
 
 This ADR does not create Core v1, configure a deployment environment, or migrate

@@ -83,17 +83,17 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 
 当前实现与目标边界之间的主要差距：
 
-| 现状 | 风险 | 目标 |
-| --- | --- | --- |
-| `cy-extension-registry` 直接依赖 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面 | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
-| `ai_service.proto` 包含 LoRA、训练、推理、量化和脚本执行 | Core 与 Yield/Reactor 业务耦合 | 业务 RPC 迁入各 App 的版本化协议 |
-| `AgentService` 使用自由字符串 `command_type/payload/env` | 可能演化成远程命令注入面 | 只保留类型化资源和生命周期命令 |
-| `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑 | 没有 OS/GPU provider 抽象 | 原始事实经 provider/adapter 暴露 |
-| `BuiltinSystemProbe` 又硬编码另一份硬件事实 | 双重库存权威 | 可分配资源只由 Kernel 报告 |
-| `StdioTransport::spawn(executable, args)` 裸启动进程 | 没有 cgroup、沙盒、设备映射或资源环境注入 | 所有进程经 `ProcessRuntime` 与 `SandboxBackend` |
-| 当前 ADR 允许 `in-proc-rust` 业务插件和 PyO3 | 业务崩溃可能影响可信核心 | 进程内仅限平台适配器；PyO3 只能存在于外部 worker |
-| GPU 按型号聚合 | 无法对单卡、MIG/分区做租约 | 使用稳定设备 ID、PCI 地址、分区和健康状态 |
-| 六大 App 尚未形成各自独立仓库 | 发布、权限和版本边界尚未落地 | 方案 A：Core 开源，六个服务一服务一仓 |
+| 现状                                                  | 风险                        | 目标                                                 |
+| --------------------------------------------------- | ------------------------- | -------------------------------------------------- |
+| `cy-extension-registry` 直接依赖 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面         | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
+| `ai_service.proto` 包含 LoRA、训练、推理、量化和脚本执行            | Core 与 Yield/Reactor 业务耦合 | 业务 RPC 迁入各 App 的版本化协议                              |
+| `AgentService` 使用自由字符串 `command_type/payload/env`   | 可能演化成远程命令注入面              | 只保留类型化资源和生命周期命令                                    |
+| `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑               | 没有 OS/GPU provider 抽象     | 原始事实经 provider/adapter 暴露                          |
+| `BuiltinSystemProbe` 又硬编码另一份硬件事实                    | 双重库存权威                    | 可分配资源只由 Kernel 报告                                  |
+| `StdioTransport::spawn(executable, args)` 裸启动进程     | 没有 cgroup、沙盒、设备映射或资源环境注入  | 所有进程经 `ProcessRuntime` 与 `SandboxBackend`          |
+| 当前 ADR 允许 `in-proc-rust` 业务插件和 PyO3                 | 业务崩溃可能影响可信核心              | 进程内仅限平台适配器；PyO3 只能存在于外部 worker                     |
+| GPU 按型号聚合                                           | 无法对单卡、MIG/分区做租约           | 使用稳定设备 ID、PCI 地址、分区和健康状态                           |
+| 六大 App 尚未形成各自独立仓库                                   | 发布、权限和版本边界尚未落地            | 方案 A：Core 开源，六个服务一服务一仓                             |
 
 ### 2.1 当前实现的补充核查
 
@@ -125,13 +125,13 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 
 ## 3. 内核、框架、插件与 Shell 的边界
 
-| 层 | 必须负责 | 明确禁止 |
-| --- | --- | --- |
-| Rust Kernel / Node Runtime | 主机资源发现；设备清单；资源租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；本地 IPC；节点观察状态 | 训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库 |
-| Kotlin Framework / Control Plane | 插件目录与安装；依赖解析；期望状态；集群拓扑；节点选择；权限、租户与配额策略；工作流；配置；分布式状态协调；面向 Shell 的 API | 直接调用 CUDA/NVML；直接操作 cgroup/device node；用 `ProcessBuilder` 启动计算插件；加载 Python 到 JVM |
-| App / Plugin | Catalyst、Yield、Reactor 等全部 AI 和产品能力；PyTorch、vLLM、uv；数据、训练、推理、网关、评估和微前端 | 依赖 Kernel 私有 crate；绕过租约；自行选择未授权 GPU；修改控制面全局状态 |
-| 服务插件 UI / Shell | UI extension、窗口/托盘、安全存储、认证会话、公开 API 客户端和远程控制体验；Navigator 可提供官方组合壳 | 进入 Core 仓库；直接调用 KernelService；启动节点进程；扫描 GPU；持有节点管理凭证 |
-| SDK / Contracts | 唯一跨语言协议；版本策略；代码生成；manifest/schema；兼容性测试与 TCK | 业务实现；某一种语言独有但未进入协议的隐藏语义 |
+| 层                                | 必须负责                                                                                                   | 明确禁止                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Rust Kernel / Node Runtime       | 主机资源发现；设备清单；资源租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；本地 IPC；节点观察状态 | 训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Kotlin Framework / Control Plane | 插件目录与安装；依赖解析；期望状态；集群拓扑；节点选择；权限、租户与配额策略；工作流；配置；分布式状态协调；面向 Shell 的 API                                   | 直接调用 CUDA/NVML；直接操作 cgroup/device node；用 `ProcessBuilder` 启动计算插件；加载 Python 到 JVM |
+| App / Plugin                     | Catalyst、Yield、Reactor 等全部 AI 和产品能力；PyTorch、vLLM、uv；数据、训练、推理、网关、评估和微前端                                 | 依赖 Kernel 私有 crate；绕过租约；自行选择未授权 GPU；修改控制面全局状态                                    |
+| 服务插件 UI / Shell                  | UI extension、窗口/托盘、安全存储、认证会话、公开 API 客户端和远程控制体验；Navigator 可提供官方组合壳                                      | 进入 Core 仓库；直接调用 KernelService；启动节点进程；扫描 GPU；持有节点管理凭证                             |
+| SDK / Contracts                  | 唯一跨语言协议；版本策略；代码生成；manifest/schema；兼容性测试与 TCK                                                           | 业务实现；某一种语言独有但未进入协议的隐藏语义                                                          |
 
 Kernel 不能被称为完全“无状态”。进程、租约、重启计数和健康信息都是节点
 本地运行态。更准确的定义是：
@@ -184,13 +184,13 @@ generation 和错误语义完全相同。直连模式只是传输拓扑变化，
 
 ### 3.3 通信平面
 
-| 平面 | 用途 | 推荐传输 |
-| --- | --- | --- |
-| 控制面 | 资源租约、插件期望状态、进程启停、查询 | 默认 Agent 主动 mTLS 双向 gRPC；可选 Kotlin 直连 KernelService；本地可用 UDS |
-| 事件面 | 节点、租约、进程、插件状态变化 | 可恢复的 gRPC stream；后续可接事件总线 |
-| 本地插件面 | Supervisor 与 Python/JVM/native worker | 现有 length-prefixed Protobuf over stdio；后续 UDS/Named Pipe |
-| 数据面 | 模型、数据集、checkpoint、token/tensor 流 | 对象存储 URI、共享内存、mmap、UDS 或独立流服务 |
-| 客户端面 | Shell 到控制面 | HTTPS、WebSocket、gRPC-Web/Connect 等公开 API |
+| 平面    | 用途                                    | 推荐传输                                                         |
+| ----- | ------------------------------------- | ------------------------------------------------------------ |
+| 控制面   | 资源租约、插件期望状态、进程启停、查询                   | 默认 Agent 主动 mTLS 双向 gRPC；可选 Kotlin 直连 KernelService；本地可用 UDS |
+| 事件面   | 节点、租约、进程、插件状态变化                       | 可恢复的 gRPC stream；后续可接事件总线                                    |
+| 本地插件面 | Supervisor 与 Python/JVM/native worker | 现有 length-prefixed Protobuf over stdio；后续 UDS/Named Pipe     |
+| 数据面   | 模型、数据集、checkpoint、token/tensor 流      | 对象存储 URI、共享内存、mmap、UDS 或独立流服务                                |
+| 客户端面  | Shell 到控制面                            | HTTPS、WebSocket、gRPC-Web/Connect 等公开 API                     |
 
 分布式部署默认由 Rust Agent 主动建立到 Kotlin 控制面的 mTLS 长连接，以
 适应 NAT 和防火墙。第一帧必须完成节点身份、node epoch、协议版本和恢复
@@ -201,15 +201,15 @@ session lease 的命令来源。
 
 ### 3.4 连接故障与恢复规则
 
-| 场景 | 首期规则 |
-| --- | --- |
-| Controller 暂时失联 | Node 不接受新的 generation；现有实例只运行到 lease/grace 截止 |
-| Resource lease 到期 | 先 drain，再停止并释放资源；不能无限离线运行 |
-| Node session 到期 | Kotlin 将 Node/Instance 标记为 UNKNOWN/LOST，不直接假设进程已死 |
-| Controller 重启 | 从持久化 desired state/outbox 恢复，再与 node snapshot 对账 |
-| Node 重启 | 仅接管 identity、package digest、generation、fencing token 均匹配的进程；其余按 orphan 策略处理 |
-| Plugin 崩溃 | Rust 记录真实 exit/OOM，按 restart policy 更新 attempt，并触发 quarantine 条件 |
-| 旧 Controller 恢复 | generation/fencing token 过期的 mutation 和 heartbeat 必须被拒绝 |
+| 场景                | 首期规则                                                                        |
+| ----------------- | --------------------------------------------------------------------------- |
+| Controller 暂时失联   | Node 不接受新的 generation；现有实例只运行到 lease/grace 截止                               |
+| Resource lease 到期 | 先 drain，再停止并释放资源；不能无限离线运行                                                   |
+| Node session 到期   | Kotlin 将 Node/Instance 标记为 UNKNOWN/LOST，不直接假设进程已死                           |
+| Controller 重启     | 从持久化 desired state/outbox 恢复，再与 node snapshot 对账                            |
+| Node 重启           | 仅接管 identity、package digest、generation、fencing token 均匹配的进程；其余按 orphan 策略处理 |
+| Plugin 崩溃         | Rust 记录真实 exit/OOM，按 restart policy 更新 attempt，并触发 quarantine 条件            |
+| 旧 Controller 恢复   | generation/fencing token 过期的 mutation 和 heartbeat 必须被拒绝                     |
 
 对训练等非幂等任务，Framework 不能在节点刚失联时盲目在另一节点重跑；必须先
 证明旧 lease/fencing 已失效，或由业务扩展协议提供 checkpoint/recovery 语义。
@@ -504,20 +504,20 @@ cyrene-navigator/
 
 ### 6.6 当前路径到目标路径
 
-| 当前路径 | 目标路径 | 迁移规则 |
-| --- | --- | --- |
-| 根 `Cargo.toml` / `Cargo.lock` | `cyrene-core/` 原路径 | 保持 Rust workspace 根入口 |
-| `kernel/crates/cy-*` | `cyrene-core/kernel/crates/cy-*` | 先增量扩展，不先拆现有 crate |
-| `framework/jvm/README.md` | `cyrene-core/framework/jvm/*` | 按 Pure Kotlin Domain + Spring Boot Adapters 建 Gradle 工程 |
-| `framework/crates/cy-extension-registry` | 迁移期保留；长期由 Kotlin application/domain 接管 | Kotlin shadow/conformance 通过前不得删除 |
-| `framework/crates/cy-platform-api` | `cyrene-core/sdk/rust/cy-platform-api` | 重新定位为 Rust SDK/受信任静态接口 |
-| `contracts/proto/plugin/v1/*` | `cyrene-core/sdk/proto/cy/plugin/v1/*` | 原子迁移，保持 wire package |
-| `contracts/proto/ai_service.proto` | `cyrene-core/sdk/proto/cy/llm/v0/*` 后由各服务契约替代 | 冻结兼容，不直接改 package |
-| `contracts/proto/agent_service.proto` | `cyrene-core/sdk/proto/cy/llm/v0/*` | 弃用任意命令接口，保留兼容期 |
-| 无 | `cyrene-core/sdk/proto/cyrene/core/v1/cyrene_core.proto` | 新的正式分布式 Core v1 |
-| `contracts/schemas/*`、`contracts/rust/cy-*` | `cyrene-core/sdk/*` | 先建可复现 codegen，再原子迁移 |
-| 六大服务现有私有源码 | 六个独立 `cyrene-<service>` 仓库 | 不导入 Core；逐仓补 service manifest、core.lock、TCK 与签名 OCI |
-| 产品 Shell/UI | 相应 `cyrene-<service>/{ui,shell}` | Navigator 提供官方组合壳，其他服务按需提供扩展或独立壳 |
+| 当前路径                                        | 目标路径                                                     | 迁移规则                                                    |
+| ------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------- |
+| 根 `Cargo.toml` / `Cargo.lock`               | `cyrene-core/` 原路径                                       | 保持 Rust workspace 根入口                                   |
+| `kernel/crates/cy-*`                        | `cyrene-core/kernel/crates/cy-*`                         | 先增量扩展，不先拆现有 crate                                       |
+| `framework/jvm/README.md`                   | `cyrene-core/framework/jvm/*`                            | 按 Pure Kotlin Domain + Spring Boot Adapters 建 Gradle 工程 |
+| `framework/crates/cy-extension-registry`    | 迁移期保留；长期由 Kotlin application/domain 接管                   | Kotlin shadow/conformance 通过前不得删除                       |
+| `framework/crates/cy-platform-api`          | `cyrene-core/sdk/rust/cy-platform-api`                   | 重新定位为 Rust SDK/受信任静态接口                                  |
+| `contracts/proto/plugin/v1/*`               | `cyrene-core/sdk/proto/cy/plugin/v1/*`                   | 原子迁移，保持 wire package                                    |
+| `contracts/proto/ai_service.proto`          | `cyrene-core/sdk/proto/cy/llm/v0/*` 后由各服务契约替代            | 冻结兼容，不直接改 package                                       |
+| `contracts/proto/agent_service.proto`       | `cyrene-core/sdk/proto/cy/llm/v0/*`                      | 弃用任意命令接口，保留兼容期                                          |
+| 无                                           | `cyrene-core/sdk/proto/cyrene/core/v1/cyrene_core.proto` | 新的正式分布式 Core v1                                         |
+| `contracts/schemas/*`、`contracts/rust/cy-*` | `cyrene-core/sdk/*`                                      | 先建可复现 codegen，再原子迁移                                     |
+| 六大服务现有私有源码                                  | 六个独立 `cyrene-<service>` 仓库                               | 不导入 Core；逐仓补 service manifest、core.lock、TCK 与签名 OCI     |
+| 产品 Shell/UI                                 | 相应 `cyrene-<service>/{ui,shell}`                         | Navigator 提供官方组合壳，其他服务按需提供扩展或独立壳                        |
 
 `contracts/` 与 `sdk/` 不能长期双写。路径迁移必须在一个受控变更中同步更新
 Cargo、Gradle、build.rs、CI 和外部消费者；服务仓只切换公开版本，不复制
@@ -1491,19 +1491,19 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
 
 ### 10.1 当前文件迁移映射
 
-| 当前文件/模块 | 迁移方向 | 删除或替换门禁 |
-| --- | --- | --- |
-| contracts/proto/ai_service.proto | 冻结为 legacy v0；推理、训练、量化迁入版本化 extension contract | 所有消费者迁移且兼容期结束 |
-| contracts/proto/agent_service.proto | 冻结；由 typed node/kernel protocol 替代 | 注册、心跳、reconcile、恢复集成测试通过 |
-| contracts/proto/plugin/v1/* | 保留 POC 兼容；新增 worker v2 package | Python/JVM conformance runner 与迁移 adapter 全绿 |
-| cy-manifest、plugin.schema.json、PLUGIN_SPEC.md | 收敛为一份规范和多语言模型 | Schema/Rust/Kotlin/Python fixture roundtrip 全绿 |
-| cy-local-transport | 抽象 transport factory，补 child event、UDS 和 env policy | EOF、oversize、stdout 污染、关闭/回收覆盖 |
-| cy-plugin-supervisor | 重构为 manager + instance actor，消费 lease/LaunchPlan | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿 |
-| cy-node-agent | 增加 daemon binary、mTLS/session、snapshot/reconcile | 不再把 handler unit test 当成可运行节点证明 |
-| cy-platform-api | AI trait 移到 extension SDK；Core 只留通用插件契约 | 移除官方 App 后 Core 仍能构建运行 |
-| cy-extension-registry | 迁移期保留为 compatibility layer，长期由 Kotlin catalog/router 接管 | Kotlin 行为覆盖后才删除 |
-| framework/jvm | 建立 Pure Kotlin domain/application + Spring adapters | Gradle build、架构测试、reconcile integration test 通过 |
-| apps / shell | 仅按方案 A 在相应服务仓创建或接入 | 先完成 Core API 与最小远程 mock plugin 闭环 |
+| 当前文件/模块                                       | 迁移方向                                                    | 删除或替换门禁                                                |
+| --------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------ |
+| contracts/proto/ai_service.proto              | 冻结为 legacy v0；推理、训练、量化迁入版本化 extension contract          | 所有消费者迁移且兼容期结束                                          |
+| contracts/proto/agent_service.proto           | 冻结；由 typed node/kernel protocol 替代                      | 注册、心跳、reconcile、恢复集成测试通过                               |
+| contracts/proto/plugin/v1/*                   | 保留 POC 兼容；新增 worker v2 package                          | Python/JVM conformance runner 与迁移 adapter 全绿           |
+| cy-manifest、plugin.schema.json、PLUGIN_SPEC.md | 收敛为一份规范和多语言模型                                           | Schema/Rust/Kotlin/Python fixture roundtrip 全绿         |
+| cy-local-transport                            | 抽象 transport factory，补 child event、UDS 和 env policy     | EOF、oversize、stdout 污染、关闭/回收覆盖                         |
+| cy-plugin-supervisor                          | 重构为 manager + instance actor，消费 lease/LaunchPlan        | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿 |
+| cy-node-agent                                 | 增加 daemon binary、mTLS/session、snapshot/reconcile        | 不再把 handler unit test 当成可运行节点证明                        |
+| cy-platform-api                               | AI trait 移到 extension SDK；Core 只留通用插件契约                 | 移除官方 App 后 Core 仍能构建运行                                 |
+| cy-extension-registry                         | 迁移期保留为 compatibility layer，长期由 Kotlin catalog/router 接管 | Kotlin 行为覆盖后才删除                                        |
+| framework/jvm                                 | 建立 Pure Kotlin domain/application + Spring adapters     | Gradle build、架构测试、reconcile integration test 通过        |
+| apps / shell                                  | 仅按方案 A 在相应服务仓创建或接入                                      | 先完成 Core API 与最小远程 mock plugin 闭环                      |
 
 contracts/ 与 sdk/ 不能长期双写。路径迁移必须同步更新 Cargo、Gradle、build.rs、
 CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码。

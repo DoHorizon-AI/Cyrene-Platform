@@ -15,13 +15,13 @@ Core CI, architecture-governance, and release-evidence checks pass.
 
 ## Repository layout
 
-| Directory | Responsibility |
-| --- | --- |
-| `kernel/` | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
-| `framework/` | Extension API, registry, and JVM boundary |
-| `contracts/` | Protobuf, JSON Schema, canonical manifests, and generated protocol crates |
-| `examples/` | Non-production plugin integration examples |
-| `docs/` | Architecture, protocol, and repository-boundary decisions |
+| Directory    | Responsibility                                                                                             |
+| ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `kernel/`    | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
+| `framework/` | Extension API, registry, and JVM boundary                                                                  |
+| `contracts/` | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
+| `examples/`  | Non-production plugin integration examples                                                                 |
+| `docs/`      | Architecture, protocol, and repository-boundary decisions                                                  |
 
 The former Rust control plane contained service-level training, runtime,
 artifact, and serving implementations, so it is preserved in the private
