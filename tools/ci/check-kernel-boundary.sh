@@ -31,6 +31,11 @@ if rg -n -i 'nvidia-smi|rocm-smi|/dev/nvidia|libnvidia|libloading|dlopen|ascend-
   failed=1
 fi
 
+if rg -n 'unsafe\s*\{|unsafe extern|libc::|\bCommand\b|/sys/fs/cgroup|/proc/self/cgroup|BPF_' kernel --glob '*.rs'; then
+  echo "Kernel must remain pure-safe and must not contain privileged sandbox implementation details" >&2
+  failed=1
+fi
+
 if rg -n 'cy-hardware-discovery' kernel Cargo.toml; then
   echo "Kernel workspace still depends on the retired discovery crate" >&2
   failed=1
@@ -45,9 +50,13 @@ fi
 required_files=(
   "contracts/proto/cyrene/hardware/v1/hardware_adapter.proto"
   "kernel/crates/cy-adapter-client/src/lib.rs"
+  "kernel/crates/cy-sandbox-client/src/lib.rs"
   "adapters/hardware/nvidia/src/main.rs"
+  "adapters/execution/sandboxd/src/main.rs"
   "infra/systemd/cyrene-nvidia-adapter.service"
+  "infra/systemd/cyrene-sandboxd.service"
   "docs/adr/ADR-HARDWARE-ADAPTER-BOUNDARY.md"
+  "docs/adr/ADR-SANDBOX-ADAPTER-BOUNDARY.md"
 )
 
 for path in "${required_files[@]}"; do
@@ -59,6 +68,11 @@ done
 
 if ! rg -q '^package cyrene\.hardware\.v1;' contracts/proto/cyrene/hardware/v1/hardware_adapter.proto; then
   echo "hardware adapter protocol package is missing or changed" >&2
+  failed=1
+fi
+
+if ! rg -q '^package cyrene\.sandbox\.v1;' contracts/proto/cyrene/sandbox/v1/sandbox_adapter.proto; then
+  echo "sandbox adapter protocol package is missing or changed" >&2
   failed=1
 fi
 

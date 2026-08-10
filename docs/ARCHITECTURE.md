@@ -18,9 +18,10 @@ The six products are plugins, not branches inside the core.
 
 ### Rust kernel
 
-The Kernel is a node-local host and enforcement layer. It owns leases/fencing,
-cgroup and process lifecycle, generic local IPC, and lifecycle events. It does
-not own global scheduling policy or a vendor driver integration.
+The Kernel is a node-local decision and lifecycle layer. It owns leases/fencing,
+launch authorization, generic local IPC, and lifecycle events. It does not own
+global scheduling policy, a vendor driver integration, cgroup files, or a
+worker process tree.
 
 GPU support is intentionally outside the Kernel process. A separately
 supervised Hardware Adapter Host may:
@@ -30,11 +31,12 @@ supervised Hardware Adapter Host may:
 - load a vendor C ABI library when a CLI is insufficient;
 - return versioned inventory, health, and binding facts over UDS.
 
-The Kernel applies the returned binding to its sandbox and observes exit, OOM,
-and cgroup resource events. It does not link model runtimes, vendor libraries,
-or vendor commands. Adapter loss blocks new dependent leases rather than
-crashing the Kernel; a C ABI is an internal Adapter Host detail, not a public
-Kernel extension API.
+The Kernel sends the returned binding to a separately supervised `sandboxd`
+over UDS. sandboxd applies cgroup/device enforcement and reports exit, OOM,
+and cgroup resource facts. Neither process links model runtimes, vendor
+libraries, or vendor commands into Kernel address space. Adapter loss blocks
+new dependent leases rather than crashing the Kernel; a C ABI is an internal
+Adapter Host detail, not a public Kernel extension API.
 
 ### Framework and control plane
 
@@ -51,10 +53,11 @@ worker code.
 Python, JVM, and third-party Rust business code run outside the kernel. They
 implement concrete data, training, inference, gateway, UI, and evaluation
 behavior. A worker crash must become a lifecycle event, not a core crash.
-Statically compiled Rust code inside the Kernel is limited to generic cgroup,
-process, and transport mechanisms. Hardware adapters are Core components but
-run as separate processes; they are not installable plugin runtimes. The Core
-repository does not link PyO3 or AI compute runtimes into the Kernel.
+Statically compiled Rust code inside the Kernel is limited to pure-safe state
+machines, contracts, and transport clients. Hardware and sandbox adapters are
+Core components but run as separate processes; they are not installable plugin
+runtimes. The Core repository does not link PyO3 or AI compute runtimes into
+the Kernel.
 
 ## Communication planes
 

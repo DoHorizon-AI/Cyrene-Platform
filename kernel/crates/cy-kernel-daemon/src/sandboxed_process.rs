@@ -46,10 +46,6 @@ impl SandboxedProcess {
         self.state
     }
 
-    pub fn last_cleanup(&self) -> Option<&CleanupReport> {
-        self.last_cleanup.as_ref()
-    }
-
     pub fn start(&mut self) -> Result<&ProcessHandle, ProviderError> {
         self.state = SandboxedProcessState::Starting;
         match self.runtime.launch(&self.plan, &self.binding) {

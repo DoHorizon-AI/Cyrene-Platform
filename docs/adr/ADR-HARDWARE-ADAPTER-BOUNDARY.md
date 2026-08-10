@@ -7,8 +7,9 @@
 ## Decision
 
 The CYRENE Kernel is a minimal user-space microkernel. It owns only node-local
-resource leases and fencing, cgroup/process isolation, lifecycle/reaping, and
-the generic client for local adapter IPC. It does not execute vendor commands,
+resource leases and fencing, lifecycle decisions, and generic clients for
+local adapter IPC. cgroup/process isolation and reaping belong to the external
+Sandbox Adapter Host. The Kernel does not execute vendor commands,
 read vendor-specific sysfs/procfs paths, enumerate vendor device nodes, load a
 vendor shared object, or export a vendor C ABI.
 
@@ -44,9 +45,9 @@ public API and not a substitute for process isolation.
 - Adapter Hosts must run under their own service manager scope. A Kernel crash
   cannot take an adapter down through shared address space, and an adapter
   crash cannot unwind the Kernel.
-- Kernel pre-flight cleanup may remove only cgroups and runtime paths it can
-  prove it owns. Prefix-wide deletion and adoption of foreign processes are
-  prohibited.
+- Sandbox Adapter Host pre-flight cleanup may remove only cgroups and runtime
+  paths it can prove it owns. Prefix-wide deletion and adoption of foreign
+  processes are prohibited.
 - Worker health requires IPC heartbeats plus deadline policy; PID liveness,
   cgroup telemetry, and a successful old inventory sample are insufficient.
 

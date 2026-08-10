@@ -288,7 +288,6 @@ dependencies = [
  "cy-kernel-api",
  "cy-proto",
  "cy-resource-manager",
- "cy-sandbox",
  "prost-types",
  "tokio",
  "tokio-stream",
@@ -388,11 +387,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-sandbox"
+name = "cy-sandbox-client"
 version = "0.1.0"
 dependencies = [
  "cy-kernel-api",
- "libc",
+ "cy-proto",
+ "prost",
 ]
 
 [[package]]
@@ -403,7 +403,7 @@ dependencies = [
  "cy-installation-resolver",
  "cy-kernel-daemon",
  "cy-resource-manager",
- "cy-sandbox",
+ "cy-sandbox-client",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -415,6 +415,16 @@ version = "0.1.0"
 dependencies = [
  "cy-kernel-api",
  "cy-proto",
+ "prost",
+]
+
+[[package]]
+name = "cyrene-sandboxd"
+version = "0.1.0"
+dependencies = [
+ "cy-kernel-api",
+ "cy-proto",
+ "libc",
  "prost",
 ]
 

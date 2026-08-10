@@ -21,15 +21,17 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 具体决策如下：
 
 1. **Rust Kernel / Node Runtime**
-   是每个 Linux 节点上资源、租约、沙盒、进程和本地运行状态的唯一事实源。
+   是每个 Linux 节点上资源、租约、fence、生命周期决策和本地运行状态的唯一事实源；
+   特权沙盒执行通过独立 sandboxd 完成。
 2. **Kotlin Framework / Control Plane**
    是插件目录、安装、期望状态、集群调度、权限和工作流的唯一控制面。
 3. **生态插件默认全部进程外运行。**
    Python、JVM 和第三方 Rust 插件都不能进入 Kernel 或 Kotlin 进程。
-4. **Kernel 进程内只允许通用、无厂商依赖的基础机制。**
-   例如 Linux cgroup、pidfd、进程回收和本地传输。GPU 发现、厂商 CLI、驱动
-   C ABI、厂商 sysfs/procfs 与设备节点枚举必须位于独立 Adapter Host；它们既
-   不是可安装业务插件，也不在 Kernel 地址空间。
+4. **Kernel 进程内只允许纯安全、无厂商和无宿主特权依赖的基础机制。**
+   例如租约状态机、fence、协议校验和本地传输客户端。Linux cgroup、pidfd、进程
+   回收、device BPF 与 namespace 由独立 sandboxd 执行；GPU 发现、厂商 CLI、驱动
+   C ABI、厂商 sysfs/procfs 与设备节点枚举由独立 Hardware Adapter Host 执行；它们
+   既不是可安装业务插件，也不在 Kernel 地址空间。
 5. **当前阶段不需要 C 核心或 Kernel C ABI。**
    Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离 Adapter Host
    内部，Kernel 对外保持版本化 Protobuf 契约。
@@ -131,7 +133,8 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 
 | 层                                | 必须负责                                                                                                   | 明确禁止                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Rust Kernel / Node Runtime       | 节点本地租约；cgroup/namespace/device 映射；native/bwrap/OCI 后端；进程启停、watchdog、OOM/退出码、日志；通用本地 IPC；节点观察状态 | 厂商 CLI/C ABI、厂商 sysfs/procfs、设备枚举、训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Rust Kernel / Node Runtime       | 节点本地租约、fence、启动/停止授权、watchdog 决策、通用本地 IPC 客户端、节点观察状态 | cgroup/namespace/device 映射、进程 spawn/reap、pidfd/BPF、厂商 CLI/C ABI、厂商 sysfs/procfs、设备枚举、训练策略、模型选择、数据处理、推理路由、插件市场策略、用户工作流、Python 解释器、CUDA kernel 或 AI 计算库                 |
+| Sandbox Adapter Host (`sandboxd`) | 受委托 cgroup/namespace/device 强制；native/OCI/systemd 后端；Worker 启停、reap、OOM/退出码与物理遥测；仅经 UDS 接收已批准计划 | 租约权威、GPU 厂商发现、全局策略、业务执行、直接暴露给 Kotlin/插件                                      |
 | Hardware Adapter Host            | 厂商硬件发现、健康遥测、拓扑与设备节点事实、厂商 C ABI 包装；通过 UDS 上报版本化事实和绑定 | 租约权威、cgroup 生命周期、全局策略、业务执行、直接暴露给 Kotlin/插件                                      |
 | Kotlin Framework / Control Plane | 插件目录与安装；依赖解析；期望状态；集群拓扑；节点选择；权限、租户与配额策略；工作流；配置；分布式状态协调；面向 Shell 的 API                                   | 直接调用 CUDA/NVML；直接操作 cgroup/device node；用 `ProcessBuilder` 启动计算插件；加载 Python 到 JVM |
 | App / Plugin                     | Catalyst、Yield、Reactor 等全部 AI 和产品能力；PyTorch、vLLM、uv；数据、训练、推理、网关、评估和微前端                                 | 依赖 Kernel 私有 crate；绕过租约；自行选择未授权 GPU；修改控制面全局状态                                    |
@@ -162,6 +165,7 @@ sequenceDiagram
     participant UI as Plugin-owned UI / Navigator Shell
     participant CP as Kotlin Control Plane
     participant K as Rust Kernel / Node Agent
+    participant S as Sandbox Adapter Host
     participant P as Out-of-process Plugin
     participant D as Artifact/Data Plane
 
@@ -170,8 +174,9 @@ sequenceDiagram
     UI->>CP: StartPlugin / workload request
     CP->>CP: manifest、权限、依赖、节点调度
     CP-->>K: LaunchPlugin command over outbound stream
-    K->>K: 原子租约 + cgroup/device/sandbox
-    K->>P: 启动并注入可见设备，执行本地握手
+    K->>K: 原子租约 + fence + 已批准 binding
+    K->>S: LaunchPlan + binding（本地 UDS）
+    S->>P: 启动、cgroup/device 强制与本地握手
     P-->>K: cy.plugin.v1 Health/Invoke
     K->>CP: command result / observed state / heartbeat
     CP-->>UI: lifecycle event
@@ -225,18 +230,17 @@ session lease 的命令来源。
 
 Rust 负责最小可信执行基座：
 
-- Linux 主机与设备抽象；
+- 纯安全节点状态与设备抽象；
 - 外层节点 Agent（不属于 Kernel crate）；
 - 资源租约与本地强制执行；
-- 进程、沙盒与 watchdog；
+- 生命周期与 watchdog 决策；
 - 本地 IPC 和 KernelService；
 - 审计友好的运行事件。
 
-除 `cy-sandbox` 中为 cgroup、pidfd、`prctl` 与 cgroup-device eBPF 调用所需的
-最小 Linux syscall 包装外，所有 Kernel crate 必须 `forbid(unsafe_code)`。
-`cy-sandbox` 的 unsafe 块必须保持狭窄、审计化，并启用
-`deny(unsafe_op_in_unsafe_fn)`；厂商 FFI、动态库和任何 vendor C ABI 仍只能在
-进程外 Adapter Host，不能扩散到资源管理、生命周期或协议层。
+所有 Kernel crate 必须 `forbid(unsafe_code)`。cgroup、pidfd、`prctl` 与
+cgroup-device eBPF 的最小 Linux syscall 包装仅能存在于进程外 sandboxd，并启用
+`deny(unsafe_op_in_unsafe_fn)`；厂商 FFI、动态库和任何 vendor C ABI 仅能存在于
+进程外 Hardware Adapter Host，不能扩散到资源管理、生命周期或协议层。
 
 ### 4.2 Kotlin 的范围
 
@@ -374,16 +378,17 @@ cyrene-core/
 ├── kernel/                              # Rust 用户态微内核 / Node Runtime
 │   ├── crates/
 │   │   ├── cy-kernel-api/               # 通用 process/sandbox/lease 抽象 traits
-│   │   ├── cy-kernel-daemon/            # KernelService 与 Node outbound client
 │   │   ├── cy-adapter-client/           # 通用 UDS 硬件适配器客户端
+│   │   ├── cy-sandbox-client/           # 通用 UDS sandboxd 客户端
 │   │   ├── cy-resource-manager/         # 原子配额、租约、fencing
-│   │   └── cy-sandbox/                  # runtime/backend 编排
+│   │   └── cy-kernel-daemon/            # KernelService 与生命周期状态机
 │   └── tests/
 │
 ├── runtime/cyrene-kernel/                # Linux 进程组合：UDS、安装记录 adapter、systemd 入口
 ├── agents/node/cy-node-agent/            # 外层节点控制/日志/升级；不属于 Kernel
 │
 ├── adapters/                            # 独立进程；不属于 Kernel 地址空间
+│   ├── execution/sandboxd/              # cgroup/BPF/pidfd/Worker 特权执行 Host
 │   └── hardware/
 │       ├── nvidia/                      # 当前：CLI/拓扑/设备节点 -> UDS Host
 │       ├── amd/                         # 未来独立 Adapter Host
@@ -1501,8 +1506,8 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
   生成代码；Spring Boot 只存在于 adapters/bootstrap。
 - Core Proto 不出现 LoRA、vLLM、训练超参数、模型格式等业务词汇。
 - Core RPC 不接受任意 shell、executable、argv 或 env。
-- 除审计化 Linux syscall 包装所在的 `cy-sandbox` 外，Kernel crate 默认
-  `forbid(unsafe_code)`；厂商 FFI 仅在进程外审计 adapter 中。
+- Kernel crate 一律 `forbid(unsafe_code)`；Linux syscall 包装仅在进程外
+  sandboxd，厂商 FFI 仅在进程外审计 adapter 中。
 - Kernel 依赖树不包含 AI 计算运行时。
 - 所有资源状态带 generation/revision；所有变更 RPC 可幂等重放。
 - `VISIBILITY_ONLY` 与硬隔离在 API 上可区分。
@@ -1523,7 +1528,7 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
 | contracts/proto/plugin/v1/*                   | 保留 POC 兼容；新增 worker v2 package                          | Python/JVM conformance runner 与迁移 adapter 全绿           |
 | cy-manifest、plugin.schema.json、PLUGIN_SPEC.md | 收敛为一份规范和多语言模型                                           | Schema/Rust/Kotlin/Python fixture roundtrip 全绿         |
 | framework/crates/cy-local-transport           | 保留为历史兼容 transport；生产 Worker 迁移到 KernelService/UDS | EOF、oversize、stdout 污染、关闭/回收覆盖，且 Kernel 依赖树中不存在该 crate |
-| framework/crates/cy-plugin-supervisor          | 保留为历史兼容 runner；生产启动迁移到 Kernel `SandboxedProcess`/KernelService | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿，且 Kernel 不直接 spawn stdio child |
+| framework/crates/cy-plugin-supervisor          | 保留为历史兼容 runner；生产启动迁移到 Kernel `SandboxedProcess` + sandboxd/KernelService | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿，且 Kernel 不直接 spawn stdio child |
 | framework/crates/cy-installation-resolver      | 持有安装布局/JSON 解析；只经 `InstalledPluginResolver` 给出 LaunchPlan | 安装服务的签名、digest、路径逃逸集成测试全绿；Kernel 不解析安装记录 |
 | agents/node/cy-node-agent                      | 外层 node control、日志与升级进程；增加 daemon binary、mTLS/session、snapshot/reconcile | 不再把 handler unit test 当成可运行节点证明，且 Kernel crate 不依赖该 agent |
 | cy-platform-api                               | AI trait 移到 extension SDK；Core 只留通用插件契约                 | 移除官方 App 后 Core 仍能构建运行                                 |
@@ -1573,10 +1578,10 @@ CI 和外部消费者；服务仓只切换公开版本，不复制 Core 源码�
 
 仍需单独 ADR 决定的实现细节：
 
-1. **第一版沙盒基线：** 已确定为 native process + cgroup v2；bwrap/OCI
-   后端继续通过同一个 `SandboxBackend` 预留到后续阶段。
-2. **Kernel 崩溃策略：** P2 采用 systemd control-group fate sharing；重启时
-   清理残留 cgroup，不做进程 Adopt。
+1. **第一版沙盒基线：** 已确定为 sandboxd 内的 native process + cgroup v2；
+   bwrap/OCI/systemd-scope 后端继续通过同一个 UDS SandboxAdapter 契约预留到后续阶段。
+2. **Kernel 崩溃策略：** sandboxd 持有 systemd delegated control-group，Kernel
+   不做进程 Adopt；service 级联和崩溃恢复须以真实 Linux E2E 验证为准。
 3. **签名信任模型：** keyless/OIDC、组织密钥或二者组合，以及离线部署的信任根
    轮换与撤销策略。
 4. **组合发行仓：** 是否创建可选 `cyrene-distribution`，以及 catalog lock 的

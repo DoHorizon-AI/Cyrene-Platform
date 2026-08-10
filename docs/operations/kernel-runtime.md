@@ -1,93 +1,87 @@
 # Rust Kernel runtime baseline
 
-P2 的生产基线是 Linux native process + cgroup v2。Kernel 只维护本机观察
-事实、租约、设备绑定和插件实例生命周期，不安装驱动、不下载插件、不执行
-远程传入的 shell 或任意环境变量。硬件厂商探测、驱动 C ABI、厂商 CLI、sysfs
-拓扑和设备节点枚举均在独立 Adapter Host 中执行；Kernel 只通过版本化 UDS
-Protobuf 协议读取事实和请求绑定。
+P2 的节点执行基线是 **纯安全 Kernel + 进程外 sandboxd + Linux cgroup v2**。
+Kernel 是租约、fence token、已批准设备绑定、实例状态与心跳处置的权威；它只通过
+版本化、有限帧长的 UDS 请求 sandboxd 执行启动、停止和遥测。Kernel 不创建 cgroup、
+不启动 Worker、不读取 `/proc`/cgroupfs，也不包含 pidfd、BPF 或厂商 FFI。
 
-## 启动预检
+`adapters/execution/sandboxd` 是特权执行 Host。当前 `native-cgroup` 后端负责：受委托
+根的证明式清理、`cpu.max`/`memory.max`/`cpuset.cpus`、cgroup-device BPF、Worker 进程树、
+`memory.current`/`cpu.stat`/`memory.events.local`、以及有界回收。硬件发现、温度和 ECC
+等事实仍属于各自的 Hardware Adapter Host；sandboxd 不选择 GPU 厂商，也没有资源账本。
 
-节点只有在以下事实全部满足时才进入可调度状态：
+## 启动预检与服务顺序
 
-- cgroup v2 已挂载且 `cpu`、`memory`、`pids` 控制器可用；
-- 实例 cgroup 可创建并支持 `cgroup.kill`；
-- Kernel 从自身 `/proc/self/cgroup` 解析 systemd 已委托的根，并只在其 `cyrene`
-  直接子树内创建实例 cgroup；绝不把 `/sys/fs/cgroup` 当作可清理根；
-- Kernel 能读取 `memory.events.local`；
-- pidfd 可用时优先使用，缺失时只对身份已验证的直接子进程降级到 `waitpid`；
-- GPU HARD 隔离会在启动前加载并附加 cgroup-device eBPF，规则只允许 Adapter
-  返回且 Kernel 再次校验过 major/minor 的字符或块设备。加载、校验或附加失败会
-  拒绝本次 HARD 启动；绝不降级为 `CUDA_VISIBLE_DEVICES` 后仍声明为 HARD。
+`cyrene-sandboxd.service` 先启动并独占获得 cgroup delegation。它只会在自身受委托根
+下清理可证明属于自己的直接 `instance-*` 子 cgroup：候选必须具有 `cgroup.procs` 与
+`cgroup.kill`，杀空后才删除。它不会扫描挂载根、按全局前缀递归删除或 Adopt 不明进程。
 
-缺失硬性能力时，Kernel 保持 Not Ready。未知硬件、探测超时或缺失字段不补
-默认值，也不加入可分配库存。`memory.current`、`memory.events.local` 和
-`cpu.stat` 是 cgroup 资源遥测，不能替代 GPU 健康遥测；后者只能由 Adapter
-Host 作为可过期的事实提供。
-
-## 多 Adapter UDS 注册与路由
-
-Kernel 以重复的显式参数注册一个或多个外部 Sidecar，例如：
+随后 Kernel 必须以显式端点启动；以下任一失败都会保持 Not Ready：
 
 ```text
 cyrene-kernel \
-  --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock \
-  --hardware-adapter amd=/run/cyrene/amd-adapter.sock
+  --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
+  --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock
 ```
 
-`adapter_id` 只是稳定的协议身份，不是 Kernel 内部的厂商枚举或动态库选择器；
-socket 必须是绝对 UDS 路径。Kernel 不会按厂商自动发现、加载或回退 Adapter。
-每次响应的身份必须与配置匹配；设备库存记录其来源 Adapter，后续绑定请求只会
-路由回该来源。不同 Adapter 报告相同物理设备 ID 时，库存刷新失败并拒绝新租约，
-不会任选一方。
+- sandboxd UDS 连接、协议版本与 adapter identity 均匹配；
+- sandboxd 报告 cgroup v2、`cgroup.kill`、cpu/memory/pids 控制器等必需能力；
+- 各硬件 Adapter 能返回当前、身份匹配且可用的库存事实；
+- 请求 HARD 设备隔离时，sandboxd 能真实加载并附加 cgroup-device BPF；失败即拒绝
+  启动，绝不降级为 `CUDA_VISIBLE_DEVICES` 后仍声明 HARD。
 
-各 Sidecar 的 generation 仅在各自协议范围内有效。Kernel 将其当前快照组合为
-自身单调递增的 inventory generation，资源账本只使用该聚合 generation 做租约
-校验。当前一个进程的多设备绑定仍要求相同 enforcement 模式；混合 HARD、
-VISIBILITY_ONLY 等模式会失败，而不会为了兼容性静默降级。
+UDS 文件权限目前是本地身份边界：服务 socket 设置为 `0660`，必须由受信任的
+Kernel/Adapter 服务账户及专用组拥有，绝不能让不受信任 Worker 可写。peer credential
+验证、事实 TTL 和主动健康轮询仍是 P1 工作，不应被此权限模型误称为完成。
 
-每个 Adapter socket 必须归受信任的 Kernel/Adapter 服务账户所有，并使用最小必要
-的文件权限；当前 NVIDIA Adapter 在 bind 后显式设置 `0660`。UDS 文件权限是本地
-Adapter 身份信任的第一道边界，不能把可写 socket 放给不受信任的 Worker。
+## 生命周期、心跳和回收
 
-## Adapter 故障边界
+Kernel 先验证安装记录、租约 generation/fence 和设备来源，再生成 `LaunchPlan`；
+sandboxd 只执行这份已批准计划。Worker 的应用级心跳仍通过 Kernel UDS 进入，必须带有
+正确 instance generation 与严格单调序号。PID 存活、D 状态、旧库存或 CPU/内存遥测都
+不能证明业务健康。
 
-Adapter Host 使用独立 systemd service 和 UDS 运行。连接失败、协议版本不匹配
-或事实过期时，Kernel 将所依赖的设备标为 `DEGRADED`，禁止创建新的相关租约；
-它不因一次 Adapter 断连立即杀死已有 Worker。已有实例的处置由租约、cgroup
-遥测和业务心跳的独立证据决定。
+超出 heartbeat deadline 后，Kernel 经 sandboxd 请求 P0 回收闭环：有界 SIGTERM、
+`cgroup.kill`、wait/reap。只有进程树清空、reap 完成并返回 `complete`，Kernel 才能
+发布 `STOPPED`、释放租约并再次分配设备；否则实例和设备进入 quarantine。OOM 只根据
+`memory.events.local` 的 `oom_kill` 计数确认，SIGKILL 退出码本身不是 OOM 证据。
 
-进程启动前，Kernel 会清理自身受委托根目录下的直接 `instance-*` cgroup：每个候选
-必须同时具有 `cgroup.procs` 与 `cgroup.kill`，并且只在 `cgroup.kill` 后确认空组才
-删除目录。它不会扫描挂载根、不会按全局前缀递归删除，也不会 Adopt 不明进程。
+Kernel service 不再持有 Worker cgroup。sandboxd service 使用 `KillMode=control-group`
+并设置为 Kernel 的 `PartOf`，因此操作员重启 Kernel 时会连带停止 sandboxd 与其 Worker
+树；Worker 还是 sandboxd 的直接子进程，并带 parent-death cleanup。系统服务崩溃和自动
+重启的精确级联语义必须用真实 Linux systemd 测试验证；在该 E2E 测试落地前，不能宣称
+已经具备跨 Kernel 崩溃的完整自动接管能力。
 
-## 实例回收
+## Docker、OCI 与 JVM Worker 的边界
 
-每个实例使用独立 cgroup。P0 停止顺序是有界 `SIGTERM`、`cgroup.kill`、wait/reap；
-cgroup 未清空时不能发布 `STOPPED`、释放租约或重新分配设备；实例进入 cleanup-stuck，
-设备进入隔离态。应用级 Drain/Shutdown ACK 是后续协议扩展，当前没有伪造这一确认。
+Docker 不与此设计冲突，但它只能作为 sandboxd 的未来后端。每个 Worker 恰有一个
+cgroup/lifecycle owner：当前是 sandboxd native-cgroup；未来要么是 OCI/Docker runtime，
+要么是 systemd scope。禁止把 Docker 容器交给 sandboxd 后再由 native-cgroup 后端写其
+cgroup，这会造成限制、信号和回收的双重所有权。Kernel 不接收 Docker image、命令行或
+daemon 参数；后端 profile 是节点侧受审计配置。
 
-OOM 由实例 cgroup 的 `memory.events.local` 中 `oom_kill` 计数差值确认。退出码
-为 SIGKILL 不能单独证明 OOM。
+Java/Kotlin 的 GC、类型系统和异常处理能降低 Worker 进程内部出错概率，但它们不是
+操作系统隔离：JVM OOM、JNI/native crash、无限阻塞、CPU runaway 与设备节点越权都需要
+外部 cgroup/进程/设备边界。因此 JVM 与 Python Worker 一样均运行在 sandboxd 创建的
+作用域中；这不是对 JVM 的不信任，而是将语言可靠性和节点可靠性分层。
 
-生产服务使用 [systemd unit](../../infra/systemd/cyrene-kernel.service) 的
-`KillMode=control-group` 实现 Kernel/Worker fate sharing。Kernel 重启时只清理
-残留 cgroup，不 Adopt 既有进程；清理未完成前不发布库存。
+## 多硬件 Adapter 路由
 
-每个长时间运行 Worker 通过同一个受 `0660` 文件权限保护的 Kernel UDS 调用
-`PluginLifecycleService.ReportHeartbeat`。Kernel 在启动时注入以下保留环境变量：
-`CYRENE_HEARTBEAT_SOCKET`、`CYRENE_PLUGIN_INSTANCE_NAME`、
-`CYRENE_PLUGIN_INSTANCE_GENERATION` 与 `CYRENE_HEARTBEAT_INTERVAL_MS`。心跳必须使用
-匹配代次及严格递增序号；重复、过时代次和未知实例会得到明确 disposition。超出 deadline
-后 Watchdog 执行 P0 回收序列（SIGTERM、`cgroup.kill`、wait/reap），成功后才释放租约。
-单靠 PID 存活或 D 状态不能证明业务健康。
+Kernel 以重复的显式参数注册任意多个 Hardware Sidecar。`adapter_id` 只是协议身份，
+不是 Kernel 的厂商枚举或动态库选择器；socket 必须是绝对 UDS 路径。每次响应身份都要
+匹配配置；设备记录来源 Adapter，后续绑定只回到该来源。不同 Adapter 报告相同物理
+设备 ID 时，库存刷新失败并拒绝新租约，绝不任选一方。一个 Worker 的多设备绑定仍必须
+是同一 enforcement 模式；混合 HARD 和 VISIBILITY_ONLY 将失败，不会静默放宽。
+
+Adapter 失联会产生 `ADAPTER_UNAVAILABLE` / `DEGRADED` 证据并阻止新的相关租约；它不会
+因单次断线立即杀死已有 Worker。硬件事实 TTL、主动轮询、已运行设备的 DEGRADED 事件与
+策略处置是 P1，当前仍须在控制面观察到明确的“未知/不可继续分配”状态。
 
 ## 本地安装记录
 
 Kernel 不下载、安装或解析插件安装记录。外层
 `framework/crates/cy-installation-resolver` 读取安装服务已验证的
-`/var/lib/cyrene/installations/<installation>/launch.json`，校验
-`manifest_digest`、`artifact_digest`，并拒绝解析到安装目录外的可执行文件；它只
-经 `InstalledPluginResolver` 端口交给 Kernel 一个 `LaunchPlan`。当前 Linux
-组合二进制为 `runtime/cyrene-kernel`，因此安装布局与 JSON 解析不会进入
-`kernel/` 依赖树。保留的心跳变量仍由 Kernel 注入，安装记录不能覆盖。
+`/var/lib/cyrene/installations/<installation>/launch.json`，校验 digest 并拒绝解析到
+安装目录外的可执行文件；它只经 `InstalledPluginResolver` 端口交给 Kernel 一个
+`LaunchPlan`。安装记录不能覆盖 Kernel 注入的保留心跳变量，也不能越过 sandboxd 的
+资源与设备强制执行。

@@ -1,8 +1,8 @@
 //! Linux composition root for the CYRENE Kernel daemon.
 //!
 //! The process owns no vendor driver code. It joins a versioned UDS hardware
-//! adapter, creates only its delegated cgroup subtree, and serves Core v1 over
-//! a local UDS endpoint with filesystem permissions as the trust boundary.
+//! adapter and one separately supervised Sandbox Adapter Host, then serves Core
+//! v1 over a local UDS endpoint with filesystem permissions as the trust boundary.
 
 #[cfg(not(unix))]
 fn main() {
@@ -22,36 +22,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cy_installation_resolver::FilesystemInstalledPluginResolver;
     use cy_kernel_daemon::{KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig};
     use cy_resource_manager::InMemoryResourceManager;
-    use cy_sandbox::{CgroupV2Config, CgroupV2Runtime};
+    use cy_sandbox_client::UdsSandboxAdapterClient;
     use tokio::net::UnixListener;
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::transport::Server;
 
     let args = Args::parse()?;
-    let cgroup_root = match args.cgroup_root {
-        Some(root) => root,
-        None => CgroupV2Config::delegated_root("cyrene")?,
-    };
-    let runtime = Arc::new(CgroupV2Runtime::new(CgroupV2Config {
-        root: cgroup_root,
-        device_bpf_enabled: !args.disable_device_bpf,
-    }));
-    runtime.initialize_owned_root()?;
-    if !runtime.preflight_report().ready {
-        return Err(std::io::Error::other(
-            "cgroup v2 preflight did not meet required Kernel capabilities",
-        )
-        .into());
-    }
+    let sandbox = Arc::new(UdsSandboxAdapterClient::from_endpoint(
+        args.sandbox_adapter,
+    )?);
 
     let resources = Arc::new(InMemoryResourceManager::new(&args.node_id, Vec::new()));
     let daemon = Arc::new(KernelDaemon::with_hardware_adapters(
         args.hardware_adapters,
         resources,
-        runtime,
+        sandbox,
         &args.node_id,
         node_epoch(),
     )?);
+    if !daemon.preflight_ready() {
+        return Err(std::io::Error::other(
+            "required hardware or sandbox adapter preflight did not meet Kernel capabilities",
+        )
+        .into());
+    }
     let heartbeat = WorkerHeartbeatConfig {
         socket_path: args.socket.clone(),
         interval: args.heartbeat_interval,
@@ -86,12 +80,11 @@ struct Args {
     node_id: String,
     socket: std::path::PathBuf,
     hardware_adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
-    cgroup_root: Option<std::path::PathBuf>,
+    sandbox_adapter: cy_sandbox_client::SandboxAdapterEndpoint,
     installations_root: std::path::PathBuf,
     heartbeat_interval: std::time::Duration,
     heartbeat_timeout: std::time::Duration,
     heartbeat_grace: std::time::Duration,
-    disable_device_bpf: bool,
 }
 
 #[cfg(unix)]
@@ -102,12 +95,11 @@ impl Args {
         let mut node_id = env::var("CYRENE_NODE_ID").unwrap_or_else(|_| "cyrene-node".to_string());
         let mut socket = PathBuf::from("/run/cyrene/kernel.sock");
         let mut hardware_adapters = Vec::new();
-        let mut cgroup_root = None;
+        let mut sandbox_adapter = None;
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
         let mut heartbeat_interval = Duration::from_secs(5);
         let mut heartbeat_timeout = Duration::from_secs(20);
         let mut heartbeat_grace = Duration::from_secs(10);
-        let mut disable_device_bpf = false;
         while let Some(argument) = values.next() {
             let mut value = || {
                 values.next().ok_or_else(|| {
@@ -121,13 +113,12 @@ impl Args {
                 "--node-id" => node_id = value()?,
                 "--socket" => socket = PathBuf::from(value()?),
                 "--hardware-adapter" => hardware_adapters.push(parse_hardware_adapter(&value()?)?),
-                "--cgroup-root" => cgroup_root = Some(PathBuf::from(value()?)),
+                "--sandbox-adapter" => sandbox_adapter = Some(parse_sandbox_adapter(&value()?)?),
                 "--installations-root" => installations_root = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-timeout-ms" => heartbeat_timeout = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
-                "--disable-device-bpf" => disable_device_bpf = true,
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--node-id ID] [--socket PATH] [--cgroup-root PATH] [--installations-root PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--disable-device-bpf]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--node-id ID] [--socket PATH] [--installations-root PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -145,18 +136,51 @@ impl Args {
             )
             .into());
         }
+        let sandbox_adapter = sandbox_adapter.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "exactly one --sandbox-adapter ID=/absolute/socket.sock is required",
+            )
+        })?;
         Ok(Self {
             node_id,
             socket,
             hardware_adapters,
-            cgroup_root,
+            sandbox_adapter,
             installations_root,
             heartbeat_interval,
             heartbeat_timeout,
             heartbeat_grace,
-            disable_device_bpf,
         })
     }
+}
+
+#[cfg(unix)]
+fn parse_sandbox_adapter(
+    value: &str,
+) -> Result<cy_sandbox_client::SandboxAdapterEndpoint, std::io::Error> {
+    let (adapter_id, socket_path) = value.split_once('=').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sandbox adapter must use ID=/absolute/socket.sock",
+        )
+    })?;
+    let socket_path = std::path::PathBuf::from(socket_path);
+    if adapter_id.is_empty()
+        || !adapter_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        || !socket_path.is_absolute()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sandbox adapter ID must be safe and its UDS socket path absolute",
+        ));
+    }
+    Ok(cy_sandbox_client::SandboxAdapterEndpoint::new(
+        adapter_id,
+        socket_path,
+    ))
 }
 
 #[cfg(unix)]

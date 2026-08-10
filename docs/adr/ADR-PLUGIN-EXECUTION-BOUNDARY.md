@@ -17,9 +17,10 @@ Local subprocess plugins use the existing zero-port stdio protocol as the
 mandatory baseline. UDS or platform-specific local transports may be added
 later without changing the lifecycle contract.
 
-In-process Rust code is permitted only for generic Kernel mechanisms such as
-cgroup enforcement, pidfd lifecycle control, and local transport framing. It is
-not an installable plugin runtime and cannot be selected through plugin.toml.
+In-process Rust code is permitted only for pure-safe Kernel mechanisms such as
+state machines, contract validation, and local transport framing. Privileged
+cgroup enforcement and pidfd lifecycle control belong to sandboxd. It is not
+an installable plugin runtime and cannot be selected through plugin.toml.
 Vendor hardware adapters are governed by
 [ADR-HARDWARE-ADAPTER-BOUNDARY](ADR-HARDWARE-ADAPTER-BOUNDARY.md) and always
 run outside the Kernel process.

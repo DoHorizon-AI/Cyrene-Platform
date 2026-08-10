@@ -1,4 +1,4 @@
-//! CYRENE Linux cgroup v2 sandbox runtime.
+//! Privileged CYRENE Linux cgroup v2 Sandbox Adapter Host runtime.
 //!
 //! The configured root is an **owned and delegated** cgroup subtree, never the
 //! cgroup mount root. Startup reaps only direct instance cgroups below that
@@ -22,8 +22,8 @@ use cy_kernel_api::{
     ProcessHandle, ProcessRuntime, ProviderError, SandboxBackend, StopRequest,
 };
 
-mod managed_process;
-pub use managed_process::{SandboxedProcess, SandboxedProcessState};
+mod protocol;
+pub use protocol::handle_request;
 
 const CPU_PERIOD_USEC: u64 = 100_000;
 const OWNED_INSTANCE_PREFIX: &str = "instance-";

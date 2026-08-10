@@ -24,9 +24,11 @@ use cy_kernel_api::{
     ResourceRequest, SandboxBackend, VerifiedInstallation,
 };
 use cy_proto::core_v1;
-use cy_sandbox::{SandboxedProcess, SandboxedProcessState};
 use tokio_stream::{iter, Stream};
 use tonic::{Request, Response, Status};
+
+mod sandboxed_process;
+use sandboxed_process::{SandboxedProcess, SandboxedProcessState};
 
 /// 节点内核守护进程核心结构体
 pub struct KernelDaemon {

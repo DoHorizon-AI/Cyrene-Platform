@@ -14,7 +14,7 @@ cy-adapter-client = { path = "../../kernel/crates/cy-adapter-client" }
 cy-installation-resolver = { path = "../../framework/crates/cy-installation-resolver" }
 cy-kernel-daemon = { path = "../../kernel/crates/cy-kernel-daemon" }
 cy-resource-manager = { path = "../../kernel/crates/cy-resource-manager" }
-cy-sandbox = { path = "../../kernel/crates/cy-sandbox" }
+cy-sandbox-client = { path = "../../kernel/crates/cy-sandbox-client" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.11"

@@ -43,13 +43,14 @@ two package or installation protocols.
 
 ## Hardware boundary
 
-The Rust Kernel keeps only node-local leases, cgroup sandboxing, process
-lifecycle, and the generic local-adapter client. Vendor-specific discovery,
-telemetry, device-node enumeration, and C ABI loading run in separately
-supervised hardware-adapter processes under `adapters/hardware/`. CUDA, ROCm,
-Ascend, model execution, training, and quantization stay outside the Kernel.
-The Kernel and an adapter exchange versioned Protobuf frames over UDS; a C ABI
-may exist only inside an adapter process, never as a public Kernel API.
+The Rust Kernel keeps only node-local leases, fencing, lifecycle decisions and
+generic local-adapter clients. Privileged cgroup/device/process execution runs
+in the separately supervised `adapters/execution/sandboxd`; vendor discovery,
+telemetry, device-node enumeration, and C ABI loading run in separate hardware
+adapter processes under `adapters/hardware/`. CUDA, ROCm, Ascend, model
+execution, training, and quantization stay outside the Kernel. Kernel and all
+local adapters exchange versioned Protobuf frames over UDS; a C ABI may exist
+only inside an adapter process, never as a public Kernel API.
 
 ## Current checkpoint
 
