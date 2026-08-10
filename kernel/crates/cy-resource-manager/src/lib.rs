@@ -8,6 +8,8 @@
 //! 3. **围栏令牌 (Fence Token)**：每次分配赋予单调递增的 fence token，租约释放必须携带正确的令牌，彻底杜绝延迟网络包或旧任务错误释放新租约的竞态条件；
 //! 4. **硬件隔离封锁 (Quarantine)**：支持在检测到硬件故障时将特定 GPU 标记为隔离状态，阻止后续调度分配。
 
+#![forbid(unsafe_code)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -252,6 +254,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
             allocations,
             inventory_generation: state.generation,
             fence_token,
+            limits: request.limits,
         };
         state.leases.insert(request.lease_name, lease.clone());
         Ok(lease)
@@ -311,6 +314,7 @@ mod tests {
     fn device(id: &str) -> AcceleratorDevice {
         AcceleratorDevice {
             device_id: id.to_string(),
+            adapter_id: "test-adapter".to_string(),
             kind: AcceleratorKind::Gpu,
             vendor: AcceleratorVendor::Nvidia,
             device_family: "test".to_string(),
@@ -346,6 +350,7 @@ mod tests {
                     count: 1,
                     vendor: Some(AcceleratorVendor::Nvidia),
                     min_memory_bytes: Some(1),
+                    limits: Default::default(),
                 })
             }));
         }
@@ -367,6 +372,7 @@ mod tests {
                 count: 1,
                 vendor: None,
                 min_memory_bytes: None,
+                limits: Default::default(),
             })
             .unwrap();
         assert_eq!(

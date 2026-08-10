@@ -12,8 +12,10 @@ path = "src/lib.rs"
 [dependencies]
 cy-adapter-client = { path = "../cy-adapter-client" }
 cy-kernel-api = { path = "../cy-kernel-api" }
+cy-resource-manager = { path = "../cy-resource-manager" }
+cy-sandbox = { path = "../cy-sandbox" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
-cy-plugin-supervisor = { path = "../cy-plugin-supervisor" }
 prost-types = "0.12"
-tokio-stream = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.11"

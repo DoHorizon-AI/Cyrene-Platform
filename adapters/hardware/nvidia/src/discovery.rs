@@ -140,21 +140,14 @@ impl NvidiaSmiProvider {
 
     /// 扫描并定位指定 GPU 序号关联的操作系统设备文件（如 `/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`）
     fn nodes_for(&self, index: usize) -> Vec<DeviceNode> {
-        let mut nodes = vec![DeviceNode {
-            path: self.device_root.join(format!("nvidia{index}")),
-            major: None,
-            minor: Some(index as u32),
-            required: true,
-        }];
+        let mut nodes = vec![device_node(
+            self.device_root.join(format!("nvidia{index}")),
+            true,
+        )];
         for name in ["nvidiactl", "nvidia-uvm", "nvidia-uvm-tools"] {
             let path = self.device_root.join(name);
             if path.exists() {
-                nodes.push(DeviceNode {
-                    path,
-                    major: None,
-                    minor: None,
-                    required: true,
-                });
+                nodes.push(device_node(path, true));
             }
         }
         nodes
@@ -187,6 +180,7 @@ impl AcceleratorProvider for NvidiaSmiProvider {
             gpus.into_iter()
                 .map(|gpu| AcceleratorDevice {
                     device_id: gpu.uuid,
+                    adapter_id: self.adapter_id().to_string(),
                     kind: AcceleratorKind::Gpu,
                     vendor: AcceleratorVendor::Nvidia,
                     device_family: gpu.name,
@@ -228,6 +222,19 @@ impl AcceleratorProvider for NvidiaSmiProvider {
                 &missing.join(", "),
             ));
         }
+        let unresolved = device
+            .device_nodes
+            .iter()
+            .filter(|node| node.required && (node.major.is_none() || node.minor.is_none()))
+            .map(|node| node.path.display().to_string())
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            return Err(ProviderError::new(
+                self.adapter_id(),
+                "DEVICE_NODE_IDENTITY_UNKNOWN",
+                &unresolved.join(", "),
+            ));
+        }
 
         let mut environment = BTreeMap::new();
         environment.insert("CUDA_VISIBLE_DEVICES".to_string(), device.device_id.clone());
@@ -240,9 +247,9 @@ impl AcceleratorProvider for NvidiaSmiProvider {
             nodes: device.device_nodes.clone(),
             environment,
             required_gids: Vec::new(),
-            enforcement: cy_kernel_api::EnforcementMode::VisibilityOnly,
+            enforcement: cy_kernel_api::EnforcementMode::Hard,
             adapter_id: self.adapter_id().to_string(),
-            reason_code: "DEVICE_BPF_NOT_CONFIGURED".to_string(),
+            reason_code: "DEVICE_BPF_REQUIRED".to_string(),
         })
     }
 
@@ -254,6 +261,36 @@ impl AcceleratorProvider for NvidiaSmiProvider {
             .ok_or_else(|| {
                 ProviderError::new(self.adapter_id(), "DEVICE_NOT_FOUND", "device is absent")
             })
+    }
+}
+
+/// Capture the actual major/minor identity while still inside the isolated
+/// hardware adapter. The Kernel re-checks it immediately before attaching its
+/// cgroup-device eBPF filter, preventing a path swap from widening access.
+fn device_node(path: PathBuf, required: bool) -> DeviceNode {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let device = std::fs::metadata(&path)
+            .ok()
+            .map(|metadata| metadata.rdev());
+        let major = device.map(|value| ((value >> 8) & 0x0fff) as u32);
+        let minor = device.map(|value| ((value & 0xff) | ((value >> 12) & 0x0fff00)) as u32);
+        DeviceNode {
+            path,
+            major,
+            minor,
+            required,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        DeviceNode {
+            path,
+            major: None,
+            minor: None,
+            required,
+        }
     }
 }
 

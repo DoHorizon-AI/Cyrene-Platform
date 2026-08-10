@@ -5,17 +5,29 @@ RequiresMountsFor=/sys/fs/cgroup
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/cyrene-kernel
+# Each deployment supplies one or more generic UDS adapters. This example
+# registers the NVIDIA Sidecar; AMD/Ascend/custom adapters use the same flag.
+ExecStart=/usr/bin/cyrene-kernel --socket /run/cyrene/kernel.sock --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock
 Restart=on-failure
 RestartSec=2s
+RuntimeDirectory=cyrene
+RuntimeDirectoryMode=0750
+UMask=0007
 
 # Kernel and all instance cgroups share one fate. The Kernel does not adopt
 # workers after a crash; systemd removes the complete service cgroup.
 KillMode=control-group
-Delegate=yes
+# The Kernel resolves /proc/self/cgroup and creates only its `cyrene` child.
+# Do not point it at /sys/fs/cgroup: this service delegates its own subtree.
+Delegate=cpu cpuset memory pids
 TasksMax=infinity
 MemoryAccounting=yes
 CPUAccounting=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cyrene
 
 [Install]
 WantedBy=multi-user.target

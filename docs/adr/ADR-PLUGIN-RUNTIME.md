@@ -11,6 +11,16 @@
 > In-process Rust remains valid only for audited, statically compiled Core
 > platform adapters and is not an installable manifest runtime.
 
+> **Current placement and enforcement:** the historical stdio runner now lives
+> in `framework/crates/cy-plugin-supervisor` with
+> `framework/crates/cy-local-transport`. It is a framework compatibility
+> component, not a Kernel dependency and not an approved production launch
+> path. `cy-kernel-daemon` may launch workers only through the generic
+> `cy-sandbox::SandboxedProcess` lifecycle, with a lease, cgroup sandbox,
+> device binding, reaping, and heartbeat watchdog. The remaining framework
+> runner must migrate to `KernelService`; it must not be reintroduced under
+> `kernel/` or used to bypass the Kernel boundary.
+
 ---
 
 ## 1. Context and Problem Statement

@@ -1,3 +1,9 @@
+//! Generic process lifecycle state built on a Kernel [`SandboxBackend`].
+//!
+//! This type deliberately contains no plugin protocol, stdio, SDK, or worker
+//! business concepts. The Kernel only owns launch, bounded stop, and cleanup
+//! truth; framework-specific plugin RPC belongs outside `kernel/`.
+
 use std::sync::Arc;
 
 use cy_kernel_api::{
@@ -6,7 +12,7 @@ use cy_kernel_api::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedInstanceState {
+pub enum SandboxedProcessState {
     Discovered,
     Starting,
     Healthy,
@@ -15,28 +21,28 @@ pub enum ManagedInstanceState {
     Quarantined,
 }
 
-pub struct ManagedInstance {
+pub struct SandboxedProcess {
     runtime: Arc<dyn SandboxBackend>,
     plan: LaunchPlan,
     binding: DeviceBinding,
     handle: Option<ProcessHandle>,
-    state: ManagedInstanceState,
+    state: SandboxedProcessState,
     last_cleanup: Option<CleanupReport>,
 }
 
-impl ManagedInstance {
+impl SandboxedProcess {
     pub fn new(runtime: Arc<dyn SandboxBackend>, plan: LaunchPlan, binding: DeviceBinding) -> Self {
         Self {
             runtime,
             plan,
             binding,
             handle: None,
-            state: ManagedInstanceState::Discovered,
+            state: SandboxedProcessState::Discovered,
             last_cleanup: None,
         }
     }
 
-    pub fn state(&self) -> ManagedInstanceState {
+    pub fn state(&self) -> SandboxedProcessState {
         self.state
     }
 
@@ -45,15 +51,15 @@ impl ManagedInstance {
     }
 
     pub fn start(&mut self) -> Result<&ProcessHandle, ProviderError> {
-        self.state = ManagedInstanceState::Starting;
+        self.state = SandboxedProcessState::Starting;
         match self.runtime.launch(&self.plan, &self.binding) {
             Ok(handle) => {
                 self.handle = Some(handle);
-                self.state = ManagedInstanceState::Healthy;
+                self.state = SandboxedProcessState::Healthy;
                 Ok(self.handle.as_ref().expect("handle was just stored"))
             }
             Err(error) => {
-                self.state = ManagedInstanceState::Quarantined;
+                self.state = SandboxedProcessState::Quarantined;
                 Err(error)
             }
         }
@@ -61,7 +67,7 @@ impl ManagedInstance {
 
     pub fn stop(&mut self, request: &StopRequest) -> Result<&CleanupReport, ProviderError> {
         let Some(handle) = self.handle.as_ref() else {
-            self.state = ManagedInstanceState::Stopped;
+            self.state = SandboxedProcessState::Stopped;
             self.last_cleanup = Some(CleanupReport {
                 complete: true,
                 exit_code: None,
@@ -71,12 +77,12 @@ impl ManagedInstance {
             });
             return Ok(self.last_cleanup.as_ref().expect("cleanup was just stored"));
         };
-        self.state = ManagedInstanceState::Stopping;
+        self.state = SandboxedProcessState::Stopping;
         let report = self.runtime.stop(handle, request)?;
         self.state = if report.complete {
-            ManagedInstanceState::Stopped
+            SandboxedProcessState::Stopped
         } else {
-            ManagedInstanceState::Quarantined
+            SandboxedProcessState::Quarantined
         };
         self.last_cleanup = Some(report);
         Ok(self.last_cleanup.as_ref().expect("cleanup was just stored"))
@@ -87,8 +93,8 @@ impl ManagedInstance {
 mod tests {
     use super::*;
     use cy_kernel_api::{
-        CapabilityFact, EnforcementMode, EnforcementReport, NodeCapabilities, ProcessCondition,
-        ProcessRuntime,
+        CapabilityFact, CgroupLimits, EnforcementMode, EnforcementReport, NodeCapabilities,
+        ProcessCondition, ProcessRuntime,
     };
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
@@ -159,8 +165,8 @@ mod tests {
         }
     }
 
-    fn instance(complete: bool) -> ManagedInstance {
-        ManagedInstance::new(
+    fn process(complete: bool) -> SandboxedProcess {
+        SandboxedProcess::new(
             Arc::new(FakeBackend { complete }),
             LaunchPlan {
                 instance_name: "instance-1".into(),
@@ -168,6 +174,7 @@ mod tests {
                 args: Vec::new(),
                 environment: BTreeMap::new(),
                 cgroup_name: "instance-1".into(),
+                limits: CgroupLimits::default(),
             },
             DeviceBinding {
                 device_id: "gpu-0".into(),
@@ -183,29 +190,29 @@ mod tests {
 
     #[test]
     fn incomplete_cleanup_never_publishes_stopped() {
-        let mut instance = instance(false);
-        instance.start().unwrap();
-        let report = instance
+        let mut process = process(false);
+        process.start().unwrap();
+        let report = process
             .stop(&StopRequest {
                 grace_period: Duration::from_millis(1),
                 immediate: false,
             })
             .unwrap();
         assert!(!report.complete);
-        assert_eq!(instance.state(), ManagedInstanceState::Quarantined);
+        assert_eq!(process.state(), SandboxedProcessState::Quarantined);
     }
 
     #[test]
     fn complete_cleanup_publishes_stopped() {
-        let mut instance = instance(true);
-        instance.start().unwrap();
-        let report = instance
+        let mut process = process(true);
+        process.start().unwrap();
+        let report = process
             .stop(&StopRequest {
                 grace_period: Duration::from_millis(1),
                 immediate: false,
             })
             .unwrap();
         assert!(report.complete);
-        assert_eq!(instance.state(), ManagedInstanceState::Stopped);
+        assert_eq!(process.state(), SandboxedProcessState::Stopped);
     }
 }

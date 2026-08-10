@@ -7,9 +7,6 @@ members = [
     "contracts/rust/cy-proto",
 
     # 2. 内核层 (Kernel Crates)
-    "kernel/crates/cy-local-transport",
-    "kernel/crates/cy-node-agent",
-    "kernel/crates/cy-plugin-supervisor",
     "kernel/crates/cy-kernel-api",
     "kernel/crates/cy-adapter-client",
     "kernel/crates/cy-resource-manager",
@@ -18,9 +15,16 @@ members = [
 
     # 3. 框架层 (Framework Crates)
     "framework/crates/cy-extension-registry",
+    "framework/crates/cy-installation-resolver",
+    "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
+    "framework/crates/cy-plugin-supervisor",
 
-    # 4. 进程外硬件适配器（不属于 Kernel 进程）
+    # 4. 外层节点运行时组合（不属于 Kernel crate）
+    "runtime/cyrene-kernel",
+    "agents/node/cy-node-agent",
+
+    # 5. 进程外硬件适配器（不属于 Kernel 进程）
     "adapters/hardware/nvidia",
 ]
 

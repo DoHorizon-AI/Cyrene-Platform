@@ -13,11 +13,20 @@ read vendor-specific sysfs/procfs paths, enumerate vendor device nodes, load a
 vendor shared object, or export a vendor C ABI.
 
 Each vendor integration is an independently supervised Adapter Host process.
-The initial implementation is `adapters/hardware/nvidia`; AMD and Ascend are
-future peers, not branches inside a generic Kernel discovery crate. Kernel and
-host use the versioned `cyrene.hardware.v1` Protobuf request/response protocol
-over a bounded Unix domain socket frame. The Kernel-side implementation is the
+`adapters/hardware/nvidia` is the current deployment example; AMD, Ascend,
+Intel, virtual partitioners, and private accelerator integrations are peers,
+not branches inside a generic Kernel discovery crate. Kernel and host use the
+versioned `cyrene.hardware.v1` Protobuf request/response protocol over a
+bounded Unix domain socket frame. The Kernel-side implementation is the
 vendor-neutral `cy-adapter-client` crate.
+
+The Kernel is configured with one or more explicit `adapter_id=absolute-uds`
+endpoints. It does not infer a vendor from the adapter ID, auto-discover a
+sidecar, or contain a vendor fallback. The adapter client verifies the response
+identity, records the configured adapter ID as every device's provenance,
+creates a Kernel-local aggregate inventory generation, and routes a device
+binding only back to its provenance adapter. Duplicate physical device IDs
+across sidecars fail closed rather than selecting an arbitrary owner.
 
 Vendor C ABI is allowed only *inside* an Adapter Host (or a private dynamic
 library loaded by it). It is an internal implementation choice, not a CYRENE
@@ -29,7 +38,9 @@ public API and not a substitute for process isolation.
   blocks new leases requiring that adapter; it does not by itself kill existing
   workloads.
 - Adapter inventory is a versioned, expiring fact. The resource manager keeps
-  the lease/fencing authority and rejects stale generations.
+  the lease/fencing authority and rejects stale generations. The registry
+  aggregates independently versioned sidecar facts into its own monotonic
+  Kernel generation; it never compares vendor-local generations directly.
 - Adapter Hosts must run under their own service manager scope. A Kernel crash
   cannot take an adapter down through shared address space, and an adapter
   crash cannot unwind the Kernel.
@@ -51,6 +62,10 @@ versioned contracts rather than a Rust or vendor-specific ABI.
 
 - no vendor command, vendor shared-library loading, or vendor device-path scan
   exists under `kernel/`;
+- Kernel startup accepts multiple explicit adapter endpoints and has no
+  vendor-specific endpoint, service dependency, or fallback path;
+- a device binding is routed only to the adapter that supplied its provenance,
+  and duplicate device IDs across adapters fail closed;
 - a disconnected adapter cannot produce allocatable inventory or a new lease;
 - malformed or oversized UDS frames fail closed without panicking the Kernel;
 - adapter protocol compatibility and stale-generation rejection are tested;

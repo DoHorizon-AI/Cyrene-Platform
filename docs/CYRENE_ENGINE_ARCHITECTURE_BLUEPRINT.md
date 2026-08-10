@@ -61,8 +61,8 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 模块、依赖、关键符号、现有 Proto 和 IDE 诊断，得到以下事实：
 
 - 根 Cargo workspace 已包含 8 个 Rust crate。
-- `kernel/` 已有 `cy-local-transport`、`cy-node-agent` 和
-  `cy-plugin-supervisor`。
+- 初始盘点时 `cy-local-transport` 与 `cy-plugin-supervisor` 位于 `kernel/`；
+  现已迁为 `framework/` 的历史兼容层，Kernel 仅保留通用沙盒生命周期。
 - `framework/` 已有 Rust 的 `cy-extension-registry` 与 `cy-platform-api`，
   但 `framework/jvm/` 只有占位 README，没有 Kotlin/Gradle 工程。
 - `contracts/` 已有 manifest/schema、Rust bindings、旧的 `cy.llm`
@@ -89,12 +89,12 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 
 | 现状                                                  | 风险                        | 目标                                                 |
 | --------------------------------------------------- | ------------------------- | -------------------------------------------------- |
-| `cy-extension-registry` 直接依赖 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面         | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
+| `cy-extension-registry` 直接依赖 framework 的 `cy-plugin-supervisor` | Kotlin 落地后形成两个控制面         | Kotlin 通过 `KernelService` 驱动 Rust，不链接 Kernel crate |
 | `ai_service.proto` 包含 LoRA、训练、推理、量化和脚本执行            | Core 与 Yield/Reactor 业务耦合 | 业务 RPC 迁入各 App 的版本化协议                              |
 | `AgentService` 使用自由字符串 `command_type/payload/env`   | 可能演化成远程命令注入面              | 只保留类型化资源和生命周期命令                                    |
 | `HardwareProbe` 直接实现 NVIDIA/procfs 逻辑               | 驱动故障可进入 Node Runtime    | 已迁出 Kernel；原始事实只经进程外 Adapter Host 暴露          |
 | `BuiltinSystemProbe` 又硬编码另一份硬件事实                    | 双重库存权威                    | 已移除默认实现；可分配资源只由 Kernel 报告                    |
-| `StdioTransport::spawn(executable, args)` 裸启动进程     | 没有 cgroup、沙盒、设备映射或资源环境注入  | 所有进程经 `ProcessRuntime` 与 `SandboxBackend`          |
+| framework 的 `StdioTransport::spawn(executable, args)` 裸启动进程     | 可绕过 cgroup、沙盒、设备映射或资源环境注入  | 生产 Worker 一律经 Kernel `ProcessRuntime` 与 `SandboxBackend`；该兼容层不得成为 Kernel 依赖          |
 | 当前 ADR 允许 `in-proc-rust` 业务插件和 PyO3                 | 业务崩溃可能影响可信核心              | 进程内仅限平台适配器；PyO3 只能存在于外部 worker                     |
 | GPU 按型号聚合                                           | 无法对单卡、MIG/分区做租约           | 使用稳定设备 ID、PCI 地址、分区和健康状态                           |
 | 六大 App 尚未形成各自独立仓库                                   | 发布、权限和版本边界尚未落地            | 方案 A：Core 开源，六个服务一服务一仓                             |
@@ -104,10 +104,10 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 以下事实用于区分“已有代码”与“目标架构”，不能把现有 scaffold 或单元测试
 误报为分布式闭环已经完成：
 
-- framework/crates/cy-extension-registry 当前直接持有
+- framework/crates/cy-extension-registry 当前直接持有 framework 的
   cy-plugin-supervisor::PluginSupervisor，调用链仍是 Rust 同进程调用；这
   不是 Kotlin 通过 KernelService 驱动 Rust 的进程边界。
-- cy-node-agent 目前仍主要是 AgentService/journal handler scaffold，尚未
+- agents/node/cy-node-agent 目前仍主要是 AgentService/journal handler scaffold，尚未
   提供可部署的 node daemon binary、mTLS enrollment、session fencing 或
   durable desired/observed reconcile。
 - AgentCommandRequest 仍包含自由字符串 command_type/payload/env；该
@@ -116,9 +116,9 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 - 已移除 Node Agent 的 `probe.rs` 与其默认版本/能力猜测。正式 inventory 由
   外部 Adapter Host 返回版本化快照；未知或失联必须返回
   `UNKNOWN/UNSUPPORTED/DEGRADED`，不能将猜测写成可分配事实。
-- cy-plugin-supervisor 已有状态枚举和握手骨架，但 EOF、child exit、OOM、
-  health timeout、Shutdown ACK、流式多帧和 wait/reap 尚未形成完整的
-  instance-level watchdog 闭环。
+- framework 的 cy-plugin-supervisor 仍有状态枚举和握手骨架，但 EOF、child
+  exit、OOM、health timeout、Shutdown ACK、流式多帧和 wait/reap 尚未形成完整的
+  instance-level watchdog 闭环；它是待淘汰的兼容 runner，禁止作为 Kernel 生产启动路径。
 - cy-platform-api、ai_service.proto、manifest 文档/Schema/Rust model
   仍存在业务扩展和模型定义的 legacy 入口。它们必须先冻结、统一 fixture，
   再迁移到独立 extension contract；不能直接成为 Core v1 的第二权威。
@@ -226,14 +226,17 @@ session lease 的命令来源。
 Rust 负责最小可信执行基座：
 
 - Linux 主机与设备抽象；
-- 节点 Agent；
+- 外层节点 Agent（不属于 Kernel crate）；
 - 资源租约与本地强制执行；
 - 进程、沙盒与 watchdog；
 - 本地 IPC 和 KernelService；
 - 审计友好的运行事件。
 
-Kernel 默认应使用 `forbid(unsafe_code)`。确需 unsafe/FFI 的 crate 必须被
-依赖边界隔离，并且不能把 unsafe 扩散到资源管理、Supervisor 或协议层。
+除 `cy-sandbox` 中为 cgroup、pidfd、`prctl` 与 cgroup-device eBPF 调用所需的
+最小 Linux syscall 包装外，所有 Kernel crate 必须 `forbid(unsafe_code)`。
+`cy-sandbox` 的 unsafe 块必须保持狭窄、审计化，并启用
+`deny(unsafe_op_in_unsafe_fn)`；厂商 FFI、动态库和任何 vendor C ABI 仍只能在
+进程外 Adapter Host，不能扩散到资源管理、生命周期或协议层。
 
 ### 4.2 Kotlin 的范围
 
@@ -374,11 +377,11 @@ cyrene-core/
 │   │   ├── cy-kernel-daemon/            # KernelService 与 Node outbound client
 │   │   ├── cy-adapter-client/           # 通用 UDS 硬件适配器客户端
 │   │   ├── cy-resource-manager/         # 原子配额、租约、fencing
-│   │   ├── cy-sandbox/                  # runtime/backend 编排
-│   │   ├── cy-local-transport/          # 已存在
-│   │   ├── cy-plugin-supervisor/        # 已存在
-│   │   └── cy-node-agent/               # 已存在
+│   │   └── cy-sandbox/                  # runtime/backend 编排
 │   └── tests/
+│
+├── runtime/cyrene-kernel/                # Linux 进程组合：UDS、安装记录 adapter、systemd 入口
+├── agents/node/cy-node-agent/            # 外层节点控制/日志/升级；不属于 Kernel
 │
 ├── adapters/                            # 独立进程；不属于 Kernel 地址空间
 │   └── hardware/
@@ -386,23 +389,30 @@ cyrene-core/
 │       ├── amd/                         # 未来独立 Adapter Host
 │       └── ascend/                      # 未来独立 Adapter Host
 │
-├── framework/jvm/                       # Kotlin/JVM 控制面
-│   ├── settings.gradle.kts
-│   ├── build.gradle.kts
-│   ├── gradle/libs.versions.toml
-│   ├── domain/                           # 纯 Kotlin/JDK 领域模型与规则
-│   ├── application/                      # use case 与 inbound/outbound ports
-│   ├── adapters/
-│   │   ├── inbound-grpc/
-│   │   ├── inbound-http/
-│   │   ├── inbound-websocket/
-│   │   ├── outbound-kernel/
-│   │   ├── outbound-persistence/
-│   │   ├── outbound-events/
-│   │   ├── outbound-oci/
-│   │   └── outbound-signature/
-│   ├── bootstrap/                        # Spring Boot 装配和部署入口
-│   └── architecture-tests/               # 强制依赖方向与禁用依赖
+├── framework/
+│   ├── crates/                           # Rust 迁移期兼容层；不属于 Kernel
+│   │   ├── cy-extension-registry/        # 待 Kotlin catalog/router 接管
+│   │   ├── cy-installation-resolver/     # 已验证安装记录的文件系统/JSON adapter
+│   │   ├── cy-local-transport/           # 历史 stdio transport；禁止 Kernel 使用
+│   │   ├── cy-platform-api/              # legacy extension API
+│   │   └── cy-plugin-supervisor/         # 历史 runner；必须迁移至 KernelService
+│   └── jvm/                              # Kotlin/JVM 控制面
+│       ├── settings.gradle.kts
+│       ├── build.gradle.kts
+│       ├── gradle/libs.versions.toml
+│       ├── domain/                       # 纯 Kotlin/JDK 领域模型与规则
+│       ├── application/                  # use case 与 inbound/outbound ports
+│       ├── adapters/
+│       │   ├── inbound-grpc/
+│       │   ├── inbound-http/
+│       │   ├── inbound-websocket/
+│       │   ├── outbound-kernel/
+│       │   ├── outbound-persistence/
+│       │   ├── outbound-events/
+│       │   ├── outbound-oci/
+│       │   └── outbound-signature/
+│       ├── bootstrap/                    # Spring Boot 装配和部署入口
+│       └── architecture-tests/           # 强制依赖方向与禁用依赖
 │
 ├── sdk/                                  # 唯一公开跨语言契约边界
 │   ├── proto/
@@ -1297,8 +1307,9 @@ message PluginLifecycleEvent {
 - manifest JSON、内联 secret；
 - 模型、数据集、checkpoint、大块 bytes、日志正文、stdout/stderr。
 
-Rust 节点只能从已签名、已校验、按 digest 绑定的本地安装记录解析入口点，
-使用 argv 数组启动进程，并拒绝插件覆盖 `CUDA_VISIBLE_DEVICES`、
+外层安装记录 adapter 只能从已签名、已校验、按 digest 绑定的本地安装记录解析
+入口点；Kernel 接收其端口返回的 `LaunchPlan` 后使用 argv 数组启动进程，并拒绝
+插件覆盖 `CUDA_VISIBLE_DEVICES`、
 `HIP_VISIBLE_DEVICES` 等 Kernel 保留变量。
 
 ### 7.3 与现有协议的关系
@@ -1490,7 +1501,8 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
   生成代码；Spring Boot 只存在于 adapters/bootstrap。
 - Core Proto 不出现 LoRA、vLLM、训练超参数、模型格式等业务词汇。
 - Core RPC 不接受任意 shell、executable、argv 或 env。
-- Kernel 默认 `forbid(unsafe_code)`；FFI 仅在审计 adapter 中。
+- 除审计化 Linux syscall 包装所在的 `cy-sandbox` 外，Kernel crate 默认
+  `forbid(unsafe_code)`；厂商 FFI 仅在进程外审计 adapter 中。
 - Kernel 依赖树不包含 AI 计算运行时。
 - 所有资源状态带 generation/revision；所有变更 RPC 可幂等重放。
 - `VISIBILITY_ONLY` 与硬隔离在 API 上可区分。
@@ -1510,9 +1522,10 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
 | contracts/proto/agent_service.proto           | 冻结；由 typed node/kernel protocol 替代                      | 注册、心跳、reconcile、恢复集成测试通过                               |
 | contracts/proto/plugin/v1/*                   | 保留 POC 兼容；新增 worker v2 package                          | Python/JVM conformance runner 与迁移 adapter 全绿           |
 | cy-manifest、plugin.schema.json、PLUGIN_SPEC.md | 收敛为一份规范和多语言模型                                           | Schema/Rust/Kotlin/Python fixture roundtrip 全绿         |
-| cy-local-transport                            | 抽象 transport factory，补 child event、UDS 和 env policy     | EOF、oversize、stdout 污染、关闭/回收覆盖                         |
-| cy-plugin-supervisor                          | 重构为 manager + instance actor，消费 lease/LaunchPlan        | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿 |
-| cy-node-agent                                 | 增加 daemon binary、mTLS/session、snapshot/reconcile        | 不再把 handler unit test 当成可运行节点证明                        |
+| framework/crates/cy-local-transport           | 保留为历史兼容 transport；生产 Worker 迁移到 KernelService/UDS | EOF、oversize、stdout 污染、关闭/回收覆盖，且 Kernel 依赖树中不存在该 crate |
+| framework/crates/cy-plugin-supervisor          | 保留为历史兼容 runner；生产启动迁移到 Kernel `SandboxedProcess`/KernelService | watchdog、cancel、stream、graceful stop、crash-loop E2E 全绿，且 Kernel 不直接 spawn stdio child |
+| framework/crates/cy-installation-resolver      | 持有安装布局/JSON 解析；只经 `InstalledPluginResolver` 给出 LaunchPlan | 安装服务的签名、digest、路径逃逸集成测试全绿；Kernel 不解析安装记录 |
+| agents/node/cy-node-agent                      | 外层 node control、日志与升级进程；增加 daemon binary、mTLS/session、snapshot/reconcile | 不再把 handler unit test 当成可运行节点证明，且 Kernel crate 不依赖该 agent |
 | cy-platform-api                               | AI trait 移到 extension SDK；Core 只留通用插件契约                 | 移除官方 App 后 Core 仍能构建运行                                 |
 | cy-extension-registry                         | 迁移期保留为 compatibility layer，长期由 Kotlin catalog/router 接管 | Kotlin 行为覆盖后才删除                                        |
 | framework/jvm                                 | 建立 Pure Kotlin domain/application + Spring adapters     | Gradle build、架构测试、reconcile integration test 通过        |

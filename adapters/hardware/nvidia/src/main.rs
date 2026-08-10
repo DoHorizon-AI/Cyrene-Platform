@@ -9,7 +9,7 @@ fn main() -> std::io::Result<()> {
         env, fs,
         io::{Read, Write},
         os::unix::{
-            fs::FileTypeExt,
+            fs::{FileTypeExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
         path::PathBuf,
@@ -32,7 +32,11 @@ fn main() -> std::io::Result<()> {
         fs::remove_file(&socket_path)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
-    let provider = NvidiaSmiProvider::new("nvidia-smi");
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660))?;
+    // `nvidia` is the stable UDS adapter identity. `nvidia-smi` remains an
+    // implementation detail of this external process and never leaks into
+    // Kernel routing configuration.
+    let provider = NvidiaSmiProvider::new("nvidia");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

@@ -24,9 +24,6 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tracing::{info, warn};
 
-mod instance;
-pub use instance::{ManagedInstance, ManagedInstanceState};
-
 /// 插件运行时 13 态精细化生命周期状态机
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginRuntimeState {

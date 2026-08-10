@@ -10,6 +10,8 @@
 //! - **沙箱与进程生命周期**：[`LaunchPlan`], [`ProcessHandle`], [`CleanupReport`], [`StopRequest`]
 //! - **核心端口 Trait**：[`AcceleratorProvider`], [`ResourceLeaseManager`], [`ProcessRuntime`], [`SandboxBackend`] 等
 
+#![forbid(unsafe_code)]
+
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, time::Duration};
 
 /// 资源隔离与限制的强制执行模式 (Enforcement Mode)
@@ -151,6 +153,11 @@ pub struct DeviceNode {
 pub struct AcceleratorDevice {
     /// 设备全局唯一标识（例如："gpu-0000:01:00.0"）
     pub device_id: String,
+    /// 产生此不可变硬件事实的外部 Adapter 标识。
+    ///
+    /// 这不是厂商 API，而是 Kernel 用于把设备绑定请求路由回同一 UDS
+    /// Sidecar 的来源证明。资源账本不能根据 `vendor` 猜测路由。
+    pub adapter_id: String,
     /// 设备类型（GPU/NPU 等）
     pub kind: AcceleratorKind,
     /// 硬件厂商
@@ -260,6 +267,22 @@ pub struct ResourceRequest {
     pub vendor: Option<AcceleratorVendor>,
     /// 单卡最低显存要求（字节数，可选）
     pub min_memory_bytes: Option<u64>,
+    /// 进程 cgroup 应执行的 CPU、内存与 CPU 集合限制。
+    pub limits: CgroupLimits,
+}
+
+/// 由 Kernel 执行的 cgroup v2 配额。
+///
+/// 这些字段是纯数值契约；具体的 `cpu.max`、`memory.max` 与 `cpuset.cpus`
+/// 写入属于 Linux Sandbox 适配器，避免资源账本依赖宿主机实现细节。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgroupLimits {
+    /// CPU 上限，单位为 millicores；`None` 表示不设置 `cpu.max`。
+    pub cpu_max_millicores: Option<u32>,
+    /// 内存上限，单位为字节；`None` 表示不设置 `memory.max`。
+    pub memory_max_bytes: Option<u64>,
+    /// 可运行 CPU 集合，例如 `"0-3,8-11"`；`None` 表示不设置 `cpuset.cpus`。
+    pub cpuset_cpus: Option<String>,
 }
 
 /// 单项设备资源分配结果
@@ -288,6 +311,8 @@ pub struct ResourceLease {
     pub inventory_generation: u64,
     /// 隔离围栏令牌（Fence Token：递增的单调计数器，防止旧任务迟到的写操作污染新租约）
     pub fence_token: u64,
+    /// 与该租约绑定、启动时必须写入 cgroup 的资源上限。
+    pub limits: CgroupLimits,
 }
 
 /// 进程沙箱启动计划 (Launch Plan)
@@ -303,6 +328,48 @@ pub struct LaunchPlan {
     pub environment: BTreeMap<String, String>,
     /// 分配给该进程的 cgroup 作用域组名
     pub cgroup_name: String,
+    /// 进程启动前必须生效的 cgroup 配额。
+    pub limits: CgroupLimits,
+}
+
+/// Immutable identity of an installation that has already passed installer
+/// verification. It deliberately contains no product/plugin implementation
+/// details, executable path, arguments, or environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedInstallation {
+    pub installation_name: String,
+    pub manifest_digest: String,
+    pub artifact_digest: String,
+}
+
+/// Port for obtaining a launch plan from a previously verified installation.
+///
+/// Install layout and record parsing belong to an outer adapter. Before the
+/// result is launched, the Kernel still overlays lease limits, reserved
+/// heartbeat values, and device-binding environment restrictions.
+pub trait InstalledPluginResolver: Send + Sync {
+    fn resolve_launch_plan(
+        &self,
+        installation: &VerifiedInstallation,
+        instance_name: &str,
+    ) -> Result<LaunchPlan, ProviderError>;
+}
+
+/// 由 cgroup v2 直接读取的真实物理消耗量。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgroupTelemetry {
+    /// `memory.current`，单位为字节。
+    pub memory_current_bytes: Option<u64>,
+    /// `memory.peak`，单位为字节；旧内核不可用时为 `None`。
+    pub memory_peak_bytes: Option<u64>,
+    /// `cpu.stat` 的总使用时间，单位为微秒。
+    pub cpu_usage_usec: Option<u64>,
+    /// `cpu.stat` 的用户态使用时间，单位为微秒。
+    pub cpu_user_usec: Option<u64>,
+    /// `cpu.stat` 的内核态使用时间，单位为微秒。
+    pub cpu_system_usec: Option<u64>,
+    /// `memory.events.local` 的 `oom_kill` 计数。
+    pub oom_kill_count: u64,
 }
 
 /// 已启动沙箱进程的句柄引用 (Process Handle)
@@ -440,6 +507,14 @@ pub trait ProcessRuntime: Send + Sync {
         handle: &ProcessHandle,
         request: &StopRequest,
     ) -> Result<CleanupReport, ProviderError>;
+    /// 读取运行时可提供的物理资源遥测。后端不支持时返回明确错误，绝不估算。
+    fn telemetry(&self, _handle: &ProcessHandle) -> Result<CgroupTelemetry, ProviderError> {
+        Err(ProviderError::new(
+            "process-runtime",
+            "TELEMETRY_UNAVAILABLE",
+            "this runtime does not expose physical cgroup telemetry",
+        ))
+    }
 }
 
 /// 端口 Trait 5：沙箱隔离后端标识

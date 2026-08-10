@@ -11,10 +11,20 @@ if [[ -d kernel/crates/cy-hardware-discovery ]]; then
   failed=1
 fi
 
-if [[ -f kernel/crates/cy-node-agent/src/probe.rs ]]; then
+if [[ -f agents/node/cy-node-agent/src/probe.rs ]]; then
   echo "Node Agent must not contain a vendor hardware probe" >&2
   failed=1
 fi
+
+for legacy_path in \
+  kernel/crates/cy-local-transport \
+  kernel/crates/cy-plugin-supervisor \
+  kernel/crates/cy-node-agent; do
+  if [[ -e "$legacy_path" ]]; then
+    echo "non-Kernel component remains under kernel/: $legacy_path" >&2
+    failed=1
+  fi
+done
 
 if rg -n -i 'nvidia-smi|rocm-smi|/dev/nvidia|libnvidia|libloading|dlopen|ascend-cli' kernel; then
   echo "Kernel contains vendor command, device scan, or dynamic-library loading" >&2
@@ -23,6 +33,12 @@ fi
 
 if rg -n 'cy-hardware-discovery' kernel Cargo.toml; then
   echo "Kernel workspace still depends on the retired discovery crate" >&2
+  failed=1
+fi
+
+if rg -n 'framework/crates|cy-local-transport|cy-plugin-supervisor|cy-installation-resolver|cy-node-agent' \
+  kernel --glob 'Cargo.toml'; then
+  echo "Kernel crate manifest depends on a framework, legacy runner, installer, or node-agent crate" >&2
   failed=1
 fi
 
