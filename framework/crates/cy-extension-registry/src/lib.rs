@@ -1,3 +1,14 @@
+//! CYRENE 扩展注册中心与远程 RPC 代理层 (Extension Registry & Remote Proxies).
+//!
+//! 【扩展代理与注册中心架构】
+//! 为平台 10 大扩展点提供类型安全的远程 RPC 代理与统一查找管理：
+//! 1. **强类型远程代理 (Typed Remote Proxies)**：
+//!    将平台 SPI Trait（如 [`Probe`], [`ModelAnalyzer`], [`ExecutionEngine`]）的异步方法透明转换为 Protobuf [`Invoke`] 封包，经由 [`PluginSupervisor`] 的 stdio 零端口管道与插件子进程交互；
+//! 2. **前置健康检查与自愈重连 ([`prepare_supervisor`])**：
+//!    在发起 RPC 调用前，自动调用监管器的 `ensure_healthy`，若插件处于崩溃态且策略允许则自动触发指数退避拉起；
+//! 3. **强类型注册表 ([`ExtensionRegistry`])**：
+//!    按扩展点分类（`Probe`, `Storage`, `Notification` 等）分别索引并提供类型安全的高效注册、按 ID 查询与批量枚举能力。
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +34,7 @@ use cy_plugin_supervisor::{PluginRuntimeState, PluginSupervisor};
 use tokio::sync::Mutex as AsyncMutex;
 
 // ---------------------------------------------------------------------------
-// Helper macro/function for ensuring supervisor readiness before invoke
+// 辅助函数：在发起 RPC 调用前确保插件监管器与子进程就绪
 // ---------------------------------------------------------------------------
 
 async fn prepare_supervisor<'a>(
@@ -48,10 +59,10 @@ async fn prepare_supervisor<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Typed Remote Proxies for All 10 Extension Points
+// 10 大扩展点的强类型远程代理 (Typed Remote Proxies)
 // ---------------------------------------------------------------------------
 
-/// 1. Remote Probe Proxy
+/// 1. 远程硬件探针代理
 pub struct RemoteProbe {
     plugin_id: String,
     supervisor: Arc<AsyncMutex<PluginSupervisor>>,
@@ -832,9 +843,10 @@ impl Plugin for GenericRemotePlugin {
 }
 
 // ---------------------------------------------------------------------------
-// Typed Extension Registry
+// 强类型扩展注册中心 (Extension Registry)
 // ---------------------------------------------------------------------------
 
+/// 强类型插件扩展注册中心：集中管理并分发 10 大扩展点的插件实例
 #[derive(Default)]
 pub struct ExtensionRegistry {
     probes: HashMap<String, Arc<dyn Probe>>,
@@ -852,10 +864,12 @@ pub struct ExtensionRegistry {
 }
 
 impl ExtensionRegistry {
+    /// 创建空的扩展注册中心
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 注册通用插件
     pub fn register_plugin(&mut self, plugin: Arc<dyn Plugin>) {
         self.all_plugins.insert(plugin.id().to_string(), plugin);
     }
