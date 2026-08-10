@@ -1125,7 +1125,7 @@ mod tests {
             device_bpf_enabled: false,
         };
         let binding = DeviceBinding {
-            device_id: "GPU-0".to_string(),
+            resource_id: "GPU-0".to_string(),
             nodes: Vec::new(),
             environment: BTreeMap::new(),
             required_gids: Vec::new(),

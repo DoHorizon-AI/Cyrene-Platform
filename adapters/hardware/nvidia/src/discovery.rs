@@ -17,9 +17,9 @@ use std::{
 };
 
 use cy_kernel_api::{
-    AcceleratorDevice, AcceleratorKind, AcceleratorLinkType, AcceleratorProvider,
-    AcceleratorVendor, CapabilityFact, DeviceBinding, DeviceNode, HealthReport,
-    HostInventoryProvider, InventorySnapshot, NodeCapabilities, ProviderError,
+    semantic::{Capability, Identity, Quantity, Resource, ResourceState},
+    CapabilityFact, DeviceBinding, DeviceNode, HealthReport, HostInventoryProvider,
+    InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,
 };
 
 /// 命令行执行输出结果
@@ -153,8 +153,8 @@ impl NvidiaSmiProvider {
         nodes
     }
 
-    fn next_inventory_generation(&self, devices: &[AcceleratorDevice]) -> u64 {
-        let fingerprint = devices
+    fn next_inventory_generation(&self, resources: &[Resource]) -> u64 {
+        let fingerprint = resources
             .iter()
             .map(|device| format!("{device:?}"))
             .collect::<String>();
@@ -170,47 +170,107 @@ impl NvidiaSmiProvider {
     }
 }
 
-impl AcceleratorProvider for NvidiaSmiProvider {
+impl ResourceProvider for NvidiaSmiProvider {
     fn adapter_id(&self) -> &str {
         "nvidia-smi"
     }
 
-    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
+    fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
         self.query().map(|gpus| {
             gpus.into_iter()
-                .map(|gpu| AcceleratorDevice {
-                    device_id: gpu.uuid,
-                    adapter_id: self.adapter_id().to_string(),
-                    kind: AcceleratorKind::Gpu,
-                    vendor: AcceleratorVendor::Nvidia,
-                    device_family: gpu.name,
-                    pci_address: Some(gpu.pci_address.clone()),
-                    numa_node: self.numa_node(&gpu.pci_address),
-                    total_memory_bytes: gpu.total_memory_bytes,
-                    allocatable_memory_bytes: gpu.free_memory_bytes,
-                    features: vec!["cuda".to_string()],
-                    device_nodes: self.nodes_for(gpu.index),
-                    links: Vec::new(),
-                    health: HealthReport {
-                        healthy: Some(true),
-                        reason_code: "NVIDIA_SMI_PROBE_OK".to_string(),
-                        summary: "nvidia-smi returned a complete device row".to_string(),
-                    },
+                .map(|gpu| {
+                    let mut capacity = BTreeMap::new();
+                    if let Some(value) = gpu.total_memory_bytes {
+                        capacity.insert(
+                            "memory.total".to_string(),
+                            Quantity {
+                                value,
+                                unit: "byte".to_string(),
+                            },
+                        );
+                    }
+                    if let Some(value) = gpu.free_memory_bytes {
+                        capacity.insert(
+                            "memory.allocatable".to_string(),
+                            Quantity {
+                                value,
+                                unit: "byte".to_string(),
+                            },
+                        );
+                    }
+                    let mut attributes = BTreeMap::from([
+                        ("vendor".to_string(), "nvidia".to_string()),
+                        ("family".to_string(), gpu.name),
+                        ("pci.address".to_string(), gpu.pci_address.clone()),
+                    ]);
+                    if let Some(numa_node) = self.numa_node(&gpu.pci_address) {
+                        attributes.insert("numa.node".to_string(), numa_node.to_string());
+                    }
+                    Resource {
+                        identity: Identity {
+                            id: gpu.uuid,
+                            generation: 1,
+                        },
+                        provider: Identity {
+                            id: self.adapter_id().to_string(),
+                            generation: 1,
+                        },
+                        resource_class: "accelerator".to_string(),
+                        capabilities: vec![
+                            Capability {
+                                id: "accelerator.compute".to_string(),
+                                revision: 1,
+                                properties: BTreeMap::new(),
+                            },
+                            Capability {
+                                id: "accelerator.kind.gpu".to_string(),
+                                revision: 1,
+                                properties: BTreeMap::new(),
+                            },
+                            Capability {
+                                id: "vendor.nvidia.cuda".to_string(),
+                                revision: 1,
+                                properties: BTreeMap::new(),
+                            },
+                        ],
+                        capacity,
+                        attributes,
+                        state: ResourceState::Ready,
+                        reason_code: "nvidia-smi-probe-ok".to_string(),
+                        summary: "provider returned a complete resource row".to_string(),
+                        links: Vec::new(),
+                    }
                 })
                 .collect()
         })
     }
 
-    fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError> {
-        if device.vendor != AcceleratorVendor::Nvidia {
+    fn create_binding(&self, resource: &Resource) -> Result<DeviceBinding, ProviderError> {
+        if resource.provider.id != self.adapter_id()
+            || !resource
+                .capabilities
+                .iter()
+                .any(|capability| capability.id == "vendor.nvidia.cuda")
+        {
             return Err(ProviderError::new(
                 self.adapter_id(),
-                "UNSUPPORTED_VENDOR",
-                "NVIDIA adapter cannot bind a non-NVIDIA device",
+                "RESOURCE_PROVIDER_MISMATCH",
+                "resource was not published by this provider",
             ));
         }
-        let missing = device
-            .device_nodes
+        let gpu = self
+            .query()?
+            .into_iter()
+            .find(|gpu| gpu.uuid == resource.identity.id)
+            .ok_or_else(|| {
+                ProviderError::new(
+                    self.adapter_id(),
+                    "RESOURCE_NOT_FOUND",
+                    "resource is absent",
+                )
+            })?;
+        let nodes = self.nodes_for(gpu.index);
+        let missing = nodes
             .iter()
             .filter(|node| node.required && !node.path.exists())
             .map(|node| node.path.display().to_string())
@@ -222,8 +282,7 @@ impl AcceleratorProvider for NvidiaSmiProvider {
                 &missing.join(", "),
             ));
         }
-        let unresolved = device
-            .device_nodes
+        let unresolved = nodes
             .iter()
             .filter(|node| node.required && (node.major.is_none() || node.minor.is_none()))
             .map(|node| node.path.display().to_string())
@@ -237,14 +296,17 @@ impl AcceleratorProvider for NvidiaSmiProvider {
         }
 
         let mut environment = BTreeMap::new();
-        environment.insert("CUDA_VISIBLE_DEVICES".to_string(), device.device_id.clone());
+        environment.insert(
+            "CUDA_VISIBLE_DEVICES".to_string(),
+            resource.identity.id.clone(),
+        );
         environment.insert(
             "NVIDIA_VISIBLE_DEVICES".to_string(),
-            device.device_id.clone(),
+            resource.identity.id.clone(),
         );
         Ok(DeviceBinding {
-            device_id: device.device_id.clone(),
-            nodes: device.device_nodes.clone(),
+            resource_id: resource.identity.id.clone(),
+            nodes,
             environment,
             required_gids: Vec::new(),
             enforcement: cy_kernel_api::EnforcementMode::Hard,
@@ -253,11 +315,15 @@ impl AcceleratorProvider for NvidiaSmiProvider {
         })
     }
 
-    fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError> {
-        AcceleratorProvider::probe_inventory(self)?
+    fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError> {
+        ResourceProvider::probe_resources(self)?
             .into_iter()
-            .find(|device| device.device_id == device_id)
-            .map(|device| device.health)
+            .find(|resource| resource.identity.id == resource_id)
+            .map(|resource| HealthReport {
+                healthy: Some(resource.state == ResourceState::Ready),
+                reason_code: resource.reason_code,
+                summary: resource.summary,
+            })
             .ok_or_else(|| {
                 ProviderError::new(self.adapter_id(), "DEVICE_NOT_FOUND", "device is absent")
             })
@@ -296,11 +362,14 @@ fn device_node(path: PathBuf, required: bool) -> DeviceNode {
 
 impl HostInventoryProvider for NvidiaSmiProvider {
     fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
-        let devices = <Self as AcceleratorProvider>::probe_inventory(self)?;
-        let generation = self.next_inventory_generation(&devices);
+        let mut resources = <Self as ResourceProvider>::probe_resources(self)?;
+        let generation = self.next_inventory_generation(&resources);
+        for resource in &mut resources {
+            resource.identity.generation = generation;
+        }
         Ok(InventorySnapshot {
             generation,
-            devices,
+            resources,
             capabilities: NodeCapabilities {
                 ready: true,
                 facts: vec![CapabilityFact {
@@ -375,7 +444,7 @@ fn parse_mib(value: &str, field: &str) -> Result<Option<u64>, ProviderError> {
 }
 
 /// 解析 `nvidia-smi topo -m` 互联拓扑矩阵文本，提取 GPU 间的 NVLink / PCIe P2P 链路关系
-pub fn parse_nvidia_topology(output: &str) -> Vec<(String, String, AcceleratorLinkType)> {
+pub fn parse_nvidia_topology(output: &str) -> Vec<(String, String, String)> {
     let mut lines = output.lines().filter(|line| !line.trim().is_empty());
     let Some(header) = lines.next() else {
         return Vec::new();
@@ -393,9 +462,9 @@ pub fn parse_nvidia_topology(output: &str) -> Vec<(String, String, AcceleratorLi
                 continue;
             };
             let link_type = match value.to_ascii_uppercase().as_str() {
-                value if value.starts_with("NV") => Some(AcceleratorLinkType::Nvlink),
+                value if value.starts_with("NV") => Some("vendor.nvidia.nvlink".to_string()),
                 value if value.starts_with("PIX") || value.starts_with("PHB") => {
-                    Some(AcceleratorLinkType::Pcie)
+                    Some("interconnect.pcie".to_string())
                 }
                 _ => None,
             };
@@ -448,12 +517,15 @@ mod tests {
                 stderr: String::new(),
             },
         }));
-        let devices = AcceleratorProvider::probe_inventory(&provider).unwrap();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].device_id, "GPU-uuid");
-        assert_eq!(devices[0].total_memory_bytes, Some(40960 * 1024 * 1024));
-        assert!(devices[0].links.is_empty());
-        assert_eq!(devices[0].numa_node, None);
+        let resources = ResourceProvider::probe_resources(&provider).unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].identity.id, "GPU-uuid");
+        assert_eq!(
+            resources[0].capacity["memory.total"].value,
+            40960 * 1024 * 1024
+        );
+        assert!(resources[0].links.is_empty());
+        assert!(!resources[0].attributes.contains_key("numa.node"));
     }
 
     #[test]
@@ -470,8 +542,8 @@ mod tests {
         assert_eq!(
             links,
             vec![
-                ("GPU0".into(), "GPU1".into(), AcceleratorLinkType::Nvlink),
-                ("GPU1".into(), "GPU0".into(), AcceleratorLinkType::Nvlink),
+                ("GPU0".into(), "GPU1".into(), "vendor.nvidia.nvlink".into()),
+                ("GPU1".into(), "GPU0".into(), "vendor.nvidia.nvlink".into()),
             ]
         );
     }

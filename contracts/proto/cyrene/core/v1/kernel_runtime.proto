@@ -4,6 +4,7 @@ package cyrene.core.v1;
 
 import "cyrene/core/v1/common.proto";
 import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -13,10 +14,11 @@ message KernelCapabilities {
   uint64 inventory_generation = 3;
   google.protobuf.Timestamp observed_at = 4;
   NodeCapacity capacity = 5;
-  repeated AcceleratorDevice accelerators = 6;
+  repeated AcceleratorDevice accelerators = 6 [deprecated = true];
   repeated string sandbox_backends = 7;
   repeated EnforcementReport enforcement = 8;
   repeated string feature_flags = 9;
+  repeated cyrene.semantic.v1.Resource resources = 10;
 }
 
 message GetKernelCapabilitiesRequest {

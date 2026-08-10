@@ -136,6 +136,20 @@ pub struct Provider {
     pub capabilities: Vec<Capability>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceState {
+    Ready,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopologyLink {
+    pub peer: Identity,
+    pub kind: String,
+    pub properties: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resource {
     pub identity: Identity,
@@ -144,6 +158,10 @@ pub struct Resource {
     pub capabilities: Vec<Capability>,
     pub capacity: BTreeMap<String, Quantity>,
     pub attributes: BTreeMap<String, String>,
+    pub state: ResourceState,
+    pub reason_code: String,
+    pub summary: String,
+    pub links: Vec<TopologyLink>,
 }
 
 impl Resource {
@@ -162,7 +180,25 @@ impl Resource {
             validate_namespaced_id("capacity key", key)?;
             quantity.validate()?;
         }
-        validate_properties(&self.attributes)
+        validate_properties(&self.attributes)?;
+        validate_text(
+            "resource reason code",
+            &self.reason_code,
+            MAX_NAMESPACED_ID_BYTES,
+        )?;
+        validate_text("resource summary", &self.summary, MAX_ID_BYTES)?;
+        if self.links.len() > MAX_PROPERTIES {
+            return Err(ContractError::new(
+                "TOPOLOGY_LIMIT_EXCEEDED",
+                "resource has too many topology links",
+            ));
+        }
+        for link in &self.links {
+            link.peer.validate()?;
+            validate_namespaced_id("topology kind", &link.kind)?;
+            validate_properties(&link.properties)?;
+        }
+        Ok(())
     }
 }
 
@@ -536,6 +572,10 @@ mod tests {
                 },
             )]),
             attributes: BTreeMap::new(),
+            state: ResourceState::Ready,
+            reason_code: "ready".to_string(),
+            summary: "resource is ready".to_string(),
+            links: Vec::new(),
         }
     }
 

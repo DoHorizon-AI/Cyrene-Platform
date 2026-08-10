@@ -3,6 +3,7 @@ syntax = "proto3";
 package cyrene.hardware.v1;
 
 import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
 import "google/protobuf/timestamp.proto";
 
 // The adapter protocol is local and request/response based.  The Kernel uses
@@ -22,8 +23,10 @@ message GetInventoryRequest {
 }
 
 message CreateBindingRequest {
-  string device_id = 1;
+  // Deprecated compatibility field. New clients use resource.
+  string device_id = 1 [deprecated = true];
   uint64 expected_inventory_generation = 2;
+  cyrene.semantic.v1.Identity resource = 3;
 }
 
 message AdapterResponse {
@@ -39,11 +42,12 @@ message AdapterResponse {
 
 message HardwareInventory {
   uint64 generation = 1;
-  repeated cyrene.core.v1.AcceleratorDevice devices = 2;
+  repeated cyrene.core.v1.AcceleratorDevice devices = 2 [deprecated = true];
   repeated AdapterFact facts = 3;
   repeated cyrene.core.v1.EnforcementReport enforcement = 4;
   google.protobuf.Timestamp sampled_at = 5;
   google.protobuf.Timestamp expires_at = 6;
+  repeated cyrene.semantic.v1.Resource resources = 7;
 }
 
 message AdapterFact {
@@ -61,12 +65,13 @@ message DeviceNode {
 }
 
 message DeviceBinding {
-  string device_id = 1;
+  string device_id = 1 [deprecated = true];
   repeated DeviceNode nodes = 2;
   map<string, string> environment = 3;
   repeated uint32 required_gids = 4;
   cyrene.core.v1.EnforcementMode enforcement = 5;
   string reason_code = 6;
+  cyrene.semantic.v1.Identity resource = 7;
 }
 
 message AdapterError {

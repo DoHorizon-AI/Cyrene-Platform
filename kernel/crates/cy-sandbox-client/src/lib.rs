@@ -252,7 +252,7 @@ fn limits_to_proto(value: &CgroupLimits) -> sandbox_v1::SandboxLimits {
 
 fn binding_to_proto(value: &DeviceBinding) -> sandbox_v1::SandboxDeviceBinding {
     sandbox_v1::SandboxDeviceBinding {
-        device_id: value.device_id.clone(),
+        device_id: value.resource_id.clone(),
         nodes: value
             .nodes
             .iter()
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn binding_round_trip_preserves_hard_enforcement() {
         let binding = DeviceBinding {
-            device_id: "gpu-0".to_string(),
+            resource_id: "gpu-0".to_string(),
             nodes: vec![DeviceNode {
                 path: PathBuf::from("/dev/example"),
                 major: Some(1),

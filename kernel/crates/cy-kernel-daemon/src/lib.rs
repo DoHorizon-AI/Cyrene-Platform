@@ -7,6 +7,9 @@
 //! 3. **职责边界**：内核守护进程专职负责单机节点物理事实与资源隔离，不包含远程制品下载、全局调度仲裁或跨重启接管僵尸进程的逻辑。
 
 #![forbid(unsafe_code)]
+// Tonic owns the concrete Status representation; service helpers keep the
+// canonical Result<T, Status> signature instead of boxing transport errors.
+#![allow(clippy::result_large_err)]
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -21,13 +24,12 @@ use std::{
 
 use cy_adapter_client::{HardwareAdapterEndpoint, UdsHardwareAdapterRegistry};
 use cy_kernel_api::{
-    AcceleratorKind, AcceleratorLinkType, AcceleratorProvider, AcceleratorVendor, CgroupLimits,
-    CleanupReport, DeviceBinding, EnforcementMode, HostInventoryProvider, InstalledPluginResolver,
-    InventorySnapshot, LeaseState, NoopRuntimeJournal, ProviderError, ResourceLease,
-    ResourceLeaseManager, ResourceRequest, RuntimeJournalEvent, RuntimeJournalRecord,
-    RuntimeJournalSink, SandboxBackend, VerifiedInstallation,
+    semantic, CgroupLimits, CleanupReport, DeviceBinding, EnforcementMode, HostInventoryProvider,
+    InstalledPluginResolver, InventorySnapshot, LeaseState, NoopRuntimeJournal, ProviderError,
+    ResourceLease, ResourceLeaseManager, ResourceProvider, ResourceRequest, RuntimeJournalEvent,
+    RuntimeJournalRecord, RuntimeJournalSink, SandboxBackend, VerifiedInstallation,
 };
-use cy_proto::core_v1;
+use cy_proto::{core_v1, semantic_v1};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{iter, wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
@@ -42,8 +44,8 @@ const OPERATION_EVENT_SUBSCRIBER_CAPACITY: usize = 64;
 pub struct KernelDaemon {
     /// 宿主机硬件清单提供者
     inventory_provider: Arc<dyn HostInventoryProvider>,
-    /// 硬件加速卡提供者
-    accelerator_provider: Arc<dyn AcceleratorProvider>,
+    /// 进程外通用资源 Provider
+    resource_provider: Arc<dyn ResourceProvider>,
     /// 硬件资源租约管理器
     resources: Arc<dyn ResourceLeaseManager>,
     /// 沙箱隔离后端
@@ -58,7 +60,7 @@ impl KernelDaemon {
     /// 构造新的内核守护进程实例
     pub fn new(
         inventory_provider: Arc<dyn HostInventoryProvider>,
-        accelerator_provider: Arc<dyn AcceleratorProvider>,
+        resource_provider: Arc<dyn ResourceProvider>,
         resources: Arc<dyn ResourceLeaseManager>,
         sandbox: Arc<dyn SandboxBackend>,
         node_id: impl Into<String>,
@@ -66,7 +68,7 @@ impl KernelDaemon {
     ) -> Self {
         Self {
             inventory_provider,
-            accelerator_provider,
+            resource_provider,
             resources,
             sandbox,
             node_id: node_id.into(),
@@ -142,28 +144,28 @@ impl KernelDaemon {
         self.resources.get_lease(lease_name)
     }
 
-    /// 为租约内的所有加速卡合并一份设备绑定。
+    /// 为租约内的所有资源合并一份沙箱绑定。
     ///
-    /// 当前 SandboxBackend 接口以单份 DeviceBinding 表达设备集合，因此多卡租约在这里合并
-    /// 设备节点、环境变量与 GID；任何厂商适配器冲突都会 fail closed。
+    /// 当前 SandboxBackend 接口以单份 DeviceBinding 表达资源集合，因此多资源租约在这里合并
+    /// 设备节点、环境变量与 GID；任何 Provider 冲突都会 fail closed。
     pub fn binding_for_lease(&self, lease: &ResourceLease) -> Result<DeviceBinding, ProviderError> {
         let snapshot = self.inventory()?;
         let mut bindings = Vec::with_capacity(lease.allocations.len());
         for allocation in &lease.allocations {
-            let device = snapshot
-                .devices
+            let resource = snapshot
+                .resources
                 .iter()
-                .find(|device| device.device_id == allocation.device_id)
+                .find(|resource| resource.identity == allocation.resource)
                 .ok_or_else(|| {
                     ProviderError::new(
                         "kernel-daemon",
-                        "LEASE_DEVICE_NOT_IN_INVENTORY",
-                        &allocation.device_id,
+                        "LEASE_RESOURCE_NOT_IN_INVENTORY",
+                        &allocation.resource.id,
                     )
                 })?;
             bindings.push(
-                self.accelerator_provider
-                    .create_binding_for_generation(device, lease.inventory_generation)?,
+                self.resource_provider
+                    .create_binding_for_generation(resource, lease.inventory_generation)?,
             );
         }
         merge_bindings(bindings)
@@ -173,52 +175,13 @@ impl KernelDaemon {
     ///
     /// # 诚实上报原则
     /// 严格如实上报硬件探测结果，绝不针对缺失的显存、NUMA 或拓扑值进行主观猜测。
+    #[allow(deprecated)]
     pub fn get_kernel_capabilities(&self) -> Result<core_v1::KernelCapabilities, ProviderError> {
         let snapshot = self.inventory()?;
-        let accelerators = snapshot
-            .devices
+        let resources = snapshot
+            .resources
             .iter()
-            .map(|device| core_v1::AcceleratorDevice {
-                device_id: device.device_id.clone(),
-                kind: to_proto_kind(device.kind) as i32,
-                vendor: to_proto_vendor(device.vendor) as i32,
-                other_vendor_id: String::new(),
-                device_family: device.device_family.clone(),
-                pci_address: device.pci_address.clone().unwrap_or_default(),
-                total_memory_bytes: device.total_memory_bytes.unwrap_or_default(),
-                allocatable_memory_bytes: device.allocatable_memory_bytes.unwrap_or_default(),
-                features: device.features.clone(),
-                partitions: Vec::new(),
-                health: Some(core_v1::HealthReport {
-                    status: device.health.healthy.map_or(
-                        core_v1::HealthStatus::Unknown as i32,
-                        |healthy| {
-                            if healthy {
-                                core_v1::HealthStatus::Healthy as i32
-                            } else {
-                                core_v1::HealthStatus::Degraded as i32
-                            }
-                        },
-                    ),
-                    reason_code: device.health.reason_code.clone(),
-                    summary: device.health.summary.clone(),
-                }),
-                numa_node: device.numa_node,
-                links: device
-                    .links
-                    .iter()
-                    .map(|link| core_v1::AcceleratorLink {
-                        peer_device_id: link.peer_device_id.clone(),
-                        link_type: to_proto_link_type(link.link_type) as i32,
-                        link_count: link.link_count.unwrap_or_default(),
-                        width: link.width.unwrap_or_default(),
-                        bandwidth_bytes_per_second: link
-                            .bandwidth_bytes_per_second
-                            .unwrap_or_default(),
-                        stable: link.stable,
-                    })
-                    .collect(),
-            })
+            .map(to_semantic_proto_resource)
             .collect();
         let runtime = self.sandbox.preflight();
         Ok(core_v1::KernelCapabilities {
@@ -230,7 +193,9 @@ impl KernelDaemon {
             inventory_generation: snapshot.generation,
             observed_at: Some(now_timestamp()),
             capacity: None,
-            accelerators,
+            // Deprecated compatibility projection. Kernel no longer decodes
+            // vendor or accelerator-specific attributes.
+            accelerators: Vec::new(),
             sandbox_backends: vec![self.sandbox.backend_id().to_string()],
             enforcement: runtime
                 .enforcement
@@ -249,6 +214,7 @@ impl KernelDaemon {
                 .filter(|fact| fact.available)
                 .map(|fact| fact.name)
                 .collect(),
+            resources,
         })
     }
 }
@@ -631,6 +597,7 @@ impl KernelServiceAdapter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn accept_heartbeat(
         &self,
         plugin_instance_name: &str,
@@ -931,6 +898,90 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .map_err(provider_status)
     }
 
+    async fn acquire_lease(
+        &self,
+        request: Request<core_v1::AcquireLeaseRequest>,
+    ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let request = request.into_inner();
+        self.validate_node(request.node.as_ref())?;
+        let lease_name = self.lease_name(request.mutation.as_ref())?;
+        let generation = request
+            .mutation
+            .as_ref()
+            .and_then(|mutation| mutation.expected_generation)
+            .unwrap_or_else(|| self.daemon.resources.inventory().generation);
+        let holder = semantic_identity_from_proto(request.holder, "holder")?;
+        let query = semantic_query_from_proto(
+            request
+                .query
+                .ok_or_else(|| Status::invalid_argument("resource query is required"))?,
+        )?;
+        let ttl = proto_duration(
+            request
+                .ttl
+                .ok_or_else(|| Status::invalid_argument("lease ttl is required"))?,
+        )?;
+        if ttl.is_zero() {
+            return Err(Status::invalid_argument("lease ttl must be positive"));
+        }
+        let limits = cgroup_limits(request.cpu.as_ref(), request.memory.as_ref())?;
+        let lease = self
+            .daemon
+            .reserve(ResourceRequest {
+                lease_name,
+                expected_inventory_generation: generation,
+                holder,
+                query,
+                expires_at_unix_ms: Some(expires_after(ttl)),
+                limits,
+            })
+            .map_err(provider_status)?;
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReserved,
+            None,
+            Some(&journal_lease),
+            "LEASE_RESERVED",
+        );
+        Ok(Response::new(to_semantic_proto_lease(&lease)))
+    }
+
+    async fn release_lease(
+        &self,
+        request: Request<core_v1::ReleaseLeaseRequest>,
+    ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let request = request.into_inner();
+        let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
+        let current = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if current.generation != lease_identity.generation {
+            return Err(Status::failed_precondition("stale lease generation"));
+        }
+        self.daemon
+            .release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease_identity.id.clone(),
+            fence_token: request.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReleased,
+            None,
+            Some(&journal_lease),
+            "LEASE_RELEASED",
+        );
+        let lease = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        Ok(Response::new(to_semantic_proto_lease(&lease)))
+    }
+
     async fn reserve_resources(
         &self,
         request: Request<core_v1::ReserveResourcesRequest>,
@@ -946,7 +997,19 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .as_ref()
             .and_then(|mutation| mutation.expected_generation)
             .unwrap_or_else(|| self.daemon.resources.inventory().generation);
-        let internal = resource_request(&lease_name, generation, &requirements)?;
+        let holder = legacy_holder(request.mutation.as_ref(), &lease_name);
+        let expires_at_unix_ms = request
+            .ttl
+            .map(proto_duration)
+            .transpose()?
+            .map(expires_after);
+        let internal = resource_request(
+            &lease_name,
+            generation,
+            holder,
+            expires_at_unix_ms,
+            &requirements,
+        )?;
         let lease = self.daemon.reserve(internal).map_err(provider_status)?;
         let journal_lease = core_v1::ResourceLeaseRef {
             lease_name: lease.name.clone(),
@@ -1033,7 +1096,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     .as_ref()
                     .and_then(|mutation| mutation.expected_generation)
                     .unwrap_or_else(|| self.daemon.resources.inventory().generation);
-                let internal = resource_request(&lease_name, generation, &requirements)?;
+                let internal = resource_request(
+                    &lease_name,
+                    generation,
+                    legacy_holder(request.mutation.as_ref(), &instance_name),
+                    None,
+                    &requirements,
+                )?;
                 (
                     self.daemon.reserve(internal).map_err(provider_status)?,
                     true,
@@ -1606,35 +1675,109 @@ fn managed_runtime_state(process: &ManagedProcess) -> i32 {
     }
 }
 
-/// 将内部芯片类型转换为 Protobuf 协议枚举
-fn to_proto_kind(kind: AcceleratorKind) -> core_v1::AcceleratorKind {
-    match kind {
-        AcceleratorKind::Gpu => core_v1::AcceleratorKind::Gpu,
-        AcceleratorKind::Npu => core_v1::AcceleratorKind::Npu,
-        AcceleratorKind::Tpu => core_v1::AcceleratorKind::Tpu,
-        AcceleratorKind::Other => core_v1::AcceleratorKind::Other,
+fn to_semantic_proto_identity(identity: &semantic::Identity) -> semantic_v1::Identity {
+    semantic_v1::Identity {
+        id: identity.id.clone(),
+        generation: identity.generation,
     }
 }
 
-/// 将内部厂商类型转换为 Protobuf 协议枚举
-fn to_proto_vendor(vendor: AcceleratorVendor) -> core_v1::AcceleratorVendor {
-    match vendor {
-        AcceleratorVendor::Nvidia => core_v1::AcceleratorVendor::Nvidia,
-        AcceleratorVendor::Amd => core_v1::AcceleratorVendor::Amd,
-        AcceleratorVendor::HuaweiAscend => core_v1::AcceleratorVendor::HuaweiAscend,
-        AcceleratorVendor::Intel => core_v1::AcceleratorVendor::Intel,
-        AcceleratorVendor::Other => core_v1::AcceleratorVendor::Other,
+fn semantic_identity_from_proto(
+    identity: Option<semantic_v1::Identity>,
+    field: &str,
+) -> Result<semantic::Identity, Status> {
+    let identity =
+        identity.ok_or_else(|| Status::invalid_argument(format!("{field} is required")))?;
+    let identity = semantic::Identity {
+        id: identity.id,
+        generation: identity.generation,
+    };
+    identity.validate().map_err(|error| {
+        Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
+    })?;
+    Ok(identity)
+}
+
+fn to_semantic_proto_resource(resource: &semantic::Resource) -> semantic_v1::Resource {
+    semantic_v1::Resource {
+        identity: Some(to_semantic_proto_identity(&resource.identity)),
+        provider: Some(to_semantic_proto_identity(&resource.provider)),
+        resource_class: resource.resource_class.clone(),
+        capabilities: resource
+            .capabilities
+            .iter()
+            .map(|capability| semantic_v1::Capability {
+                id: capability.id.clone(),
+                revision: capability.revision,
+                properties: capability.properties.clone().into_iter().collect(),
+            })
+            .collect(),
+        capacity: resource
+            .capacity
+            .iter()
+            .map(|(key, quantity)| {
+                (
+                    key.clone(),
+                    semantic_v1::Quantity {
+                        value: quantity.value,
+                        unit: quantity.unit.clone(),
+                    },
+                )
+            })
+            .collect(),
+        attributes: resource.attributes.clone().into_iter().collect(),
+        state: match resource.state {
+            semantic::ResourceState::Ready => semantic_v1::ResourceState::Ready,
+            semantic::ResourceState::Degraded => semantic_v1::ResourceState::Degraded,
+            semantic::ResourceState::Unavailable => semantic_v1::ResourceState::Unavailable,
+        } as i32,
+        reason_code: resource.reason_code.clone(),
+        summary: resource.summary.clone(),
+        links: resource
+            .links
+            .iter()
+            .map(|link| semantic_v1::TopologyLink {
+                peer: Some(to_semantic_proto_identity(&link.peer)),
+                kind: link.kind.clone(),
+                properties: link.properties.clone().into_iter().collect(),
+            })
+            .collect(),
     }
 }
 
-/// 将内部互联总线类型转换为 Protobuf 协议枚举
-fn to_proto_link_type(link_type: AcceleratorLinkType) -> core_v1::AcceleratorLinkType {
-    match link_type {
-        AcceleratorLinkType::Pcie => core_v1::AcceleratorLinkType::Pcie,
-        AcceleratorLinkType::Nvlink => core_v1::AcceleratorLinkType::Nvlink,
-        AcceleratorLinkType::Xgmi => core_v1::AcceleratorLinkType::Xgmi,
-        AcceleratorLinkType::Other => core_v1::AcceleratorLinkType::Other,
-    }
+fn semantic_query_from_proto(
+    query: semantic_v1::ResourceQuery,
+) -> Result<semantic::ResourceQuery, Status> {
+    let query = semantic::ResourceQuery {
+        resource_class: query.resource_class,
+        count: query.count,
+        required_capabilities: query
+            .required_capabilities
+            .into_iter()
+            .map(|requirement| semantic::CapabilityRequirement {
+                id: requirement.id,
+                minimum_revision: requirement.minimum_revision,
+                required_properties: requirement.required_properties.into_iter().collect(),
+            })
+            .collect(),
+        minimum_capacity: query
+            .minimum_capacity
+            .into_iter()
+            .map(|(key, quantity)| {
+                (
+                    key,
+                    semantic::Quantity {
+                        value: quantity.value,
+                        unit: quantity.unit,
+                    },
+                )
+            })
+            .collect(),
+    };
+    query.validate().map_err(|error| {
+        Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
+    })?;
+    Ok(query)
 }
 
 /// 将内部隔离执行模式转换为 Protobuf 协议枚举
@@ -1651,13 +1794,13 @@ fn to_proto_enforcement(mode: EnforcementMode) -> core_v1::EnforcementMode {
 fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, ProviderError> {
     let Some(first) = bindings.first().cloned() else {
         return Ok(DeviceBinding {
-            device_id: "none".to_string(),
+            resource_id: "none".to_string(),
             nodes: Vec::new(),
             environment: BTreeMap::new(),
             required_gids: Vec::new(),
             enforcement: EnforcementMode::Unenforced,
             adapter_id: "kernel-daemon".to_string(),
-            reason_code: "NO_ACCELERATOR_ALLOCATION".to_string(),
+            reason_code: "NO_RESOURCE_BINDING".to_string(),
         });
     };
     let mut nodes = first.nodes;
@@ -1665,19 +1808,19 @@ fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, Provide
     let mut required_gids = first.required_gids;
     let enforcement = first.enforcement;
     let mut adapter_ids = vec![first.adapter_id.clone()];
-    let mut device_ids = vec![first.device_id];
+    let mut resource_ids = vec![first.resource_id];
     for binding in bindings.into_iter().skip(1) {
         if binding.enforcement != enforcement {
             return Err(ProviderError::new(
                 "kernel-daemon",
-                "MIXED_DEVICE_ENFORCEMENT",
-                "a multi-device binding must use one enforcement mode",
+                "MIXED_RESOURCE_ENFORCEMENT",
+                "a multi-resource binding must use one enforcement mode",
             ));
         }
         if !adapter_ids.contains(&binding.adapter_id) {
             adapter_ids.push(binding.adapter_id.clone());
         }
-        device_ids.push(binding.device_id);
+        resource_ids.push(binding.resource_id);
         for node in binding.nodes {
             if !nodes.iter().any(|existing| existing.path == node.path) {
                 nodes.push(node);
@@ -1688,7 +1831,7 @@ fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, Provide
                 if existing != &value {
                     return Err(ProviderError::new(
                         "kernel-daemon",
-                        "CONFLICTING_DEVICE_ENVIRONMENT",
+                        "CONFLICTING_RESOURCE_ENVIRONMENT",
                         &key,
                     ));
                 }
@@ -1704,52 +1847,90 @@ fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, Provide
     }
     adapter_ids.sort();
     Ok(DeviceBinding {
-        device_id: device_ids.join(","),
+        resource_id: resource_ids.join(","),
         nodes,
         environment,
         required_gids,
         enforcement,
         adapter_id: adapter_ids.join(","),
-        reason_code: "DEVICE_BINDING_CREATED_BY_UDS_ADAPTERS".to_string(),
+        reason_code: "RESOURCE_BINDING_CREATED_BY_UDS_ADAPTERS".to_string(),
     })
 }
 
 fn resource_request(
     lease_name: &str,
     generation: u64,
+    holder: semantic::Identity,
+    expires_at_unix_ms: Option<u64>,
     requirements: &core_v1::ResourceRequirements,
 ) -> Result<ResourceRequest, Status> {
-    let mut count = 0usize;
-    let mut vendor = None;
+    let mut count = 0u32;
+    let mut kind_capability: Option<String> = None;
+    let mut required_capabilities = BTreeMap::<String, semantic::CapabilityRequirement>::new();
     let mut min_memory_bytes: Option<u64> = None;
     for accelerator in &requirements.accelerators {
         count = count
-            .checked_add(accelerator.count as usize)
+            .checked_add(accelerator.count)
             .ok_or_else(|| Status::invalid_argument("accelerator count overflow"))?;
-        if accelerator.vendor != core_v1::AcceleratorVendor::Unspecified as i32 {
-            let requested_vendor = core_v1::AcceleratorVendor::try_from(accelerator.vendor)
-                .map_err(|_| Status::invalid_argument("unknown accelerator vendor"))?;
-            let requested_vendor = match requested_vendor {
-                core_v1::AcceleratorVendor::Nvidia => AcceleratorVendor::Nvidia,
-                core_v1::AcceleratorVendor::Amd => AcceleratorVendor::Amd,
-                core_v1::AcceleratorVendor::HuaweiAscend => AcceleratorVendor::HuaweiAscend,
-                core_v1::AcceleratorVendor::Intel => AcceleratorVendor::Intel,
-                core_v1::AcceleratorVendor::Other | core_v1::AcceleratorVendor::Unspecified => {
-                    AcceleratorVendor::Other
-                }
-            };
-            if vendor.is_some_and(|current| current != requested_vendor) {
-                return Err(Status::invalid_argument(
-                    "multiple accelerator vendors are not supported in one P2 request",
+        if accelerator.vendor != core_v1::AcceleratorVendor::Unspecified as i32
+            || !accelerator.other_vendor_id.is_empty()
+        {
+            return Err(Status::failed_precondition(
+                "legacy vendor selectors are not interpreted by Kernel; use AcquireLease with a namespaced Capability",
+            ));
+        }
+        let requested_kind = match core_v1::AcceleratorKind::try_from(accelerator.kind)
+            .map_err(|_| Status::invalid_argument("unknown accelerator kind"))?
+        {
+            core_v1::AcceleratorKind::Unspecified => "accelerator.compute",
+            core_v1::AcceleratorKind::Gpu => "accelerator.kind.gpu",
+            core_v1::AcceleratorKind::Npu => "accelerator.kind.npu",
+            core_v1::AcceleratorKind::Tpu => "accelerator.kind.tpu",
+            core_v1::AcceleratorKind::Other => "accelerator.kind.other",
+        };
+        if kind_capability
+            .as_ref()
+            .is_some_and(|current| current != requested_kind)
+        {
+            return Err(Status::invalid_argument(
+                "one legacy request cannot mix accelerator kinds",
+            ));
+        }
+        kind_capability = Some(requested_kind.to_string());
+        for capability_id in &accelerator.required_features {
+            if !capability_id.contains('.') {
+                return Err(Status::failed_precondition(
+                    "legacy bare feature names are ambiguous; use a namespaced Capability id",
                 ));
             }
-            vendor = Some(requested_vendor);
+            required_capabilities.insert(
+                capability_id.clone(),
+                semantic::CapabilityRequirement {
+                    id: capability_id.clone(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                },
+            );
         }
         min_memory_bytes = match min_memory_bytes {
             Some(current) => Some(current.max(accelerator.min_memory_bytes_per_device)),
             None => Some(accelerator.min_memory_bytes_per_device),
         };
     }
+    if count == 0 {
+        return Err(Status::invalid_argument(
+            "at least one accelerator resource is required",
+        ));
+    }
+    let kind_capability = kind_capability.unwrap_or_else(|| "accelerator.compute".to_string());
+    required_capabilities.insert(
+        kind_capability.clone(),
+        semantic::CapabilityRequirement {
+            id: kind_capability,
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        },
+    );
     let cpu_max_millicores = requirements
         .cpu
         .as_ref()
@@ -1781,9 +1962,25 @@ fn resource_request(
     Ok(ResourceRequest {
         lease_name: lease_name.to_string(),
         expected_inventory_generation: generation,
-        count,
-        vendor,
-        min_memory_bytes: min_memory_bytes.filter(|value| *value > 0),
+        holder,
+        query: semantic::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count,
+            required_capabilities: required_capabilities.into_values().collect(),
+            minimum_capacity: min_memory_bytes
+                .filter(|value| *value > 0)
+                .map(|value| {
+                    BTreeMap::from([(
+                        "memory.allocatable".to_string(),
+                        semantic::Quantity {
+                            value,
+                            unit: "byte".to_string(),
+                        },
+                    )])
+                })
+                .unwrap_or_default(),
+        },
+        expires_at_unix_ms,
         limits: CgroupLimits {
             cpu_max_millicores,
             memory_max_bytes,
@@ -1828,6 +2025,7 @@ fn inject_heartbeat_environment(
     Ok(environment)
 }
 
+#[allow(deprecated)]
 fn to_proto_lease(
     daemon: &KernelDaemon,
     lease: ResourceLease,
@@ -1854,6 +2052,8 @@ fn to_proto_lease(
             LeaseState::Active => core_v1::LeaseState::Active,
             LeaseState::Releasing => core_v1::LeaseState::Releasing,
             LeaseState::Released => core_v1::LeaseState::Released,
+            LeaseState::Expired => core_v1::LeaseState::Expired,
+            LeaseState::Revoked => core_v1::LeaseState::Failed,
             LeaseState::Failed => core_v1::LeaseState::Failed,
             LeaseState::Quarantined => core_v1::LeaseState::Failed,
         } as i32,
@@ -1863,16 +2063,97 @@ fn to_proto_lease(
             .into_iter()
             .map(|allocation| core_v1::AcceleratorAllocation {
                 allocation_id: allocation.allocation_id,
-                device_id: allocation.device_id,
+                device_id: allocation.resource.id,
                 partition_id: String::new(),
-                granted_memory_bytes: allocation.granted_memory_bytes.unwrap_or_default(),
+                granted_memory_bytes: allocation
+                    .granted_capacity
+                    .get("memory.allocatable")
+                    .filter(|quantity| quantity.unit == "byte")
+                    .map_or(0, |quantity| quantity.value),
                 enforcement: to_proto_enforcement(allocation.enforcement) as i32,
             })
             .collect(),
         enforcement,
-        expires_at: None,
+        expires_at: lease.expires_at_unix_ms.map(timestamp_from_unix_ms),
         fence_token: lease.fence_token,
         inventory_generation: lease.inventory_generation,
+    })
+}
+
+fn to_semantic_proto_lease(lease: &ResourceLease) -> semantic_v1::Lease {
+    semantic_v1::Lease {
+        identity: Some(semantic_v1::Identity {
+            id: lease.name.clone(),
+            generation: lease.generation,
+        }),
+        holder: Some(to_semantic_proto_identity(&lease.holder)),
+        resources: lease
+            .allocations
+            .iter()
+            .map(|allocation| to_semantic_proto_identity(&allocation.resource))
+            .collect(),
+        state: match lease.state {
+            LeaseState::Active => semantic_v1::LeaseState::Active,
+            LeaseState::Releasing => semantic_v1::LeaseState::Releasing,
+            LeaseState::Released => semantic_v1::LeaseState::Released,
+            LeaseState::Expired => semantic_v1::LeaseState::Expired,
+            LeaseState::Revoked => semantic_v1::LeaseState::Revoked,
+            LeaseState::Failed | LeaseState::Quarantined => semantic_v1::LeaseState::Failed,
+        } as i32,
+        fence_token: lease.fence_token,
+        expires_at: lease.expires_at_unix_ms.map(timestamp_from_unix_ms),
+    }
+}
+
+fn legacy_holder(
+    mutation: Option<&core_v1::MutationContext>,
+    fallback: &str,
+) -> semantic::Identity {
+    let id = mutation
+        .and_then(|mutation| mutation.request.as_ref())
+        .map(|request| {
+            if !request.tenant_id.is_empty() || !request.project_id.is_empty() {
+                format!("legacy/{}/{}", request.tenant_id, request.project_id)
+            } else if !request.request_id.is_empty() {
+                format!("legacy/request/{}", request.request_id)
+            } else {
+                format!("legacy/{fallback}")
+            }
+        })
+        .unwrap_or_else(|| format!("legacy/{fallback}"));
+    semantic::Identity { id, generation: 1 }
+}
+
+fn cgroup_limits(
+    cpu: Option<&core_v1::CpuRequirements>,
+    memory: Option<&core_v1::MemoryRequirements>,
+) -> Result<CgroupLimits, Status> {
+    if let Some(cpu) = cpu {
+        if cpu.limit_millicores > 0
+            && cpu.request_millicores > 0
+            && cpu.request_millicores > cpu.limit_millicores
+        {
+            return Err(Status::invalid_argument(
+                "cpu request_millicores cannot exceed limit_millicores",
+            ));
+        }
+    }
+    if let Some(memory) = memory {
+        if memory.limit_bytes > 0
+            && memory.request_bytes > 0
+            && memory.request_bytes > memory.limit_bytes
+        {
+            return Err(Status::invalid_argument(
+                "memory request_bytes cannot exceed limit_bytes",
+            ));
+        }
+    }
+    Ok(CgroupLimits {
+        cpu_max_millicores: cpu
+            .and_then(|value| (value.limit_millicores > 0).then_some(value.limit_millicores)),
+        memory_max_bytes: memory
+            .and_then(|value| (value.limit_bytes > 0).then_some(value.limit_bytes)),
+        cpuset_cpus: None,
     })
 }
 
@@ -1883,7 +2164,7 @@ fn provider_status(error: ProviderError) -> Status {
             Status::failed_precondition(message)
         }
         "INSUFFICIENT_RESOURCES" => Status::resource_exhausted(message),
-        "LEASE_NOT_FOUND" | "DEVICE_NOT_FOUND" => Status::not_found(message),
+        "LEASE_NOT_FOUND" | "DEVICE_NOT_FOUND" | "RESOURCE_NOT_FOUND" => Status::not_found(message),
         _ => Status::internal(message),
     }
 }
@@ -1896,6 +2177,25 @@ fn proto_duration(duration: prost_types::Duration) -> Result<Duration, Status> {
     }
     Ok(Duration::from_secs(duration.seconds as u64)
         .saturating_add(Duration::from_nanos(duration.nanos as u64)))
+}
+
+fn expires_after(duration: Duration) -> u64 {
+    now_unix_ms().saturating_add(duration.as_millis().min(u64::MAX as u128) as u64)
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn timestamp_from_unix_ms(unix_ms: u64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: (unix_ms / 1_000).min(i64::MAX as u64) as i64,
+        nanos: ((unix_ms % 1_000) * 1_000_000) as i32,
+    }
 }
 
 fn to_proto_duration(duration: Duration) -> prost_types::Duration {
@@ -1924,6 +2224,7 @@ fn now_timestamp() -> prost_types::Timestamp {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use cy_kernel_api::{
@@ -1941,7 +2242,7 @@ mod tests {
         fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
             Ok(InventorySnapshot {
                 generation: 1,
-                devices: Vec::new(),
+                resources: Vec::new(),
                 capabilities: NodeCapabilities {
                     ready: true,
                     facts: Vec::new(),
@@ -1951,36 +2252,130 @@ mod tests {
         }
     }
 
-    impl AcceleratorProvider for EmptyHardware {
+    impl ResourceProvider for EmptyHardware {
         fn adapter_id(&self) -> &str {
             "test-adapter"
         }
 
-        fn probe_inventory(&self) -> Result<Vec<cy_kernel_api::AcceleratorDevice>, ProviderError> {
+        fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError> {
             Ok(Vec::new())
         }
 
         fn create_binding(
             &self,
-            _device: &cy_kernel_api::AcceleratorDevice,
+            _resource: &semantic::Resource,
         ) -> Result<DeviceBinding, ProviderError> {
-            Err(ProviderError::new(
-                "test-adapter",
-                "UNUSED",
-                "no accelerators",
-            ))
+            Err(ProviderError::new("test-adapter", "UNUSED", "no resources"))
         }
 
         fn read_health(
             &self,
             _device_id: &str,
         ) -> Result<cy_kernel_api::HealthReport, ProviderError> {
-            Err(ProviderError::new(
-                "test-adapter",
-                "UNUSED",
-                "no accelerators",
-            ))
+            Err(ProviderError::new("test-adapter", "UNUSED", "no resources"))
         }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestHardware {
+        resource: semantic::Resource,
+    }
+
+    impl HostInventoryProvider for TestHardware {
+        fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+            Ok(InventorySnapshot {
+                generation: 1,
+                resources: vec![self.resource.clone()],
+                capabilities: NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                },
+            })
+        }
+    }
+
+    impl ResourceProvider for TestHardware {
+        fn adapter_id(&self) -> &str {
+            "test-provider"
+        }
+
+        fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError> {
+            Ok(vec![self.resource.clone()])
+        }
+
+        fn create_binding(
+            &self,
+            resource: &semantic::Resource,
+        ) -> Result<DeviceBinding, ProviderError> {
+            Ok(DeviceBinding {
+                resource_id: resource.identity.id.clone(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: Vec::new(),
+                enforcement: EnforcementMode::Hard,
+                adapter_id: self.adapter_id().to_string(),
+                reason_code: "test-binding".to_string(),
+            })
+        }
+
+        fn read_health(
+            &self,
+            _resource_id: &str,
+        ) -> Result<cy_kernel_api::HealthReport, ProviderError> {
+            Ok(cy_kernel_api::HealthReport {
+                healthy: Some(true),
+                reason_code: "test-ready".to_string(),
+                summary: "ready".to_string(),
+            })
+        }
+    }
+
+    fn test_resource() -> semantic::Resource {
+        semantic::Resource {
+            identity: semantic::Identity {
+                id: "resource-1".to_string(),
+                generation: 1,
+            },
+            provider: semantic::Identity {
+                id: "test-provider".to_string(),
+                generation: 1,
+            },
+            resource_class: "accelerator".to_string(),
+            capabilities: vec![semantic::Capability {
+                id: "accelerator.compute".to_string(),
+                revision: 1,
+                properties: BTreeMap::new(),
+            }],
+            capacity: BTreeMap::from([(
+                "memory.allocatable".to_string(),
+                semantic::Quantity {
+                    value: 1024,
+                    unit: "byte".to_string(),
+                },
+            )]),
+            attributes: BTreeMap::new(),
+            state: semantic::ResourceState::Ready,
+            reason_code: "test-ready".to_string(),
+            summary: "ready".to_string(),
+            links: Vec::new(),
+        }
+    }
+
+    fn semantic_lease_adapter() -> KernelServiceAdapter {
+        let resource = test_resource();
+        let hardware = Arc::new(TestHardware {
+            resource: resource.clone(),
+        });
+        let daemon = Arc::new(KernelDaemon::new(
+            hardware.clone(),
+            hardware,
+            Arc::new(InMemoryResourceManager::new("node", vec![resource])),
+            Arc::new(FakeSandbox),
+            "node",
+            7,
+        ));
+        KernelServiceAdapter::new(daemon, Arc::new(UnusedResolver))
     }
 
     #[derive(Debug)]
@@ -2093,7 +2488,7 @@ mod tests {
                         limits: CgroupLimits::default(),
                     },
                     DeviceBinding {
-                        device_id: "none".to_string(),
+                        resource_id: "none".to_string(),
                         nodes: Vec::new(),
                         environment: BTreeMap::new(),
                         required_gids: Vec::new(),
@@ -2132,6 +2527,11 @@ mod tests {
         let request = resource_request(
             "lease-1",
             4,
+            semantic::Identity {
+                id: "worker/test".to_string(),
+                generation: 1,
+            },
+            None,
             &core_v1::ResourceRequirements {
                 cpu: Some(core_v1::CpuRequirements {
                     request_millicores: 500,
@@ -2142,7 +2542,10 @@ mod tests {
                     limit_bytes: 2048,
                 }),
                 ephemeral_storage_limit_bytes: 0,
-                accelerators: Vec::new(),
+                accelerators: vec![core_v1::AcceleratorRequirements {
+                    count: 1,
+                    ..Default::default()
+                }],
             },
         )
         .unwrap();
@@ -2152,16 +2555,97 @@ mod tests {
         let error = resource_request(
             "lease-2",
             4,
+            semantic::Identity {
+                id: "worker/test".to_string(),
+                generation: 1,
+            },
+            None,
             &core_v1::ResourceRequirements {
                 cpu: Some(core_v1::CpuRequirements {
                     request_millicores: 751,
                     limit_millicores: 750,
                 }),
+                accelerators: vec![core_v1::AcceleratorRequirements {
+                    count: 1,
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         )
         .unwrap_err();
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn semantic_lease_rpc_is_vendor_neutral_fenced_and_ttl_bounded() {
+        use core_v1::kernel_service_server::KernelService;
+
+        let adapter = semantic_lease_adapter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let lease = runtime
+            .block_on(
+                adapter.acquire_lease(Request::new(core_v1::AcquireLeaseRequest {
+                    mutation: Some(core_v1::MutationContext {
+                        request: Some(core_v1::RequestContext {
+                            request_id: "request-1".to_string(),
+                            ..Default::default()
+                        }),
+                        idempotency_key: "semantic-1".to_string(),
+                        expected_generation: Some(1),
+                    }),
+                    node: Some(core_v1::NodeRef {
+                        node_id: "node".to_string(),
+                        node_epoch: 7,
+                    }),
+                    holder: Some(semantic_v1::Identity {
+                        id: "worker-1".to_string(),
+                        generation: 1,
+                    }),
+                    query: Some(semantic_v1::ResourceQuery {
+                        resource_class: "accelerator".to_string(),
+                        count: 1,
+                        required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                            id: "accelerator.compute".to_string(),
+                            minimum_revision: 1,
+                            required_properties: Default::default(),
+                        }],
+                        minimum_capacity: Default::default(),
+                    }),
+                    ttl: Some(prost_types::Duration {
+                        seconds: 30,
+                        nanos: 0,
+                    }),
+                    cpu: None,
+                    memory: None,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(lease.state, semantic_v1::LeaseState::Active as i32);
+        assert_eq!(lease.resources[0].id, "resource-1");
+        assert!(lease.expires_at.is_some());
+        let lease_identity = lease.identity.clone();
+
+        let released = runtime
+            .block_on(
+                adapter.release_lease(Request::new(core_v1::ReleaseLeaseRequest {
+                    mutation: None,
+                    lease: lease_identity,
+                    fence_token: lease.fence_token,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(released.state, semantic_v1::LeaseState::Released as i32);
+
+        let capabilities = adapter.daemon.get_kernel_capabilities().unwrap();
+        assert!(capabilities.accelerators.is_empty());
+        assert_eq!(capabilities.resources.len(), 1);
+        assert_eq!(capabilities.resources[0].resource_class, "accelerator");
     }
 
     #[test]
@@ -2387,7 +2871,7 @@ mod tests {
     fn multi_adapter_bindings_preserve_provenance_without_relaxing_enforcement() {
         let merged = merge_bindings(vec![
             DeviceBinding {
-                device_id: "nvidia-0".to_string(),
+                resource_id: "nvidia-0".to_string(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
                 required_gids: vec![44],
@@ -2396,7 +2880,7 @@ mod tests {
                 reason_code: "TEST".to_string(),
             },
             DeviceBinding {
-                device_id: "amd-0".to_string(),
+                resource_id: "amd-0".to_string(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
                 required_gids: vec![45],
@@ -2407,7 +2891,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(merged.device_id, "nvidia-0,amd-0");
+        assert_eq!(merged.resource_id, "nvidia-0,amd-0");
         assert_eq!(merged.adapter_id, "amd,nvidia");
         assert_eq!(merged.required_gids, vec![44, 45]);
         assert_eq!(merged.enforcement, EnforcementMode::Hard);
@@ -2417,7 +2901,7 @@ mod tests {
     fn multi_adapter_bindings_reject_mixed_enforcement() {
         let error = merge_bindings(vec![
             DeviceBinding {
-                device_id: "nvidia-0".to_string(),
+                resource_id: "nvidia-0".to_string(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
                 required_gids: Vec::new(),
@@ -2426,7 +2910,7 @@ mod tests {
                 reason_code: "TEST".to_string(),
             },
             DeviceBinding {
-                device_id: "virtual-0".to_string(),
+                resource_id: "virtual-0".to_string(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
                 required_gids: Vec::new(),
@@ -2437,6 +2921,6 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert_eq!(error.reason_code, "MIXED_DEVICE_ENFORCEMENT");
+        assert_eq!(error.reason_code, "MIXED_RESOURCE_ENFORCEMENT");
     }
 }

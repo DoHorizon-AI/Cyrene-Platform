@@ -1,14 +1,14 @@
 //! CYRENE 节点内核核心 API 契约与端口定义 (Kernel Core Ports & Fact Types).
 //!
 //! 【六边形架构与端口-适配器模式 (Hexagonal Architecture)】
-//! 本 Crate 作为节点内核的核心抽象契约层，**刻意不包含任何特定 Linux 系统调用、特定 GPU 厂商 SDK、gRPC (Tonic) 或底层进程实现的细节**。
+//! 本 Crate 作为节点内核的核心抽象契约层，**刻意不包含任何特定 Linux 系统调用、硬件厂商 SDK、gRPC (Tonic) 或底层进程实现的细节**。
 //! 通用端口的实现（如进程外硬件适配器客户端、cgroup v2 沙箱、内存租约管理器）向内核上报事实（Facts），
 //! 内核守护进程组合根将其组装暴露为统一的 Core v1 平台服务：
 //!
-//! - **硬件资产与事实**：[`AcceleratorDevice`], [`DeviceNode`], [`AcceleratorLink`], [`HealthReport`]
+//! - **资源与事实**：[`semantic::Resource`], [`semantic::Capability`], [`DeviceNode`], [`HealthReport`]
 //! - **资源租约与围栏**：[`ResourceLease`], [`ResourceRequest`], [`DeviceBinding`], [`EnforcementMode`]
 //! - **沙箱与进程生命周期**：[`LaunchPlan`], [`ProcessHandle`], [`CleanupReport`], [`StopRequest`]
-//! - **核心端口 Trait**：[`AcceleratorProvider`], [`ResourceLeaseManager`], [`ProcessRuntime`], [`SandboxBackend`] 等
+//! - **核心端口 Trait**：[`ResourceProvider`], [`ResourceLeaseManager`], [`ProcessRuntime`], [`SandboxBackend`] 等
 
 #![forbid(unsafe_code)]
 
@@ -123,7 +123,7 @@ pub enum EnforcementMode {
     Hard,
     /// 软隔离（进程级配额警告）
     Soft,
-    /// 仅通过可见性环境变量隔离（如 `CUDA_VISIBLE_DEVICES`）
+    /// 仅通过 Provider 管理的可见性环境变量隔离
     VisibilityOnly,
     /// 仅观察监控，不做任何拦截
     ObserveOnly,
@@ -134,7 +134,7 @@ pub enum EnforcementMode {
 /// 资源隔离执行情况报告
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnforcementReport {
-    /// 资源类型（如 "gpu", "memory", "cpu"）
+    /// 资源类型（如 "accelerator", "memory", "cpu"）
     pub resource_kind: String,
     /// 实际生效的强制模式
     pub mode: EnforcementMode,
@@ -147,7 +147,7 @@ pub struct EnforcementReport {
 /// 节点单项能力事实项 (Capability Fact)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityFact {
-    /// 能力名称（如 "cgroup_v2", "nvidia_driver", "pcie_p2p"）
+    /// 能力名称（如 "cgroup_v2", "resource_binding"）
     pub name: String,
     /// 当前是否可用
     pub available: bool,
@@ -166,64 +166,6 @@ pub struct NodeCapabilities {
     pub facts: Vec<CapabilityFact>,
     /// 当前生效的资源隔离策略报告
     pub enforcement: Vec<EnforcementReport>,
-}
-
-/// 硬件加速芯片种类
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceleratorKind {
-    /// 图形处理器 (GPU)
-    Gpu,
-    /// 神经网络处理器 (NPU)
-    Npu,
-    /// 张量处理器 (TPU)
-    Tpu,
-    /// 其他专用加速芯片
-    Other,
-}
-
-/// 硬件加速芯片厂商分类
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceleratorVendor {
-    /// 英伟达 (NVIDIA)
-    Nvidia,
-    /// 超威半导体 (AMD ROCm)
-    Amd,
-    /// 华为昇腾 (Huawei Ascend)
-    HuaweiAscend,
-    /// 英特尔 (Intel Gaudi / Xe)
-    Intel,
-    /// 其他厂商
-    Other,
-}
-
-/// 芯片间高速互联总线类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceleratorLinkType {
-    /// PCIe 总线
-    Pcie,
-    /// NVIDIA NVLink 互联
-    Nvlink,
-    /// AMD xGMI / Infinity Fabric
-    Xgmi,
-    /// 其他专用高速互联
-    Other,
-}
-
-/// 加速卡间互联拓扑链路 (Accelerator Link)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcceleratorLink {
-    /// 对端对等设备 ID
-    pub peer_device_id: String,
-    /// 互联链路类型
-    pub link_type: AcceleratorLinkType,
-    /// 链路通道数量（如 4x NVLink）
-    pub link_count: Option<u32>,
-    /// 链路位宽
-    pub width: Option<u32>,
-    /// 理论带宽（字节/秒）
-    pub bandwidth_bytes_per_second: Option<u64>,
-    /// 拓扑连接状态是否稳定
-    pub stable: bool,
 }
 
 /// 硬件设备健康状况报告
@@ -250,47 +192,14 @@ pub struct DeviceNode {
     pub required: bool,
 }
 
-/// 加速卡物理设备完整事实模型 (Accelerator Device)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcceleratorDevice {
-    /// 设备全局唯一标识（例如："gpu-0000:01:00.0"）
-    pub device_id: String,
-    /// 产生此不可变硬件事实的外部 Adapter 标识。
-    ///
-    /// 这不是厂商 API，而是 Kernel 用于把设备绑定请求路由回同一 UDS
-    /// Sidecar 的来源证明。资源账本不能根据 `vendor` 猜测路由。
-    pub adapter_id: String,
-    /// 设备类型（GPU/NPU 等）
-    pub kind: AcceleratorKind,
-    /// 硬件厂商
-    pub vendor: AcceleratorVendor,
-    /// 架构/产品家族（如 "Ada Lovelace", "Hopper", "CDNA3"）
-    pub device_family: String,
-    /// PCI 总线地址（例如："0000:01:00.0"）
-    pub pci_address: Option<String>,
-    /// 绑定的 NUMA 内存节点编号
-    pub numa_node: Option<i32>,
-    /// 物理显存总量（字节数）
-    pub total_memory_bytes: Option<u64>,
-    /// 允许分配给工作负载的最大显存量（字节数）
-    pub allocatable_memory_bytes: Option<u64>,
-    /// 硬件支持的特性列表（如 `["tensor_cores", "fp8", "flash_attention"]`）
-    pub features: Vec<String>,
-    /// 需要映射进容器/沙箱的系统设备节点列表
-    pub device_nodes: Vec<DeviceNode>,
-    /// 与其他加速卡的互联拓扑链路
-    pub links: Vec<AcceleratorLink>,
-    /// 设备健康状态
-    pub health: HealthReport,
-}
-
 /// 节点硬件清单快照 (Inventory Snapshot)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventorySnapshot {
     /// 状态版本世代代数（每次硬件或拓扑变动单调递增）
     pub generation: u64,
-    /// 当前探测到的所有加速卡设备
-    pub devices: Vec<AcceleratorDevice>,
+    /// Provider 发布的通用资源事实。Kernel 只解释 Semantic Contract 的
+    /// class/capability/capacity 匹配规则，不解释厂商属性。
+    pub resources: Vec<semantic::Resource>,
     /// 当前节点的综合能力与隔离策略
     pub capabilities: NodeCapabilities,
 }
@@ -298,8 +207,8 @@ pub struct InventorySnapshot {
 /// 设备绑定配置 (Device Binding)：定义特定沙箱进程对硬件设备的访问授权与环境变量
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceBinding {
-    /// 绑定的物理设备 ID
-    pub device_id: String,
+    /// 绑定的语义资源 ID
+    pub resource_id: String,
     /// 需要注入沙箱的设备节点
     pub nodes: Vec<DeviceNode>,
     /// Adapter 返回、由 Kernel 受控注入的设备环境变量
@@ -319,7 +228,7 @@ impl DeviceBinding {
     ///
     /// # 安全保护（核心约束）
     /// 严格禁止插件/用户代码覆盖 Adapter 已为设备绑定声明的环境变量。
-    /// 一旦发现冲突立即报错，防止越权访问未分配的 GPU 设备。
+    /// 一旦发现冲突立即报错，防止越权访问未分配资源。
     pub fn merge_environment(
         &self,
         requested: &BTreeMap<String, String>,
@@ -350,6 +259,10 @@ pub enum LeaseState {
     Releasing,
     /// 已彻底释放
     Released,
+    /// TTL 已到期并由账本收回。
+    Expired,
+    /// 权威主动撤销。
+    Revoked,
     /// 分配或执行失败
     Failed,
     /// 出现硬件故障已被隔离封锁
@@ -363,12 +276,12 @@ pub struct ResourceRequest {
     pub lease_name: String,
     /// 客户端发起请求时所基于的硬件清单世代代数（用于乐观并发控制）
     pub expected_inventory_generation: u64,
-    /// 请求分配的加速卡数量
-    pub count: usize,
-    /// 指定厂商要求（可选）
-    pub vendor: Option<AcceleratorVendor>,
-    /// 单卡最低显存要求（字节数，可选）
-    pub min_memory_bytes: Option<u64>,
+    /// 受租约保护的 Worker/holder 身份。
+    pub holder: semantic::Identity,
+    /// 由控制面编译后的有界、厂商无关资源查询。
+    pub query: semantic::ResourceQuery,
+    /// 租约绝对过期时间（Unix 毫秒）。
+    pub expires_at_unix_ms: Option<u64>,
     /// 进程 cgroup 应执行的 CPU、内存与 CPU 集合限制。
     pub limits: CgroupLimits,
 }
@@ -392,10 +305,10 @@ pub struct CgroupLimits {
 pub struct ResourceAllocation {
     /// 分配 ID
     pub allocation_id: String,
-    /// 实际分配的设备 ID
-    pub device_id: String,
-    /// 批准分配的显存额度
-    pub granted_memory_bytes: Option<u64>,
+    /// 实际分配的资源身份与代次。
+    pub resource: semantic::Identity,
+    /// 分配时批准的通用容量快照。
+    pub granted_capacity: BTreeMap<String, semantic::Quantity>,
     /// 生效的隔离模式
     pub enforcement: EnforcementMode,
 }
@@ -405,14 +318,20 @@ pub struct ResourceAllocation {
 pub struct ResourceLease {
     /// 租约名称
     pub name: String,
+    /// 租约身份代次；同名租约重建时必须递增。
+    pub generation: u64,
     /// 当前状态
     pub state: LeaseState,
+    /// 当前资源所有权持有者。
+    pub holder: semantic::Identity,
     /// 具体的设备分配清单
     pub allocations: Vec<ResourceAllocation>,
     /// 创建租约时的硬件世代
     pub inventory_generation: u64,
     /// 隔离围栏令牌（Fence Token：递增的单调计数器，防止旧任务迟到的写操作污染新租约）
     pub fence_token: u64,
+    /// 租约绝对过期时间（Unix 毫秒）。
+    pub expires_at_unix_ms: Option<u64>,
     /// 与该租约绑定、启动时必须写入 cgroup 的资源上限。
     pub limits: CgroupLimits,
 }
@@ -565,26 +484,27 @@ pub trait HostInventoryProvider: Send + Sync {
 }
 
 /// 端口 Trait 2：特定厂商硬件加速卡适配器
-pub trait AcceleratorProvider: Send + Sync {
+pub trait ResourceProvider: Send + Sync {
     /// 适配器唯一 ID（例如："hardware-adapter-uds"）
     fn adapter_id(&self) -> &str;
-    /// 探测该厂商下的所有加速设备
-    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError>;
-    /// 为指定设备创建安全隔离绑定规则
-    fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError>;
+    /// 探测该 Provider 的通用资源事实。
+    fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError>;
+    /// 为指定资源创建安全隔离绑定规则。
+    fn create_binding(&self, resource: &semantic::Resource)
+        -> Result<DeviceBinding, ProviderError>;
     /// 为指定库存代次创建绑定。
     ///
     /// 旧的或纯静态实现可以安全地沿用无代次的默认实现；进程外 Adapter Host
     /// 必须覆盖此方法并将代次传给其协议端点。
     fn create_binding_for_generation(
         &self,
-        device: &AcceleratorDevice,
+        resource: &semantic::Resource,
         _expected_inventory_generation: u64,
     ) -> Result<DeviceBinding, ProviderError> {
-        self.create_binding(device)
+        self.create_binding(resource)
     }
-    /// 读取指定设备的健康状态
-    fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError>;
+    /// 读取指定资源的健康状态。
+    fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError>;
 }
 
 /// 端口 Trait 3：硬件资源租约与锁管理器
@@ -707,7 +627,7 @@ mod tests {
     #[test]
     fn adapter_binding_environment_is_reserved_without_vendor_knowledge() {
         let binding = DeviceBinding {
-            device_id: "accelerator-1".to_string(),
+            resource_id: "accelerator-1".to_string(),
             nodes: Vec::new(),
             environment: BTreeMap::from([("ADAPTER_VISIBLE_DEVICE".to_string(), "1".to_string())]),
             required_gids: Vec::new(),

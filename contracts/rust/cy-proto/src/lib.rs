@@ -5,10 +5,14 @@
 //! 下的 Protobuf 文件生成的。
 //! Proto 文件是整个平台的单一契约事实来源（Single Source of Truth），包含：
 //! - 节点问候与握手协议 ([`core_v1::NodeHello`], [`core_v1::NodeWelcome`])
-//! - 硬件加速卡拓扑与设备信息 ([`core_v1::AcceleratorDevice`])
-//! - 资源租约管理与围栏令牌 ([`core_v1::ReserveResourcesRequest`], [`core_v1::ResourceLease`])
+//! - 通用资源与能力事实 ([`semantic_v1::Resource`], [`semantic_v1::Capability`])
+//! - 资源租约管理与围栏令牌 ([`core_v1::AcquireLeaseRequest`], [`semantic_v1::Lease`])
 //! - 插件进程生命周期与清理状态 ([`core_v1::PluginProcess`])
 //! - 控制面下发指令与心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportHeartbeatResponse`])
+
+// Prost owns the generated enum representation; wire compatibility takes
+// precedence over hand-boxing generated variants in this projection crate.
+#![allow(clippy::large_enum_variant)]
 
 pub mod google {
     pub mod rpc {
@@ -53,6 +57,7 @@ pub use cyrene::sandbox::v1 as sandbox_v1;
 pub use cyrene::semantic::v1 as semantic_v1;
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{core_v1, hardware_v1, sandbox_v1, semantic_v1};
     use prost::Message;
@@ -294,6 +299,7 @@ mod tests {
                 hardware_v1::CreateBindingRequest {
                     device_id: "device-1".to_string(),
                     expected_inventory_generation: 42,
+                    resource: None,
                 },
             )),
         };
@@ -343,6 +349,10 @@ mod tests {
             }],
             capacity: Default::default(),
             attributes: Default::default(),
+            state: semantic_v1::ResourceState::Ready as i32,
+            reason_code: "ready".to_string(),
+            summary: "resource is ready".to_string(),
+            links: Vec::new(),
         };
         let encoded = resource.encode_to_vec();
         let decoded = semantic_v1::Resource::decode(encoded.as_slice()).unwrap();

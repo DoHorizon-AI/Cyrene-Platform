@@ -47,6 +47,19 @@ message Provider {
   repeated Capability capabilities = 3;
 }
 
+enum ResourceState {
+  RESOURCE_STATE_UNSPECIFIED = 0;
+  RESOURCE_STATE_READY = 1;
+  RESOURCE_STATE_DEGRADED = 2;
+  RESOURCE_STATE_UNAVAILABLE = 3;
+}
+
+message TopologyLink {
+  Identity peer = 1;
+  string kind = 2;
+  map<string, string> properties = 3;
+}
+
 message Resource {
   Identity identity = 1;
   Identity provider = 2;
@@ -54,6 +67,10 @@ message Resource {
   repeated Capability capabilities = 4;
   map<string, Quantity> capacity = 5;
   map<string, string> attributes = 6;
+  ResourceState state = 7;
+  string reason_code = 8;
+  string summary = 9;
+  repeated TopologyLink links = 10;
 }
 
 message ResourceQuery {
