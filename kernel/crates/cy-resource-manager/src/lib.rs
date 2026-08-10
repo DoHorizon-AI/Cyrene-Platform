@@ -196,6 +196,17 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         Ok(lease)
     }
 
+    /// 读取租约当前快照
+    fn get_lease(&self, lease_name: &str) -> Result<ResourceLease, ProviderError> {
+        self.state
+            .lock()
+            .expect("resource state lock poisoned")
+            .leases
+            .get(lease_name)
+            .cloned()
+            .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))
+    }
+
     /// 释放硬件资源租约
     ///
     /// # 安全校验

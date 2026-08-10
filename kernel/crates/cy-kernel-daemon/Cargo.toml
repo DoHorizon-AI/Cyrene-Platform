@@ -15,4 +15,7 @@ cy-kernel-api = { path = "../cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 cy-resource-manager = { path = "../cy-resource-manager" }
 cy-sandbox = { path = "../cy-sandbox" }
+cy-plugin-supervisor = { path = "../cy-plugin-supervisor" }
 prost-types = "0.12"
+tokio-stream = "0.1"
+tonic = "0.11"

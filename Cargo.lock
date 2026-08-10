@@ -303,10 +303,13 @@ version = "0.1.0"
 dependencies = [
  "cy-hardware-discovery",
  "cy-kernel-api",
+ "cy-plugin-supervisor",
  "cy-proto",
  "cy-resource-manager",
  "cy-sandbox",
  "prost-types",
+ "tokio-stream",
+ "tonic",
 ]
 
 [[package]]
