@@ -4,6 +4,8 @@ After=local-fs.target
 
 [Service]
 Type=simple
+User=root
+Group=cyrene
 ExecStart=/usr/bin/cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock
 Restart=on-failure
 RestartSec=2s

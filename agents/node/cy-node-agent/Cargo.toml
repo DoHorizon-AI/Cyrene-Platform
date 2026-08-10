@@ -9,12 +9,21 @@ license = "Apache-2.0"
 name = "cy_node_agent"
 path = "src/lib.rs"
 
+[[bin]]
+name = "cy-node-agent"
+path = "src/main.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 tokio = { version = "1.35", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.11", features = ["transport", "tls"] }
+tower = "0.4"
+async-trait = "0.1"
+prost-types = "0.12"
 sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 

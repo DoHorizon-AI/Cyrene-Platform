@@ -8,6 +8,8 @@ PartOf=cyrene-kernel.service
 
 [Service]
 Type=simple
+User=root
+Group=cyrene
 ExecStart=/usr/bin/cyrene-sandboxd --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock
 Restart=on-failure
 RestartSec=2s

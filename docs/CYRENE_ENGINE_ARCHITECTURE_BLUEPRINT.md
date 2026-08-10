@@ -109,9 +109,11 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 - framework/crates/cy-extension-registry 当前直接持有 framework 的
   cy-plugin-supervisor::PluginSupervisor，调用链仍是 Rust 同进程调用；这
   不是 Kotlin 通过 KernelService 驱动 Rust 的进程边界。
-- agents/node/cy-node-agent 目前仍主要是 AgentService/journal handler scaffold，尚未
-  提供可部署的 node daemon binary、mTLS enrollment、session fencing 或
-  durable desired/observed reconcile。
+- agents/node/cy-node-agent 已提供可部署的 node daemon binary、outbound mTLS、
+  受 `session_id` 与严格序号约束的 session fencing、指数退避重连，以及到本机
+  KernelService UDS 的 typed command bridge。它仍不承担控制面的 durable
+  desired/observed reconcile、升级编排或业务日志；断线后的 Operation event 补发
+  仍需随 Kotlin 控制面和事件存储共同验收。
 - AgentCommandRequest 仍包含自由字符串 command_type/payload/env；该
   兼容接口不得演化为远程 shell，迁移期只能保留为 legacy v0，并由 typed
   resource/lifecycle command 替代。
@@ -1457,7 +1459,8 @@ golden fixture 一致。
 
 ### P5：分布式与数据面
 
-- Agent 默认 outbound mTLS 双向流、session fencing、重连和事件恢复；
+- Agent 默认 outbound mTLS 双向流、session fencing、重连已落地；补齐与 Kotlin
+  事件存储协作的 event recovery 和 durable desired/observed reconcile；
 - 可选 direct KernelService 经过同一 TCK，且不能与 outbound 模式形成双主；
 - 对象存储/共享内存/UDS 数据面；
 - 多节点故障转移、配额、审计和可观测性。

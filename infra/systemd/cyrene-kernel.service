@@ -5,6 +5,8 @@ Requires=cyrene-sandboxd.service
 
 [Service]
 Type=simple
+User=cyrene-kernel
+Group=cyrene
 # Each deployment supplies one or more generic UDS adapters. This example
 # registers the NVIDIA Sidecar; AMD/Ascend/custom adapters use the same flag.
 ExecStart=/usr/bin/cyrene-kernel --socket /run/cyrene/kernel.sock --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock --runtime-journal /var/lib/cyrene/runtime/journal.jsonl
@@ -18,7 +20,8 @@ UMask=0007
 
 # Kernel never owns workers or a cgroup delegation. `cyrene-sandboxd` owns the
 # delegated subtree and worker fate; this service contains only safe decisions
-# and local UDS clients.
+# and local UDS clients. The `cyrene` group is the explicit trust boundary for
+# sandboxd, hardware adapters, and the external Node Agent; never add Workers.
 KillMode=process
 NoNewPrivileges=yes
 PrivateTmp=yes

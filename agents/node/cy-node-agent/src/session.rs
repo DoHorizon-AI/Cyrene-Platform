@@ -21,6 +21,14 @@ pub enum NodeControlSessionError {
     NotEstablished,
     #[error("node-control frame did not contain a kernel command")]
     MissingCommand,
+    #[error("node-control welcome did not establish a non-empty session id")]
+    MissingSessionId,
+    #[error("node-control frame belongs to another session")]
+    SessionFenced,
+    #[error("node-control frame sequence {received} is not newer than {accepted}")]
+    StaleControlFrame { received: u64, accepted: u64 },
+    #[error("kernel command id is required")]
+    MissingCommandId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +37,7 @@ enum SessionState {
     Established {
         session_id: String,
         desired_generation: u64,
+        last_control_sequence: u64,
     },
 }
 
@@ -104,9 +113,17 @@ impl NodeControlSession {
             });
         }
 
+        if welcome.session_id.is_empty() || frame.session_id != welcome.session_id {
+            return Err(NodeControlSessionError::MissingSessionId);
+        }
+        if !welcome.resume_token.is_empty() {
+            self.resume_token = welcome.resume_token.clone();
+        }
+
         self.state = SessionState::Established {
             session_id: welcome.session_id.clone(),
             desired_generation: welcome.desired_generation,
+            last_control_sequence: frame.sequence_number,
         };
         Ok(welcome.clone())
     }
@@ -131,17 +148,45 @@ impl NodeControlSession {
 
     /// Validate and extract a command frame without executing it.
     pub fn accept_command(
-        &self,
+        &mut self,
         frame: ControlPlaneToNode,
     ) -> Result<KernelCommand, NodeControlSessionError> {
-        if !matches!(self.state, SessionState::Established { .. }) {
-            return Err(NodeControlSessionError::NotEstablished);
+        let (session_id, accepted) = match &self.state {
+            SessionState::Established {
+                session_id,
+                last_control_sequence,
+                ..
+            } => (session_id.clone(), *last_control_sequence),
+            SessionState::AwaitingWelcome => return Err(NodeControlSessionError::NotEstablished),
+        };
+        if frame.session_id != session_id {
+            return Err(NodeControlSessionError::SessionFenced);
         }
-
-        match frame.body {
-            Some(control_plane_to_node::Body::Command(command)) => Ok(command),
-            _ => Err(NodeControlSessionError::MissingCommand),
+        if frame.sequence_number <= accepted {
+            return Err(NodeControlSessionError::StaleControlFrame {
+                received: frame.sequence_number,
+                accepted,
+            });
         }
+        let command = match frame.body {
+            Some(control_plane_to_node::Body::Command(command))
+                if !command.command_id.is_empty() =>
+            {
+                command
+            }
+            Some(control_plane_to_node::Body::Command(_)) => {
+                return Err(NodeControlSessionError::MissingCommandId)
+            }
+            _ => return Err(NodeControlSessionError::MissingCommand),
+        };
+        if let SessionState::Established {
+            last_control_sequence,
+            ..
+        } = &mut self.state
+        {
+            *last_control_sequence = frame.sequence_number;
+        }
+        Ok(command)
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -160,12 +205,33 @@ impl NodeControlSession {
         }
     }
 
+    pub fn resume_token(&self) -> &str {
+        &self.resume_token
+    }
+
+    pub fn is_established(&self) -> bool {
+        matches!(self.state, SessionState::Established { .. })
+    }
+
+    /// Wrap a completed typed Kernel command so that it is bound to the
+    /// currently accepted control-plane session.
+    pub fn command_result(
+        &mut self,
+        result: cy_proto::core_v1::KernelCommandResult,
+    ) -> Result<NodeToControlPlane, NodeControlSessionError> {
+        if !self.is_established() {
+            return Err(NodeControlSessionError::NotEstablished);
+        }
+        Ok(self.frame(node_to_control_plane::Body::CommandResult(result)))
+    }
+
     fn frame(&mut self, body: node_to_control_plane::Body) -> NodeToControlPlane {
         let sequence_number = self.next_sequence;
         self.next_sequence += 1;
         NodeToControlPlane {
             frame_id: format!("{}-{}", self.node.node_id, sequence_number),
             sequence_number,
+            session_id: self.session_id().unwrap_or_default().to_string(),
             body: Some(body),
         }
     }
@@ -185,7 +251,9 @@ mod tests {
                 desired_generation: 3,
                 heartbeat_interval: None,
                 server_time: None,
+                resume_token: "resume-2".into(),
             })),
+            session_id: "session-1".into(),
         }
     }
 
@@ -206,6 +274,7 @@ mod tests {
         assert_eq!(welcome.session_id, "session-1");
         assert_eq!(session.session_id(), Some("session-1"));
         assert_eq!(session.desired_generation(), Some(3));
+        assert_eq!(session.resume_token(), "resume-2");
     }
 
     #[test]
@@ -233,6 +302,7 @@ mod tests {
             .accept_command(ControlPlaneToNode {
                 frame_id: "command-1".into(),
                 sequence_number: 2,
+                session_id: "session-1".into(),
                 body: Some(control_plane_to_node::Body::Command(KernelCommand {
                     command_id: "op-1".into(),
                     request: None,
@@ -240,5 +310,37 @@ mod tests {
             })
             .unwrap();
         assert_eq!(command.command_id, "op-1");
+    }
+
+    #[test]
+    fn session_fences_old_or_replayed_commands() {
+        let mut session = NodeControlSession::new("node-1", 7, "0.1.0", 1, 1, "");
+        session.hello();
+        session.accept_welcome(welcome_frame()).unwrap();
+
+        let stale = session.accept_command(ControlPlaneToNode {
+            frame_id: "replay".into(),
+            sequence_number: 1,
+            session_id: "session-1".into(),
+            body: Some(control_plane_to_node::Body::Command(KernelCommand {
+                command_id: "op-1".into(),
+                request: None,
+            })),
+        });
+        assert!(matches!(
+            stale,
+            Err(NodeControlSessionError::StaleControlFrame { .. })
+        ));
+
+        let fenced = session.accept_command(ControlPlaneToNode {
+            frame_id: "old-session".into(),
+            sequence_number: 2,
+            session_id: "session-old".into(),
+            body: Some(control_plane_to_node::Body::Command(KernelCommand {
+                command_id: "op-2".into(),
+                request: None,
+            })),
+        });
+        assert_eq!(fenced.unwrap_err(), NodeControlSessionError::SessionFenced);
     }
 }
