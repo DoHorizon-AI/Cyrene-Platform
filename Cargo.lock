@@ -412,8 +412,10 @@ dependencies = [
 name = "cy-sandbox-client"
 version = "0.1.0"
 dependencies = [
+ "cy-adapter-client",
  "cy-kernel-api",
  "cy-proto",
+ "nix",
  "prost",
 ]
 
@@ -453,6 +455,7 @@ dependencies = [
  "cy-kernel-api",
  "cy-proto",
  "libc",
+ "nix",
  "prost",
 ]
 

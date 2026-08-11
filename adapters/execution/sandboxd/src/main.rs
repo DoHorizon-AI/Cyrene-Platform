@@ -47,11 +47,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if let Err(error) =
+                    verify_client_peer(&stream, args.allowed_client_uid, args.allowed_client_gid)
+                {
+                    eprintln!(
+                        "sandboxd rejected UDS peer: adapter_id={} error={error}",
+                        args.adapter_id
+                    );
+                    continue;
+                }
                 if let Err(error) = serve_one(stream, runtime.as_ref(), &args.adapter_id) {
                     eprintln!("sandboxd request failed: {error}");
                 }
             }
             Err(error) => eprintln!("sandboxd accept failed: {error}"),
+        }
+    }
+
+    fn verify_client_peer(
+        stream: &UnixStream,
+        expected_uid: Option<u32>,
+        expected_gid: Option<u32>,
+    ) -> std::io::Result<()> {
+        if expected_uid.is_none() && expected_gid.is_none() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let credentials =
+                nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+                    .map_err(std::io::Error::other)?;
+            if expected_uid.is_some_and(|uid| uid != credentials.uid())
+                || expected_gid.is_some_and(|gid| gid != credentials.gid())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "UDS peer credentials do not match configured Kernel identity",
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = stream;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "UDS peer credential checks require Linux",
+            ))
         }
     }
 
@@ -99,6 +141,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket: PathBuf,
         cgroup_root: Option<PathBuf>,
         disable_device_bpf: bool,
+        allowed_client_uid: Option<u32>,
+        allowed_client_gid: Option<u32>,
     }
 
     impl Args {
@@ -108,6 +152,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut socket = PathBuf::from("/run/cyrene/sandboxd.sock");
             let mut cgroup_root = None;
             let mut disable_device_bpf = false;
+            let mut allowed_client_uid = None;
+            let mut allowed_client_gid = None;
             while let Some(argument) = values.next() {
                 let mut value = || {
                     values.next().ok_or_else(|| {
@@ -122,7 +168,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--socket" => socket = PathBuf::from(value()?),
                     "--cgroup-root" => cgroup_root = Some(PathBuf::from(value()?)),
                     "--disable-device-bpf" => disable_device_bpf = true,
-                    "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-sandboxd [--adapter-id ID] [--socket PATH] [--cgroup-root PATH] [--disable-device-bpf]").into()),
+                    "--allowed-client-uid" => {
+                        allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "--allowed-client-uid must be an unsigned integer",
+                            )
+                        })?)
+                    }
+                    "--allowed-client-gid" => {
+                        allowed_client_gid = Some(value()?.parse::<u32>().map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "--allowed-client-gid must be an unsigned integer",
+                            )
+                        })?)
+                    }
+                    "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-sandboxd [--adapter-id ID] [--socket PATH] [--cgroup-root PATH] [--disable-device-bpf] [--allowed-client-uid UID] [--allowed-client-gid GID]").into()),
                     _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
                 }
             }
@@ -143,6 +205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 socket,
                 cgroup_root,
                 disable_device_bpf,
+                allowed_client_uid,
+                allowed_client_gid,
             })
         }
     }

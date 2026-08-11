@@ -14,6 +14,7 @@ use std::{
 #[cfg(unix)]
 use std::io::{Read, Write};
 
+use cy_adapter_client::PeerCredentialExpectation;
 use cy_kernel_api::{
     CapabilityFact, CgroupLimits, CgroupTelemetry, CleanupReport, DeviceBinding, EnforcementMode,
     EnforcementReport, LaunchPlan, NodeCapabilities, ProcessCondition, ProcessHandle,
@@ -33,6 +34,7 @@ pub struct SandboxAdapterEndpoint {
     pub adapter_id: String,
     pub socket_path: PathBuf,
     pub timeout: Duration,
+    pub peer_credentials: PeerCredentialExpectation,
 }
 
 impl SandboxAdapterEndpoint {
@@ -41,6 +43,7 @@ impl SandboxAdapterEndpoint {
             adapter_id: adapter_id.into(),
             socket_path: socket_path.into(),
             timeout: Duration::from_secs(2),
+            peer_credentials: PeerCredentialExpectation::default(),
         }
     }
 }
@@ -51,6 +54,7 @@ pub struct UdsSandboxAdapterClient {
     adapter_id: String,
     socket_path: PathBuf,
     timeout: Duration,
+    peer_credentials: PeerCredentialExpectation,
 }
 
 impl UdsSandboxAdapterClient {
@@ -66,6 +70,7 @@ impl UdsSandboxAdapterClient {
             adapter_id: endpoint.adapter_id,
             socket_path: endpoint.socket_path,
             timeout: endpoint.timeout,
+            peer_credentials: endpoint.peer_credentials,
         })
     }
 
@@ -82,7 +87,13 @@ impl UdsSandboxAdapterClient {
             body: Some(body),
         };
         let payload = request.encode_to_vec();
-        let payload = exchange(&self.adapter_id, &self.socket_path, self.timeout, &payload)?;
+        let payload = exchange(
+            &self.adapter_id,
+            &self.socket_path,
+            self.timeout,
+            self.peer_credentials,
+            &payload,
+        )?;
         let response =
             sandbox_v1::SandboxResponse::decode(payload.as_slice()).map_err(|error| {
                 ProviderError::new(
@@ -358,6 +369,7 @@ fn exchange(
     adapter_id: &str,
     socket_path: &Path,
     timeout: Duration,
+    peer_credentials: PeerCredentialExpectation,
     payload: &[u8],
 ) -> Result<Vec<u8>, ProviderError> {
     use std::os::unix::net::UnixStream;
@@ -372,6 +384,7 @@ fn exchange(
     let mut stream = UnixStream::connect(socket_path).map_err(|error| {
         ProviderError::new(adapter_id, "SANDBOX_UNAVAILABLE", &error.to_string())
     })?;
+    verify_connected_peer(adapter_id, &stream, peer_credentials)?;
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|_| stream.set_write_timeout(Some(timeout)))
@@ -390,6 +403,7 @@ fn exchange(
     adapter_id: &str,
     _socket_path: &Path,
     _timeout: Duration,
+    _peer_credentials: PeerCredentialExpectation,
     _payload: &[u8],
 ) -> Result<Vec<u8>, ProviderError> {
     Err(ProviderError::new(
@@ -397,6 +411,51 @@ fn exchange(
         "SANDBOX_UNSUPPORTED_PLATFORM",
         "Unix-domain-socket sandbox adapters require a Unix host",
     ))
+}
+
+/// Verifies the connected Sandbox Adapter Host against the configured UDS
+/// peer identity. The Kernel checks it after connect, before sending any
+/// sandbox request; a mismatch fails closed and drops the connection.
+#[cfg(unix)]
+fn verify_connected_peer(
+    adapter_id: &str,
+    stream: &std::os::unix::net::UnixStream,
+    expected: PeerCredentialExpectation,
+) -> Result<(), ProviderError> {
+    if !expected.is_configured() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let credentials =
+            nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+                .map_err(|error| {
+                    ProviderError::new(
+                        adapter_id,
+                        "SANDBOX_PEER_CREDENTIAL_UNAVAILABLE",
+                        &error.to_string(),
+                    )
+                })?;
+        if expected.uid.is_some_and(|uid| uid != credentials.uid())
+            || expected.gid.is_some_and(|gid| gid != credentials.gid())
+        {
+            return Err(ProviderError::new(
+                adapter_id,
+                "SANDBOX_PEER_CREDENTIAL_MISMATCH",
+                "UDS peer credentials do not match the configured sandbox adapter identity",
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        Err(ProviderError::new(
+            adapter_id,
+            "SANDBOX_PEER_CREDENTIAL_UNSUPPORTED",
+            "configured UDS peer credential checks require a Linux Kernel host",
+        ))
+    }
 }
 
 #[cfg(unix)]

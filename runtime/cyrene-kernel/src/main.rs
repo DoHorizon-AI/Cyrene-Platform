@@ -127,6 +127,8 @@ impl Args {
         let mut adapter_poll_interval = Duration::from_secs(5);
         let mut adapter_peer_credentials =
             BTreeMap::<String, cy_adapter_client::PeerCredentialExpectation>::new();
+        let mut sandbox_peer_uid = None;
+        let mut sandbox_peer_gid = None;
         while let Some(argument) = values.next() {
             let mut value = || {
                 values.next().ok_or_else(|| {
@@ -150,6 +152,22 @@ impl Args {
                     adapter_peer_credentials.entry(adapter_id).or_default().gid = Some(gid);
                 }
                 "--sandbox-adapter" => sandbox_adapter = Some(parse_sandbox_adapter(&value()?)?),
+                "--sandbox-adapter-peer-uid" => {
+                    sandbox_peer_uid = Some(value()?.parse::<u32>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "--sandbox-adapter-peer-uid must be an unsigned integer",
+                        )
+                    })?)
+                }
+                "--sandbox-adapter-peer-gid" => {
+                    sandbox_peer_gid = Some(value()?.parse::<u32>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "--sandbox-adapter-peer-gid must be an unsigned integer",
+                        )
+                    })?)
+                }
                 "--installations-root" => installations_root = PathBuf::from(value()?),
                 "--runtime-journal" => runtime_journal = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
@@ -157,7 +175,7 @@ impl Args {
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -204,12 +222,18 @@ impl Args {
             )
             .into());
         }
-        let sandbox_adapter = sandbox_adapter.ok_or_else(|| {
+        let mut sandbox_adapter = sandbox_adapter.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "exactly one --sandbox-adapter ID=/absolute/socket.sock is required",
             )
         })?;
+        // The single sandbox adapter has no routing ID ambiguity, so its peer
+        // identity policy is configured as a bare UID/GID rather than ID=NUMBER.
+        sandbox_adapter.peer_credentials = cy_adapter_client::PeerCredentialExpectation {
+            uid: sandbox_peer_uid,
+            gid: sandbox_peer_gid,
+        };
         Ok(Self {
             node_id,
             socket,
