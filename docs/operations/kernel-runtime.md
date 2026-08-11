@@ -19,11 +19,27 @@ Kernel 是租约、fence token、已批准设备绑定、实例状态与心跳�
 随后 Kernel 必须以显式端点启动；以下任一失败都会保持 Not Ready：
 
 ```text
+# Kernel asserts each Adapter's identity; the Adapters assert the Kernel's
+# identity back. Numbers below match the shipped systemd units:
+#   * cyrene-kernel service account = uid 991, group cyrene = gid 992
+#     (replace with `id -u cyrene-kernel` / `getent group cyrene`)
+#   * cyrene-sandboxd / cyrene-nvidia-adapter run as root (uid 0) in the units
 cyrene-kernel \
   --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
+  --sandbox-adapter-peer-uid sandboxd=0 \
+  --sandbox-adapter-peer-gid sandboxd=992 \
   --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock \
-  --hardware-adapter-peer-uid nvidia=992 \
+  --hardware-adapter-peer-uid nvidia=0 \
   --hardware-adapter-peer-gid nvidia=992
+```
+
+The matching reverse flags live on the Adapter units:
+
+```text
+cyrene-sandboxd --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock \
+  --allowed-client-uid 991 --allowed-client-gid 992
+cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock \
+  --allowed-client-uid 991 --allowed-client-gid 992
 ```
 
 - sandboxd UDS 连接、协议版本与 adapter identity 均匹配；
@@ -34,11 +50,24 @@ cyrene-kernel \
 
 UDS 文件权限与 peer credential 共同构成本地身份边界：服务 socket 设置为 `0660`，必须由
 受信任的 Kernel/Adapter 服务账户及专用组拥有，绝不能让不受信任 Worker 可写。Kernel 可用
-`--hardware-adapter-peer-uid ID=UID` / `--hardware-adapter-peer-gid ID=GID` 对已连接 Adapter
-执行 Linux `SO_PEERCRED` 校验；NVIDIA Adapter 用 `--allowed-client-uid UID` /
-`--allowed-client-gid GID` 对 Kernel 做反向校验。任一已配置校验失败都会在发送协议帧前拒绝。
-部署必须同时配置双方或依赖受保护的 systemd socket 目录；未配置身份策略不是对不受信任
-本地用户的安全边界。
+`--hardware-adapter-peer-uid ID=UID` / `--hardware-adapter-peer-gid ID=GID` 对已连接 Hardware
+Adapter 执行 Linux `SO_PEERCRED` 校验；单例 sandbox Adapter 因无路由 ID 歧义，使用裸
+`--sandbox-adapter-peer-uid UID` / `--sandbox-adapter-peer-gid GID`。反向地，sandboxd 与
+各 Hardware Adapter 用 `--allowed-client-uid UID` / `--allowed-client-gid GID` 对 Kernel 做
+`SO_PEERCRED` 校验。任一已配置校验失败都会在发送协议帧前拒绝。
+
+**服务账户与 UID/GID 部署示例**：推荐把三个进程做成独立 systemd 服务账户。假设
+`cyrene-kernel` 账户 uid = 991、专用组 `cyrene` gid = 992，`cyrene-sandboxd` 与
+`cyrene-nvidia-adapter` 在单元中以 `root` 运行（uid 0）、同属 `cyrene` 组，则：Kernel 传
+`--sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992` 与
+`--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`；两个 Adapter
+各传 `--allowed-client-uid 991 --allowed-client-gid 992`。具体数值以部署主机的
+`id -u cyrene-kernel` / `getent group cyrene` 为准，由打包脚本写入单元文件。
+
+**fail-closed 启动**：自本变更起，三个特权进程在启动参数解析阶段即要求至少配置一个可信
+peer UID/GID；任一 Adapter 端点未配置身份策略将直接启动失败，而不再静默退回“仅文件系统
+权限”。因此部署要么同时配置双方，要么依赖受保护的 systemd socket 目录——未配置身份策略
+不再是“对不受信任本地用户”的可用安全边界。
 
 ## 生命周期、心跳和回收
 
