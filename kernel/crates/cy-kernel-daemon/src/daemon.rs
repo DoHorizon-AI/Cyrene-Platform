@@ -94,6 +94,10 @@ impl KernelDaemon {
     }
 
     /// 申请预留硬件资源租约
+    ///
+    /// Transport authentication is enforced at the `KernelAuthority` boundary.
+    /// The lease holder remains the planned Worker identity, not a
+    /// caller-supplied Principal.
     pub fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
         let snapshot = self.inventory()?;
         if !snapshot.capabilities.ready {
