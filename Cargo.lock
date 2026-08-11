@@ -341,6 +341,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "cy-proto",
+ "prost",
  "prost-types",
  "serde",
  "serde_json",

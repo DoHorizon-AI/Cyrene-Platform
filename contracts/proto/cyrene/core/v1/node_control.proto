@@ -4,7 +4,9 @@ package cyrene.core.v1;
 
 import "cyrene/core/v1/common.proto";
 import "cyrene/core/v1/kernel_runtime.proto";
+import "cyrene/core/v1/kernel_authority.proto";
 import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "google/rpc/status.proto";
@@ -15,6 +17,7 @@ message NodeHello {
   uint32 min_protocol_version = 3;
   uint32 max_protocol_version = 4;
   string resume_token = 5;
+  repeated cyrene.semantic.v1.ContractRevision offered_contracts = 6;
 }
 
 message NodeWelcome {
@@ -26,6 +29,7 @@ message NodeWelcome {
   // Opaque control-plane cursor presented by the Agent on its next reconnect.
   // It has no authority without the mutually authenticated stream identity.
   string resume_token = 6;
+  cyrene.semantic.v1.ContractRevision selected_contract = 7;
 }
 
 message NodeHeartbeat {
@@ -71,6 +75,7 @@ message KernelCommand {
     LaunchPluginRequest launch_plugin = 13;
     TerminatePluginRequest terminate_plugin = 14;
     CancelOperationRequest cancel_operation = 15;
+    KernelAuthorityCommand authority = 16;
   }
 }
 
@@ -82,5 +87,40 @@ message KernelCommandResult {
     ResourceLease resource_lease = 11;
     Operation operation = 12;
     google.rpc.Status error = 13;
+    KernelAuthorityCommandResult authority = 14;
+  }
+}
+
+// Typed control-plane envelope for canonical KernelAuthorityService actions.
+// It deliberately carries no legacy plugin, installation, LRO or Any payload.
+message KernelAuthorityCommand {
+  oneof request {
+    NegotiateRequest negotiate = 1;
+    AcquireSemanticLeaseRequest acquire_lease = 2;
+    RenewLeaseRequest renew_lease = 3;
+    ReleaseSemanticLeaseRequest release_lease = 4;
+    StartWorkerRequest start_worker = 5;
+    HeartbeatWorkerRequest heartbeat_worker = 6;
+    StopWorkerRequest stop_worker = 7;
+    CreateOperationRequest create_operation = 8;
+    ReportOperationRequest report_operation = 9;
+    CancelSemanticOperationRequest cancel_operation = 10;
+    PublishEndpointRequest publish_endpoint = 11;
+    AuthorizeEndpointRequest authorize_endpoint = 12;
+    RevokeEndpointRequest revoke_endpoint = 13;
+    SubscribeEventsRequest subscribe_events = 14;
+  }
+}
+
+message KernelAuthorityCommandResult {
+  oneof outcome {
+    cyrene.semantic.v1.ContractRevision negotiated_contract = 1;
+    cyrene.semantic.v1.Lease lease = 2;
+    cyrene.semantic.v1.Worker worker = 3;
+    cyrene.semantic.v1.Operation operation = 4;
+    cyrene.semantic.v1.Endpoint endpoint = 5;
+    cyrene.semantic.v1.EndpointGrant endpoint_grant = 6;
+    bool revoked = 7;
+    cyrene.semantic.v1.EventPage event_page = 8;
   }
 }

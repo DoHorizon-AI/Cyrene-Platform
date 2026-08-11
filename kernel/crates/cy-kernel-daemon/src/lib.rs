@@ -270,6 +270,7 @@ struct ManagedProcess {
     restart_count: u32,
     watchdog_triggered: bool,
     control: Option<WorkerControlSession>,
+    semantic_control: Option<SemanticWorkerControlSession>,
     pending_shutdown: Option<PendingWorkerShutdown>,
 }
 
@@ -278,6 +279,16 @@ type WorkerControlSender = mpsc::Sender<Result<core_v1::KernelToWorker, Status>>
 struct WorkerControlSession {
     connection_id: u64,
     outbound: WorkerControlSender,
+}
+
+type SemanticWorkerControlSender = mpsc::Sender<Result<core_v1::KernelToWorkerControl, Status>>;
+
+/// The canonical worker channel intentionally carries no authority operation.
+/// A connected process may prove liveness and acknowledge a drain request, but
+/// it cannot acquire a lease or publish an Endpoint through this socket.
+struct SemanticWorkerControlSession {
+    connection_id: u64,
+    outbound: SemanticWorkerControlSender,
 }
 
 struct PendingWorkerShutdown {
@@ -368,6 +379,14 @@ impl KernelServiceAdapter {
         &self,
     ) -> core_v1::plugin_lifecycle_service_server::PluginLifecycleServiceServer<Self> {
         core_v1::plugin_lifecycle_service_server::PluginLifecycleServiceServer::new(self.clone())
+    }
+
+    /// Canonical Worker liveness/drain channel. It is registered only on the
+    /// Worker UDS listener, separate from `KernelAuthorityService`.
+    pub fn worker_control_server(
+        &self,
+    ) -> core_v1::worker_control_service_server::WorkerControlServiceServer<Self> {
+        core_v1::worker_control_service_server::WorkerControlServiceServer::new(self.clone())
     }
 
     /// Starts the bounded watchdog loop. A missing heartbeat executes the same
@@ -856,6 +875,133 @@ impl KernelServiceAdapter {
         }
     }
 
+    fn register_semantic_worker_control(
+        &self,
+        hello: &core_v1::WorkerControlHello,
+        outbound: SemanticWorkerControlSender,
+    ) -> Result<(u64, semantic::Worker), Status> {
+        let worker_identity = semantic_identity_from_proto(hello.worker.clone(), "worker")?;
+        let lease_identity = semantic_identity_from_proto(hello.lease.clone(), "lease")?;
+        let lease = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if lease.generation != lease_identity.generation
+            || lease.fence_token != hello.fence_token
+            || lease.holder != worker_identity
+            || lease.state != LeaseState::Active
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "FENCE_MISMATCH",
+                "worker control hello no longer has active lease authority",
+            ));
+        }
+        let connection_id = self.next_control_connection.fetch_add(1, Ordering::Relaxed);
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
+            semantic_status(
+                tonic::Code::NotFound,
+                "WORKER_NOT_FOUND",
+                "worker is not managed by this Kernel",
+            )
+        })?;
+        let worker = process.semantic_worker.as_ref().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::FailedPrecondition,
+                "WORKER_COMPATIBILITY_ONLY",
+                "legacy plugin process cannot use semantic Worker control",
+            )
+        })?;
+        if worker.identity != worker_identity || worker.lease != lease_identity {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STALE_GENERATION",
+                "worker identity or lease generation is stale",
+            ));
+        }
+        let worker = worker.clone();
+        process.semantic_control = Some(SemanticWorkerControlSession {
+            connection_id,
+            outbound,
+        });
+        Ok((connection_id, worker))
+    }
+
+    fn unregister_semantic_worker_control(
+        &self,
+        worker_id: &str,
+        generation: u64,
+        connection_id: u64,
+    ) {
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let Some(process) = instances.get_mut(worker_id) else {
+            return;
+        };
+        if process
+            .semantic_worker
+            .as_ref()
+            .is_some_and(|worker| worker.identity.generation == generation)
+            && process
+                .semantic_control
+                .as_ref()
+                .is_some_and(|control| control.connection_id == connection_id)
+        {
+            process.semantic_control = None;
+        }
+    }
+
+    fn accept_semantic_shutdown_ack(
+        &self,
+        ack: &core_v1::WorkerControlShutdownAck,
+    ) -> Result<(), Status> {
+        let worker_identity = semantic_identity_from_proto(ack.worker.clone(), "worker")?;
+        let lease_identity = semantic_identity_from_proto(ack.lease.clone(), "lease")?;
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
+            semantic_status(
+                tonic::Code::NotFound,
+                "WORKER_NOT_FOUND",
+                "worker is not managed by this Kernel",
+            )
+        })?;
+        let worker = process.semantic_worker.as_ref().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::FailedPrecondition,
+                "WORKER_COMPATIBILITY_ONLY",
+                "legacy plugin process cannot use semantic Worker control",
+            )
+        })?;
+        let fence_matches = process
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.fence_token == ack.fence_token);
+        if worker.identity != worker_identity || worker.lease != lease_identity || !fence_matches {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "FENCE_MISMATCH",
+                "worker shutdown acknowledgement is stale",
+            ));
+        }
+        let pending = process.pending_shutdown.as_mut().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::FailedPrecondition,
+                "SHUTDOWN_NOT_REQUESTED",
+                "Kernel did not request a worker shutdown",
+            )
+        })?;
+        if pending.shutdown_id != ack.shutdown_id {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STALE_GENERATION",
+                "worker shutdown acknowledgement is stale",
+            ));
+        }
+        pending.acknowledged = true;
+        pending.drained = ack.drained;
+        Ok(())
+    }
+
     fn accept_shutdown_ack(&self, ack: &core_v1::WorkerShutdownAck) -> Result<(), Status> {
         let mut instances = self.instances.lock().expect("instance lock poisoned");
         let process = instances
@@ -935,6 +1081,131 @@ impl KernelServiceAdapter {
         }
     }
 
+    fn request_semantic_worker_shutdown(&self, worker_id: &str, reason_code: &str) -> bool {
+        let shutdown_id = format!(
+            "shutdown-{}",
+            self.next_control_connection.fetch_add(1, Ordering::Relaxed)
+        );
+        let (outbound, worker, lease) = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let Some(process) = instances.get_mut(worker_id) else {
+                return false;
+            };
+            let Some(control) = process.semantic_control.as_ref() else {
+                return false;
+            };
+            let Some(worker) = process.semantic_worker.as_ref() else {
+                return false;
+            };
+            let Some(lease) = process.lease.as_ref() else {
+                return false;
+            };
+            process.pending_shutdown = Some(PendingWorkerShutdown {
+                shutdown_id: shutdown_id.clone(),
+                acknowledged: false,
+                drained: false,
+            });
+            (control.outbound.clone(), worker.clone(), lease.clone())
+        };
+        let sent = outbound.try_send(Ok(core_v1::KernelToWorkerControl {
+            body: Some(core_v1::kernel_to_worker_control::Body::Shutdown(
+                core_v1::WorkerControlShutdown {
+                    worker: Some(to_semantic_proto_identity(&worker.identity)),
+                    lease: Some(to_semantic_proto_identity(&worker.lease)),
+                    fence_token: lease.fence_token,
+                    shutdown_id: shutdown_id.clone(),
+                    ack_deadline: Some(to_proto_duration(self.heartbeat.shutdown_ack_timeout)),
+                    reason_code: reason_code.to_string(),
+                },
+            )),
+        }));
+        if sent.is_err() {
+            self.unregister_pending_shutdown(worker_id, &shutdown_id);
+            return false;
+        }
+        let deadline = Instant::now() + self.heartbeat.shutdown_ack_timeout;
+        loop {
+            let acknowledged = self
+                .instances
+                .lock()
+                .expect("instance lock poisoned")
+                .get(worker_id)
+                .and_then(|process| process.pending_shutdown.as_ref())
+                .is_some_and(|pending| pending.shutdown_id == shutdown_id && pending.acknowledged);
+            if acknowledged || Instant::now() >= deadline {
+                return acknowledged;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn accept_semantic_worker_heartbeat(
+        &self,
+        worker_identity: semantic::Identity,
+        lease_identity: semantic::Identity,
+        fence_token: u64,
+    ) -> Result<semantic::Worker, Status> {
+        let lease = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if lease.generation != lease_identity.generation
+            || lease.fence_token != fence_token
+            || lease.holder != worker_identity
+            || lease.state != LeaseState::Active
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "FENCE_MISMATCH",
+                "worker heartbeat no longer has active lease authority",
+            ));
+        }
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
+            semantic_status(
+                tonic::Code::NotFound,
+                "WORKER_NOT_FOUND",
+                "worker is not managed by this Kernel",
+            )
+        })?;
+        let worker = process.semantic_worker.as_mut().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::FailedPrecondition,
+                "WORKER_COMPATIBILITY_ONLY",
+                "legacy plugin process is not a semantic Worker",
+            )
+        })?;
+        if worker.identity != worker_identity || worker.lease != lease_identity {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STALE_GENERATION",
+                "worker identity or lease generation is stale",
+            ));
+        }
+        if !worker
+            .state
+            .can_transition_to(semantic::WorkerState::Running)
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STATE_TRANSITION_INVALID",
+                "worker cannot enter RUNNING from its current state",
+            ));
+        }
+        worker.state = semantic::WorkerState::Running;
+        process.last_heartbeat = Instant::now();
+        process.last_heartbeat_at = Some(now_timestamp());
+        let response = worker.clone();
+        drop(instances);
+        self.publish_semantic_event(
+            response.identity.clone(),
+            "worker.running",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+        Ok(response)
+    }
+
     fn unregister_pending_shutdown(&self, instance_name: &str, shutdown_id: &str) {
         if let Some(process) = self
             .instances
@@ -965,7 +1236,17 @@ impl KernelServiceAdapter {
                 .collect::<Vec<_>>()
         };
         for name in overdue {
-            let _acknowledged = self.request_worker_shutdown(&name, "HEARTBEAT_TIMEOUT", false);
+            let is_semantic_worker = self
+                .instances
+                .lock()
+                .expect("instance lock poisoned")
+                .get(&name)
+                .is_some_and(|process| process.semantic_worker.is_some());
+            let _acknowledged = if is_semantic_worker {
+                self.request_semantic_worker_shutdown(&name, "HEARTBEAT_TIMEOUT")
+            } else {
+                self.request_worker_shutdown(&name, "HEARTBEAT_TIMEOUT", false)
+            };
             self.publish_runtime_event(
                 core_v1::RuntimeEventType::WatchdogTriggered,
                 &name,
@@ -1329,6 +1610,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     restart_count: 0,
                     watchdog_triggered: false,
                     control: None,
+                    semantic_control: None,
                     pending_shutdown: None,
                 },
             );
@@ -1802,6 +2084,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                     restart_count: 0,
                     watchdog_triggered: false,
                     control: None,
+                    semantic_control: None,
                     pending_shutdown: None,
                 },
             );
@@ -1843,64 +2126,11 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         validate_authority_context(request.context.as_ref())?;
         let worker_identity = semantic_identity_from_proto(request.worker, "worker")?;
         let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
-        let lease = self
-            .daemon
-            .lease(&lease_identity.id)
-            .map_err(provider_status)?;
-        if lease.generation != lease_identity.generation
-            || lease.fence_token != request.fence_token
-            || lease.holder != worker_identity
-            || lease.state != LeaseState::Active
-        {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "FENCE_MISMATCH",
-                "worker heartbeat no longer has active lease authority",
-            ));
-        }
-        let mut instances = self.instances.lock().expect("instance lock poisoned");
-        let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
-            semantic_status(
-                tonic::Code::NotFound,
-                "WORKER_NOT_FOUND",
-                "worker is not managed by this Kernel",
-            )
-        })?;
-        let worker = process.semantic_worker.as_mut().ok_or_else(|| {
-            semantic_status(
-                tonic::Code::FailedPrecondition,
-                "WORKER_COMPATIBILITY_ONLY",
-                "legacy plugin process is not a semantic Worker",
-            )
-        })?;
-        if worker.identity != worker_identity || worker.lease != lease_identity {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "STALE_GENERATION",
-                "worker identity or lease generation is stale",
-            ));
-        }
-        if !worker
-            .state
-            .can_transition_to(semantic::WorkerState::Running)
-        {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "STATE_TRANSITION_INVALID",
-                "worker cannot enter RUNNING from its current state",
-            ));
-        }
-        worker.state = semantic::WorkerState::Running;
-        process.last_heartbeat = Instant::now();
-        process.last_heartbeat_at = Some(now_timestamp());
-        let response = worker.clone();
-        drop(instances);
-        self.publish_semantic_event(
-            response.identity.clone(),
-            "worker.running",
-            "cyrene.worker.v1",
-            Vec::new(),
-        );
+        let response = self.accept_semantic_worker_heartbeat(
+            worker_identity,
+            lease_identity,
+            request.fence_token,
+        )?;
         Ok(Response::new(to_semantic_proto_worker(&response)))
     }
 
@@ -1933,7 +2163,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             .transpose()?
             .unwrap_or(self.heartbeat.graceful_stop);
         let _acknowledged =
-            self.request_worker_shutdown(&worker_identity.id, "STOP_REQUESTED", false);
+            self.request_semantic_worker_shutdown(&worker_identity.id, "STOP_REQUESTED");
         let (worker, report) = {
             let mut instances = self.instances.lock().expect("instance lock poisoned");
             let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
@@ -2302,6 +2532,119 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         let page = self.semantic_events_after(&cursor, page_size);
         debug_assert!(page.validate().is_ok());
         Ok(Response::new(to_semantic_proto_event_page(&page)))
+    }
+}
+
+#[tonic::async_trait]
+impl core_v1::worker_control_service_server::WorkerControlService for KernelServiceAdapter {
+    type ConnectStream = std::pin::Pin<
+        Box<dyn Stream<Item = Result<core_v1::KernelToWorkerControl, Status>> + Send + 'static>,
+    >;
+
+    async fn connect(
+        &self,
+        request: Request<tonic::Streaming<core_v1::WorkerControlToKernel>>,
+    ) -> Result<Response<Self::ConnectStream>, Status> {
+        let mut inbound = request.into_inner();
+        let first = inbound.message().await?.ok_or_else(|| {
+            semantic_status(
+                tonic::Code::InvalidArgument,
+                "WORKER_HELLO_REQUIRED",
+                "WorkerControlHello must be the first control frame",
+            )
+        })?;
+        validate_authority_context(first.context.as_ref())?;
+        let Some(core_v1::worker_control_to_kernel::Body::Hello(hello)) = first.body else {
+            return Err(semantic_status(
+                tonic::Code::InvalidArgument,
+                "WORKER_HELLO_REQUIRED",
+                "WorkerControlHello must be the first control frame",
+            ));
+        };
+        let (outbound, receiver) = mpsc::channel(16);
+        let (connection_id, worker) =
+            self.register_semantic_worker_control(&hello, outbound.clone())?;
+        outbound
+            .send(Ok(core_v1::KernelToWorkerControl {
+                body: Some(core_v1::kernel_to_worker_control::Body::Welcome(
+                    core_v1::WorkerControlWelcome {
+                        worker: Some(to_semantic_proto_worker(&worker)),
+                        next_heartbeat_after: Some(to_proto_duration(self.heartbeat.interval)),
+                    },
+                )),
+            }))
+            .await
+            .map_err(|_| {
+                semantic_status(
+                    tonic::Code::Unavailable,
+                    "WORKER_CONTROL_CLOSED",
+                    "worker control receiver closed during handshake",
+                )
+            })?;
+
+        let adapter = self.clone();
+        let worker_id = worker.identity.id.clone();
+        let worker_generation = worker.identity.generation;
+        tokio::spawn(async move {
+            while let Ok(Some(frame)) = inbound.message().await {
+                let result = validate_authority_context(frame.context.as_ref()).and_then(|_| {
+                    match frame.body {
+                        Some(core_v1::worker_control_to_kernel::Body::Heartbeat(heartbeat)) => {
+                            let worker = semantic_identity_from_proto(heartbeat.worker, "worker")?;
+                            let lease = semantic_identity_from_proto(heartbeat.lease, "lease")?;
+                            adapter
+                                .accept_semantic_worker_heartbeat(
+                                    worker,
+                                    lease,
+                                    heartbeat.fence_token,
+                                )
+                                .map(|worker| core_v1::KernelToWorkerControl {
+                                    body: Some(
+                                        core_v1::kernel_to_worker_control::Body::HeartbeatAck(
+                                            core_v1::WorkerControlHeartbeatAck {
+                                                worker: Some(to_semantic_proto_worker(&worker)),
+                                                next_heartbeat_after: Some(to_proto_duration(
+                                                    adapter.heartbeat.interval,
+                                                )),
+                                            },
+                                        ),
+                                    ),
+                                })
+                                .map(Some)
+                        }
+                        Some(core_v1::worker_control_to_kernel::Body::ShutdownAck(ack)) => {
+                            adapter.accept_semantic_shutdown_ack(&ack)?;
+                            Ok(None)
+                        }
+                        Some(core_v1::worker_control_to_kernel::Body::Hello(_)) | None => {
+                            Err(semantic_status(
+                                tonic::Code::InvalidArgument,
+                                "WORKER_FRAME_INVALID",
+                                "WorkerControlHello is valid only as the first control frame",
+                            ))
+                        }
+                    }
+                });
+                match result {
+                    Ok(Some(response)) => {
+                        if outbound.send(Ok(response)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = outbound.send(Err(error)).await;
+                        break;
+                    }
+                }
+            }
+            adapter.unregister_semantic_worker_control(
+                &worker_id,
+                worker_generation,
+                connection_id,
+            );
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
 }
 
@@ -2791,7 +3134,7 @@ fn semantic_operation_from_proto(
     operation.validate().map_err(|error| {
         semantic_status(
             tonic::Code::InvalidArgument,
-            &error.reason_code,
+            error.reason_code,
             &error.message,
         )
     })?;
@@ -2868,7 +3211,7 @@ fn semantic_worker_from_proto(worker: semantic_v1::Worker) -> Result<semantic::W
     worker.validate().map_err(|error| {
         semantic_status(
             tonic::Code::InvalidArgument,
-            &error.reason_code,
+            error.reason_code,
             &error.message,
         )
     })?;
@@ -2937,7 +3280,7 @@ fn semantic_event_cursor_from_proto(
     cursor.validate().map_err(|error| {
         semantic_status(
             tonic::Code::InvalidArgument,
-            &error.reason_code,
+            error.reason_code,
             &error.message,
         )
     })?;
@@ -3795,6 +4138,7 @@ mod tests {
             restart_count: 0,
             watchdog_triggered: false,
             control: None,
+            semantic_control: None,
             pending_shutdown: None,
         }
     }
@@ -4510,6 +4854,126 @@ mod tests {
         assert!(pending.drained);
         drop(instances);
         adapter.unregister_worker_control("worker_1", 99, connection_id);
+    }
+
+    #[test]
+    fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
+        use core_v1::{
+            kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+            StartWorkerRequest,
+        };
+
+        let adapter = semantic_worker_adapter().with_worker_heartbeat(WorkerHeartbeatConfig {
+            socket_path: PathBuf::from("/run/cyrene/worker.sock"),
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
+            graceful_stop: Duration::from_secs(1),
+            shutdown_ack_timeout: Duration::from_millis(50),
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let lease = runtime
+            .block_on(
+                adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+                    context: Some(authority_context("control-lease")),
+                    holder: Some(semantic_v1::Identity {
+                        id: "worker-control-1".to_string(),
+                        generation: 1,
+                    }),
+                    query: Some(semantic_v1::ResourceQuery {
+                        resource_class: "accelerator".to_string(),
+                        count: 1,
+                        required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                            id: "accelerator.compute".to_string(),
+                            minimum_revision: 1,
+                            required_properties: Default::default(),
+                        }],
+                        minimum_capacity: Default::default(),
+                    }),
+                    ttl: Some(prost_types::Duration {
+                        seconds: 30,
+                        nanos: 0,
+                    }),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        let worker = semantic_v1::Worker {
+            identity: Some(semantic_v1::Identity {
+                id: "worker-control-1".to_string(),
+                generation: 1,
+            }),
+            principal: Some(semantic_v1::Identity {
+                id: "principal-1".to_string(),
+                generation: 1,
+            }),
+            provider: Some(semantic_v1::Identity {
+                id: "provider-1".to_string(),
+                generation: 1,
+            }),
+            lease: lease.identity.clone(),
+            state: semantic_v1::WorkerState::Registered as i32,
+            execution_ref: "opaque-execution-reference".to_string(),
+            limits: Default::default(),
+        };
+        runtime
+            .block_on(adapter.start_worker(Request::new(StartWorkerRequest {
+                context: Some(authority_context("control-start")),
+                worker: Some(worker.clone()),
+            })))
+            .unwrap();
+
+        let (outbound, mut inbound) = mpsc::channel(1);
+        let (connection_id, welcome) = adapter
+            .register_semantic_worker_control(
+                &core_v1::WorkerControlHello {
+                    worker: worker.identity.clone(),
+                    lease: lease.identity.clone(),
+                    fence_token: lease.fence_token,
+                },
+                outbound,
+            )
+            .unwrap();
+        assert_eq!(welcome.identity.id, "worker-control-1");
+
+        let acknowledger = {
+            let adapter = adapter.clone();
+            let worker = worker.clone();
+            let lease = lease.clone();
+            thread::spawn(move || {
+                let frame = inbound
+                    .blocking_recv()
+                    .expect("Kernel must send Shutdown")
+                    .expect("semantic Worker control stream must remain healthy");
+                let Some(core_v1::kernel_to_worker_control::Body::Shutdown(shutdown)) = frame.body
+                else {
+                    panic!("expected WorkerControlShutdown frame");
+                };
+                adapter
+                    .accept_semantic_shutdown_ack(&core_v1::WorkerControlShutdownAck {
+                        worker: worker.identity.clone(),
+                        lease: lease.identity.clone(),
+                        fence_token: lease.fence_token,
+                        shutdown_id: shutdown.shutdown_id,
+                        drained: true,
+                    })
+                    .unwrap();
+            })
+        };
+
+        assert!(adapter.request_semantic_worker_shutdown("worker-control-1", "TEST_STOP"));
+        acknowledger.join().unwrap();
+        let instances = adapter.instances.lock().unwrap();
+        let pending = instances["worker-control-1"]
+            .pending_shutdown
+            .as_ref()
+            .unwrap();
+        assert!(pending.acknowledged);
+        assert!(pending.drained);
+        drop(instances);
+        adapter.unregister_semantic_worker_control("worker-control-1", 1, connection_id);
     }
 
     #[test]

@@ -11,8 +11,9 @@ wire schemas and language libraries are projections of that authority.
 - `rust/` contains Rust mirrors and generated bindings.
 - `tck/kernel-semantic/v1/` contains the Python/Kotlin/Rust acceptance vectors
   for revision negotiation, validation, matching, lifecycle, authority and
-  event replay. `tck/worker-control/v1/` separately covers the live Worker
-  control channel.
+  event replay. `tck/worker-control/v1/` separately covers the legacy live
+  Worker control compatibility channel; new SDKs use the paired
+  `KernelAuthorityService` and restricted `WorkerControlService` projections.
 
 Advanced services may depend on released contract artifacts or a checked-out
 core repository. They must not depend on private paths inside the kernel or

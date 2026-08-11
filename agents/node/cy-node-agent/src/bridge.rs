@@ -9,12 +9,16 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use cy_proto::{
     core_v1::{
-        kernel_command, kernel_command_result, kernel_service_client::KernelServiceClient,
-        ControlPlaneToNode, GetKernelCapabilitiesRequest, KernelCommand, KernelCommandResult,
-        NodeRef,
+        kernel_authority_command, kernel_authority_command_result,
+        kernel_authority_service_client::KernelAuthorityServiceClient, kernel_command,
+        kernel_command_result, kernel_service_client::KernelServiceClient, ControlPlaneToNode,
+        GetKernelCapabilitiesRequest, KernelAuthorityCommand, KernelAuthorityCommandResult,
+        KernelCommand, KernelCommandResult, NodeRef,
     },
     google::rpc::Status as RpcStatus,
+    semantic_v1::Rejection,
 };
+use prost::Message;
 use thiserror::Error;
 #[cfg(unix)]
 use tonic::transport::Endpoint;
@@ -65,7 +69,7 @@ impl UdsKernelCommandExecutor {
     /// restart cannot leave the Agent presenting an old epoch to the control
     /// plane.
     pub async fn discover_node(&self) -> Result<NodeRef, LocalKernelError> {
-        let mut client = self.connect_client().await?;
+        let mut client = KernelServiceClient::new(self.connect_channel().await?);
         let capabilities = client
             .get_kernel_capabilities(Request::new(GetKernelCapabilitiesRequest {
                 context: None,
@@ -85,7 +89,9 @@ impl UdsKernelCommandExecutor {
         let request = command.request.ok_or_else(|| {
             LocalKernelError::Transport("KernelCommand request oneof is required".to_string())
         })?;
-        let mut client = self.connect_client().await?;
+        let channel = self.connect_channel().await?;
+        let mut client = KernelServiceClient::new(channel.clone());
+        let mut authority = KernelAuthorityServiceClient::new(channel);
         let outcome = match request {
             kernel_command::Request::GetCapabilities(request) => client
                 .get_kernel_capabilities(Request::new(request))
@@ -117,6 +123,11 @@ impl UdsKernelCommandExecutor {
                 .cancel_operation(Request::new(request))
                 .await
                 .map(|response| kernel_command_result::Outcome::Operation(response.into_inner())),
+            kernel_command::Request::Authority(command) => {
+                execute_authority_command(&mut authority, command)
+                    .await
+                    .map(kernel_command_result::Outcome::Authority)
+            }
         };
         Ok(KernelCommandResult {
             command_id,
@@ -128,9 +139,7 @@ impl UdsKernelCommandExecutor {
     }
 
     #[cfg(unix)]
-    async fn connect_client(
-        &self,
-    ) -> Result<KernelServiceClient<tonic::transport::Channel>, LocalKernelError> {
+    async fn connect_channel(&self) -> Result<tonic::transport::Channel, LocalKernelError> {
         use tokio::net::UnixStream;
         use tower::service_fn;
 
@@ -141,13 +150,11 @@ impl UdsKernelCommandExecutor {
             }))
             .await
             .map_err(|error| LocalKernelError::Transport(error.to_string()))?;
-        Ok(KernelServiceClient::new(channel))
+        Ok(channel)
     }
 
     #[cfg(not(unix))]
-    async fn connect_client(
-        &self,
-    ) -> Result<KernelServiceClient<tonic::transport::Channel>, LocalKernelError> {
+    async fn connect_channel(&self) -> Result<tonic::transport::Channel, LocalKernelError> {
         Err(LocalKernelError::UnsupportedHost)
     }
 }
@@ -203,11 +210,116 @@ fn rejected_result(command_id: String, code: Code, message: String) -> KernelCom
 }
 
 fn rpc_status(status: Status) -> RpcStatus {
+    let reason_code = status
+        .metadata()
+        .get("x-cyrene-reason-code")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     RpcStatus {
         code: status.code() as i32,
         message: status.message().to_string(),
-        details: Vec::new(),
+        details: reason_code
+            .map(|reason_code| prost_types::Any {
+                type_url: "type.googleapis.com/cyrene.semantic.v1.Rejection".to_string(),
+                value: Rejection {
+                    reason_code,
+                    message: status.message().to_string(),
+                }
+                .encode_to_vec(),
+            })
+            .into_iter()
+            .collect(),
     }
+}
+
+async fn execute_authority_command(
+    client: &mut KernelAuthorityServiceClient<tonic::transport::Channel>,
+    command: KernelAuthorityCommand,
+) -> Result<KernelAuthorityCommandResult, Status> {
+    let request = command.request.ok_or_else(|| {
+        Status::invalid_argument("KernelAuthorityCommand request oneof is required")
+    })?;
+    let outcome = match request {
+        kernel_authority_command::Request::Negotiate(request) => client
+            .negotiate(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::NegotiatedContract(response.into_inner())
+            }),
+        kernel_authority_command::Request::AcquireLease(request) => client
+            .acquire_lease(Request::new(request))
+            .await
+            .map(|response| kernel_authority_command_result::Outcome::Lease(response.into_inner())),
+        kernel_authority_command::Request::RenewLease(request) => client
+            .renew_lease(Request::new(request))
+            .await
+            .map(|response| kernel_authority_command_result::Outcome::Lease(response.into_inner())),
+        kernel_authority_command::Request::ReleaseLease(request) => client
+            .release_lease(Request::new(request))
+            .await
+            .map(|response| kernel_authority_command_result::Outcome::Lease(response.into_inner())),
+        kernel_authority_command::Request::StartWorker(request) => client
+            .start_worker(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Operation(response.into_inner())
+            }),
+        kernel_authority_command::Request::HeartbeatWorker(request) => client
+            .heartbeat_worker(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Worker(response.into_inner())
+            }),
+        kernel_authority_command::Request::StopWorker(request) => client
+            .stop_worker(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Operation(response.into_inner())
+            }),
+        kernel_authority_command::Request::CreateOperation(request) => client
+            .create_operation(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Operation(response.into_inner())
+            }),
+        kernel_authority_command::Request::ReportOperation(request) => client
+            .report_operation(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Operation(response.into_inner())
+            }),
+        kernel_authority_command::Request::CancelOperation(request) => client
+            .cancel_operation(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Operation(response.into_inner())
+            }),
+        kernel_authority_command::Request::PublishEndpoint(request) => client
+            .publish_endpoint(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::Endpoint(response.into_inner())
+            }),
+        kernel_authority_command::Request::AuthorizeEndpoint(request) => client
+            .authorize_endpoint(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::EndpointGrant(response.into_inner())
+            }),
+        kernel_authority_command::Request::RevokeEndpoint(request) => client
+            .revoke_endpoint(Request::new(request))
+            .await
+            .map(|_| kernel_authority_command_result::Outcome::Revoked(true)),
+        kernel_authority_command::Request::SubscribeEvents(request) => client
+            .subscribe_events(Request::new(request))
+            .await
+            .map(|response| {
+                kernel_authority_command_result::Outcome::EventPage(response.into_inner())
+            }),
+    }?;
+    Ok(KernelAuthorityCommandResult {
+        outcome: Some(outcome),
+    })
 }
 
 #[cfg(test)]
@@ -249,6 +361,11 @@ mod tests {
                     heartbeat_interval: None,
                     server_time: None,
                     resume_token: "resume-2".to_string(),
+                    selected_contract: Some(cy_proto::semantic_v1::ContractRevision {
+                        contract_id: "cyrene.kernel.semantic".to_string(),
+                        major: 1,
+                        minor: 0,
+                    }),
                 })),
             })
             .unwrap();
@@ -288,5 +405,16 @@ mod tests {
             UdsKernelCommandExecutor::new("kernel.sock"),
             Err(LocalKernelError::RelativeSocketPath)
         ));
+    }
+
+    #[test]
+    fn authority_rejection_reason_is_preserved_as_a_semantic_detail() {
+        let mut status = Status::failed_precondition("lease fence is stale");
+        status
+            .metadata_mut()
+            .insert("x-cyrene-reason-code", "FENCE_MISMATCH".parse().unwrap());
+        let status = rpc_status(status);
+        let rejection = Rejection::decode(status.details[0].value.as_slice()).unwrap();
+        assert_eq!(rejection.reason_code, "FENCE_MISMATCH");
     }
 }

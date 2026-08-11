@@ -316,17 +316,21 @@ At this freeze, the specification, semantic Proto, pure Rust model and
 Kernel-semantic TCK define v1. The production Core gRPC service, Node Agent and
 Hardware Adapter protocols are **partial migration projections**, not yet a
 claim of full v1 conformance. In particular they must still adopt authenticated
-Principal injection, semantic Worker/Operation/Event types, Provider-scoped
-TTL/reconciliation, non-reused durable fences and the typed replay result.
+Principal injection, Provider-scoped TTL/reconciliation and complete Linux
+integration evidence for durable fencing and local peer authorization.
 
-`KernelAuthorityService` is the canonical Core gRPC projection. Its current
-lease renewal and Endpoint actions require a selected `ContractRevision` in an
-`AuthorityCallContext`; they carry no caller-supplied Principal, `NodeRef`,
-plugin installation or vendor-specific data. The legacy `KernelService` and
-`PluginLifecycleService` remain compatibility projections only. Until the
-authority and Worker-control sockets are separated and Principal injection is
-fully enforced, filesystem access to the local UDS is the provisional local
-admission boundary rather than a claim of complete authorization conformance.
+`KernelAuthorityService` is the canonical Core gRPC projection. Every
+state-changing authority action requires a selected `ContractRevision` in an
+`AuthorityCallContext`; it carries no caller-supplied Principal, `NodeRef`,
+plugin installation or vendor-specific data. `WorkerControlService` is a
+separate, restricted bidirectional liveness/drain projection: its hello frame
+contains only the already-authorized Worker and Lease identities plus a fence,
+and Kernel returns the authoritative Worker record. It permits only
+`Hello → Heartbeat → ShutdownAck`; it cannot invoke authority actions. The
+legacy `KernelService` and `PluginLifecycleService` remain compatibility
+projections only. Principal injection and UDS peer authorization are still
+required for full conformance; filesystem access to a local UDS remains only a
+provisional local admission boundary.
 
 The canonical projection now also carries semantic `Worker`, `Operation` and
 `EventPage` actions. `StartWorker` accepts only an opaque execution reference;
@@ -334,9 +338,26 @@ the out-of-Kernel resolver proves the digest-bound installation before returning
 a launch plan. `SubscribeEvents` is a bounded pull projection of
 `EventCursor → EventPage`: it returns typed `CURRENT`, `GAP` or
 `SOURCE_CHANGED` and never reuses the legacy `resume_token` or LRO event
-envelope. The runtime serves authority actions and Worker-control compatibility
-actions on distinct UDS paths so a Worker control client is not registered on
-the authority endpoint.
+envelope. The runtime serves authority actions on one UDS path and canonical
+plus compatibility Worker control actions on a separate Worker UDS path, so a
+Worker control client is never registered on the authority endpoint.
+
+The Node Agent projects these actions through a typed
+`KernelAuthorityCommand`/`KernelAuthorityCommandResult` control-stream branch.
+It offers and validates the selected semantic revision during its fenced Node
+session, then forwards only the canonical action request to the local Authority
+UDS client. Semantic results remain typed; a gRPC rejection trailer is carried
+back as a serialized `cyrene.semantic.v1.Rejection` detail so remote Kotlin,
+Python and native clients can branch on `reason_code` rather than an error
+string. Legacy node commands remain a separately named compatibility branch.
+
+Installation remains outside the authority. The built-in filesystem resolver
+accepts a Worker `execution_ref` only in its adapter-owned
+`installation-name@sha256:digest` form, verifies the immutable installation
+record, and returns the digest-bound launch plan through the resolver port.
+OCI retrieval, signatures, SBOM/provenance policy and language SDK packaging
+therefore stay out of Kernel code; a different installer may implement the
+same resolver port without changing the semantic API.
 
 Changing an existing field meaning, accepted input, authority decision,
 transition, reason code or bound requires semantic v2. Additive optional

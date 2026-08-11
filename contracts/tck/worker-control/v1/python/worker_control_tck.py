@@ -87,7 +87,56 @@ def verify_scenarios() -> None:
         assert actual == expected, f"{name}: expected {expected}, got {actual}"
 
 
+def expected_semantic_trace_result(trace: str) -> str:
+    state = "AWAIT_HELLO"
+    worker_generation = lease_generation = fence = 0
+    shutdown_id = ""
+    for raw in trace.split(";"):
+        direction, kind, raw_worker, raw_lease, raw_fence, identifier = raw.split(":", 5)
+        current = (int(raw_worker), int(raw_lease), int(raw_fence))
+        if state == "AWAIT_HELLO":
+            if (direction, kind) != ("W2K", "HELLO") or 0 in current:
+                return "HELLO_REQUIRED"
+            worker_generation, lease_generation, fence = current
+            state = "AWAIT_WELCOME"
+        elif state == "AWAIT_WELCOME":
+            if (direction, kind) != ("K2W", "WELCOME"):
+                return "WELCOME_REQUIRED"
+            if current != (worker_generation, lease_generation, fence):
+                return "FENCE_MISMATCH"
+            state = "RUNNING"
+        elif state == "RUNNING":
+            if current != (worker_generation, lease_generation, fence):
+                return "FENCE_MISMATCH"
+            if (direction, kind) == ("W2K", "HEARTBEAT"):
+                continue
+            if (direction, kind) == ("K2W", "HEARTBEAT_ACK"):
+                continue
+            if (direction, kind) == ("K2W", "SHUTDOWN") and identifier:
+                shutdown_id, state = identifier, "AWAIT_SHUTDOWN_ACK"
+            else:
+                return "FRAME_INVALID"
+        elif state == "AWAIT_SHUTDOWN_ACK":
+            if current != (worker_generation, lease_generation, fence):
+                return "FENCE_MISMATCH"
+            if (direction, kind) != ("W2K", "SHUTDOWN_ACK"):
+                return "SHUTDOWN_ACK_INVALID"
+            if identifier != shutdown_id:
+                return "SHUTDOWN_ID_MISMATCH"
+            state = "STOPPED"
+        else:
+            return "FRAME_AFTER_STOP"
+    return "ACCEPT" if state == "STOPPED" else "TRACE_INCOMPLETE"
+
+
+def verify_semantic_scenarios() -> None:
+    for name, expected, trace in rows(ROOT / "semantic_scenarios.tsv"):
+        actual = expected_semantic_trace_result(trace)
+        assert actual == expected, f"{name}: expected {expected}, got {actual}"
+
+
 if __name__ == "__main__":
     verify_vectors()
     verify_scenarios()
+    verify_semantic_scenarios()
     print("Python Worker-control TCK v1 passed")

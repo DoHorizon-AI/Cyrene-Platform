@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // It never registers KernelAuthorityService, so a Worker cannot call lease
     // or Endpoint authority actions merely because it can acknowledge shutdown.
     let worker_control_server = Server::builder()
+        .add_service(adapter.worker_control_server())
         .add_service(adapter.lifecycle_server())
         .serve_with_incoming(UnixListenerStream::new(worker_control_listener));
     tokio::try_join!(authority_server, worker_control_server)?;
