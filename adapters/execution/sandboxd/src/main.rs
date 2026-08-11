@@ -167,6 +167,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
+            // Fail-closed: sandboxd must be configured with at least one trusted
+            // Kernel peer UID/GID; otherwise UDS admission silently allows any
+            // local user able to reach the socket.
+            if allowed_client_uid.is_none() && allowed_client_gid.is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "cyrene-sandboxd requires at least one of --allowed-client-uid or --allowed-client-gid to enforce UDS admission",
+                )
+                .into());
+            }
             Ok(Self {
                 adapter_id,
                 socket,

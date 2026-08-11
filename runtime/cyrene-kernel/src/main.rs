@@ -2,7 +2,10 @@
 //!
 //! The process owns no vendor driver code. It joins a versioned UDS hardware
 //! adapter and one separately supervised Sandbox Adapter Host, then serves Core
-//! v1 over a local UDS endpoint with filesystem permissions as the trust boundary.
+//! v1 over a local UDS endpoint. Admission is enforced by Unix-socket peer
+//! credentials (SO_PEERCRED): every Adapter endpoint must be configured with a
+//! trusted peer UID/GID (fail-closed at startup), and the authority socket also
+//! authenticates the calling Principal from the peer credential.
 
 #[cfg(unix)]
 mod runtime_journal;
@@ -234,6 +237,11 @@ impl Args {
             uid: sandbox_peer_uid,
             gid: sandbox_peer_gid,
         };
+        // Fail-closed admission gate: every Adapter endpoint must be configured
+        // with at least one trusted peer UID/GID. Without this, the library
+        // default of `PeerCredentialExpectation::default()` (allow any peer)
+        // would silently disable UDS admission for that endpoint in production.
+        require_configured_adapter_peers(&hardware_adapters, &sandbox_adapter)?;
         Ok(Self {
             node_id,
             socket,
@@ -249,6 +257,31 @@ impl Args {
             adapter_poll_interval,
         })
     }
+}
+
+#[cfg(unix)]
+fn require_configured_adapter_peers(
+    hardware_adapters: &[cy_adapter_client::HardwareAdapterEndpoint],
+    sandbox_adapter: &cy_sandbox_client::SandboxAdapterEndpoint,
+) -> std::io::Result<()> {
+    for endpoint in hardware_adapters {
+        if !endpoint.peer_credentials.is_configured() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "hardware adapter '{}' requires at least one --hardware-adapter-peer-uid or --hardware-adapter-peer-gid",
+                    endpoint.adapter_id
+                ),
+            ));
+        }
+    }
+    if !sandbox_adapter.peer_credentials.is_configured() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sandbox adapter requires at least one --sandbox-adapter-peer-uid or --sandbox-adapter-peer-gid",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -371,4 +404,53 @@ fn prepare_socket_path(path: &std::path::Path) -> Result<(), std::io::Error> {
     }
     fs::remove_file(path)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::require_configured_adapter_peers;
+    use cy_adapter_client::{HardwareAdapterEndpoint, PeerCredentialExpectation};
+    use cy_sandbox_client::SandboxAdapterEndpoint;
+    use std::path::PathBuf;
+
+    fn hardware(id: &str) -> HardwareAdapterEndpoint {
+        HardwareAdapterEndpoint::new(id, PathBuf::from("/run/cyrene/test-hardware.sock"))
+    }
+
+    fn sandbox() -> SandboxAdapterEndpoint {
+        SandboxAdapterEndpoint::new("sandboxd", PathBuf::from("/run/cyrene/test-sandbox.sock"))
+    }
+
+    #[test]
+    fn gate_rejects_unconfigured_hardware_adapter() {
+        let hw = hardware("nvidia");
+        let sb = sandbox();
+        assert!(require_configured_adapter_peers(&[hw], &sb).is_err());
+    }
+
+    #[test]
+    fn gate_rejects_unconfigured_sandbox_adapter() {
+        let mut hw = hardware("nvidia");
+        hw.peer_credentials = PeerCredentialExpectation {
+            uid: Some(0),
+            gid: None,
+        };
+        let sb = sandbox();
+        assert!(require_configured_adapter_peers(&[hw], &sb).is_err());
+    }
+
+    #[test]
+    fn gate_accepts_fully_configured_endpoints() {
+        let mut hw = hardware("nvidia");
+        hw.peer_credentials = PeerCredentialExpectation {
+            uid: Some(0),
+            gid: None,
+        };
+        let mut sb = sandbox();
+        sb.peer_credentials = PeerCredentialExpectation {
+            uid: Some(0),
+            gid: None,
+        };
+        assert!(require_configured_adapter_peers(&[hw], &sb).is_ok());
+    }
 }
