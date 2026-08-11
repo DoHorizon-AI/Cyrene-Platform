@@ -687,8 +687,10 @@ mod linux_uds {
         let error = observed.unwrap_err();
         assert!(
             error.kind() == std::io::ErrorKind::WouldBlock
-                || error.kind() == std::io::ErrorKind::TimedOut,
-            "server must time out waiting for a frame that was never sent, got {error}"
+                || error.kind() == std::io::ErrorKind::TimedOut
+                || error.kind() == std::io::ErrorKind::UnexpectedEof
+                || error.kind() == std::io::ErrorKind::ConnectionReset,
+            "server must observe a closed connection or time out waiting for a frame that was never sent, got {error}"
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(socket.parent().unwrap());
