@@ -96,7 +96,14 @@ object WorkerControlTck {
         var fence = 0
         var shutdownId = ""
         trace.split(";").forEach { raw ->
-            val (direction, kind, rawWorker, rawLease, rawFence, identifier) = raw.split(":", limit = 6)
+            val fields = raw.split(":", limit = 6)
+            check(fields.size == 6) { "invalid semantic trace frame: $raw" }
+            val direction = fields[0]
+            val kind = fields[1]
+            val rawWorker = fields[2]
+            val rawLease = fields[3]
+            val rawFence = fields[4]
+            val identifier = fields[5]
             val current = Triple(rawWorker.toInt(), rawLease.toInt(), rawFence.toInt())
             val expected = Triple(workerGeneration, leaseGeneration, fence)
             when (state) {

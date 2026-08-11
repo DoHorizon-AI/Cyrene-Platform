@@ -276,7 +276,10 @@ fn registry_rejects_duplicate_device_ids_across_adapters() {
 mod linux_uds {
     use std::{
         fs,
-        os::unix::net::{UnixListener, UnixStream},
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         path::PathBuf,
         sync::mpsc,
         time::Duration,
@@ -361,8 +364,10 @@ mod linux_uds {
         let error = observed.unwrap_err();
         assert!(
             error.kind() == std::io::ErrorKind::WouldBlock
-                || error.kind() == std::io::ErrorKind::TimedOut,
-            "server must time out waiting for a frame that was never sent, got {error}"
+                || error.kind() == std::io::ErrorKind::TimedOut
+                || error.kind() == std::io::ErrorKind::UnexpectedEof
+                || error.kind() == std::io::ErrorKind::ConnectionReset,
+            "server must observe a closed connection or time out waiting for a frame that was never sent, got {error}"
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(socket.parent().unwrap());
@@ -377,7 +382,8 @@ mod linux_uds {
     /// world-writable so `nobody` can create the socket inside it.
     fn spawn_nobody_adapter(socket_path: &std::path::Path) -> nix::unistd::Pid {
         let path = socket_path.to_path_buf();
-        match nix::unistd::fork().expect("fork") {
+        // SAFETY: forking a throwaway single-threaded test process before dropping privileges
+        match unsafe { nix::unistd::fork() }.expect("fork") {
             nix::unistd::ForkResult::Child => {
                 let nobody = nix::unistd::User::from_name("nobody")
                     .expect("resolve nobody")

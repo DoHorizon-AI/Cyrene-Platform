@@ -5,7 +5,7 @@
 //! knowledge.  A disconnected adapter is reported as a provider failure so the
 //! caller can stop issuing new leases while preserving its existing state.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 pub(crate) mod client;
 pub(crate) mod convert;

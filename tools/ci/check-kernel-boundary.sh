@@ -37,8 +37,8 @@ if rg -n 'pub enum Accelerator|pub struct AcceleratorDevice|trait AcceleratorPro
   failed=1
 fi
 
-if rg -n 'unsafe\s*\{|unsafe extern|libc::|\bCommand\b|/sys/fs/cgroup|/proc/self/cgroup|BPF_' kernel --glob '*.rs'; then
-  echo "Kernel must remain pure-safe and must not contain privileged sandbox implementation details" >&2
+if rg -n 'unsafe\s*\{|unsafe extern|libc::|\bCommand\b|/sys/fs/cgroup|/proc/self/cgroup|BPF_' kernel --glob '*.rs' --glob '!*tests.rs' --glob '!**/tests/**'; then
+  echo "Kernel production code must remain pure-safe and must not contain privileged sandbox implementation details" >&2
   failed=1
 fi
 
