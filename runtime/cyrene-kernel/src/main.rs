@@ -21,11 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
 
     use cy_installation_resolver::FilesystemInstalledPluginResolver;
-    use cy_kernel_daemon::{KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig};
+    use cy_kernel_daemon::{
+        peer_cred::{inject_authority_principal, PeerCredAccept},
+        KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig,
+    };
+    use cy_proto::core_v1;
     use cy_resource_manager::InMemoryResourceManager;
     use cy_sandbox_client::UdsSandboxAdapterClient;
     use runtime_journal::FileRuntimeJournal;
-    use tokio::net::UnixListener;
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::transport::Server;
 
@@ -79,9 +82,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authority_listener = bind_socket(&args.socket)?;
     let worker_control_listener = bind_socket(&args.worker_control_socket)?;
     let authority_server = Server::builder()
-        .add_service(adapter.authority_server())
+        .add_service(
+            core_v1::kernel_authority_service_server::KernelAuthorityServiceServer::with_interceptor(
+                adapter.clone(),
+                inject_authority_principal,
+            ),
+        )
         .add_service(adapter.server())
-        .serve_with_incoming(UnixListenerStream::new(authority_listener));
+        .serve_with_incoming(PeerCredAccept::new(UnixListenerStream::new(
+            authority_listener,
+        )));
     // The Worker socket exposes only the constrained control/liveness service.
     // It never registers KernelAuthorityService, so a Worker cannot call lease
     // or Endpoint authority actions merely because it can acknowledge shutdown.

@@ -161,11 +161,9 @@ mod linux_uds {
     /// the ground truth the admission check compares against.
     fn own_credentials() -> (u32, u32) {
         let (stream, _peer) = UnixStream::pair().unwrap();
-        let credentials = nix::sys::socket::getsockopt(
-            &stream,
-            nix::sys::socket::sockopt::PeerCredentials,
-        )
-        .unwrap();
+        let credentials =
+            nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials)
+                .unwrap();
         (credentials.uid(), credentials.gid())
     }
 
