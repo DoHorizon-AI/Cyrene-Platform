@@ -545,7 +545,11 @@ mod tests {
             .into_iter()
             .filter_map(|worker| worker.join().unwrap().ok())
             .collect::<Vec<_>>();
-        assert_eq!(successful.len(), 64, "all concurrent reserves should succeed");
+        assert_eq!(
+            successful.len(),
+            64,
+            "all concurrent reserves should succeed"
+        );
         let mut fences = successful
             .iter()
             .map(|lease| lease.fence_token)

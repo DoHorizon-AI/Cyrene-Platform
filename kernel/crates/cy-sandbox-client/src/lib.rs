@@ -597,7 +597,9 @@ mod linux_uds {
     use cy_proto::sandbox_v1;
     use prost::Message;
 
-    use crate::{exchange, read_frame, write_frame, SandboxAdapterEndpoint, UdsSandboxAdapterClient};
+    use crate::{
+        exchange, read_frame, write_frame, SandboxAdapterEndpoint, UdsSandboxAdapterClient,
+    };
 
     const ADAPTER_ID: &str = "sandboxd-test";
 
@@ -605,11 +607,9 @@ mod linux_uds {
     /// the ground truth both sides compare against.
     fn own_peer_credentials() -> PeerCredentialExpectation {
         let (stream, _peer) = UnixStream::pair().unwrap();
-        let credentials = nix::sys::socket::getsockopt(
-            &stream,
-            nix::sys::socket::sockopt::PeerCredentials,
-        )
-        .unwrap();
+        let credentials =
+            nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials)
+                .unwrap();
         PeerCredentialExpectation {
             uid: Some(credentials.uid()),
             gid: Some(credentials.gid()),

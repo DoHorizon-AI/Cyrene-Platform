@@ -291,11 +291,9 @@ mod linux_uds {
     /// the ground truth the Kernel-side check compares against.
     fn own_peer_credentials() -> PeerCredentialExpectation {
         let (stream, _peer) = UnixStream::pair().unwrap();
-        let credentials = nix::sys::socket::getsockopt(
-            &stream,
-            nix::sys::socket::sockopt::PeerCredentials,
-        )
-        .unwrap();
+        let credentials =
+            nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials)
+                .unwrap();
         PeerCredentialExpectation {
             uid: Some(credentials.uid()),
             gid: Some(credentials.gid()),
