@@ -83,3 +83,14 @@ Production servers are headless. Plugins may provide micro-frontend assets. A
 thin cross-platform shell renders those assets and talks to the framework over
 public APIs. Navigator is the first-party implementation of that shell, not a
 kernel component.
+
+## Kernel document layers
+
+- [Kernel design goals](architecture/kernel-design-goals.md): durable design
+  direction and boundaries.
+- [Kernel semantic contract v1](contracts/kernel-semantic-contract-v1.md): the
+  sole normative definition of current v1 semantics.
+- [Kernel execution goals](operations/kernel-execution-goals.md): active P2
+  implementation and Linux acceptance work.
+- [Kernel runtime baseline](operations/kernel-runtime.md): deployment and
+  operating guidance.
