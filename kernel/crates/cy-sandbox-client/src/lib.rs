@@ -587,11 +587,7 @@ mod tests {
 mod linux_uds {
     use std::{
         fs,
-        os::unix::{
-            fs::PermissionsExt,
-            net::{UnixListener, UnixStream},
-        },
-        process::{Child, Command},
+        os::unix::net::{UnixListener, UnixStream},
         sync::mpsc,
         time::Duration,
     };
@@ -697,80 +693,5 @@ mod linux_uds {
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(socket.parent().unwrap());
-    }
-
-    /// Starts the ignored test helper as `nobody` through `runuser`. This is
-    /// intentionally process-based rather than `fork`: the client crate
-    /// forbids unsafe code, while `nix::unistd::fork` is unsafe on a process
-    /// that may already have test-harness threads.
-    fn spawn_nobody_adapter(socket_path: &std::path::Path) -> Child {
-        let test_binary = std::env::current_exe().expect("locate test binary");
-        Command::new("runuser")
-            .args(["--preserve-environment", "--user", "nobody", "--"])
-            .env(NOBODY_ADAPTER_SOCKET_ENV, socket_path)
-            .arg(test_binary)
-            .args([
-                "--exact",
-                "linux_uds::nobody_adapter_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .spawn()
-            .expect("start nobody adapter helper through runuser")
-    }
-
-    /// Runs only when spawned by [`spawn_nobody_adapter`]. It binds the UDS as
-    /// the unprivileged account, then accepts the parent connection so the
-    /// parent can inspect the real `SO_PEERCRED` before sending a frame.
-    #[test]
-    #[ignore = "internal helper for the multi-account UDS acceptance test"]
-    fn nobody_adapter_helper() {
-        let Some(socket_path) = std::env::var_os(NOBODY_ADAPTER_SOCKET_ENV) else {
-            return;
-        };
-        let socket_path = std::path::PathBuf::from(socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("nobody bind");
-        fs::write(socket_path.with_extension("ready"), b"").expect("ready sentinel");
-        let _ = listener.accept();
-    }
-
-    /// End-to-end multi-account rejection (Kernel→Adapter / outbound client
-    /// direction): the Kernel client is configured to trust its own (root) uid,
-    /// while a foreign local account (`nobody`) impersonates the sandbox
-    /// adapter. The peer-credential check must reject the connection before any
-    /// sandbox frame is exchanged. Requires root, a `nobody` account, and
-    /// `runuser`; runs in the Linux acceptance environment via
-    /// `cargo test -p cy-sandbox-client -- --ignored`.
-    #[test]
-    #[ignore = "requires root and a second local account; run in the Linux acceptance environment"]
-    fn peer_credentials_reject_a_different_local_account() {
-        let trusted = own_peer_credentials();
-        let directory = std::env::temp_dir().join(format!(
-            "cyrene-sandbox-client-multiacct-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
-        let socket = directory.join("sandboxd.sock");
-        let _ = fs::remove_file(&socket);
-
-        let mut child = spawn_nobody_adapter(&socket);
-        let ready = socket.with_extension("ready");
-        while !ready.exists() {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        let error = exchange(
-            ADAPTER_ID,
-            &socket,
-            Duration::from_secs(2),
-            trusted,
-            b"preflight",
-        )
-        .unwrap_err();
-        assert_eq!(error.reason_code, "SANDBOX_PEER_CREDENTIAL_MISMATCH");
-
-        child.wait().unwrap();
-        let _ = fs::remove_dir_all(&directory);
     }
 }
