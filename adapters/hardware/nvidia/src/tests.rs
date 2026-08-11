@@ -132,13 +132,55 @@ mod linux_uds {
         let _ = fs::remove_dir_all(socket.parent().unwrap());
     }
 
-    /// A true multi-account end-to-end run (Kernel and adapter owned by
-    /// different local users, e.g. setuid to `nobody`) needs root and a
-    /// dedicated Linux acceptance host. It is exercised there via
+    /// Forks a throwaway Kernel-side client that drops to the unprivileged
+    /// `nobody` account and connects to `socket_path`, sending one raw frame.
+    /// The adapter server (this test's parent) verifies the connected peer;
+    /// because the client runs as `nobody`, SO_PEERCRED reports a uid that
+    /// differs from the trusted (root) expectation, so admission must fail
+    /// closed.
+    fn spawn_nobody_client(socket_path: &std::path::Path) -> nix::unistd::Pid {
+        let path = socket_path.to_path_buf();
+        match nix::unistd::fork().expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let nobody = nix::unistd::User::from_name("nobody")
+                    .expect("resolve nobody")
+                    .expect("nobody must exist on the acceptance host");
+                nix::unistd::setgid(nobody.gid).expect("setgid(nobody)");
+                nix::unistd::setuid(nobody.uid).expect("setuid(nobody)");
+                let mut client = UnixStream::connect(&path).expect("nobody connect");
+                let _ = write_frame(&mut client, b"inventory");
+                std::process::exit(0);
+            }
+            nix::unistd::ForkResult::Parent { child } => child,
+        }
+    }
+
+    /// End-to-end multi-account rejection (adapter / inbound server direction):
+    /// the NVIDIA adapter is configured to trust the Kernel client's own (root)
+    /// uid, while a foreign local account (`nobody`) opens the socket. The
+    /// server-side peer check must reject the connection before any frame is
+    /// processed. Requires root and a `nobody` account; runs in the Linux
+    /// acceptance environment via
     /// `cargo test -p cyrene-nvidia-adapter -- --ignored`.
     #[test]
     #[ignore = "requires root and a second local account; run in the Linux acceptance environment"]
     fn peer_credentials_reject_a_different_local_account() {
-        unimplemented!("covered by the Linux acceptance environment, see doc comment")
+        let socket = socket_path("multiacct");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (trusted_uid, _trusted_gid) = own_credentials();
+
+        let child = spawn_nobody_client(&socket);
+        let (stream, _) = listener.accept().unwrap();
+        // The connecting peer is `nobody`; the trusted Kernel uid is our own
+        // (root) identity, so the admission check must fail closed.
+        let verdict = verify_client_peer(&stream, Some(trusted_uid), None);
+        assert!(verdict.is_err(), "a foreign local account must be rejected");
+        assert_eq!(
+            verdict.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        nix::sys::wait::waitpid(child, None).unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
     }
 }

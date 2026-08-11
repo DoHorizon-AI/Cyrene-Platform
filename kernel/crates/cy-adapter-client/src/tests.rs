@@ -370,13 +370,68 @@ mod linux_uds {
         let _ = fs::remove_dir_all(socket.parent().unwrap());
     }
 
-    /// A true multi-account end-to-end run (Kernel process and adapter owned
-    /// by different local users, e.g. setuid to `nobody`) needs root and a
-    /// dedicated Linux acceptance host. It is exercised there via
+    /// Forks a throwaway "hardware adapter" that runs as the unprivileged
+    /// `nobody` account, binds `socket_path`, and accepts one connection. The
+    /// Kernel-side client (this test's parent) verifies the connected peer;
+    /// because the listener is owned by `nobody`, SO_PEERCRED reports a uid
+    /// that differs from the trusted (root) expectation, so admission must
+    /// fail closed. The directory backing `socket_path` must already be
+    /// world-writable so `nobody` can create the socket inside it.
+    fn spawn_nobody_adapter(socket_path: &std::path::Path) -> nix::unistd::Pid {
+        let path = socket_path.to_path_buf();
+        match nix::unistd::fork().expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let nobody = nix::unistd::User::from_name("nobody")
+                    .expect("resolve nobody")
+                    .expect("nobody must exist on the acceptance host");
+                nix::unistd::setgid(nobody.gid).expect("setgid(nobody)");
+                nix::unistd::setuid(nobody.uid).expect("setuid(nobody)");
+                let listener = UnixListener::bind(&path).expect("nobody bind");
+                fs::write(path.with_extension("ready"), b"").expect("ready sentinel");
+                let _ = listener.accept();
+                std::process::exit(0);
+            }
+            nix::unistd::ForkResult::Parent { child } => child,
+        }
+    }
+
+    /// End-to-end multi-account rejection (Kernel→Hardware adapter / outbound
+    /// client direction): the Kernel client is configured to trust its own
+    /// (root) uid, while a foreign local account (`nobody`) impersonates the
+    /// hardware adapter. The peer-credential check must reject the connection
+    /// before any adapter frame is exchanged. Requires root and a `nobody`
+    /// account; runs in the Linux acceptance environment via
     /// `cargo test -p cy-adapter-client -- --ignored`.
     #[test]
     #[ignore = "requires root and a second local account; run in the Linux acceptance environment"]
     fn peer_credentials_reject_a_different_local_account() {
-        unimplemented!("covered by the Linux acceptance environment, see doc comment")
+        let trusted = own_peer_credentials();
+        let directory = std::env::temp_dir().join(format!(
+            "cyrene-adapter-client-multiacct-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let socket = directory.join("adapter.sock");
+        let _ = fs::remove_file(&socket);
+
+        let child = spawn_nobody_adapter(&socket);
+        let ready = socket.with_extension("ready");
+        while !ready.exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let error = exchange(
+            "test-adapter",
+            &socket,
+            Duration::from_secs(2),
+            trusted,
+            b"ping",
+        )
+        .unwrap_err();
+        assert_eq!(error.reason_code, "ADAPTER_PEER_CREDENTIAL_MISMATCH");
+
+        nix::sys::wait::waitpid(child, None).unwrap();
+        let _ = fs::remove_dir_all(&directory);
     }
 }
