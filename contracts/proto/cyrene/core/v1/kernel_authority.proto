@@ -21,10 +21,23 @@ service KernelAuthorityService {
   rpc ReleaseLease(ReleaseSemanticLeaseRequest)
       returns (cyrene.semantic.v1.Lease);
 
+  rpc StartWorker(StartWorkerRequest) returns (cyrene.semantic.v1.Operation);
+  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (cyrene.semantic.v1.Worker);
+  rpc StopWorker(StopWorkerRequest) returns (cyrene.semantic.v1.Operation);
+
+  rpc CreateOperation(CreateOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+  rpc ReportOperation(ReportOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+  rpc CancelOperation(CancelSemanticOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+
   rpc PublishEndpoint(PublishEndpointRequest) returns (cyrene.semantic.v1.Endpoint);
   rpc AuthorizeEndpoint(AuthorizeEndpointRequest)
       returns (cyrene.semantic.v1.EndpointGrant);
   rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
+  rpc SubscribeEvents(SubscribeEventsRequest)
+      returns (cyrene.semantic.v1.EventPage);
 }
 
 // A call proves that the client selected a compatible semantic revision. It
@@ -59,6 +72,41 @@ message ReleaseSemanticLeaseRequest {
   uint64 fence_token = 3;
 }
 
+message StartWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Worker worker = 2;
+}
+
+message HeartbeatWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+}
+
+message StopWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+  google.protobuf.Duration grace_period = 5;
+}
+
+message CreateOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Operation operation = 2;
+}
+
+message ReportOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Operation operation = 2;
+}
+
+message CancelSemanticOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity operation = 2;
+}
+
 message PublishEndpointRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.Endpoint endpoint = 2;
@@ -72,4 +120,10 @@ message AuthorizeEndpointRequest {
 message RevokeEndpointRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.Identity grant = 2;
+}
+
+message SubscribeEventsRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EventCursor cursor = 2;
+  uint32 page_size = 3;
 }

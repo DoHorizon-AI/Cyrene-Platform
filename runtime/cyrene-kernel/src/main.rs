@@ -16,11 +16,7 @@ fn main() {
 #[cfg(unix)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::{
-        fs,
-        os::unix::{fs::PermissionsExt, net::UnixListener as StdUnixListener},
-        sync::Arc,
-    };
+    use std::sync::Arc;
 
     use cy_installation_resolver::FilesystemInstalledPluginResolver;
     use cy_kernel_daemon::{KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig};
@@ -60,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let heartbeat = WorkerHeartbeatConfig {
-        socket_path: args.socket.clone(),
+        socket_path: args.worker_control_socket.clone(),
         interval: args.heartbeat_interval,
         timeout: args.heartbeat_timeout,
         graceful_stop: args.heartbeat_grace,
@@ -78,17 +74,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _watchdog = adapter.start_watchdog();
     let _adapter_monitor = adapter.start_adapter_monitor();
 
-    prepare_socket_path(&args.socket)?;
-    let listener = StdUnixListener::bind(&args.socket)?;
-    listener.set_nonblocking(true)?;
-    let listener = UnixListener::from_std(listener)?;
-    fs::set_permissions(&args.socket, fs::Permissions::from_mode(0o660))?;
-    Server::builder()
+    let authority_listener = bind_socket(&args.socket)?;
+    let worker_control_listener = bind_socket(&args.worker_control_socket)?;
+    let authority_server = Server::builder()
         .add_service(adapter.authority_server())
         .add_service(adapter.server())
+        .serve_with_incoming(UnixListenerStream::new(authority_listener));
+    // The Worker socket exposes only the constrained control/liveness service.
+    // It never registers KernelAuthorityService, so a Worker cannot call lease
+    // or Endpoint authority actions merely because it can acknowledge shutdown.
+    let worker_control_server = Server::builder()
         .add_service(adapter.lifecycle_server())
-        .serve_with_incoming(UnixListenerStream::new(listener))
-        .await?;
+        .serve_with_incoming(UnixListenerStream::new(worker_control_listener));
+    tokio::try_join!(authority_server, worker_control_server)?;
     Ok(())
 }
 
@@ -97,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct Args {
     node_id: String,
     socket: std::path::PathBuf,
+    worker_control_socket: std::path::PathBuf,
     hardware_adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
     sandbox_adapter: cy_sandbox_client::SandboxAdapterEndpoint,
     installations_root: std::path::PathBuf,
@@ -115,6 +114,7 @@ impl Args {
         let mut values = env::args().skip(1);
         let mut node_id = env::var("CYRENE_NODE_ID").unwrap_or_else(|_| "cyrene-node".to_string());
         let mut socket = PathBuf::from("/run/cyrene/kernel.sock");
+        let mut worker_control_socket = PathBuf::from("/run/cyrene/worker.sock");
         let mut hardware_adapters = Vec::new();
         let mut sandbox_adapter = None;
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
@@ -138,6 +138,7 @@ impl Args {
             match argument.as_str() {
                 "--node-id" => node_id = value()?,
                 "--socket" => socket = PathBuf::from(value()?),
+                "--worker-control-socket" => worker_control_socket = PathBuf::from(value()?),
                 "--hardware-adapter" => hardware_adapters.push(parse_hardware_adapter(&value()?)?),
                 "--hardware-adapter-peer-uid" => {
                     let (adapter_id, uid) = parse_adapter_identity_value(&value()?)?;
@@ -155,7 +156,7 @@ impl Args {
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -180,6 +181,16 @@ impl Args {
             )
             .into());
         }
+        if !socket.is_absolute()
+            || !worker_control_socket.is_absolute()
+            || socket == worker_control_socket
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "authority and Worker-control socket paths must be distinct absolute paths",
+            )
+            .into());
+        }
         for endpoint in &mut hardware_adapters {
             if let Some(credentials) = adapter_peer_credentials.remove(&endpoint.adapter_id) {
                 endpoint.peer_credentials = credentials;
@@ -201,6 +212,7 @@ impl Args {
         Ok(Self {
             node_id,
             socket,
+            worker_control_socket,
             hardware_adapters,
             sandbox_adapter,
             installations_root,
@@ -212,6 +224,19 @@ impl Args {
             adapter_poll_interval,
         })
     }
+}
+
+#[cfg(unix)]
+fn bind_socket(path: &std::path::Path) -> Result<tokio::net::UnixListener, std::io::Error> {
+    use std::{
+        fs,
+        os::unix::{fs::PermissionsExt, net::UnixListener as StdUnixListener},
+    };
+    prepare_socket_path(path)?;
+    let listener = StdUnixListener::bind(path)?;
+    listener.set_nonblocking(true)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
+    tokio::net::UnixListener::from_std(listener)
 }
 
 #[cfg(unix)]

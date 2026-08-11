@@ -134,6 +134,85 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
             },
         })
     }
+
+    fn resolve_worker_launch_plan(
+        &self,
+        worker: &cy_kernel_api::semantic::Worker,
+    ) -> Result<ResolvedLaunchPlan, ProviderError> {
+        // The execution reference format is owned by this outer installation
+        // adapter. Kernel code treats it as opaque and only sees the verified
+        // ResolvedLaunchPlan returned below.
+        let (installation_name, manifest_digest) =
+            worker.execution_ref.split_once('@').ok_or_else(|| {
+                ProviderError::new(
+                    "filesystem-plugin-resolver",
+                    "EXECUTION_REFERENCE_INVALID",
+                    "expected installation-name@sha256:digest",
+                )
+            })?;
+        if !safe_segment(installation_name) || !sha256_digest(manifest_digest) {
+            return Err(ProviderError::new(
+                "filesystem-plugin-resolver",
+                "EXECUTION_REFERENCE_INVALID",
+                "execution reference has an unsafe installation name or digest",
+            ));
+        }
+        let root = self.root.canonicalize().map_err(|error| {
+            ProviderError::new(
+                "filesystem-plugin-resolver",
+                "INSTALLATION_ROOT_UNAVAILABLE",
+                &error.to_string(),
+            )
+        })?;
+        let installation_path = root
+            .join(installation_name)
+            .canonicalize()
+            .map_err(|error| {
+                ProviderError::new(
+                    "filesystem-plugin-resolver",
+                    "INSTALLATION_NOT_FOUND",
+                    &error.to_string(),
+                )
+            })?;
+        if !installation_path.starts_with(&root) {
+            return Err(ProviderError::new(
+                "filesystem-plugin-resolver",
+                "INSTALLATION_OUTSIDE_ROOT",
+                &installation_path.display().to_string(),
+            ));
+        }
+        let record =
+            fs::read_to_string(installation_path.join("launch.json")).map_err(|error| {
+                ProviderError::new(
+                    "filesystem-plugin-resolver",
+                    "INSTALLATION_RECORD_MISSING",
+                    &error.to_string(),
+                )
+            })?;
+        let record: InstalledLaunchRecord = serde_json::from_str(&record).map_err(|error| {
+            ProviderError::new(
+                "filesystem-plugin-resolver",
+                "INSTALLATION_RECORD_INVALID",
+                &error.to_string(),
+            )
+        })?;
+        let installation = VerifiedInstallation {
+            installation_name: record.installation_name.clone(),
+            manifest_digest: record.manifest_digest.clone(),
+            artifact_digest: record.artifact_digest.clone(),
+            verified_signature_identity: record.verified_signature_identity.clone(),
+        };
+        if installation.installation_name != installation_name
+            || installation.manifest_digest != manifest_digest
+        {
+            return Err(ProviderError::new(
+                "filesystem-plugin-resolver",
+                "EXECUTION_REFERENCE_MISMATCH",
+                "execution reference does not bind the verified installation record",
+            ));
+        }
+        self.resolve_launch_plan(&installation, &worker.identity.id)
+    }
 }
 
 fn validate_installation_record(
@@ -268,5 +347,41 @@ mod tests {
             .resolve_launch_plan(&installation(), "instance-1")
             .unwrap_err();
         assert_eq!(error.reason_code, "INSTALLATION_VERIFICATION_INVALID");
+    }
+
+    #[test]
+    fn resolves_worker_only_from_a_digest_bound_execution_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        write_record(
+            directory.path(),
+            "https://issuer.example/workload/demo",
+            DIGEST,
+        );
+        let worker = cy_kernel_api::semantic::Worker {
+            identity: cy_kernel_api::semantic::Identity {
+                id: "worker-1".to_string(),
+                generation: 1,
+            },
+            principal: cy_kernel_api::semantic::Identity {
+                id: "principal-1".to_string(),
+                generation: 1,
+            },
+            provider: cy_kernel_api::semantic::Identity {
+                id: "provider-1".to_string(),
+                generation: 1,
+            },
+            lease: cy_kernel_api::semantic::Identity {
+                id: "lease-1".to_string(),
+                generation: 1,
+            },
+            state: cy_kernel_api::semantic::WorkerState::Starting,
+            execution_ref: format!("demo-plugin@{DIGEST}"),
+            limits: BTreeMap::new(),
+        };
+        let resolved = FilesystemInstalledPluginResolver::new(directory.path())
+            .resolve_worker_launch_plan(&worker)
+            .unwrap();
+        assert_eq!(resolved.installation.manifest_digest, DIGEST);
+        assert_eq!(resolved.plan.instance_name, "worker-1");
     }
 }

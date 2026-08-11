@@ -328,6 +328,16 @@ authority and Worker-control sockets are separated and Principal injection is
 fully enforced, filesystem access to the local UDS is the provisional local
 admission boundary rather than a claim of complete authorization conformance.
 
+The canonical projection now also carries semantic `Worker`, `Operation` and
+`EventPage` actions. `StartWorker` accepts only an opaque execution reference;
+the out-of-Kernel resolver proves the digest-bound installation before returning
+a launch plan. `SubscribeEvents` is a bounded pull projection of
+`EventCursor → EventPage`: it returns typed `CURRENT`, `GAP` or
+`SOURCE_CHANGED` and never reuses the legacy `resume_token` or LRO event
+envelope. The runtime serves authority actions and Worker-control compatibility
+actions on distinct UDS paths so a Worker control client is not registered on
+the authority endpoint.
+
 Changing an existing field meaning, accepted input, authority decision,
 transition, reason code or bound requires semantic v2. Additive optional
 projection fields are v1-compatible only when an older implementation can

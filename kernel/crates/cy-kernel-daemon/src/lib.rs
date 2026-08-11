@@ -259,6 +259,7 @@ impl Default for WorkerHeartbeatConfig {
 struct ManagedProcess {
     instance: SandboxedProcess,
     lease: Option<core_v1::ResourceLeaseRef>,
+    semantic_worker: Option<semantic::Worker>,
     plugin: core_v1::InstalledPluginRef,
     generation: u64,
     accepted_sequence: u64,
@@ -294,9 +295,12 @@ pub struct KernelServiceAdapter {
     operations: Arc<Mutex<HashMap<String, core_v1::Operation>>>,
     operation_events: Arc<Mutex<VecDeque<core_v1::OperationEvent>>>,
     operation_event_sender: broadcast::Sender<core_v1::OperationEvent>,
+    semantic_operations: Arc<Mutex<BTreeMap<String, semantic::Operation>>>,
+    semantic_events: Arc<Mutex<VecDeque<semantic::Event>>>,
     endpoints: Arc<Mutex<BTreeMap<String, semantic::Endpoint>>>,
     endpoint_grants: Arc<Mutex<BTreeMap<String, semantic::EndpointGrant>>>,
     next_event_sequence: Arc<AtomicU64>,
+    next_semantic_event_sequence: Arc<AtomicU64>,
     adapter_available: Arc<AtomicBool>,
     adapter_poll_interval: Duration,
     heartbeat: WorkerHeartbeatConfig,
@@ -316,9 +320,14 @@ impl KernelServiceAdapter {
                 OPERATION_EVENT_HISTORY_CAPACITY,
             ))),
             operation_event_sender,
+            semantic_operations: Arc::new(Mutex::new(BTreeMap::new())),
+            semantic_events: Arc::new(Mutex::new(VecDeque::with_capacity(
+                OPERATION_EVENT_HISTORY_CAPACITY,
+            ))),
             endpoints: Arc::new(Mutex::new(BTreeMap::new())),
             endpoint_grants: Arc::new(Mutex::new(BTreeMap::new())),
             next_event_sequence: Arc::new(AtomicU64::new(1)),
+            next_semantic_event_sequence: Arc::new(AtomicU64::new(1)),
             adapter_available: Arc::new(AtomicBool::new(true)),
             adapter_poll_interval: Duration::from_secs(5),
             heartbeat: WorkerHeartbeatConfig::default(),
@@ -428,6 +437,9 @@ impl KernelServiceAdapter {
         reason_code: impl Into<String>,
         summary: impl Into<String>,
     ) {
+        let target_resource_name = target_resource_name.into();
+        let reason_code = reason_code.into();
+        let summary = summary.into();
         self.publish_event(core_v1::OperationEvent {
             event_id: String::new(),
             resume_token: String::new(),
@@ -435,12 +447,21 @@ impl KernelServiceAdapter {
             operation: None,
             runtime_event: Some(core_v1::RuntimeEvent {
                 r#type: event_type as i32,
-                target_resource_name: target_resource_name.into(),
-                reason_code: reason_code.into(),
-                summary: summary.into(),
+                target_resource_name: target_resource_name.clone(),
+                reason_code: reason_code.clone(),
+                summary: summary.clone(),
                 observed_at: Some(now_timestamp()),
             }),
         });
+        self.publish_semantic_event(
+            semantic::Identity {
+                id: target_resource_name,
+                generation: 1,
+            },
+            runtime_event_kind(event_type),
+            "cyrene.runtime.v1",
+            format!("{reason_code}:{summary}").into_bytes(),
+        );
     }
 
     fn publish_event(&self, mut event: core_v1::OperationEvent) {
@@ -458,6 +479,86 @@ impl KernelServiceAdapter {
         history.push_back(event.clone());
         drop(history);
         let _ = self.operation_event_sender.send(event);
+    }
+
+    fn semantic_event_source(&self) -> semantic::Identity {
+        semantic::Identity {
+            id: format!("kernel/{}", self.daemon.node_id),
+            generation: self.daemon.node_epoch,
+        }
+    }
+
+    fn publish_semantic_event(
+        &self,
+        subject: semantic::Identity,
+        kind: impl Into<String>,
+        schema_id: impl Into<String>,
+        body: impl Into<Vec<u8>>,
+    ) {
+        let event = semantic::Event {
+            sequence: self
+                .next_semantic_event_sequence
+                .fetch_add(1, Ordering::Relaxed),
+            source: self.semantic_event_source(),
+            subject,
+            kind: kind.into(),
+            observed_at_unix_ms: now_unix_ms(),
+            schema_id: schema_id.into(),
+            body: body.into(),
+        };
+        if event.validate().is_err() {
+            return;
+        }
+        let mut history = self
+            .semantic_events
+            .lock()
+            .expect("semantic event history lock poisoned");
+        if history.len() == OPERATION_EVENT_HISTORY_CAPACITY {
+            history.pop_front();
+        }
+        history.push_back(event);
+    }
+
+    fn semantic_events_after(
+        &self,
+        cursor: &semantic::EventCursor,
+        limit: usize,
+    ) -> semantic::EventPage {
+        let source = self.semantic_event_source();
+        let history = self
+            .semantic_events
+            .lock()
+            .expect("semantic event history lock poisoned");
+        let oldest = history.front().map_or(0, |event| event.sequence);
+        let latest = history.back().map_or(0, |event| event.sequence);
+        let status = cursor.status_against(&source, oldest);
+        if status != semantic::ReplayStatus::Current {
+            return semantic::EventPage {
+                source,
+                status,
+                events: Vec::new(),
+                oldest_available_sequence: oldest,
+                latest_available_sequence: latest,
+                next_sequence: cursor.sequence,
+            };
+        }
+        let events = history
+            .iter()
+            .filter(|event| event.sequence > cursor.sequence)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_sequence = events
+            .last()
+            .map_or(cursor.sequence, |event| event.sequence);
+        semantic::EventPage {
+            source,
+            status,
+            events,
+            oldest_available_sequence: oldest,
+            latest_available_sequence: latest,
+            next_sequence,
+        }
     }
 
     fn record_runtime(
@@ -553,6 +654,23 @@ impl KernelServiceAdapter {
             updated_at: Some(timestamp),
             outcome: None,
         })
+    }
+
+    fn remember_semantic_operation(&self, operation: semantic::Operation) -> semantic::Operation {
+        self.semantic_operations
+            .lock()
+            .expect("semantic operation lock poisoned")
+            .insert(
+                semantic_identity_key(&operation.identity),
+                operation.clone(),
+            );
+        self.publish_semantic_event(
+            operation.identity.clone(),
+            semantic_operation_event_kind(operation.state),
+            "cyrene.operation.v1",
+            Vec::new(),
+        );
+        operation
     }
 
     fn publish_cleanup_events(&self, target: &str, report: &CleanupReport) {
@@ -1200,6 +1318,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 ManagedProcess {
                     instance,
                     lease: Some(lease_ref.clone()),
+                    semantic_worker: None,
                     plugin,
                     generation: lease_ref.fence_token,
                     accepted_sequence: 0,
@@ -1583,6 +1702,473 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         Ok(Response::new(to_semantic_proto_lease(&lease)))
     }
 
+    async fn start_worker(
+        &self,
+        request: Request<core_v1::StartWorkerRequest>,
+    ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let mut worker = semantic_worker_from_proto(
+            request
+                .worker
+                .ok_or_else(|| Status::invalid_argument("worker is required"))?,
+        )?;
+        if !matches!(
+            worker.state,
+            semantic::WorkerState::Registered | semantic::WorkerState::Starting
+        ) {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STATE_TRANSITION_INVALID",
+                "StartWorker requires REGISTERED or STARTING state",
+            ));
+        }
+        if self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .contains_key(&worker.identity.id)
+        {
+            return Err(semantic_status(
+                tonic::Code::AlreadyExists,
+                "WORKER_EXISTS",
+                "worker identity is already managed by this Kernel",
+            ));
+        }
+        let lease = self
+            .daemon
+            .lease(&worker.lease.id)
+            .map_err(provider_status)?;
+        if lease.generation != worker.lease.generation
+            || lease.holder != worker.identity
+            || lease.state != LeaseState::Active
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "LEASE_NOT_ACTIVE",
+                "worker does not hold the referenced active Lease incarnation",
+            ));
+        }
+        let binding = self
+            .daemon
+            .binding_for_lease(&lease)
+            .map_err(provider_status)?;
+        let resolved = self
+            .resolver
+            .resolve_worker_launch_plan(&worker)
+            .map_err(provider_status)?;
+        let mut plan = resolved.plan;
+        if plan.instance_name != worker.identity.id {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "EXECUTION_REFERENCE_MISMATCH",
+                "resolver returned a plan for another Worker identity",
+            ));
+        }
+        plan.limits = lease.limits.clone();
+        plan.environment = inject_heartbeat_environment(
+            plan.environment,
+            &self.heartbeat,
+            &worker.identity.id,
+            lease.fence_token,
+        )
+        .map_err(provider_status)?;
+        plan.environment = binding
+            .merge_environment(&plan.environment)
+            .map_err(provider_status)?;
+        let mut instance = SandboxedProcess::new(self.daemon.sandbox.clone(), plan, binding);
+        instance.start().map_err(provider_status)?;
+        worker.state = semantic::WorkerState::Starting;
+        let lease_ref = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.instances
+            .lock()
+            .expect("instance lock poisoned")
+            .insert(
+                worker.identity.id.clone(),
+                ManagedProcess {
+                    instance,
+                    lease: Some(lease_ref.clone()),
+                    semantic_worker: Some(worker.clone()),
+                    plugin: core_v1::InstalledPluginRef::default(),
+                    generation: lease.fence_token,
+                    accepted_sequence: 0,
+                    last_heartbeat: Instant::now(),
+                    last_heartbeat_at: None,
+                    runtime_state: core_v1::PluginRuntimeState::Starting as i32,
+                    health: None,
+                    restart_count: 0,
+                    watchdog_triggered: false,
+                    control: None,
+                    pending_shutdown: None,
+                },
+            );
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceLaunched,
+            Some(&worker.identity.id),
+            Some(&lease_ref),
+            "WORKER_LAUNCHED",
+        );
+        self.publish_semantic_event(
+            worker.identity.clone(),
+            "worker.starting",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+        let operation = semantic::Operation {
+            identity: semantic::Identity {
+                id: format!("operation/start/{}", worker.identity.id),
+                generation: worker.identity.generation,
+            },
+            owner: worker.principal.clone(),
+            executor: worker.provider.clone(),
+            kind: "worker.start".to_string(),
+            state: semantic::OperationState::Running,
+            deadline_unix_ms: None,
+            parent: None,
+            metadata: BTreeMap::from([("worker.id".to_string(), worker.identity.id.clone())]),
+        };
+        Ok(Response::new(to_semantic_proto_operation(
+            &self.remember_semantic_operation(operation),
+        )))
+    }
+
+    async fn heartbeat_worker(
+        &self,
+        request: Request<core_v1::HeartbeatWorkerRequest>,
+    ) -> Result<Response<semantic_v1::Worker>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let worker_identity = semantic_identity_from_proto(request.worker, "worker")?;
+        let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
+        let lease = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if lease.generation != lease_identity.generation
+            || lease.fence_token != request.fence_token
+            || lease.holder != worker_identity
+            || lease.state != LeaseState::Active
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "FENCE_MISMATCH",
+                "worker heartbeat no longer has active lease authority",
+            ));
+        }
+        let mut instances = self.instances.lock().expect("instance lock poisoned");
+        let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
+            semantic_status(
+                tonic::Code::NotFound,
+                "WORKER_NOT_FOUND",
+                "worker is not managed by this Kernel",
+            )
+        })?;
+        let worker = process.semantic_worker.as_mut().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::FailedPrecondition,
+                "WORKER_COMPATIBILITY_ONLY",
+                "legacy plugin process is not a semantic Worker",
+            )
+        })?;
+        if worker.identity != worker_identity || worker.lease != lease_identity {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STALE_GENERATION",
+                "worker identity or lease generation is stale",
+            ));
+        }
+        if !worker
+            .state
+            .can_transition_to(semantic::WorkerState::Running)
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STATE_TRANSITION_INVALID",
+                "worker cannot enter RUNNING from its current state",
+            ));
+        }
+        worker.state = semantic::WorkerState::Running;
+        process.last_heartbeat = Instant::now();
+        process.last_heartbeat_at = Some(now_timestamp());
+        let response = worker.clone();
+        drop(instances);
+        self.publish_semantic_event(
+            response.identity.clone(),
+            "worker.running",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+        Ok(Response::new(to_semantic_proto_worker(&response)))
+    }
+
+    async fn stop_worker(
+        &self,
+        request: Request<core_v1::StopWorkerRequest>,
+    ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let worker_identity = semantic_identity_from_proto(request.worker, "worker")?;
+        let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
+        let lease = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if lease.generation != lease_identity.generation
+            || lease.fence_token != request.fence_token
+            || lease.holder != worker_identity
+            || lease.state != LeaseState::Active
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "FENCE_MISMATCH",
+                "worker stop no longer has active lease authority",
+            ));
+        }
+        let grace_period = request
+            .grace_period
+            .map(proto_duration)
+            .transpose()?
+            .unwrap_or(self.heartbeat.graceful_stop);
+        let _acknowledged =
+            self.request_worker_shutdown(&worker_identity.id, "STOP_REQUESTED", false);
+        let (worker, report) = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
+                semantic_status(
+                    tonic::Code::NotFound,
+                    "WORKER_NOT_FOUND",
+                    "worker is not managed by this Kernel",
+                )
+            })?;
+            let worker = process.semantic_worker.as_mut().ok_or_else(|| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    "WORKER_COMPATIBILITY_ONLY",
+                    "legacy plugin process is not a semantic Worker",
+                )
+            })?;
+            if worker.identity != worker_identity || worker.lease != lease_identity {
+                return Err(semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    "STALE_GENERATION",
+                    "worker identity or lease generation is stale",
+                ));
+            }
+            worker.state = semantic::WorkerState::Draining;
+            let report = process
+                .instance
+                .stop(&cy_kernel_api::StopRequest {
+                    grace_period,
+                    immediate: false,
+                })
+                .map_err(provider_status)?
+                .clone();
+            worker.state = if report.complete {
+                semantic::WorkerState::Stopped
+            } else {
+                semantic::WorkerState::Failed
+            };
+            (worker.clone(), report)
+        };
+        self.publish_cleanup_events(&worker_identity.id, &report);
+        if report.complete {
+            self.daemon
+                .release(&lease_identity.id, request.fence_token)
+                .map_err(provider_status)?;
+            self.instances
+                .lock()
+                .expect("instance lock poisoned")
+                .remove(&worker_identity.id);
+        }
+        self.publish_semantic_event(
+            worker.identity.clone(),
+            if report.complete {
+                "worker.stopped"
+            } else {
+                "worker.failed"
+            },
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+        let operation = semantic::Operation {
+            identity: semantic::Identity {
+                id: format!("operation/stop/{}", worker.identity.id),
+                generation: worker.identity.generation,
+            },
+            owner: worker.principal,
+            executor: worker.provider,
+            kind: "worker.stop".to_string(),
+            state: if report.complete {
+                semantic::OperationState::Succeeded
+            } else {
+                semantic::OperationState::Failed
+            },
+            deadline_unix_ms: None,
+            parent: None,
+            metadata: BTreeMap::from([("worker.id".to_string(), worker.identity.id)]),
+        };
+        Ok(Response::new(to_semantic_proto_operation(
+            &self.remember_semantic_operation(operation),
+        )))
+    }
+
+    async fn create_operation(
+        &self,
+        request: Request<core_v1::CreateOperationRequest>,
+    ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let operation = semantic_operation_from_proto(
+            request
+                .operation
+                .ok_or_else(|| Status::invalid_argument("operation is required"))?,
+        )?;
+        if operation.state != semantic::OperationState::Created {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STATE_TRANSITION_INVALID",
+                "CreateOperation requires CREATED state",
+            ));
+        }
+        let key = semantic_identity_key(&operation.identity);
+        let mut operations = self
+            .semantic_operations
+            .lock()
+            .expect("semantic operation lock poisoned");
+        if let Some(existing) = operations.get(&key) {
+            if existing == &operation {
+                return Ok(Response::new(to_semantic_proto_operation(existing)));
+            }
+            return Err(semantic_status(
+                tonic::Code::AlreadyExists,
+                "OPERATION_EXISTS",
+                "an operation with this identity already exists",
+            ));
+        }
+        if operations.values().any(|existing| {
+            existing.identity.id == operation.identity.id
+                && existing.identity.generation > operation.identity.generation
+        }) {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STALE_GENERATION",
+                "operation identity generation is stale",
+            ));
+        }
+        operations.insert(key, operation.clone());
+        drop(operations);
+        self.publish_semantic_event(
+            operation.identity.clone(),
+            "operation.created",
+            "cyrene.operation.v1",
+            Vec::new(),
+        );
+        Ok(Response::new(to_semantic_proto_operation(&operation)))
+    }
+
+    async fn report_operation(
+        &self,
+        request: Request<core_v1::ReportOperationRequest>,
+    ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let reported = semantic_operation_from_proto(
+            request
+                .operation
+                .ok_or_else(|| Status::invalid_argument("operation is required"))?,
+        )?;
+        let key = semantic_identity_key(&reported.identity);
+        let mut operations = self
+            .semantic_operations
+            .lock()
+            .expect("semantic operation lock poisoned");
+        let current = operations.get(&key).cloned().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::NotFound,
+                "OPERATION_NOT_FOUND",
+                "operation is unknown",
+            )
+        })?;
+        if current.owner != reported.owner
+            || current.executor != reported.executor
+            || current.kind != reported.kind
+            || current.deadline_unix_ms != reported.deadline_unix_ms
+            || current.parent != reported.parent
+        {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "OPERATION_IMMUTABLE_FIELDS_CHANGED",
+                "operation report attempted to change immutable authority fields",
+            ));
+        }
+        if !current.state.can_transition_to(reported.state) {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "STATE_TRANSITION_INVALID",
+                "operation report is not an idempotent or forward transition",
+            ));
+        }
+        operations.insert(key, reported.clone());
+        drop(operations);
+        self.publish_semantic_event(
+            reported.identity.clone(),
+            semantic_operation_event_kind(reported.state),
+            "cyrene.operation.v1",
+            Vec::new(),
+        );
+        Ok(Response::new(to_semantic_proto_operation(&reported)))
+    }
+
+    async fn cancel_operation(
+        &self,
+        request: Request<core_v1::CancelSemanticOperationRequest>,
+    ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let identity = semantic_identity_from_proto(request.operation, "operation")?;
+        let key = semantic_identity_key(&identity);
+        let mut operations = self
+            .semantic_operations
+            .lock()
+            .expect("semantic operation lock poisoned");
+        let current = operations.get(&key).cloned().ok_or_else(|| {
+            semantic_status(
+                tonic::Code::NotFound,
+                "OPERATION_NOT_FOUND",
+                "operation is unknown",
+            )
+        })?;
+        let mut cancelled = current.clone();
+        if !matches!(
+            current.state,
+            semantic::OperationState::Cancelling | semantic::OperationState::Cancelled
+        ) {
+            if !current
+                .state
+                .can_transition_to(semantic::OperationState::Cancelling)
+            {
+                return Err(semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    "STATE_TRANSITION_INVALID",
+                    "operation cannot be cancelled from its current state",
+                ));
+            }
+            cancelled.state = semantic::OperationState::Cancelling;
+            operations.insert(key, cancelled.clone());
+        }
+        drop(operations);
+        self.publish_semantic_event(
+            cancelled.identity.clone(),
+            semantic_operation_event_kind(cancelled.state),
+            "cyrene.operation.v1",
+            Vec::new(),
+        );
+        Ok(Response::new(to_semantic_proto_operation(&cancelled)))
+    }
+
     async fn publish_endpoint(
         &self,
         request: Request<core_v1::PublishEndpointRequest>,
@@ -1599,7 +2185,8 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             .lock()
             .expect("instance lock poisoned")
             .get(&endpoint.owner.id)
-            .is_some_and(|process| process.generation == endpoint.owner.generation);
+            .and_then(|process| process.semantic_worker.as_ref())
+            .is_some_and(|worker| worker.identity == endpoint.owner);
         if !owner_is_managed {
             return Err(semantic_status(
                 tonic::Code::FailedPrecondition,
@@ -1695,6 +2282,26 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             .expect("endpoint grant lock poisoned")
             .remove(&semantic_identity_key(&grant));
         Ok(Response::new(()))
+    }
+
+    async fn subscribe_events(
+        &self,
+        request: Request<core_v1::SubscribeEventsRequest>,
+    ) -> Result<Response<semantic_v1::EventPage>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let cursor = semantic_event_cursor_from_proto(request.cursor)?;
+        let page_size = usize::try_from(request.page_size).unwrap_or(usize::MAX);
+        if page_size == 0 || page_size > OPERATION_EVENT_HISTORY_CAPACITY {
+            return Err(semantic_status(
+                tonic::Code::InvalidArgument,
+                "EVENT_PAGE_LIMIT_INVALID",
+                "event page_size must be in 1..=256",
+            ));
+        }
+        let page = self.semantic_events_after(&cursor, page_size);
+        debug_assert!(page.validate().is_ok());
+        Ok(Response::new(to_semantic_proto_event_page(&page)))
     }
 }
 
@@ -2135,6 +2742,232 @@ fn to_semantic_proto_endpoint_grant(grant: &semantic::EndpointGrant) -> semantic
         lease: Some(to_semantic_proto_identity(&grant.lease)),
         fence_token: grant.fence_token,
         expires_at: Some(timestamp_from_unix_ms(grant.expires_at_unix_ms)),
+    }
+}
+
+fn semantic_operation_from_proto(
+    operation: semantic_v1::Operation,
+) -> Result<semantic::Operation, Status> {
+    let state = semantic_v1::OperationState::try_from(operation.state).map_err(|_| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "UNKNOWN_ENUM_VALUE",
+            "operation state is unknown",
+        )
+    })?;
+    let state = match state {
+        semantic_v1::OperationState::Created => semantic::OperationState::Created,
+        semantic_v1::OperationState::Pending => semantic::OperationState::Pending,
+        semantic_v1::OperationState::Running => semantic::OperationState::Running,
+        semantic_v1::OperationState::Succeeded => semantic::OperationState::Succeeded,
+        semantic_v1::OperationState::Failed => semantic::OperationState::Failed,
+        semantic_v1::OperationState::Cancelling => semantic::OperationState::Cancelling,
+        semantic_v1::OperationState::Cancelled => semantic::OperationState::Cancelled,
+        semantic_v1::OperationState::Lost => semantic::OperationState::Lost,
+        semantic_v1::OperationState::Unspecified => {
+            return Err(semantic_status(
+                tonic::Code::InvalidArgument,
+                "UNKNOWN_ENUM_VALUE",
+                "operation state cannot be UNSPECIFIED",
+            ));
+        }
+    };
+    let operation = semantic::Operation {
+        identity: semantic_identity_from_proto(operation.identity, "operation identity")?,
+        owner: semantic_identity_from_proto(operation.owner, "operation owner")?,
+        executor: semantic_identity_from_proto(operation.executor, "operation executor")?,
+        kind: operation.kind,
+        state,
+        deadline_unix_ms: operation
+            .deadline
+            .map(|timestamp| unix_ms_from_timestamp(timestamp, "operation deadline"))
+            .transpose()?,
+        parent: operation
+            .parent
+            .map(|identity| semantic_identity_from_proto(Some(identity), "operation parent"))
+            .transpose()?,
+        metadata: operation.metadata.into_iter().collect(),
+    };
+    operation.validate().map_err(|error| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            &error.reason_code,
+            &error.message,
+        )
+    })?;
+    Ok(operation)
+}
+
+fn to_semantic_proto_operation(operation: &semantic::Operation) -> semantic_v1::Operation {
+    semantic_v1::Operation {
+        identity: Some(to_semantic_proto_identity(&operation.identity)),
+        owner: Some(to_semantic_proto_identity(&operation.owner)),
+        executor: Some(to_semantic_proto_identity(&operation.executor)),
+        kind: operation.kind.clone(),
+        state: match operation.state {
+            semantic::OperationState::Created => semantic_v1::OperationState::Created,
+            semantic::OperationState::Pending => semantic_v1::OperationState::Pending,
+            semantic::OperationState::Running => semantic_v1::OperationState::Running,
+            semantic::OperationState::Succeeded => semantic_v1::OperationState::Succeeded,
+            semantic::OperationState::Failed => semantic_v1::OperationState::Failed,
+            semantic::OperationState::Cancelling => semantic_v1::OperationState::Cancelling,
+            semantic::OperationState::Cancelled => semantic_v1::OperationState::Cancelled,
+            semantic::OperationState::Lost => semantic_v1::OperationState::Lost,
+        } as i32,
+        deadline: operation.deadline_unix_ms.map(timestamp_from_unix_ms),
+        parent: operation.parent.as_ref().map(to_semantic_proto_identity),
+        metadata: operation.metadata.clone().into_iter().collect(),
+    }
+}
+
+fn semantic_worker_from_proto(worker: semantic_v1::Worker) -> Result<semantic::Worker, Status> {
+    let state = semantic_v1::WorkerState::try_from(worker.state).map_err(|_| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "UNKNOWN_ENUM_VALUE",
+            "worker state is unknown",
+        )
+    })?;
+    let state = match state {
+        semantic_v1::WorkerState::Registered => semantic::WorkerState::Registered,
+        semantic_v1::WorkerState::Starting => semantic::WorkerState::Starting,
+        semantic_v1::WorkerState::Running => semantic::WorkerState::Running,
+        semantic_v1::WorkerState::Draining => semantic::WorkerState::Draining,
+        semantic_v1::WorkerState::Stopped => semantic::WorkerState::Stopped,
+        semantic_v1::WorkerState::Failed => semantic::WorkerState::Failed,
+        semantic_v1::WorkerState::Lost => semantic::WorkerState::Lost,
+        semantic_v1::WorkerState::Unspecified => {
+            return Err(semantic_status(
+                tonic::Code::InvalidArgument,
+                "UNKNOWN_ENUM_VALUE",
+                "worker state cannot be UNSPECIFIED",
+            ));
+        }
+    };
+    let worker = semantic::Worker {
+        identity: semantic_identity_from_proto(worker.identity, "worker identity")?,
+        principal: semantic_identity_from_proto(worker.principal, "worker principal")?,
+        provider: semantic_identity_from_proto(worker.provider, "worker provider")?,
+        lease: semantic_identity_from_proto(worker.lease, "worker lease")?,
+        state,
+        execution_ref: worker.execution_ref,
+        limits: worker
+            .limits
+            .into_iter()
+            .map(|(key, quantity)| {
+                (
+                    key,
+                    semantic::Quantity {
+                        value: quantity.value,
+                        unit: quantity.unit,
+                    },
+                )
+            })
+            .collect(),
+    };
+    worker.validate().map_err(|error| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            &error.reason_code,
+            &error.message,
+        )
+    })?;
+    Ok(worker)
+}
+
+fn to_semantic_proto_worker(worker: &semantic::Worker) -> semantic_v1::Worker {
+    semantic_v1::Worker {
+        identity: Some(to_semantic_proto_identity(&worker.identity)),
+        principal: Some(to_semantic_proto_identity(&worker.principal)),
+        provider: Some(to_semantic_proto_identity(&worker.provider)),
+        lease: Some(to_semantic_proto_identity(&worker.lease)),
+        state: match worker.state {
+            semantic::WorkerState::Registered => semantic_v1::WorkerState::Registered,
+            semantic::WorkerState::Starting => semantic_v1::WorkerState::Starting,
+            semantic::WorkerState::Running => semantic_v1::WorkerState::Running,
+            semantic::WorkerState::Draining => semantic_v1::WorkerState::Draining,
+            semantic::WorkerState::Stopped => semantic_v1::WorkerState::Stopped,
+            semantic::WorkerState::Failed => semantic_v1::WorkerState::Failed,
+            semantic::WorkerState::Lost => semantic_v1::WorkerState::Lost,
+        } as i32,
+        execution_ref: worker.execution_ref.clone(),
+        limits: worker
+            .limits
+            .iter()
+            .map(|(key, quantity)| {
+                (
+                    key.clone(),
+                    semantic_v1::Quantity {
+                        value: quantity.value,
+                        unit: quantity.unit.clone(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn semantic_operation_event_kind(state: semantic::OperationState) -> &'static str {
+    match state {
+        semantic::OperationState::Created => "operation.created",
+        semantic::OperationState::Pending => "operation.pending",
+        semantic::OperationState::Running => "operation.running",
+        semantic::OperationState::Succeeded => "operation.succeeded",
+        semantic::OperationState::Failed => "operation.failed",
+        semantic::OperationState::Cancelling => "operation.cancelling",
+        semantic::OperationState::Cancelled => "operation.cancelled",
+        semantic::OperationState::Lost => "operation.lost",
+    }
+}
+
+fn semantic_event_cursor_from_proto(
+    cursor: Option<semantic_v1::EventCursor>,
+) -> Result<semantic::EventCursor, Status> {
+    let cursor = cursor.ok_or_else(|| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "REQUIRED_FIELD_MISSING",
+            "event cursor is required",
+        )
+    })?;
+    let cursor = semantic::EventCursor {
+        source: semantic_identity_from_proto(cursor.source, "event cursor source")?,
+        sequence: cursor.sequence,
+    };
+    cursor.validate().map_err(|error| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            &error.reason_code,
+            &error.message,
+        )
+    })?;
+    Ok(cursor)
+}
+
+fn to_semantic_proto_event_page(page: &semantic::EventPage) -> semantic_v1::EventPage {
+    semantic_v1::EventPage {
+        source: Some(to_semantic_proto_identity(&page.source)),
+        status: match page.status {
+            semantic::ReplayStatus::Current => semantic_v1::ReplayStatus::Current,
+            semantic::ReplayStatus::Gap => semantic_v1::ReplayStatus::Gap,
+            semantic::ReplayStatus::SourceChanged => semantic_v1::ReplayStatus::SourceChanged,
+        } as i32,
+        events: page
+            .events
+            .iter()
+            .map(|event| semantic_v1::Event {
+                sequence: event.sequence,
+                source: Some(to_semantic_proto_identity(&event.source)),
+                subject: Some(to_semantic_proto_identity(&event.subject)),
+                kind: event.kind.clone(),
+                observed_at: Some(timestamp_from_unix_ms(event.observed_at_unix_ms)),
+                schema_id: event.schema_id.clone(),
+                body: event.body.clone(),
+            })
+            .collect(),
+        oldest_available_sequence: page.oldest_available_sequence,
+        latest_available_sequence: page.latest_available_sequence,
+        next_sequence: page.next_sequence,
     }
 }
 
@@ -2631,9 +3464,12 @@ fn proto_duration(duration: prost_types::Duration) -> Result<Duration, Status> {
 }
 
 fn unix_ms_from_timestamp(timestamp: prost_types::Timestamp, field: &str) -> Result<u64, Status> {
-    if timestamp.seconds < 0 || !(0..1_000_000_000).contains(&timestamp.nanos) {
+    if timestamp.seconds < 0
+        || !(0..1_000_000_000).contains(&timestamp.nanos)
+        || timestamp.nanos % 1_000_000 != 0
+    {
         return Err(Status::invalid_argument(format!(
-            "{field} must be non-negative and normalized"
+            "{field} must be non-negative, normalized, and millisecond-aligned"
         )));
     }
     let seconds = timestamp.seconds as u64;
@@ -2676,6 +3512,18 @@ fn operation_event_matches(event: &core_v1::OperationEvent, names: &[String]) ->
             .is_some_and(|operation| names.contains(&operation.name))
 }
 
+fn runtime_event_kind(event_type: core_v1::RuntimeEventType) -> &'static str {
+    match event_type {
+        core_v1::RuntimeEventType::InstanceStateChanged => "worker.state.changed",
+        core_v1::RuntimeEventType::WatchdogTriggered => "worker.watchdog.triggered",
+        core_v1::RuntimeEventType::OomKilled => "worker.oom.killed",
+        core_v1::RuntimeEventType::AdapterDegraded => "provider.degraded",
+        core_v1::RuntimeEventType::CleanupCompleted => "worker.cleanup.completed",
+        core_v1::RuntimeEventType::KernelReconciled => "kernel.reconciled",
+        core_v1::RuntimeEventType::Unspecified => "kernel.observation",
+    }
+}
+
 fn now_timestamp() -> prost_types::Timestamp {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2692,7 +3540,7 @@ mod tests {
     use super::*;
     use cy_kernel_api::{
         CapabilityFact, CleanupReport, LaunchPlan, NodeCapabilities, ProcessCondition,
-        ProcessHandle, ProcessRuntime, StopRequest,
+        ProcessHandle, ProcessRuntime, ResolvedLaunchPlan, StopRequest,
     };
     use cy_resource_manager::InMemoryResourceManager;
     use std::{collections::BTreeMap, path::PathBuf};
@@ -2928,6 +3776,7 @@ mod tests {
                 },
             ),
             lease,
+            semantic_worker: None,
             plugin: core_v1::InstalledPluginRef {
                 installation_name: instance_name.to_string(),
                 plugin_id: "test".to_string(),
@@ -2976,6 +3825,60 @@ mod tests {
                 "not launched in this test",
             ))
         }
+    }
+
+    struct TestWorkerResolver;
+
+    impl InstalledPluginResolver for TestWorkerResolver {
+        fn resolve_launch_plan(
+            &self,
+            _installation: &VerifiedInstallation,
+            _instance_name: &str,
+        ) -> Result<ResolvedLaunchPlan, ProviderError> {
+            Err(ProviderError::new(
+                "test",
+                "UNUSED",
+                "legacy launch is not used",
+            ))
+        }
+
+        fn resolve_worker_launch_plan(
+            &self,
+            worker: &semantic::Worker,
+        ) -> Result<ResolvedLaunchPlan, ProviderError> {
+            Ok(ResolvedLaunchPlan {
+                installation: VerifiedInstallation {
+                    installation_name: "test-installation".to_string(),
+                    manifest_digest: "sha256:test".to_string(),
+                    artifact_digest: "sha256:test".to_string(),
+                    verified_signature_identity: "test".to_string(),
+                },
+                plan: LaunchPlan {
+                    instance_name: worker.identity.id.clone(),
+                    executable: PathBuf::from("worker"),
+                    args: Vec::new(),
+                    environment: BTreeMap::new(),
+                    cgroup_name: format!("instance-{}", worker.identity.id),
+                    limits: CgroupLimits::default(),
+                },
+            })
+        }
+    }
+
+    fn semantic_worker_adapter() -> KernelServiceAdapter {
+        let resource = test_resource();
+        let hardware = Arc::new(TestHardware {
+            resource: resource.clone(),
+        });
+        let daemon = Arc::new(KernelDaemon::new(
+            hardware.clone(),
+            hardware,
+            Arc::new(InMemoryResourceManager::new("node", vec![resource])),
+            Arc::new(FakeSandbox),
+            "node",
+            7,
+        ));
+        KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver))
     }
 
     fn heartbeat_adapter() -> KernelServiceAdapter {
@@ -3185,17 +4088,40 @@ mod tests {
             unix_ms_from_timestamp(renewed.expires_at.clone().unwrap(), "renewed").unwrap()
                 > unix_ms_from_timestamp(lease.expires_at.clone().unwrap(), "lease").unwrap()
         );
-        adapter.instances.lock().unwrap().insert(
-            "worker-1".to_string(),
-            managed_test_process(
-                "worker-1",
-                1,
-                Some(core_v1::ResourceLeaseRef {
-                    lease_name: renewed.identity.as_ref().unwrap().id.clone(),
-                    fence_token: renewed.fence_token,
-                }),
-            ),
+        let mut process = managed_test_process(
+            "worker-1",
+            1,
+            Some(core_v1::ResourceLeaseRef {
+                lease_name: renewed.identity.as_ref().unwrap().id.clone(),
+                fence_token: renewed.fence_token,
+            }),
         );
+        process.semantic_worker = Some(semantic::Worker {
+            identity: semantic::Identity {
+                id: "worker-1".to_string(),
+                generation: 1,
+            },
+            principal: semantic::Identity {
+                id: "principal-1".to_string(),
+                generation: 1,
+            },
+            provider: semantic::Identity {
+                id: "provider-1".to_string(),
+                generation: 1,
+            },
+            lease: semantic::Identity {
+                id: renewed.identity.as_ref().unwrap().id.clone(),
+                generation: renewed.identity.as_ref().unwrap().generation,
+            },
+            state: semantic::WorkerState::Starting,
+            execution_ref: "test-ref".to_string(),
+            limits: BTreeMap::new(),
+        });
+        adapter
+            .instances
+            .lock()
+            .unwrap()
+            .insert("worker-1".to_string(), process);
 
         let endpoint = runtime
             .block_on(
@@ -3251,6 +4177,221 @@ mod tests {
             })))
             .unwrap();
         assert!(adapter.endpoint_grants.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
+        use core_v1::{
+            kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+            CancelSemanticOperationRequest, CreateOperationRequest, HeartbeatWorkerRequest,
+            ReportOperationRequest, StartWorkerRequest, StopWorkerRequest, SubscribeEventsRequest,
+        };
+
+        let adapter = semantic_worker_adapter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let lease = runtime
+            .block_on(
+                adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+                    context: Some(authority_context("worker-lease")),
+                    holder: Some(semantic_v1::Identity {
+                        id: "worker-1".to_string(),
+                        generation: 1,
+                    }),
+                    query: Some(semantic_v1::ResourceQuery {
+                        resource_class: "accelerator".to_string(),
+                        count: 1,
+                        required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                            id: "accelerator.compute".to_string(),
+                            minimum_revision: 1,
+                            required_properties: Default::default(),
+                        }],
+                        minimum_capacity: Default::default(),
+                    }),
+                    ttl: Some(prost_types::Duration {
+                        seconds: 30,
+                        nanos: 0,
+                    }),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        let worker = semantic_v1::Worker {
+            identity: Some(semantic_v1::Identity {
+                id: "worker-1".to_string(),
+                generation: 1,
+            }),
+            principal: Some(semantic_v1::Identity {
+                id: "principal-1".to_string(),
+                generation: 1,
+            }),
+            provider: Some(semantic_v1::Identity {
+                id: "provider-1".to_string(),
+                generation: 1,
+            }),
+            lease: lease.identity.clone(),
+            state: semantic_v1::WorkerState::Registered as i32,
+            execution_ref: "opaque-execution-reference".to_string(),
+            limits: Default::default(),
+        };
+        let started = runtime
+            .block_on(adapter.start_worker(Request::new(StartWorkerRequest {
+                context: Some(authority_context("start-worker")),
+                worker: Some(worker.clone()),
+            })))
+            .unwrap()
+            .into_inner();
+        assert_eq!(started.kind, "worker.start");
+        assert_eq!(started.state, semantic_v1::OperationState::Running as i32);
+
+        let running = runtime
+            .block_on(
+                adapter.heartbeat_worker(Request::new(HeartbeatWorkerRequest {
+                    context: Some(authority_context("heartbeat-worker")),
+                    worker: worker.identity.clone(),
+                    lease: lease.identity.clone(),
+                    fence_token: lease.fence_token,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(running.state, semantic_v1::WorkerState::Running as i32);
+
+        let operation = semantic_v1::Operation {
+            identity: Some(semantic_v1::Identity {
+                id: "operation-1".to_string(),
+                generation: 1,
+            }),
+            owner: worker.principal.clone(),
+            executor: worker.provider.clone(),
+            kind: "ai.train".to_string(),
+            state: semantic_v1::OperationState::Created as i32,
+            deadline: None,
+            parent: None,
+            metadata: Default::default(),
+        };
+        runtime
+            .block_on(
+                adapter.create_operation(Request::new(CreateOperationRequest {
+                    context: Some(authority_context("create-operation")),
+                    operation: Some(operation.clone()),
+                })),
+            )
+            .unwrap();
+        let mut reported = operation;
+        reported.state = semantic_v1::OperationState::Running as i32;
+        runtime
+            .block_on(
+                adapter.report_operation(Request::new(ReportOperationRequest {
+                    context: Some(authority_context("report-operation")),
+                    operation: Some(reported),
+                })),
+            )
+            .unwrap();
+        let cancelling = runtime
+            .block_on(
+                adapter.cancel_operation(Request::new(CancelSemanticOperationRequest {
+                    context: Some(authority_context("cancel-operation")),
+                    operation: Some(semantic_v1::Identity {
+                        id: "operation-1".to_string(),
+                        generation: 1,
+                    }),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            cancelling.state,
+            semantic_v1::OperationState::Cancelling as i32
+        );
+
+        let cursor = semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
+            sequence: 0,
+        };
+        let events = runtime
+            .block_on(
+                adapter.subscribe_events(Request::new(SubscribeEventsRequest {
+                    context: Some(authority_context("subscribe-events")),
+                    cursor: Some(cursor),
+                    page_size: 256,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(events.status, semantic_v1::ReplayStatus::Current as i32);
+        assert!(events
+            .events
+            .iter()
+            .any(|event| event.kind == "worker.starting"));
+        assert!(events
+            .events
+            .iter()
+            .any(|event| event.kind == "operation.running"));
+
+        let source_changed = runtime
+            .block_on(
+                adapter.subscribe_events(Request::new(SubscribeEventsRequest {
+                    context: Some(authority_context("source-changed")),
+                    cursor: Some(semantic_v1::EventCursor {
+                        source: Some(semantic_v1::Identity {
+                            id: "another-kernel".to_string(),
+                            generation: 1,
+                        }),
+                        sequence: 0,
+                    }),
+                    page_size: 1,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            source_changed.status,
+            semantic_v1::ReplayStatus::SourceChanged as i32
+        );
+        for sequence in 0..=OPERATION_EVENT_HISTORY_CAPACITY {
+            adapter.publish_semantic_event(
+                semantic::Identity {
+                    id: "worker-1".to_string(),
+                    generation: 1,
+                },
+                "worker.observed",
+                "cyrene.worker.v1",
+                sequence.to_string().into_bytes(),
+            );
+        }
+        let gap = runtime
+            .block_on(
+                adapter.subscribe_events(Request::new(SubscribeEventsRequest {
+                    context: Some(authority_context("replay-gap")),
+                    cursor: Some(semantic_v1::EventCursor {
+                        source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
+                        sequence: 1,
+                    }),
+                    page_size: 1,
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(gap.status, semantic_v1::ReplayStatus::Gap as i32);
+        assert!(gap.events.is_empty());
+
+        let stopped = runtime
+            .block_on(adapter.stop_worker(Request::new(StopWorkerRequest {
+                context: Some(authority_context("stop-worker")),
+                worker: worker.identity,
+                lease: lease.identity,
+                fence_token: lease.fence_token,
+                grace_period: Some(prost_types::Duration {
+                    seconds: 1,
+                    nanos: 0,
+                }),
+            })))
+            .unwrap()
+            .into_inner();
+        assert_eq!(stopped.state, semantic_v1::OperationState::Succeeded as i32);
     }
 
     #[test]

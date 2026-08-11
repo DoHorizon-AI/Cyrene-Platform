@@ -423,6 +423,21 @@ pub trait InstalledPluginResolver: Send + Sync {
         installation: &VerifiedInstallation,
         instance_name: &str,
     ) -> Result<ResolvedLaunchPlan, ProviderError>;
+
+    /// Resolve an opaque, externally verified Worker execution reference. The
+    /// Kernel passes it through without parsing installation, OCI, language or
+    /// runtime details; the outer resolver proves its immutable binding before
+    /// returning a launch plan.
+    fn resolve_worker_launch_plan(
+        &self,
+        worker: &semantic::Worker,
+    ) -> Result<ResolvedLaunchPlan, ProviderError> {
+        Err(ProviderError::new(
+            "execution-plan-resolver",
+            "EXECUTION_REFERENCE_UNRESOLVED",
+            &worker.execution_ref,
+        ))
+    }
 }
 
 /// 由 cgroup v2 直接读取的真实物理消耗量。
