@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.core.v1";
+
+// Canonical gRPC projection of the language-neutral Kernel authority. The
+// authenticated Principal is injected by the UDS or mTLS transport boundary;
+// it is deliberately never a caller-controlled request field.
+service KernelAuthorityService {
+  rpc Negotiate(NegotiateRequest) returns (cyrene.semantic.v1.ContractRevision);
+
+  rpc AcquireLease(AcquireSemanticLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+  rpc RenewLease(RenewLeaseRequest) returns (cyrene.semantic.v1.Lease);
+  rpc ReleaseLease(ReleaseSemanticLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+
+  rpc PublishEndpoint(PublishEndpointRequest) returns (cyrene.semantic.v1.Endpoint);
+  rpc AuthorizeEndpoint(AuthorizeEndpointRequest)
+      returns (cyrene.semantic.v1.EndpointGrant);
+  rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
+}
+
+// A call proves that the client selected a compatible semantic revision. It
+// contains correlation/idempotency metadata only, never identity or policy.
+message AuthorityCallContext {
+  cyrene.semantic.v1.ContractRevision contract = 1;
+  string request_id = 2;
+  string idempotency_key = 3;
+}
+
+message NegotiateRequest {
+  repeated cyrene.semantic.v1.ContractRevision offered = 1;
+}
+
+message AcquireSemanticLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity holder = 2;
+  cyrene.semantic.v1.ResourceQuery query = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message RenewLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message ReleaseSemanticLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+}
+
+message PublishEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Endpoint endpoint = 2;
+}
+
+message AuthorizeEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EndpointGrant grant = 2;
+}
+
+message RevokeEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity grant = 2;
+}

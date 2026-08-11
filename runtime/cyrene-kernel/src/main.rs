@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = UnixListener::from_std(listener)?;
     fs::set_permissions(&args.socket, fs::Permissions::from_mode(0o660))?;
     Server::builder()
+        .add_service(adapter.authority_server())
         .add_service(adapter.server())
         .add_service(adapter.lifecycle_server())
         .serve_with_incoming(UnixListenerStream::new(listener))

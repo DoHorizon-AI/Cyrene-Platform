@@ -558,6 +558,14 @@ pub trait ResourceLeaseManager: Send + Sync {
     fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError>;
     /// 读取租约当前状态，用于启动/停止流程的 fencing 与结果回报
     fn get_lease(&self, lease_name: &str) -> Result<ResourceLease, ProviderError>;
+    /// 使用当前 fencing authority 延长一个活跃租约。续约绝不改变已分配
+    /// 资源、持有者或 fence token；实现必须拒绝回退的过期时间。
+    fn renew(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<ResourceLease, ProviderError>;
     /// 凭围栏令牌释放已占用的资源租约
     fn release(&self, lease_name: &str, fence_token: u64) -> Result<(), ProviderError>;
 }

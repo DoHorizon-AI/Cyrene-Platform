@@ -319,6 +319,15 @@ claim of full v1 conformance. In particular they must still adopt authenticated
 Principal injection, semantic Worker/Operation/Event types, Provider-scoped
 TTL/reconciliation, non-reused durable fences and the typed replay result.
 
+`KernelAuthorityService` is the canonical Core gRPC projection. Its current
+lease renewal and Endpoint actions require a selected `ContractRevision` in an
+`AuthorityCallContext`; they carry no caller-supplied Principal, `NodeRef`,
+plugin installation or vendor-specific data. The legacy `KernelService` and
+`PluginLifecycleService` remain compatibility projections only. Until the
+authority and Worker-control sockets are separated and Principal injection is
+fully enforced, filesystem access to the local UDS is the provisional local
+admission boundary rather than a claim of complete authorization conformance.
+
 Changing an existing field meaning, accepted input, authority decision,
 transition, reason code or bound requires semantic v2. Additive optional
 projection fields are v1-compatible only when an older implementation can

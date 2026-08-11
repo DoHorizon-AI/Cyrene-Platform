@@ -295,6 +295,56 @@ impl ResourceLeaseManager for InMemoryResourceManager {
             .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))
     }
 
+    /// 延长已有的活跃租约，而不改变该租约已授予的资源权威。围栏令牌与
+    /// 过期时间的单调性让重放包和陈旧控制面都无法缩短或劫持现有租约。
+    fn renew(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        let now = now_unix_ms();
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now);
+        if expires_at_unix_ms <= now {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_EXPIRY_INVALID",
+                "lease renewal expiry must be in the future",
+            ));
+        }
+        let lease = state
+            .leases
+            .get_mut(lease_name)
+            .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))?;
+        if lease.fence_token != fence_token {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "STALE_FENCE_TOKEN",
+                lease_name,
+            ));
+        }
+        if lease.state != LeaseState::Active {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_NOT_ACTIVE",
+                lease_name,
+            ));
+        }
+        if lease
+            .expires_at_unix_ms
+            .is_some_and(|current| expires_at_unix_ms <= current)
+        {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_EXPIRY_REGRESSION",
+                "lease renewal expiry must extend the current expiry",
+            ));
+        }
+        lease.expires_at_unix_ms = Some(expires_at_unix_ms);
+        Ok(lease.clone())
+    }
+
     /// 释放硬件资源租约
     ///
     /// # 安全校验
@@ -505,6 +555,34 @@ mod tests {
             manager.release(&lease.name, 41).unwrap_err().reason_code,
             "STALE_FENCE_TOKEN"
         );
+    }
+
+    #[test]
+    fn renewal_requires_the_active_fence_and_only_extends_expiry() {
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let mut requested = request("lease-1", 1);
+        requested.expires_at_unix_ms = Some(now_unix_ms() + 1_000);
+        let lease = manager.reserve(requested).unwrap();
+
+        assert_eq!(
+            manager
+                .renew(&lease.name, lease.fence_token + 1, now_unix_ms() + 2_000)
+                .unwrap_err()
+                .reason_code,
+            "STALE_FENCE_TOKEN"
+        );
+        assert_eq!(
+            manager
+                .renew(&lease.name, lease.fence_token, now_unix_ms() + 500)
+                .unwrap_err()
+                .reason_code,
+            "LEASE_EXPIRY_REGRESSION"
+        );
+        let renewed = manager
+            .renew(&lease.name, lease.fence_token, now_unix_ms() + 3_000)
+            .unwrap();
+        assert_eq!(renewed.fence_token, lease.fence_token);
+        assert!(renewed.expires_at_unix_ms > lease.expires_at_unix_ms);
     }
 
     #[test]

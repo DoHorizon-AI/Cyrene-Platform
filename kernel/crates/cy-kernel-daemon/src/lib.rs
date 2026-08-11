@@ -144,6 +144,19 @@ impl KernelDaemon {
         self.resources.get_lease(lease_name)
     }
 
+    /// Extend a live lease while retaining its exact resource allocation and
+    /// fencing authority. The ledger performs the active-state, fence, and
+    /// expiry monotonicity checks atomically.
+    pub fn renew(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        self.resources
+            .renew(lease_name, fence_token, expires_at_unix_ms)
+    }
+
     /// 为租约内的所有资源合并一份沙箱绑定。
     ///
     /// 当前 SandboxBackend 接口以单份 DeviceBinding 表达资源集合，因此多资源租约在这里合并
@@ -281,6 +294,8 @@ pub struct KernelServiceAdapter {
     operations: Arc<Mutex<HashMap<String, core_v1::Operation>>>,
     operation_events: Arc<Mutex<VecDeque<core_v1::OperationEvent>>>,
     operation_event_sender: broadcast::Sender<core_v1::OperationEvent>,
+    endpoints: Arc<Mutex<BTreeMap<String, semantic::Endpoint>>>,
+    endpoint_grants: Arc<Mutex<BTreeMap<String, semantic::EndpointGrant>>>,
     next_event_sequence: Arc<AtomicU64>,
     adapter_available: Arc<AtomicBool>,
     adapter_poll_interval: Duration,
@@ -301,6 +316,8 @@ impl KernelServiceAdapter {
                 OPERATION_EVENT_HISTORY_CAPACITY,
             ))),
             operation_event_sender,
+            endpoints: Arc::new(Mutex::new(BTreeMap::new())),
+            endpoint_grants: Arc::new(Mutex::new(BTreeMap::new())),
             next_event_sequence: Arc::new(AtomicU64::new(1)),
             adapter_available: Arc::new(AtomicBool::new(true)),
             adapter_poll_interval: Duration::from_secs(5),
@@ -327,6 +344,15 @@ impl KernelServiceAdapter {
 
     pub fn server(&self) -> core_v1::kernel_service_server::KernelServiceServer<Self> {
         core_v1::kernel_service_server::KernelServiceServer::new(self.clone())
+    }
+
+    /// Canonical, transport-neutral semantic action projection. It shares the
+    /// same local UDS authorization boundary and does not expose legacy
+    /// installation or vendor compatibility data.
+    pub fn authority_server(
+        &self,
+    ) -> core_v1::kernel_authority_service_server::KernelAuthorityServiceServer<Self> {
+        core_v1::kernel_authority_service_server::KernelAuthorityServiceServer::new(self.clone())
     }
 
     pub fn lifecycle_server(
@@ -1419,6 +1445,260 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 }
 
 #[tonic::async_trait]
+impl core_v1::kernel_authority_service_server::KernelAuthorityService for KernelServiceAdapter {
+    async fn negotiate(
+        &self,
+        request: Request<core_v1::NegotiateRequest>,
+    ) -> Result<Response<semantic_v1::ContractRevision>, Status> {
+        let local = semantic::ContractRevision::current();
+        let selected = request
+            .into_inner()
+            .offered
+            .into_iter()
+            .filter_map(semantic_contract_revision_from_proto)
+            .filter_map(|offered| local.negotiate(&offered))
+            .max_by_key(|revision| revision.minor)
+            .ok_or_else(|| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    "CONTRACT_INCOMPATIBLE",
+                    "no offered semantic contract revision is compatible with this Kernel",
+                )
+            })?;
+        Ok(Response::new(to_semantic_proto_contract_revision(
+            &selected,
+        )))
+    }
+
+    async fn acquire_lease(
+        &self,
+        request: Request<core_v1::AcquireSemanticLeaseRequest>,
+    ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let request = request.into_inner();
+        let context = validate_authority_context(request.context.as_ref())?;
+        let holder = semantic_identity_from_proto(request.holder, "holder")?;
+        let query = semantic_query_from_proto(
+            request
+                .query
+                .ok_or_else(|| Status::invalid_argument("resource query is required"))?,
+        )?;
+        let ttl = proto_duration(
+            request
+                .ttl
+                .ok_or_else(|| Status::invalid_argument("lease ttl is required"))?,
+        )?;
+        if ttl.is_zero() {
+            return Err(Status::invalid_argument("lease ttl must be positive"));
+        }
+        let lease = self
+            .daemon
+            .reserve(ResourceRequest {
+                lease_name: authority_lease_name(context),
+                expected_inventory_generation: self.daemon.resources.inventory().generation,
+                holder,
+                query,
+                expires_at_unix_ms: Some(expires_after(ttl)),
+                limits: CgroupLimits::default(),
+            })
+            .map_err(provider_status)?;
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReserved,
+            None,
+            Some(&journal_lease),
+            "LEASE_RESERVED",
+        );
+        Ok(Response::new(to_semantic_proto_lease(&lease)))
+    }
+
+    async fn renew_lease(
+        &self,
+        request: Request<core_v1::RenewLeaseRequest>,
+    ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
+        let ttl = proto_duration(
+            request
+                .ttl
+                .ok_or_else(|| Status::invalid_argument("lease renewal ttl is required"))?,
+        )?;
+        if ttl.is_zero() {
+            return Err(Status::invalid_argument(
+                "lease renewal ttl must be positive",
+            ));
+        }
+        let current = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if current.generation != lease_identity.generation {
+            return Err(Status::failed_precondition("stale lease generation"));
+        }
+        let lease = self
+            .daemon
+            .renew(&lease_identity.id, request.fence_token, expires_after(ttl))
+            .map_err(provider_status)?;
+        Ok(Response::new(to_semantic_proto_lease(&lease)))
+    }
+
+    async fn release_lease(
+        &self,
+        request: Request<core_v1::ReleaseSemanticLeaseRequest>,
+    ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
+        let current = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        if current.generation != lease_identity.generation {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "LEASE_GENERATION_STALE",
+                "lease generation no longer has authority",
+            ));
+        }
+        self.daemon
+            .release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease_identity.id.clone(),
+            fence_token: request.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReleased,
+            None,
+            Some(&journal_lease),
+            "LEASE_RELEASED",
+        );
+        let lease = self
+            .daemon
+            .lease(&lease_identity.id)
+            .map_err(provider_status)?;
+        Ok(Response::new(to_semantic_proto_lease(&lease)))
+    }
+
+    async fn publish_endpoint(
+        &self,
+        request: Request<core_v1::PublishEndpointRequest>,
+    ) -> Result<Response<semantic_v1::Endpoint>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let endpoint = semantic_endpoint_from_proto(
+            request
+                .endpoint
+                .ok_or_else(|| Status::invalid_argument("endpoint is required"))?,
+        )?;
+        let owner_is_managed = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&endpoint.owner.id)
+            .is_some_and(|process| process.generation == endpoint.owner.generation);
+        if !owner_is_managed {
+            return Err(semantic_status(
+                tonic::Code::FailedPrecondition,
+                "ENDPOINT_OWNER_UNKNOWN",
+                "endpoint owner is not an active managed Worker incarnation",
+            ));
+        }
+        let endpoint_key = semantic_identity_key(&endpoint.identity);
+        let mut endpoints = self.endpoints.lock().expect("endpoint lock poisoned");
+        if endpoints.values().any(|current| {
+            current.identity.id == endpoint.identity.id
+                && current.identity.generation > endpoint.identity.generation
+        }) {
+            return Err(Status::failed_precondition("stale endpoint generation"));
+        }
+        endpoints.retain(|_, current| {
+            current.identity.id != endpoint.identity.id
+                || current.identity.generation >= endpoint.identity.generation
+        });
+        endpoints.insert(endpoint_key, endpoint.clone());
+        drop(endpoints);
+        self.endpoint_grants
+            .lock()
+            .expect("endpoint grant lock poisoned")
+            .retain(|_, grant| {
+                grant.endpoint.id != endpoint.identity.id || grant.endpoint == endpoint.identity
+            });
+        Ok(Response::new(to_semantic_proto_endpoint(&endpoint)))
+    }
+
+    async fn authorize_endpoint(
+        &self,
+        request: Request<core_v1::AuthorizeEndpointRequest>,
+    ) -> Result<Response<semantic_v1::EndpointGrant>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let grant = semantic_endpoint_grant_from_proto(
+            request
+                .grant
+                .ok_or_else(|| Status::invalid_argument("endpoint grant is required"))?,
+        )?;
+        let endpoint_exists = self
+            .endpoints
+            .lock()
+            .expect("endpoint lock poisoned")
+            .get(&semantic_identity_key(&grant.endpoint))
+            .is_some_and(|endpoint| endpoint.identity == grant.endpoint);
+        if !endpoint_exists {
+            return Err(Status::not_found(
+                "endpoint grant targets an unpublished endpoint",
+            ));
+        }
+        let lease = self
+            .daemon
+            .lease(&grant.lease.id)
+            .map_err(provider_status)?;
+        if lease.generation != grant.lease.generation {
+            return Err(Status::failed_precondition("stale lease generation"));
+        }
+        if lease.fence_token != grant.fence_token {
+            return Err(Status::failed_precondition("stale lease fence token"));
+        }
+        if lease.state != LeaseState::Active || lease.holder != grant.grantee {
+            return Err(Status::failed_precondition(
+                "endpoint grant grantee does not hold an active lease",
+            ));
+        }
+        if grant.expires_at_unix_ms <= now_unix_ms()
+            || lease
+                .expires_at_unix_ms
+                .is_some_and(|lease_expiry| grant.expires_at_unix_ms > lease_expiry)
+        {
+            return Err(Status::failed_precondition(
+                "endpoint grant expiry must be active and bounded by its lease",
+            ));
+        }
+        self.endpoint_grants
+            .lock()
+            .expect("endpoint grant lock poisoned")
+            .insert(semantic_identity_key(&grant.identity), grant.clone());
+        Ok(Response::new(to_semantic_proto_endpoint_grant(&grant)))
+    }
+
+    async fn revoke_endpoint(
+        &self,
+        request: Request<core_v1::RevokeEndpointRequest>,
+    ) -> Result<Response<()>, Status> {
+        let request = request.into_inner();
+        validate_authority_context(request.context.as_ref())?;
+        let grant = semantic_identity_from_proto(request.grant, "grant")?;
+        self.endpoint_grants
+            .lock()
+            .expect("endpoint grant lock poisoned")
+            .remove(&semantic_identity_key(&grant));
+        Ok(Response::new(()))
+    }
+}
+
+#[tonic::async_trait]
 impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for KernelServiceAdapter {
     async fn install_plugin(
         &self,
@@ -1696,6 +1976,166 @@ fn semantic_identity_from_proto(
         Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
     })?;
     Ok(identity)
+}
+
+fn semantic_identity_key(identity: &semantic::Identity) -> String {
+    format!(
+        "{}:{}:{}",
+        identity.id.len(),
+        identity.id,
+        identity.generation
+    )
+}
+
+fn semantic_contract_revision_from_proto(
+    revision: semantic_v1::ContractRevision,
+) -> Option<semantic::ContractRevision> {
+    let revision = semantic::ContractRevision {
+        contract_id: revision.contract_id,
+        major: revision.major,
+        minor: revision.minor,
+    };
+    revision.validate().ok().map(|_| revision)
+}
+
+fn to_semantic_proto_contract_revision(
+    revision: &semantic::ContractRevision,
+) -> semantic_v1::ContractRevision {
+    semantic_v1::ContractRevision {
+        contract_id: revision.contract_id.clone(),
+        major: revision.major,
+        minor: revision.minor,
+    }
+}
+
+fn validate_authority_context(
+    context: Option<&core_v1::AuthorityCallContext>,
+) -> Result<&core_v1::AuthorityCallContext, Status> {
+    let context = context.ok_or_else(|| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "AUTHORITY_CONTEXT_REQUIRED",
+            "a negotiated authority call context is required",
+        )
+    })?;
+    let offered = context.contract.clone().ok_or_else(|| {
+        semantic_status(
+            tonic::Code::FailedPrecondition,
+            "CONTRACT_NEGOTIATION_REQUIRED",
+            "a selected semantic contract revision is required",
+        )
+    })?;
+    let offered = semantic_contract_revision_from_proto(offered).ok_or_else(|| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "CONTRACT_REVISION_INVALID",
+            "authority call contains an invalid semantic contract revision",
+        )
+    })?;
+    let local = semantic::ContractRevision::current();
+    if local.negotiate(&offered).as_ref() != Some(&offered) {
+        return Err(semantic_status(
+            tonic::Code::FailedPrecondition,
+            "CONTRACT_INCOMPATIBLE",
+            "authority call did not use a revision selected by this Kernel",
+        ));
+    }
+    if context.request_id.is_empty() && context.idempotency_key.is_empty() {
+        return Err(semantic_status(
+            tonic::Code::InvalidArgument,
+            "REQUEST_ID_REQUIRED",
+            "authority call requires request_id or idempotency_key",
+        ));
+    }
+    Ok(context)
+}
+
+fn authority_lease_name(context: &core_v1::AuthorityCallContext) -> String {
+    let key = if context.idempotency_key.is_empty() {
+        &context.request_id
+    } else {
+        &context.idempotency_key
+    };
+    format!("lease-{key}")
+}
+
+fn semantic_endpoint_from_proto(
+    endpoint: semantic_v1::Endpoint,
+) -> Result<semantic::Endpoint, Status> {
+    let endpoint = semantic::Endpoint {
+        identity: semantic_identity_from_proto(endpoint.identity, "endpoint identity")?,
+        provider: semantic_identity_from_proto(endpoint.provider, "endpoint provider")?,
+        owner: semantic_identity_from_proto(endpoint.owner, "endpoint owner")?,
+        transport: endpoint.transport,
+        schema_id: endpoint.schema_id,
+        capabilities: endpoint
+            .capabilities
+            .into_iter()
+            .map(|capability| semantic::Capability {
+                id: capability.id,
+                revision: capability.revision,
+                properties: capability.properties.into_iter().collect(),
+            })
+            .collect(),
+        public_attributes: endpoint.public_attributes.into_iter().collect(),
+    };
+    endpoint.validate().map_err(|error| {
+        Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
+    })?;
+    Ok(endpoint)
+}
+
+fn to_semantic_proto_endpoint(endpoint: &semantic::Endpoint) -> semantic_v1::Endpoint {
+    semantic_v1::Endpoint {
+        identity: Some(to_semantic_proto_identity(&endpoint.identity)),
+        provider: Some(to_semantic_proto_identity(&endpoint.provider)),
+        owner: Some(to_semantic_proto_identity(&endpoint.owner)),
+        transport: endpoint.transport.clone(),
+        schema_id: endpoint.schema_id.clone(),
+        capabilities: endpoint
+            .capabilities
+            .iter()
+            .map(|capability| semantic_v1::Capability {
+                id: capability.id.clone(),
+                revision: capability.revision,
+                properties: capability.properties.clone().into_iter().collect(),
+            })
+            .collect(),
+        public_attributes: endpoint.public_attributes.clone().into_iter().collect(),
+    }
+}
+
+fn semantic_endpoint_grant_from_proto(
+    grant: semantic_v1::EndpointGrant,
+) -> Result<semantic::EndpointGrant, Status> {
+    let grant = semantic::EndpointGrant {
+        identity: semantic_identity_from_proto(grant.identity, "endpoint grant identity")?,
+        endpoint: semantic_identity_from_proto(grant.endpoint, "endpoint grant endpoint")?,
+        grantee: semantic_identity_from_proto(grant.grantee, "endpoint grant grantee")?,
+        lease: semantic_identity_from_proto(grant.lease, "endpoint grant lease")?,
+        fence_token: grant.fence_token,
+        expires_at_unix_ms: unix_ms_from_timestamp(
+            grant
+                .expires_at
+                .ok_or_else(|| Status::invalid_argument("endpoint grant expiry is required"))?,
+            "endpoint grant expiry",
+        )?,
+    };
+    grant.validate().map_err(|error| {
+        Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
+    })?;
+    Ok(grant)
+}
+
+fn to_semantic_proto_endpoint_grant(grant: &semantic::EndpointGrant) -> semantic_v1::EndpointGrant {
+    semantic_v1::EndpointGrant {
+        identity: Some(to_semantic_proto_identity(&grant.identity)),
+        endpoint: Some(to_semantic_proto_identity(&grant.endpoint)),
+        grantee: Some(to_semantic_proto_identity(&grant.grantee)),
+        lease: Some(to_semantic_proto_identity(&grant.lease)),
+        fence_token: grant.fence_token,
+        expires_at: Some(timestamp_from_unix_ms(grant.expires_at_unix_ms)),
+    }
 }
 
 fn to_semantic_proto_resource(resource: &semantic::Resource) -> semantic_v1::Resource {
@@ -2158,15 +2598,26 @@ fn cgroup_limits(
 }
 
 fn provider_status(error: ProviderError) -> Status {
-    let message = format!("{}: {}", error.reason_code, error.message);
-    match error.reason_code.as_str() {
+    let code = match error.reason_code.as_str() {
         "STALE_INVENTORY_GENERATION" | "STALE_FENCE_TOKEN" | "RESOURCE_QUARANTINED" => {
-            Status::failed_precondition(message)
+            tonic::Code::FailedPrecondition
         }
-        "INSUFFICIENT_RESOURCES" => Status::resource_exhausted(message),
-        "LEASE_NOT_FOUND" | "DEVICE_NOT_FOUND" | "RESOURCE_NOT_FOUND" => Status::not_found(message),
-        _ => Status::internal(message),
+        "INSUFFICIENT_RESOURCES" => tonic::Code::ResourceExhausted,
+        "LEASE_NOT_FOUND" | "DEVICE_NOT_FOUND" | "RESOURCE_NOT_FOUND" => tonic::Code::NotFound,
+        _ => tonic::Code::Internal,
+    };
+    semantic_status(code, &error.reason_code, &error.message)
+}
+
+/// Preserve the stable semantic rejection code in gRPC trailers. The human
+/// message remains descriptive only; Node Agent projections copy this metadata
+/// into a typed `cyrene.semantic.v1.Rejection` detail for remote consumers.
+fn semantic_status(code: tonic::Code, reason_code: &str, message: &str) -> Status {
+    let mut status = Status::new(code, format!("{reason_code}: {message}"));
+    if let Ok(value) = reason_code.parse() {
+        status.metadata_mut().insert("x-cyrene-reason-code", value);
     }
+    status
 }
 
 fn proto_duration(duration: prost_types::Duration) -> Result<Duration, Status> {
@@ -2177,6 +2628,18 @@ fn proto_duration(duration: prost_types::Duration) -> Result<Duration, Status> {
     }
     Ok(Duration::from_secs(duration.seconds as u64)
         .saturating_add(Duration::from_nanos(duration.nanos as u64)))
+}
+
+fn unix_ms_from_timestamp(timestamp: prost_types::Timestamp, field: &str) -> Result<u64, Status> {
+    if timestamp.seconds < 0 || !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return Err(Status::invalid_argument(format!(
+            "{field} must be non-negative and normalized"
+        )));
+    }
+    let seconds = timestamp.seconds as u64;
+    Ok(seconds
+        .saturating_mul(1_000)
+        .saturating_add((timestamp.nanos as u64) / 1_000_000))
 }
 
 fn expires_after(duration: Duration) -> u64 {
@@ -2378,6 +2841,16 @@ mod tests {
         KernelServiceAdapter::new(daemon, Arc::new(UnusedResolver))
     }
 
+    fn authority_context(request_id: &str) -> core_v1::AuthorityCallContext {
+        core_v1::AuthorityCallContext {
+            contract: Some(to_semantic_proto_contract_revision(
+                &semantic::ContractRevision::current(),
+            )),
+            request_id: request_id.to_string(),
+            idempotency_key: request_id.to_string(),
+        }
+    }
+
     #[derive(Debug)]
     struct FakeSandbox;
 
@@ -2425,6 +2898,55 @@ mod tests {
     impl SandboxBackend for FakeSandbox {
         fn backend_id(&self) -> &str {
             "test"
+        }
+    }
+
+    fn managed_test_process(
+        instance_name: &str,
+        generation: u64,
+        lease: Option<core_v1::ResourceLeaseRef>,
+    ) -> ManagedProcess {
+        ManagedProcess {
+            instance: SandboxedProcess::new(
+                Arc::new(FakeSandbox),
+                LaunchPlan {
+                    instance_name: instance_name.to_string(),
+                    executable: PathBuf::from("worker"),
+                    args: Vec::new(),
+                    environment: BTreeMap::new(),
+                    cgroup_name: format!("instance-{instance_name}"),
+                    limits: CgroupLimits::default(),
+                },
+                DeviceBinding {
+                    resource_id: "none".to_string(),
+                    nodes: Vec::new(),
+                    environment: BTreeMap::new(),
+                    required_gids: Vec::new(),
+                    enforcement: EnforcementMode::Unenforced,
+                    adapter_id: "test".to_string(),
+                    reason_code: "TEST".to_string(),
+                },
+            ),
+            lease,
+            plugin: core_v1::InstalledPluginRef {
+                installation_name: instance_name.to_string(),
+                plugin_id: "test".to_string(),
+                version: "1".to_string(),
+                component_id: "test".to_string(),
+                manifest_digest: "sha256:test".to_string(),
+                artifact_digest: "sha256:test".to_string(),
+                verified_signature_identity: "test".to_string(),
+            },
+            generation,
+            accepted_sequence: 0,
+            last_heartbeat: Instant::now(),
+            last_heartbeat_at: None,
+            runtime_state: core_v1::PluginRuntimeState::Starting as i32,
+            health: None,
+            restart_count: 0,
+            watchdog_triggered: false,
+            control: None,
+            pending_shutdown: None,
         }
     }
 
@@ -2476,48 +2998,7 @@ mod tests {
             });
         adapter.instances.lock().unwrap().insert(
             "worker_1".to_string(),
-            ManagedProcess {
-                instance: SandboxedProcess::new(
-                    Arc::new(FakeSandbox),
-                    LaunchPlan {
-                        instance_name: "worker_1".to_string(),
-                        executable: PathBuf::from("worker"),
-                        args: Vec::new(),
-                        environment: BTreeMap::new(),
-                        cgroup_name: "instance-worker_1".to_string(),
-                        limits: CgroupLimits::default(),
-                    },
-                    DeviceBinding {
-                        resource_id: "none".to_string(),
-                        nodes: Vec::new(),
-                        environment: BTreeMap::new(),
-                        required_gids: Vec::new(),
-                        enforcement: EnforcementMode::Unenforced,
-                        adapter_id: "test".to_string(),
-                        reason_code: "TEST".to_string(),
-                    },
-                ),
-                lease: None,
-                plugin: core_v1::InstalledPluginRef {
-                    installation_name: "worker_1".to_string(),
-                    plugin_id: "test".to_string(),
-                    version: "1".to_string(),
-                    component_id: "test".to_string(),
-                    manifest_digest: "sha256:test".to_string(),
-                    artifact_digest: "sha256:test".to_string(),
-                    verified_signature_identity: "test".to_string(),
-                },
-                generation: 99,
-                accepted_sequence: 0,
-                last_heartbeat: Instant::now(),
-                last_heartbeat_at: None,
-                runtime_state: core_v1::PluginRuntimeState::Starting as i32,
-                health: None,
-                restart_count: 0,
-                watchdog_triggered: false,
-                control: None,
-                pending_shutdown: None,
-            },
+            managed_test_process("worker_1", 99, None),
         );
         adapter
     }
@@ -2646,6 +3127,130 @@ mod tests {
         assert!(capabilities.accelerators.is_empty());
         assert_eq!(capabilities.resources.len(), 1);
         assert_eq!(capabilities.resources[0].resource_class, "accelerator");
+    }
+
+    #[test]
+    fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
+        use core_v1::{
+            kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+            AuthorizeEndpointRequest, PublishEndpointRequest, RenewLeaseRequest,
+            RevokeEndpointRequest,
+        };
+
+        let adapter = semantic_lease_adapter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let lease = runtime
+            .block_on(
+                adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+                    context: Some(authority_context("endpoint-lease")),
+                    holder: Some(semantic_v1::Identity {
+                        id: "worker-1".to_string(),
+                        generation: 1,
+                    }),
+                    query: Some(semantic_v1::ResourceQuery {
+                        resource_class: "accelerator".to_string(),
+                        count: 1,
+                        required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                            id: "accelerator.compute".to_string(),
+                            minimum_revision: 1,
+                            required_properties: Default::default(),
+                        }],
+                        minimum_capacity: Default::default(),
+                    }),
+                    ttl: Some(prost_types::Duration {
+                        seconds: 10,
+                        nanos: 0,
+                    }),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        let renewed = runtime
+            .block_on(adapter.renew_lease(Request::new(RenewLeaseRequest {
+                context: Some(authority_context("renew-endpoint-lease")),
+                lease: lease.identity.clone(),
+                fence_token: lease.fence_token,
+                ttl: Some(prost_types::Duration {
+                    seconds: 20,
+                    nanos: 0,
+                }),
+            })))
+            .unwrap()
+            .into_inner();
+        assert_eq!(renewed.fence_token, lease.fence_token);
+        assert!(
+            unix_ms_from_timestamp(renewed.expires_at.clone().unwrap(), "renewed").unwrap()
+                > unix_ms_from_timestamp(lease.expires_at.clone().unwrap(), "lease").unwrap()
+        );
+        adapter.instances.lock().unwrap().insert(
+            "worker-1".to_string(),
+            managed_test_process(
+                "worker-1",
+                1,
+                Some(core_v1::ResourceLeaseRef {
+                    lease_name: renewed.identity.as_ref().unwrap().id.clone(),
+                    fence_token: renewed.fence_token,
+                }),
+            ),
+        );
+
+        let endpoint = runtime
+            .block_on(
+                adapter.publish_endpoint(Request::new(PublishEndpointRequest {
+                    context: Some(authority_context("publish-endpoint")),
+                    endpoint: Some(semantic_v1::Endpoint {
+                        identity: Some(semantic_v1::Identity {
+                            id: "endpoint-1".to_string(),
+                            generation: 1,
+                        }),
+                        provider: Some(semantic_v1::Identity {
+                            id: "provider-1".to_string(),
+                            generation: 1,
+                        }),
+                        owner: Some(semantic_v1::Identity {
+                            id: "worker-1".to_string(),
+                            generation: 1,
+                        }),
+                        transport: "transport.uds".to_string(),
+                        schema_id: "schema.v1".to_string(),
+                        capabilities: Vec::new(),
+                        public_attributes: Default::default(),
+                    }),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        let grant = runtime
+            .block_on(
+                adapter.authorize_endpoint(Request::new(AuthorizeEndpointRequest {
+                    context: Some(authority_context("authorize-endpoint")),
+                    grant: Some(semantic_v1::EndpointGrant {
+                        identity: Some(semantic_v1::Identity {
+                            id: "grant-1".to_string(),
+                            generation: 1,
+                        }),
+                        endpoint: endpoint.identity.clone(),
+                        grantee: renewed.holder.clone(),
+                        lease: renewed.identity.clone(),
+                        fence_token: renewed.fence_token,
+                        expires_at: renewed.expires_at.clone(),
+                    }),
+                })),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(grant.fence_token, renewed.fence_token);
+
+        runtime
+            .block_on(adapter.revoke_endpoint(Request::new(RevokeEndpointRequest {
+                context: Some(authority_context("revoke-endpoint")),
+                grant: grant.identity.clone(),
+            })))
+            .unwrap();
+        assert!(adapter.endpoint_grants.lock().unwrap().is_empty());
     }
 
     #[test]
