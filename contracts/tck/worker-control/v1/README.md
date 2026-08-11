@@ -15,7 +15,9 @@ WorkerHello -> WorkerWelcome -> WorkerHeartbeat/WorkerHeartbeatAck
 the Hello, Heartbeat and ShutdownAck frames must all preserve the Kernel-issued
 Worker generation, Lease generation and fence token. The included Python and
 Kotlin runners independently validate the same bounded scenarios without
-pulling a Python/JVM runtime into the Kernel.
+pulling a Python/JVM runtime into the Kernel. The `HEARTBEAT_WORKER` action is
+covered by `heartbeat_worker_accepted` (accept path) and the existing
+`semantic_heartbeat_fence_mismatch` (deny path).
 
 Run the reference runners from this directory:
 

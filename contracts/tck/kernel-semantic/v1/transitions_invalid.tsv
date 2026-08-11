@@ -1,0 +1,7 @@
+# name|noun|from|to|expected
+lease_active_to_released|lease|ACTIVE|RELEASED|STATE_TRANSITION_INVALID
+lease_revoked_to_active|lease|REVOKED|ACTIVE|STATE_TRANSITION_INVALID
+worker_starting_to_registered|worker|STARTING|REGISTERED|STATE_TRANSITION_INVALID
+worker_lost_to_running|worker|LOST|RUNNING|STATE_TRANSITION_INVALID
+operation_running_to_created|operation|RUNNING|CREATED|STATE_TRANSITION_INVALID
+operation_cancelled_to_running|operation|CANCELLED|RUNNING|STATE_TRANSITION_INVALID

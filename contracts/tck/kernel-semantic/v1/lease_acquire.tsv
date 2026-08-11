@@ -1,0 +1,6 @@
+# name|action|holder_match|resource_in_lease|fence_valid|before_expiry|expected
+acquire_lease_eligible|ACQUIRE_LEASE|true|true|true|true|ACCEPT
+acquire_lease_wrong_holder|ACQUIRE_LEASE|false|true|true|true|AUTHORITY_DENIED
+acquire_lease_resource_missing|ACQUIRE_LEASE|true|false|true|true|AUTHORITY_DENIED
+acquire_lease_invalid_fence|ACQUIRE_LEASE|true|true|false|true|FENCE_TOKEN_INVALID
+acquire_lease_expired|ACQUIRE_LEASE|true|true|true|false|LEASE_EXPIRED
