@@ -29,6 +29,7 @@ secrets/
 .vscode/
 .claude/
 .gemini/
+.workbuddy/
 *.swp
 *.swo
 .DS_Store
