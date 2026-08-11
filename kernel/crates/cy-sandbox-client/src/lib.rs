@@ -602,7 +602,6 @@ mod linux_uds {
     };
 
     const ADAPTER_ID: &str = "sandboxd-test";
-    const NOBODY_ADAPTER_SOCKET_ENV: &str = "CYRENE_SANDBOX_CLIENT_NOBODY_SOCKET";
 
     /// SO_PEERCRED on a loopback socket pair reports this process, which is
     /// the ground truth both sides compare against.

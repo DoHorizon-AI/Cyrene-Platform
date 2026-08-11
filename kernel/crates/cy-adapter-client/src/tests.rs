@@ -276,7 +276,10 @@ fn registry_rejects_duplicate_device_ids_across_adapters() {
 mod linux_uds {
     use std::{
         fs,
-        os::unix::net::{UnixListener, UnixStream},
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         path::PathBuf,
         sync::mpsc,
         time::Duration,
