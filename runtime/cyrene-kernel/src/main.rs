@@ -326,7 +326,7 @@ fn parse_hardware_adapter(
 }
 
 #[cfg(unix)]
-fn prepare_socket_path(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn prepare_socket_path(path: &std::path::Path) -> Result<(), std::io::Error> {
     use std::{fs, os::unix::fs::FileTypeExt};
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -343,8 +343,7 @@ fn prepare_socket_path(path: &std::path::Path) -> Result<(), Box<dyn std::error:
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("refusing to replace a non-socket path: {}", path.display()),
-        )
-        .into());
+        ));
     }
     fs::remove_file(path)?;
     Ok(())
