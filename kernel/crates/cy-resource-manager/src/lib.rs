@@ -528,6 +528,38 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_reservation_assigns_distinct_fence_tokens() {
+        let resources = (0..64)
+            .map(|index| resource(&format!("resource-{index}")))
+            .collect::<Vec<_>>();
+        let manager = Arc::new(InMemoryResourceManager::new("node-1", resources));
+        let generation = manager.inventory().generation;
+        let mut workers = Vec::new();
+        for index in 0..64 {
+            let manager = Arc::clone(&manager);
+            workers.push(thread::spawn(move || {
+                manager.reserve(request(format!("lease-{index}"), generation))
+            }));
+        }
+        let successful = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap().ok())
+            .collect::<Vec<_>>();
+        assert_eq!(successful.len(), 64, "all concurrent reserves should succeed");
+        let mut fences = successful
+            .iter()
+            .map(|lease| lease.fence_token)
+            .collect::<Vec<_>>();
+        fences.sort_unstable();
+        fences.dedup();
+        assert_eq!(
+            fences.len(),
+            64,
+            "every reserved lease must receive a distinct, non-reused fence token"
+        );
+    }
+
+    #[test]
     fn stale_generation_and_fence_are_rejected() {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
         let lease = manager.reserve(request("lease-1", 1)).unwrap();

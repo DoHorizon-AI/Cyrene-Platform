@@ -35,7 +35,8 @@ pub use capability::{CapabilityFact, EnforcementMode, EnforcementReport, NodeCap
 pub use error::ProviderError;
 pub use inventory::{DeviceNode, HealthReport, InventorySnapshot};
 pub use journal::{
-    NoopRuntimeJournal, RuntimeJournalEvent, RuntimeJournalRecord, RuntimeJournalSink,
+    FailingRuntimeJournal, NoopRuntimeJournal, RuntimeJournalEvent, RuntimeJournalRecord,
+    RuntimeJournalSink,
 };
 pub use launch::{InstalledPluginResolver, LaunchPlan, ResolvedLaunchPlan, VerifiedInstallation};
 pub use lease::{CgroupLimits, LeaseState, ResourceAllocation, ResourceLease, ResourceRequest};

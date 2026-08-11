@@ -76,12 +76,18 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             lease_name: lease.name.clone(),
             fence_token: lease.fence_token,
         };
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReserved,
             None,
             Some(&journal_lease),
             "LEASE_RESERVED",
-        );
+        ) {
+            // Durable fence record could not be persisted: roll back the
+            // in-memory lease so it is never externally visible without the
+            // durable evidence the contract requires.
+            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            return Err(provider_status(error));
+        }
         Ok(Response::new(to_semantic_proto_lease(&lease)))
     }
 
@@ -98,19 +104,24 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         if current.generation != lease_identity.generation {
             return Err(Status::failed_precondition("stale lease generation"));
         }
-        self.daemon
-            .release(&lease_identity.id, request.fence_token)
-            .map_err(provider_status)?;
         let journal_lease = core_v1::ResourceLeaseRef {
             lease_name: lease_identity.id.clone(),
             fence_token: request.fence_token,
         };
-        self.record_runtime(
+        // Persist the durable release record BEFORE releasing in memory
+        // (fail-closed): if the journal write fails we keep the lease rather
+        // than lose the durable evidence of the reservation.
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
             Some(&journal_lease),
             "LEASE_RELEASED",
-        );
+        ) {
+            return Err(provider_status(error));
+        }
+        self.daemon
+            .release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
         let lease = self
             .daemon
             .lease(&lease_identity.id)
@@ -151,12 +162,15 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             lease_name: lease.name.clone(),
             fence_token: lease.fence_token,
         };
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReserved,
             None,
             Some(&journal_lease),
             "LEASE_RESERVED",
-        );
+        ) {
+            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            return Err(provider_status(error));
+        }
         Ok(Response::new(to_proto_lease(
             &self.daemon,
             lease,
@@ -172,15 +186,17 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease reference is required"))?;
-        self.daemon
-            .release(&lease.lease_name, lease.fence_token)
-            .map_err(provider_status)?;
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
             Some(&lease),
             "LEASE_RELEASED",
-        );
+        ) {
+            return Err(provider_status(error));
+        }
+        self.daemon
+            .release(&lease.lease_name, lease.fence_token)
+            .map_err(provider_status)?;
         let lease = self
             .daemon
             .lease(&lease.lease_name)
@@ -325,12 +341,14 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     pending_shutdown: None,
                 },
             );
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceLaunched,
             Some(&instance_name),
             Some(&lease_ref),
             "WORKER_LAUNCHED",
-        );
+        ) {
+            eprintln!("runtime journal InstanceLaunched write failed: {error}");
+        }
         self.publish_runtime_event(
             core_v1::RuntimeEventType::InstanceStateChanged,
             &instance_name,
@@ -376,12 +394,14 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         };
         self.publish_cleanup_events(&request.process_name, &report);
         if !report.complete {
-            self.record_runtime(
+            if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
                 Some(&request.process_name),
                 lease.as_ref(),
                 &report.reason_code,
-            );
+            ) {
+                eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+            }
             let error =
                 ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
             return Ok(Response::new(self.operation_failure(
@@ -395,12 +415,14 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 .release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceTerminated,
             Some(&request.process_name),
             lease.as_ref(),
             "TERMINATE_COMPLETE",
-        );
+        ) {
+            eprintln!("runtime journal InstanceTerminated write failed: {error}");
+        }
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -461,12 +483,14 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         };
         self.publish_cleanup_events(&target, &report);
         if !report.complete {
-            self.record_runtime(
+            if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
                 Some(&target),
                 lease.as_ref(),
                 &report.reason_code,
-            );
+            ) {
+                eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+            }
             let error =
                 ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
             return Ok(Response::new(self.operation_failure(name, target, &error)));
@@ -476,12 +500,14 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 .release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceTerminated,
             Some(&target),
             lease.as_ref(),
             "CANCEL_COMPLETE",
-        );
+        ) {
+            eprintln!("runtime journal InstanceTerminated write failed: {error}");
+        }
         self.instances
             .lock()
             .expect("instance lock poisoned")

@@ -84,12 +84,18 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             lease_name: lease.name.clone(),
             fence_token: lease.fence_token,
         };
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReserved,
             None,
             Some(&journal_lease),
             "LEASE_RESERVED",
-        );
+        ) {
+            // Durable fence record could not be persisted: roll back the
+            // in-memory lease so it is never externally visible without the
+            // durable evidence the contract requires.
+            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            return Err(provider_status(error));
+        }
         Ok(Response::new(to_semantic_proto_lease(&lease)))
     }
 
@@ -142,19 +148,24 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                 "lease generation no longer has authority",
             ));
         }
-        self.daemon
-            .release(&lease_identity.id, request.fence_token)
-            .map_err(provider_status)?;
         let journal_lease = core_v1::ResourceLeaseRef {
             lease_name: lease_identity.id.clone(),
             fence_token: request.fence_token,
         };
-        self.record_runtime(
+        // Persist the durable release record BEFORE releasing in memory
+        // (fail-closed): if the journal write fails we keep the lease rather
+        // than lose the durable evidence of the reservation.
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
             Some(&journal_lease),
             "LEASE_RELEASED",
-        );
+        ) {
+            return Err(provider_status(error));
+        }
+        self.daemon
+            .release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
         let lease = self
             .daemon
             .lease(&lease_identity.id)
@@ -266,12 +277,14 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                     pending_shutdown: None,
                 },
             );
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceLaunched,
             Some(&worker.identity.id),
             Some(&lease_ref),
             "WORKER_LAUNCHED",
-        );
+        ) {
+            eprintln!("runtime journal InstanceLaunched write failed: {error}");
+        }
         self.publish_semantic_event(
             worker.identity.clone(),
             "worker.starting",

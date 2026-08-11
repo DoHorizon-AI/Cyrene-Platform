@@ -12,8 +12,8 @@ use std::{
 
 use cy_kernel_api::{
     semantic, CapabilityFact, CgroupLimits, CleanupReport, DeviceBinding, EnforcementMode,
-    HostInventoryProvider, InstalledPluginResolver, InventorySnapshot, LaunchPlan,
-    NodeCapabilities, ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError,
+    FailingRuntimeJournal, HostInventoryProvider, InstalledPluginResolver, InventorySnapshot,
+    LaunchPlan, NodeCapabilities, ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError,
     ResolvedLaunchPlan, ResourceProvider, RuntimeJournalEvent, RuntimeJournalRecord,
     RuntimeJournalSink, SandboxBackend, StopRequest, VerifiedInstallation,
 };
@@ -1273,4 +1273,143 @@ fn multi_adapter_bindings_reject_mixed_enforcement() {
     .unwrap_err();
 
     assert_eq!(error.reason_code, "MIXED_RESOURCE_ENFORCEMENT");
+}
+
+/// A lease must never become externally visible when the durable fence record
+/// cannot be persisted. The journal write is authoritative: on failure the
+/// in-memory reservation is rolled back, leaving no active lease behind.
+#[test]
+fn acquire_lease_is_rolled_back_when_journal_write_fails() {
+    use crate::convert::authority_lease_name;
+    use core_v1::{
+        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+    };
+
+    let adapter = semantic_lease_adapter().with_runtime_journal(Arc::new(FailingRuntimeJournal));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+        context: Some(authority_context("rollback-journal-fail")),
+        holder: Some(semantic_v1::Identity {
+            id: "worker-1".to_string(),
+            generation: 1,
+        }),
+        query: Some(semantic_v1::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count: 1,
+            required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                id: "accelerator.compute".to_string(),
+                minimum_revision: 1,
+                required_properties: Default::default(),
+            }],
+            minimum_capacity: Default::default(),
+        }),
+        ttl: Some(prost_types::Duration {
+            seconds: 30,
+            nanos: 0,
+        }),
+    })));
+    assert!(
+        result.is_err(),
+        "acquire_lease must fail when the durable journal write fails"
+    );
+
+    // Rollback must have released the in-memory lease, so it is not externally
+    // visible as an Active lease (its resource is freed) even though the
+    // durable fence record was never persisted.
+    let lease_name = authority_lease_name(&authority_context("rollback-journal-fail"));
+    let rolled_back = adapter
+        .daemon
+        .lease(&lease_name)
+        .expect("lease record should still exist after rollback");
+    assert_eq!(
+        rolled_back.state,
+        cy_kernel_api::LeaseState::Released,
+        "rolled-back lease must not remain Active"
+    );
+}
+
+/// A release must fail closed: if the durable release record cannot be
+/// persisted the in-memory lease is retained (we do not lose the evidence of
+/// the reservation). This journal double allows `LeaseReserved` but fails
+/// `LeaseReleased`, so a held lease survives a failed release attempt.
+#[test]
+fn release_lease_fails_closed_when_journal_write_fails() {
+    use core_v1::{
+        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+        ReleaseSemanticLeaseRequest,
+    };
+
+    #[derive(Default)]
+    struct ReserveOkReleaseFailing {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for ReserveOkReleaseFailing {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if record.event == RuntimeJournalEvent::LeaseReleased {
+                return Err(ProviderError::new(
+                    "failing-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected durable release write failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    let adapter =
+        semantic_lease_adapter().with_runtime_journal(Arc::new(ReserveOkReleaseFailing::default()));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let lease = runtime
+        .block_on(
+            adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+                context: Some(authority_context("release-journal-fail")),
+                holder: Some(semantic_v1::Identity {
+                    id: "worker-1".to_string(),
+                    generation: 1,
+                }),
+                query: Some(semantic_v1::ResourceQuery {
+                    resource_class: "accelerator".to_string(),
+                    count: 1,
+                    required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                        id: "accelerator.compute".to_string(),
+                        minimum_revision: 1,
+                        required_properties: Default::default(),
+                    }],
+                    minimum_capacity: Default::default(),
+                }),
+                ttl: Some(prost_types::Duration {
+                    seconds: 30,
+                    nanos: 0,
+                }),
+            })),
+        )
+        .unwrap()
+        .into_inner();
+
+    let release_result = runtime.block_on(adapter.release_lease(Request::new(
+        ReleaseSemanticLeaseRequest {
+            context: Some(authority_context("release-journal-fail")),
+            lease: lease.identity.clone(),
+            fence_token: lease.fence_token,
+        },
+    )));
+    assert!(
+        release_result.is_err(),
+        "release_lease must fail when the durable journal write fails"
+    );
+
+    // The in-memory lease must still be active: we must not lose the durable
+    // evidence of the reservation by releasing without a persisted record.
+    let still_held = adapter
+        .daemon
+        .lease(&lease.identity.as_ref().unwrap().id)
+        .unwrap();
+    assert_eq!(still_held.state, cy_kernel_api::LeaseState::Active);
 }

@@ -571,12 +571,16 @@ impl KernelServiceAdapter {
                             .release(&lease.lease_name, lease.fence_token)
                             .is_ok()
                         {
-                            self.record_runtime(
+                            if let Err(error) = self.record_runtime(
                                 RuntimeJournalEvent::WatchdogReaped,
                                 Some(&name),
                                 Some(lease),
                                 "HEARTBEAT_TIMEOUT_REAPED",
-                            );
+                            ) {
+                                eprintln!(
+                                    "runtime journal WatchdogReaped write failed: {error}"
+                                );
+                            }
                             self.instances
                                 .lock()
                                 .expect("instance lock poisoned")
@@ -584,20 +588,28 @@ impl KernelServiceAdapter {
                         }
                     }
                 } else {
-                    self.record_runtime(
+                    if let Err(error) = self.record_runtime(
                         RuntimeJournalEvent::InstanceCleanupFailed,
                         Some(&name),
                         lease.as_ref(),
                         &report.reason_code,
-                    );
+                    ) {
+                        eprintln!(
+                            "runtime journal InstanceCleanupFailed write failed: {error}"
+                        );
+                    }
                 }
             } else {
-                self.record_runtime(
+                if let Err(error) = self.record_runtime(
                     RuntimeJournalEvent::InstanceCleanupFailed,
                     Some(&name),
                     lease.as_ref(),
                     "WATCHDOG_STOP_FAILED",
-                );
+                ) {
+                    eprintln!(
+                        "runtime journal InstanceCleanupFailed write failed: {error}"
+                    );
+                }
             }
         }
     }
