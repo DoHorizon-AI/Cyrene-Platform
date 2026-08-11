@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 permissions:
   pull-requests: read
@@ -22,14 +24,37 @@ jobs:
             const labels = (pr.labels || []).map((label) => label.name);
             const body = pr.body || "";
 
+            // 1. Branch gate: only develop can be merged into main
             if (pr.head.ref !== "develop") {
-              core.setFailed("main accepts release PRs only from develop");
+              core.setFailed(`main accepts release PRs only from develop (current head: ${pr.head.ref})`);
             }
 
+            // 2. Release evidence verification label
             if (!labels.includes("release-evidence-verified")) {
               core.setFailed("missing release-evidence-verified label");
             }
 
+            // 3. Release evidence URL in PR body
             if (!/Release evidence:\s*https?:\/\/[^\s)]+/i.test(body)) {
-              core.setFailed("PR body must contain a Release evidence URL");
+              core.setFailed("PR body must contain a Release evidence URL (e.g. 'Release evidence: https://...')");
+            }
+
+            // 4. Admin / Maintainer approval review
+            const reviews = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+
+            const userLatestReview = new Map();
+            for (const r of reviews.data) {
+              userLatestReview.set(r.user.id, r);
+            }
+
+            const hasApproval = Array.from(userLatestReview.values()).some(
+              (r) => r.state === "APPROVED" && ["OWNER", "MEMBER", "COLLABORATOR"].includes(r.author_association)
+            );
+
+            if (!hasApproval) {
+              core.setFailed("main release PR requires approval (APPROVED review) from at least one repository administrator/maintainer");
             }
