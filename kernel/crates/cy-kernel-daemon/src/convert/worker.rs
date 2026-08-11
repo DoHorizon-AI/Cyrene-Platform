@@ -64,6 +64,11 @@ pub(crate) fn managed_runtime_state(process: &ManagedProcess) -> i32 {
 
 pub(crate) fn semantic_worker_from_proto(
     worker: semantic_v1::Worker,
+    // The authority `Principal` is supplied by the trusted transport
+    // (SO_PEERCRED), never taken from the caller body. The request may still
+    // carry a `principal` field, but it is ignored: a client must not be able
+    // to assert which authority Principal it acts as.
+    principal: semantic::Identity,
 ) -> Result<semantic::Worker, Status> {
     let state = semantic_v1::WorkerState::try_from(worker.state).map_err(|_| {
         semantic_status(
@@ -90,7 +95,9 @@ pub(crate) fn semantic_worker_from_proto(
     };
     let worker = semantic::Worker {
         identity: semantic_identity_from_proto(worker.identity, "worker identity")?,
-        principal: semantic_identity_from_proto(worker.principal, "worker principal")?,
+        // The connection Principal overrides any caller-asserted value. The
+        // request body's `principal` field is deliberately not consulted.
+        principal,
         provider: semantic_identity_from_proto(worker.provider, "worker provider")?,
         lease: semantic_identity_from_proto(worker.lease, "worker lease")?,
         state,

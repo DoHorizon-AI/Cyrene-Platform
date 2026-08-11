@@ -22,6 +22,44 @@ object KernelSemanticTck {
         "worker" to listOf("REGISTERED", "STARTING", "RUNNING", "DRAINING", "STOPPED", "FAILED", "LOST"),
         "operation" to listOf("CREATED", "PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLING", "CANCELLED", "LOST"),
     )
+    private val transitions = mapOf(
+        "lease" to mapOf(
+            "ACTIVE" to listOf("ACTIVE", "RELEASING", "EXPIRED", "REVOKED", "FAILED"),
+            "RELEASING" to listOf("RELEASING", "RELEASED", "REVOKED", "FAILED"),
+            "RELEASED" to listOf("RELEASED"),
+            "EXPIRED" to listOf("EXPIRED"),
+            "REVOKED" to listOf("REVOKED"),
+            "FAILED" to listOf("FAILED"),
+        ),
+        "worker" to mapOf(
+            "REGISTERED" to listOf("REGISTERED", "STARTING", "DRAINING", "STOPPED", "FAILED", "LOST"),
+            "STARTING" to listOf("STARTING", "RUNNING", "DRAINING", "STOPPED", "FAILED", "LOST"),
+            "RUNNING" to listOf("RUNNING", "DRAINING", "STOPPED", "FAILED", "LOST"),
+            "DRAINING" to listOf("DRAINING", "STOPPED", "FAILED", "LOST"),
+            "STOPPED" to listOf("STOPPED"),
+            "FAILED" to listOf("FAILED"),
+            "LOST" to listOf("LOST"),
+        ),
+        "operation" to mapOf(
+            "CREATED" to listOf("CREATED", "PENDING", "RUNNING", "CANCELLING", "CANCELLED", "FAILED"),
+            "PENDING" to listOf("PENDING", "RUNNING", "CANCELLING", "CANCELLED", "FAILED", "LOST"),
+            "RUNNING" to listOf("RUNNING", "SUCCEEDED", "FAILED", "CANCELLING", "LOST"),
+            "SUCCEEDED" to listOf("SUCCEEDED"),
+            "FAILED" to listOf("FAILED"),
+            "CANCELLING" to listOf("CANCELLING", "CANCELLED", "FAILED", "LOST"),
+            "CANCELLED" to listOf("CANCELLED"),
+            "LOST" to listOf("LOST"),
+        ),
+    )
+
+    private fun upperSnake(value: String): Boolean {
+        if (value.isEmpty()) return false
+        value.forEachIndexed { i, ch ->
+            val ok = if (i == 0) ch in 'A'..'Z' else ch in 'A'..'Z' || ch in '0'..'9' || ch == '_'
+            if (!ok) return false
+        }
+        return true
+    }
 
     private fun rows(root: File, name: String): List<List<String>> = File(root, name).readLines()
         .map { it.trim() }
@@ -211,6 +249,80 @@ object KernelSemanticTck {
         }
     }
 
+    private fun verifyProvider(root: File) {
+        rows(root, "provider.tsv").forEach { row ->
+            val name = row[0]
+            val action = row[1]
+            val current = row[2].toLong()
+            val provided = row[3].toLong()
+            val expected = row[4]
+            val actual = when {
+                provided == 0L -> "GENERATION_INVALID"
+                provided <= current -> "STALE_GENERATION"
+                else -> "ACCEPT"
+            }
+            check(actual == expected) { "$name: provider decision ($action)" }
+        }
+    }
+
+    private fun verifyEndpoint(root: File) {
+        rows(root, "endpoint.tsv").forEach { row ->
+            val name = row[0]
+            val action = row[1]
+            val authorized = row[2]
+            val workerExists = row[3]
+            val expected = row[4]
+            val actual = if (authorized == "true" && workerExists == "true") "ACCEPT" else "AUTHORITY_DENIED"
+            check(actual == expected) { "$name: endpoint decision ($action)" }
+        }
+    }
+
+    private fun verifyDenials(root: File) {
+        rows(root, "denials.tsv").forEach { (name, kind, value, expected) ->
+            val actual = when (kind) {
+                "authentication" -> if (value == "none") "AUTHENTICATION_REQUIRED" else "ACCEPT"
+                "required_field" -> if (value == "<empty>") "REQUIRED_FIELD_MISSING" else "ACCEPT"
+                "enum_value" -> if (value == "UNKNOWN_ENUM") "UNKNOWN_ENUM_VALUE" else "ACCEPT"
+                "reason_code" -> if (!upperSnake(value)) "REASON_CODE_INVALID" else "ACCEPT"
+                "fence_token" -> if (value == "0") "FENCE_TOKEN_INVALID" else "ACCEPT"
+                else -> "ACCEPT"
+            }
+            check(actual == expected) { "$name: denial decision ($kind)" }
+        }
+    }
+
+    private fun verifyTransitionsInvalid(root: File) {
+        rows(root, "transitions_invalid.tsv").forEach { row ->
+            val name = row[0]
+            val noun = row[1]
+            val source = row[2]
+            val target = row[3]
+            val expected = row[4]
+            val allowed = transitions.getValue(noun).getValue(source)
+            val actual = if (target !in allowed) "STATE_TRANSITION_INVALID" else "ACCEPT"
+            check(actual == expected) { "$name: illegal transition decision" }
+        }
+    }
+
+    private fun verifyLeaseAcquire(root: File) {
+        rows(root, "lease_acquire.tsv").forEach { row ->
+            val name = row[0]
+            val action = row[1]
+            val holderMatch = row[2]
+            val resourceMatch = row[3]
+            val fenceValid = row[4]
+            val beforeExpiry = row[5]
+            val expected = row[6]
+            val actual = when {
+                beforeExpiry != "true" -> "LEASE_EXPIRED"
+                fenceValid != "true" -> "FENCE_TOKEN_INVALID"
+                holderMatch != "true" || resourceMatch != "true" -> "AUTHORITY_DENIED"
+                else -> "ACCEPT"
+            }
+            check(actual == expected) { "$name: lease acquisition decision ($action)" }
+        }
+    }
+
     @JvmStatic
     fun main(args: Array<String>) {
         val root = File(if (args.isNotEmpty()) args[0] else ".")
@@ -222,6 +334,11 @@ object KernelSemanticTck {
         verifyAuthority(root)
         verifyReplay(root)
         verifyRenewal(root)
+        verifyProvider(root)
+        verifyEndpoint(root)
+        verifyDenials(root)
+        verifyTransitionsInvalid(root)
+        verifyLeaseAcquire(root)
         println("Kotlin Kernel Semantic TCK v1 passed")
     }
 }

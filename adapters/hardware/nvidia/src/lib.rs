@@ -2,6 +2,14 @@
 //! vendor's command-line tools, sysfs layout, and device nodes.
 
 pub mod discovery;
+mod peer;
+
+#[cfg(test)]
+mod tests;
+
+pub use peer::client_peer_credentials_allowed;
+#[cfg(unix)]
+pub use peer::verify_client_peer;
 
 use std::{
     collections::HashMap,

@@ -220,4 +220,98 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
     }
+
+    /// Crash/restart must not reuse fence tokens. The fence floor is taken from
+    /// the durably persisted journal (`recover()` returns max historical fence
+    /// + 1); a fresh manager seeded with that floor must allocate a strictly
+    /// greater token than the lease that existed before the restart.
+    #[test]
+    fn crash_restart_does_not_reuse_fence_tokens() {
+        use cy_kernel_api::{
+            semantic::{
+                Capability, CapabilityRequirement, Identity, Resource, ResourceQuery, ResourceState,
+            },
+            ResourceLeaseManager, ResourceRequest, RuntimeJournalEvent,
+        };
+        use cy_resource_manager::InMemoryResourceManager;
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal = FileRuntimeJournal::open(directory.path().join("runtime.jsonl")).unwrap();
+
+        let resource = Resource {
+            identity: Identity {
+                id: "resource-1".to_string(),
+                generation: 1,
+            },
+            provider: Identity {
+                id: "test-provider".to_string(),
+                generation: 1,
+            },
+            resource_class: "accelerator".to_string(),
+            capabilities: vec![Capability {
+                id: "accelerator.compute".to_string(),
+                revision: 1,
+                properties: Default::default(),
+            }],
+            capacity: Default::default(),
+            attributes: Default::default(),
+            state: ResourceState::Ready,
+            reason_code: "test-ready".to_string(),
+            summary: "healthy".to_string(),
+            links: Vec::new(),
+        };
+
+        let generation = 1_u64;
+        let request = ResourceRequest {
+            lease_name: "lease-before-restart".to_string(),
+            expected_inventory_generation: generation,
+            holder: Identity {
+                id: "worker/test".to_string(),
+                generation: 1,
+            },
+            query: ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: Default::default(),
+                }],
+                minimum_capacity: Default::default(),
+            },
+            expires_at_unix_ms: None,
+            limits: Default::default(),
+        };
+
+        // Pre-restart: acquire a lease with fence token N and durably record it.
+        let manager_before = InMemoryResourceManager::new("node-1", vec![resource.clone()]);
+        let lease_before = manager_before.reserve(request.clone()).unwrap();
+        let fence_before = lease_before.fence_token;
+        journal
+            .append(RuntimeJournalRecord {
+                event: RuntimeJournalEvent::LeaseReserved,
+                node_id: "node-1".to_string(),
+                node_epoch: 0,
+                instance_name: None,
+                lease_name: Some(lease_before.name.clone()),
+                fence_token: Some(fence_before),
+                reason_code: "LEASE_RESERVED".to_string(),
+            })
+            .unwrap();
+        drop(manager_before);
+
+        // Restart: recover the durable fence floor and seed a fresh manager.
+        let recovery = journal.recover("node-1").unwrap();
+        assert_eq!(recovery.next_fence_token, fence_before + 1);
+        let manager_after = InMemoryResourceManager::with_next_fence_token(
+            "node-1",
+            vec![resource],
+            recovery.next_fence_token,
+        );
+        let lease_after = manager_after.reserve(request).unwrap();
+        assert!(
+            lease_after.fence_token > fence_before,
+            "fence token must not be reused across a restart"
+        );
+    }
 }

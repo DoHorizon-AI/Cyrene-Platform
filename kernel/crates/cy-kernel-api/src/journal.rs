@@ -42,3 +42,20 @@ impl RuntimeJournalSink for NoopRuntimeJournal {
         Ok(())
     }
 }
+
+/// Test double whose `append` always fails. Used to exercise the durable-journal
+/// failure paths: a lease (or release) must never become externally visible when
+/// the fence record cannot be persisted, so the failure must surface and the
+/// in-memory state must be rolled back instead of being silently ignored.
+#[derive(Debug, Default)]
+pub struct FailingRuntimeJournal;
+
+impl RuntimeJournalSink for FailingRuntimeJournal {
+    fn append(&self, _record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+        Err(ProviderError::new(
+            "failing-journal",
+            "JOURNAL_WRITE_FAILED",
+            "injected durable runtime journal write failure",
+        ))
+    }
+}

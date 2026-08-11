@@ -12,8 +12,8 @@ use std::{
 
 use cy_kernel_api::{
     semantic, CapabilityFact, CgroupLimits, CleanupReport, DeviceBinding, EnforcementMode,
-    HostInventoryProvider, InstalledPluginResolver, InventorySnapshot, LaunchPlan,
-    NodeCapabilities, ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError,
+    FailingRuntimeJournal, HostInventoryProvider, InstalledPluginResolver, InventorySnapshot,
+    LaunchPlan, NodeCapabilities, ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError,
     ResolvedLaunchPlan, ResourceProvider, RuntimeJournalEvent, RuntimeJournalRecord,
     RuntimeJournalSink, SandboxBackend, StopRequest, VerifiedInstallation,
 };
@@ -30,9 +30,24 @@ use crate::{
         to_semantic_proto_identity, unix_ms_from_timestamp,
     },
     daemon::KernelDaemon,
+    peer_cred::{principal_from_peer_cred, PeerCred},
     sandboxed_process::SandboxedProcess,
     session::{ManagedProcess, WorkerHeartbeatConfig},
 };
+
+const AUTHORITY_TEST_PEER: PeerCred = PeerCred {
+    pid: 4242,
+    uid: 1000,
+    gid: 1000,
+};
+
+fn authority_request<T>(message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request
+        .extensions_mut()
+        .insert(principal_from_peer_cred(&AUTHORITY_TEST_PEER));
+    request
+}
 
 #[derive(Debug)]
 struct EmptyHardware;
@@ -519,6 +534,23 @@ fn semantic_lease_rpc_is_vendor_neutral_fenced_and_ttl_bounded() {
 }
 
 #[test]
+fn authority_rejects_requests_without_peer_credentials() {
+    use core_v1::kernel_authority_service_server::KernelAuthorityService;
+
+    let adapter = semantic_lease_adapter();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let error = runtime
+        .block_on(adapter.negotiate(Request::new(core_v1::NegotiateRequest::default())))
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+}
+
+#[test]
 fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
     use core_v1::{
         kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
@@ -532,7 +564,7 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
                 context: Some(authority_context("endpoint-lease")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-1".to_string(),
@@ -557,7 +589,7 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
         .unwrap()
         .into_inner();
     let renewed = runtime
-        .block_on(adapter.renew_lease(Request::new(RenewLeaseRequest {
+        .block_on(adapter.renew_lease(authority_request(RenewLeaseRequest {
             context: Some(authority_context("renew-endpoint-lease")),
             lease: lease.identity.clone(),
             fence_token: lease.fence_token,
@@ -610,7 +642,7 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
 
     let endpoint = runtime
         .block_on(
-            adapter.publish_endpoint(Request::new(PublishEndpointRequest {
+            adapter.publish_endpoint(authority_request(PublishEndpointRequest {
                 context: Some(authority_context("publish-endpoint")),
                 endpoint: Some(semantic_v1::Endpoint {
                     identity: Some(semantic_v1::Identity {
@@ -636,7 +668,7 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
         .into_inner();
     let grant = runtime
         .block_on(
-            adapter.authorize_endpoint(Request::new(AuthorizeEndpointRequest {
+            adapter.authorize_endpoint(authority_request(AuthorizeEndpointRequest {
                 context: Some(authority_context("authorize-endpoint")),
                 grant: Some(semantic_v1::EndpointGrant {
                     identity: Some(semantic_v1::Identity {
@@ -656,10 +688,12 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
     assert_eq!(grant.fence_token, renewed.fence_token);
 
     runtime
-        .block_on(adapter.revoke_endpoint(Request::new(RevokeEndpointRequest {
-            context: Some(authority_context("revoke-endpoint")),
-            grant: grant.identity.clone(),
-        })))
+        .block_on(
+            adapter.revoke_endpoint(authority_request(RevokeEndpointRequest {
+                context: Some(authority_context("revoke-endpoint")),
+                grant: grant.identity.clone(),
+            })),
+        )
         .unwrap();
     assert!(adapter.endpoint_grants.lock().unwrap().is_empty());
 }
@@ -679,7 +713,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
                 context: Some(authority_context("worker-lease")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-1".to_string(),
@@ -722,7 +756,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         limits: Default::default(),
     };
     let started = runtime
-        .block_on(adapter.start_worker(Request::new(StartWorkerRequest {
+        .block_on(adapter.start_worker(authority_request(StartWorkerRequest {
             context: Some(authority_context("start-worker")),
             worker: Some(worker.clone()),
         })))
@@ -730,10 +764,24 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .into_inner();
     assert_eq!(started.kind, "worker.start");
     assert_eq!(started.state, semantic_v1::OperationState::Running as i32);
+    let stored_principal = adapter
+        .instances
+        .lock()
+        .unwrap()
+        .get("worker-1")
+        .and_then(|process| process.semantic_worker.as_ref())
+        .expect("started worker must retain semantic identity")
+        .principal
+        .clone();
+    assert_eq!(
+        stored_principal.id, "unix://uid=1000/gid=1000/pid=4242",
+        "the authority must not trust Worker.principal from the request body",
+    );
+    assert_eq!(stored_principal.generation, 4242);
 
     let running = runtime
         .block_on(
-            adapter.heartbeat_worker(Request::new(HeartbeatWorkerRequest {
+            adapter.heartbeat_worker(authority_request(HeartbeatWorkerRequest {
                 context: Some(authority_context("heartbeat-worker")),
                 worker: worker.identity.clone(),
                 lease: lease.identity.clone(),
@@ -759,7 +807,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     };
     runtime
         .block_on(
-            adapter.create_operation(Request::new(CreateOperationRequest {
+            adapter.create_operation(authority_request(CreateOperationRequest {
                 context: Some(authority_context("create-operation")),
                 operation: Some(operation.clone()),
             })),
@@ -769,7 +817,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     reported.state = semantic_v1::OperationState::Running as i32;
     runtime
         .block_on(
-            adapter.report_operation(Request::new(ReportOperationRequest {
+            adapter.report_operation(authority_request(ReportOperationRequest {
                 context: Some(authority_context("report-operation")),
                 operation: Some(reported),
             })),
@@ -777,7 +825,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .unwrap();
     let cancelling = runtime
         .block_on(
-            adapter.cancel_operation(Request::new(CancelSemanticOperationRequest {
+            adapter.cancel_operation(authority_request(CancelSemanticOperationRequest {
                 context: Some(authority_context("cancel-operation")),
                 operation: Some(semantic_v1::Identity {
                     id: "operation-1".to_string(),
@@ -798,7 +846,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     };
     let events = runtime
         .block_on(
-            adapter.subscribe_events(Request::new(SubscribeEventsRequest {
+            adapter.subscribe_events(authority_request(SubscribeEventsRequest {
                 context: Some(authority_context("subscribe-events")),
                 cursor: Some(cursor),
                 page_size: 256,
@@ -818,7 +866,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
 
     let source_changed = runtime
         .block_on(
-            adapter.subscribe_events(Request::new(SubscribeEventsRequest {
+            adapter.subscribe_events(authority_request(SubscribeEventsRequest {
                 context: Some(authority_context("source-changed")),
                 cursor: Some(semantic_v1::EventCursor {
                     source: Some(semantic_v1::Identity {
@@ -849,7 +897,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     }
     let gap = runtime
         .block_on(
-            adapter.subscribe_events(Request::new(SubscribeEventsRequest {
+            adapter.subscribe_events(authority_request(SubscribeEventsRequest {
                 context: Some(authority_context("replay-gap")),
                 cursor: Some(semantic_v1::EventCursor {
                     source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
@@ -864,7 +912,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     assert!(gap.events.is_empty());
 
     let stopped = runtime
-        .block_on(adapter.stop_worker(Request::new(StopWorkerRequest {
+        .block_on(adapter.stop_worker(authority_request(StopWorkerRequest {
             context: Some(authority_context("stop-worker")),
             worker: worker.identity,
             lease: lease.identity,
@@ -1017,7 +1065,7 @@ fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(Request::new(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
                 context: Some(authority_context("control-lease")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-control-1".to_string(),
@@ -1060,7 +1108,7 @@ fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
         limits: Default::default(),
     };
     runtime
-        .block_on(adapter.start_worker(Request::new(StartWorkerRequest {
+        .block_on(adapter.start_worker(authority_request(StartWorkerRequest {
             context: Some(authority_context("control-start")),
             worker: Some(worker.clone()),
         })))
@@ -1273,4 +1321,145 @@ fn multi_adapter_bindings_reject_mixed_enforcement() {
     .unwrap_err();
 
     assert_eq!(error.reason_code, "MIXED_RESOURCE_ENFORCEMENT");
+}
+
+/// A lease must never become externally visible when the durable fence record
+/// cannot be persisted. The journal write is authoritative: on failure the
+/// in-memory reservation is rolled back, leaving no active lease behind.
+#[test]
+fn acquire_lease_is_rolled_back_when_journal_write_fails() {
+    use crate::convert::authority_lease_name;
+    use core_v1::{
+        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+    };
+
+    let adapter = semantic_lease_adapter().with_runtime_journal(Arc::new(FailingRuntimeJournal));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(adapter.acquire_lease(authority_request(
+        AcquireSemanticLeaseRequest {
+            context: Some(authority_context("rollback-journal-fail")),
+            holder: Some(semantic_v1::Identity {
+                id: "worker-1".to_string(),
+                generation: 1,
+            }),
+            query: Some(semantic_v1::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: Default::default(),
+                }],
+                minimum_capacity: Default::default(),
+            }),
+            ttl: Some(prost_types::Duration {
+                seconds: 30,
+                nanos: 0,
+            }),
+        },
+    )));
+    assert!(
+        result.is_err(),
+        "acquire_lease must fail when the durable journal write fails"
+    );
+
+    // Rollback must have released the in-memory lease, so it is not externally
+    // visible as an Active lease (its resource is freed) even though the
+    // durable fence record was never persisted.
+    let lease_name = authority_lease_name(&authority_context("rollback-journal-fail"));
+    let rolled_back = adapter
+        .daemon
+        .lease(&lease_name)
+        .expect("lease record should still exist after rollback");
+    assert_eq!(
+        rolled_back.state,
+        cy_kernel_api::LeaseState::Released,
+        "rolled-back lease must not remain Active"
+    );
+}
+
+/// A release must fail closed: if the durable release record cannot be
+/// persisted the in-memory lease is retained (we do not lose the evidence of
+/// the reservation). This journal double allows `LeaseReserved` but fails
+/// `LeaseReleased`, so a held lease survives a failed release attempt.
+#[test]
+fn release_lease_fails_closed_when_journal_write_fails() {
+    use core_v1::{
+        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+        ReleaseSemanticLeaseRequest,
+    };
+
+    #[derive(Default)]
+    struct ReserveOkReleaseFailing {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for ReserveOkReleaseFailing {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if record.event == RuntimeJournalEvent::LeaseReleased {
+                return Err(ProviderError::new(
+                    "failing-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected durable release write failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    let adapter =
+        semantic_lease_adapter().with_runtime_journal(Arc::new(ReserveOkReleaseFailing::default()));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let lease = runtime
+        .block_on(
+            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
+                context: Some(authority_context("release-journal-fail")),
+                holder: Some(semantic_v1::Identity {
+                    id: "worker-1".to_string(),
+                    generation: 1,
+                }),
+                query: Some(semantic_v1::ResourceQuery {
+                    resource_class: "accelerator".to_string(),
+                    count: 1,
+                    required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                        id: "accelerator.compute".to_string(),
+                        minimum_revision: 1,
+                        required_properties: Default::default(),
+                    }],
+                    minimum_capacity: Default::default(),
+                }),
+                ttl: Some(prost_types::Duration {
+                    seconds: 30,
+                    nanos: 0,
+                }),
+            })),
+        )
+        .unwrap()
+        .into_inner();
+
+    let release_result = runtime.block_on(adapter.release_lease(authority_request(
+        ReleaseSemanticLeaseRequest {
+            context: Some(authority_context("release-journal-fail")),
+            lease: lease.identity.clone(),
+            fence_token: lease.fence_token,
+        },
+    )));
+    assert!(
+        release_result.is_err(),
+        "release_lease must fail when the durable journal write fails"
+    );
+
+    // The in-memory lease must still be active: we must not lose the durable
+    // evidence of the reservation by releasing without a persisted record.
+    let still_held = adapter
+        .daemon
+        .lease(&lease.identity.as_ref().unwrap().id)
+        .unwrap();
+    assert_eq!(still_held.state, cy_kernel_api::LeaseState::Active);
 }

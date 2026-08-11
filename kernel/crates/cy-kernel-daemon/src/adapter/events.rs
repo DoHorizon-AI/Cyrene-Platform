@@ -2,7 +2,9 @@
 
 use std::sync::atomic::Ordering;
 
-use cy_kernel_api::{semantic, CleanupReport, RuntimeJournalEvent, RuntimeJournalRecord};
+use cy_kernel_api::{
+    semantic, CleanupReport, ProviderError, RuntimeJournalEvent, RuntimeJournalRecord,
+};
 use cy_proto::core_v1;
 
 use crate::{
@@ -160,14 +162,20 @@ impl KernelServiceAdapter {
         }
     }
 
+    /// Persists a runtime lifecycle record to the durable journal.
+    ///
+    /// For lease reservation/release this is the authoritative step: callers
+    /// must treat a returned `Err` as a hard failure (the fence record was not
+    /// durably reserved) and roll back or fail-closed accordingly, never
+    /// letting a lease become externally visible without its persisted fence.
     pub(crate) fn record_runtime(
         &self,
         event: RuntimeJournalEvent,
         instance_name: Option<&str>,
         lease: Option<&core_v1::ResourceLeaseRef>,
         reason_code: &str,
-    ) {
-        let _ = self.runtime_journal.append(RuntimeJournalRecord {
+    ) -> Result<(), ProviderError> {
+        self.runtime_journal.append(RuntimeJournalRecord {
             event,
             node_id: self.daemon.node_id.clone(),
             node_epoch: self.daemon.node_epoch,
@@ -175,7 +183,7 @@ impl KernelServiceAdapter {
             lease_name: lease.map(|lease| lease.lease_name.clone()),
             fence_token: lease.map(|lease| lease.fence_token),
             reason_code: reason_code.to_string(),
-        });
+        })
     }
 
     pub(crate) fn publish_cleanup_events(&self, target: &str, report: &CleanupReport) {

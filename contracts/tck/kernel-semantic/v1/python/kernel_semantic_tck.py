@@ -25,6 +25,48 @@ STATES = {
     "worker": ["REGISTERED", "STARTING", "RUNNING", "DRAINING", "STOPPED", "FAILED", "LOST"],
     "operation": ["CREATED", "PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLING", "CANCELLED", "LOST"],
 }
+TRANSITIONS = {
+    "lease": {
+        "ACTIVE": ["ACTIVE", "RELEASING", "EXPIRED", "REVOKED", "FAILED"],
+        "RELEASING": ["RELEASING", "RELEASED", "REVOKED", "FAILED"],
+        "RELEASED": ["RELEASED"],
+        "EXPIRED": ["EXPIRED"],
+        "REVOKED": ["REVOKED"],
+        "FAILED": ["FAILED"],
+    },
+    "worker": {
+        "REGISTERED": ["REGISTERED", "STARTING", "DRAINING", "STOPPED", "FAILED", "LOST"],
+        "STARTING": ["STARTING", "RUNNING", "DRAINING", "STOPPED", "FAILED", "LOST"],
+        "RUNNING": ["RUNNING", "DRAINING", "STOPPED", "FAILED", "LOST"],
+        "DRAINING": ["DRAINING", "STOPPED", "FAILED", "LOST"],
+        "STOPPED": ["STOPPED"],
+        "FAILED": ["FAILED"],
+        "LOST": ["LOST"],
+    },
+    "operation": {
+        "CREATED": ["CREATED", "PENDING", "RUNNING", "CANCELLING", "CANCELLED", "FAILED"],
+        "PENDING": ["PENDING", "RUNNING", "CANCELLING", "CANCELLED", "FAILED", "LOST"],
+        "RUNNING": ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLING", "LOST"],
+        "SUCCEEDED": ["SUCCEEDED"],
+        "FAILED": ["FAILED"],
+        "CANCELLING": ["CANCELLING", "CANCELLED", "FAILED", "LOST"],
+        "CANCELLED": ["CANCELLED"],
+        "LOST": ["LOST"],
+    },
+}
+
+
+def upper_snake(value: str) -> bool:
+    if not value:
+        return False
+    for i, ch in enumerate(value):
+        if i == 0:
+            ok = "A" <= ch <= "Z"
+        else:
+            ok = ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch == "_"
+        if not ok:
+            return False
+    return True
 
 
 def rows(name: str):
@@ -199,6 +241,62 @@ def verify_renewal() -> None:
         assert actual == expected, f"{name}: renewal decision"
 
 
+def verify_provider() -> None:
+    for name, action, current, provided, expected in rows("provider.tsv"):
+        current_generation, provided_generation = int(current), int(provided)
+        if provided_generation == 0:
+            actual = "GENERATION_INVALID"
+        elif provided_generation <= current_generation:
+            actual = "STALE_GENERATION"
+        else:
+            actual = "ACCEPT"
+        assert actual == expected, f"{name}: provider decision ({action})"
+
+
+def verify_endpoint() -> None:
+    for name, action, authorized, worker_exists, expected in rows("endpoint.tsv"):
+        actual = (
+            "ACCEPT"
+            if authorized == "true" and worker_exists == "true"
+            else "AUTHORITY_DENIED"
+        )
+        assert actual == expected, f"{name}: endpoint decision ({action})"
+
+
+def verify_denials() -> None:
+    for name, kind, value, expected in rows("denials.tsv"):
+        actual = {
+            "authentication": "AUTHENTICATION_REQUIRED" if value == "none" else "ACCEPT",
+            "required_field": "REQUIRED_FIELD_MISSING" if value == "<empty>" else "ACCEPT",
+            "enum_value": "UNKNOWN_ENUM_VALUE" if value == "UNKNOWN_ENUM" else "ACCEPT",
+            "reason_code": "REASON_CODE_INVALID" if not upper_snake(value) else "ACCEPT",
+            "fence_token": "FENCE_TOKEN_INVALID" if value == "0" else "ACCEPT",
+        }.get(kind, "ACCEPT")
+        assert actual == expected, f"{name}: denial decision ({kind})"
+
+
+def verify_transitions_invalid() -> None:
+    for name, noun, source, target, expected in rows("transitions_invalid.tsv"):
+        allowed = TRANSITIONS[noun][source]
+        actual = "STATE_TRANSITION_INVALID" if target not in allowed else "ACCEPT"
+        assert actual == expected, f"{name}: illegal transition decision"
+
+
+def verify_lease_acquire() -> None:
+    for row in rows("lease_acquire.tsv"):
+        (name, action, holder_match, resource_match, fence_valid,
+         before_expiry, expected) = row
+        if before_expiry != "true":
+            actual = "LEASE_EXPIRED"
+        elif fence_valid != "true":
+            actual = "FENCE_TOKEN_INVALID"
+        elif holder_match != "true" or resource_match != "true":
+            actual = "AUTHORITY_DENIED"
+        else:
+            actual = "ACCEPT"
+        assert actual == expected, f"{name}: lease acquisition decision ({action})"
+
+
 if __name__ == "__main__":
     verify_limits()
     verify_identifiers()
@@ -208,4 +306,9 @@ if __name__ == "__main__":
     verify_authority()
     verify_replay()
     verify_renewal()
+    verify_provider()
+    verify_endpoint()
+    verify_denials()
+    verify_transitions_invalid()
+    verify_lease_acquire()
     print("Python Kernel Semantic TCK v1 passed")

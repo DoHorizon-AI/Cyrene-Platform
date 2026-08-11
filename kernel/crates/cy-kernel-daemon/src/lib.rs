@@ -14,6 +14,7 @@
 pub(crate) mod adapter;
 pub(crate) mod convert;
 pub(crate) mod daemon;
+pub mod peer_cred;
 pub(crate) mod rpc;
 pub(crate) mod sandboxed_process;
 pub(crate) mod session;

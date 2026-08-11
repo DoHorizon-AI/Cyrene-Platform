@@ -19,6 +19,7 @@ use crate::{
         to_semantic_proto_lease, to_semantic_proto_operation, to_semantic_proto_worker,
         validate_authority_context,
     },
+    peer_cred::principal_from_request,
     sandboxed_process::SandboxedProcess,
     session::ManagedProcess,
 };
@@ -29,6 +30,9 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::NegotiateRequest>,
     ) -> Result<Response<semantic_v1::ContractRevision>, Status> {
+        // Authenticate the caller from the trusted transport even though the
+        // negotiation result carries no Principal of its own.
+        let _principal = principal_from_request(&request)?;
         let local = semantic::ContractRevision::current();
         let selected = request
             .into_inner()
@@ -53,6 +57,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::AcquireSemanticLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         let context = validate_authority_context(request.context.as_ref())?;
         let holder = semantic_identity_from_proto(request.holder, "holder")?;
@@ -84,12 +89,18 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             lease_name: lease.name.clone(),
             fence_token: lease.fence_token,
         };
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReserved,
             None,
             Some(&journal_lease),
             "LEASE_RESERVED",
-        );
+        ) {
+            // Durable fence record could not be persisted: roll back the
+            // in-memory lease so it is never externally visible without the
+            // durable evidence the contract requires.
+            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            return Err(provider_status(error));
+        }
         Ok(Response::new(to_semantic_proto_lease(&lease)))
     }
 
@@ -97,6 +108,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::RenewLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
@@ -128,6 +140,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::ReleaseSemanticLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
@@ -142,19 +155,24 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                 "lease generation no longer has authority",
             ));
         }
-        self.daemon
-            .release(&lease_identity.id, request.fence_token)
-            .map_err(provider_status)?;
         let journal_lease = core_v1::ResourceLeaseRef {
             lease_name: lease_identity.id.clone(),
             fence_token: request.fence_token,
         };
-        self.record_runtime(
+        // Persist the durable release record BEFORE releasing in memory
+        // (fail-closed): if the journal write fails we keep the lease rather
+        // than lose the durable evidence of the reservation.
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
             Some(&journal_lease),
             "LEASE_RELEASED",
-        );
+        ) {
+            return Err(provider_status(error));
+        }
+        self.daemon
+            .release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
         let lease = self
             .daemon
             .lease(&lease_identity.id)
@@ -166,12 +184,16 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::StartWorkerRequest>,
     ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let mut worker = semantic_worker_from_proto(
             request
                 .worker
                 .ok_or_else(|| Status::invalid_argument("worker is required"))?,
+            // The authority Principal comes from the trusted transport, not
+            // from the caller-asserted `worker.principal` body field.
+            principal.identity.clone(),
         )?;
         if !matches!(
             worker.state,
@@ -266,12 +288,14 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                     pending_shutdown: None,
                 },
             );
-        self.record_runtime(
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceLaunched,
             Some(&worker.identity.id),
             Some(&lease_ref),
             "WORKER_LAUNCHED",
-        );
+        ) {
+            eprintln!("runtime journal InstanceLaunched write failed: {error}");
+        }
         self.publish_semantic_event(
             worker.identity.clone(),
             "worker.starting",
@@ -300,6 +324,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::HeartbeatWorkerRequest>,
     ) -> Result<Response<semantic_v1::Worker>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let worker_identity = semantic_identity_from_proto(request.worker, "worker")?;
@@ -316,6 +341,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::StopWorkerRequest>,
     ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let worker_identity = semantic_identity_from_proto(request.worker, "worker")?;
@@ -427,6 +453,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::CreateOperationRequest>,
     ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let operation = semantic_operation_from_proto(
@@ -481,6 +508,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::ReportOperationRequest>,
     ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let reported = semantic_operation_from_proto(
@@ -534,6 +562,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::CancelSemanticOperationRequest>,
     ) -> Result<Response<semantic_v1::Operation>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let identity = semantic_identity_from_proto(request.operation, "operation")?;
@@ -581,6 +610,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::PublishEndpointRequest>,
     ) -> Result<Response<semantic_v1::Endpoint>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let endpoint = semantic_endpoint_from_proto(
@@ -629,6 +659,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::AuthorizeEndpointRequest>,
     ) -> Result<Response<semantic_v1::EndpointGrant>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let grant = semantic_endpoint_grant_from_proto(
@@ -682,6 +713,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::RevokeEndpointRequest>,
     ) -> Result<Response<()>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let grant = semantic_identity_from_proto(request.grant, "grant")?;
@@ -696,6 +728,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::SubscribeEventsRequest>,
     ) -> Result<Response<semantic_v1::EventPage>, Status> {
+        let _principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let cursor = semantic_event_cursor_from_proto(request.cursor)?;

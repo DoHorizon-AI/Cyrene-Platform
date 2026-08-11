@@ -2,9 +2,11 @@
 //!
 //! The process owns no vendor driver code. It joins a versioned UDS hardware
 //! adapter and one separately supervised Sandbox Adapter Host, then serves Core
-//! v1 over a local UDS endpoint with filesystem permissions as the trust boundary.
+//! v1 over a local UDS endpoint. Admission is enforced by Unix-socket peer
+//! credentials (SO_PEERCRED): every Adapter endpoint must be configured with a
+//! trusted peer UID/GID (fail-closed at startup), and the authority socket also
+//! authenticates the calling Principal from the peer credential.
 
-#[cfg(unix)]
 mod runtime_journal;
 
 #[cfg(not(unix))]
@@ -19,11 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
 
     use cy_installation_resolver::FilesystemInstalledPluginResolver;
-    use cy_kernel_daemon::{KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig};
+    use cy_kernel_daemon::{
+        peer_cred::{inject_authority_principal, PeerCredAccept},
+        KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig,
+    };
+    use cy_proto::core_v1;
     use cy_resource_manager::InMemoryResourceManager;
     use cy_sandbox_client::UdsSandboxAdapterClient;
     use runtime_journal::FileRuntimeJournal;
-    use tokio::net::UnixListener;
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::transport::Server;
 
@@ -77,9 +82,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authority_listener = bind_socket(&args.socket)?;
     let worker_control_listener = bind_socket(&args.worker_control_socket)?;
     let authority_server = Server::builder()
-        .add_service(adapter.authority_server())
+        .add_service(
+            core_v1::kernel_authority_service_server::KernelAuthorityServiceServer::with_interceptor(
+                adapter.clone(),
+                inject_authority_principal,
+            ),
+        )
         .add_service(adapter.server())
-        .serve_with_incoming(UnixListenerStream::new(authority_listener));
+        .serve_with_incoming(PeerCredAccept::new(UnixListenerStream::new(
+            authority_listener,
+        )));
     // The Worker socket exposes only the constrained control/liveness service.
     // It never registers KernelAuthorityService, so a Worker cannot call lease
     // or Endpoint authority actions merely because it can acknowledge shutdown.
@@ -127,6 +139,8 @@ impl Args {
         let mut adapter_poll_interval = Duration::from_secs(5);
         let mut adapter_peer_credentials =
             BTreeMap::<String, cy_adapter_client::PeerCredentialExpectation>::new();
+        let mut sandbox_peer_uid = None;
+        let mut sandbox_peer_gid = None;
         while let Some(argument) = values.next() {
             let mut value = || {
                 values.next().ok_or_else(|| {
@@ -150,6 +164,22 @@ impl Args {
                     adapter_peer_credentials.entry(adapter_id).or_default().gid = Some(gid);
                 }
                 "--sandbox-adapter" => sandbox_adapter = Some(parse_sandbox_adapter(&value()?)?),
+                "--sandbox-adapter-peer-uid" => {
+                    sandbox_peer_uid = Some(value()?.parse::<u32>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "--sandbox-adapter-peer-uid must be an unsigned integer",
+                        )
+                    })?)
+                }
+                "--sandbox-adapter-peer-gid" => {
+                    sandbox_peer_gid = Some(value()?.parse::<u32>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "--sandbox-adapter-peer-gid must be an unsigned integer",
+                        )
+                    })?)
+                }
                 "--installations-root" => installations_root = PathBuf::from(value()?),
                 "--runtime-journal" => runtime_journal = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
@@ -157,7 +187,7 @@ impl Args {
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -204,12 +234,23 @@ impl Args {
             )
             .into());
         }
-        let sandbox_adapter = sandbox_adapter.ok_or_else(|| {
+        let mut sandbox_adapter = sandbox_adapter.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "exactly one --sandbox-adapter ID=/absolute/socket.sock is required",
             )
         })?;
+        // The single sandbox adapter has no routing ID ambiguity, so its peer
+        // identity policy is configured as a bare UID/GID rather than ID=NUMBER.
+        sandbox_adapter.peer_credentials = cy_adapter_client::PeerCredentialExpectation {
+            uid: sandbox_peer_uid,
+            gid: sandbox_peer_gid,
+        };
+        // Fail-closed admission gate: every Adapter endpoint must be configured
+        // with at least one trusted peer UID/GID. Without this, the library
+        // default of `PeerCredentialExpectation::default()` (allow any peer)
+        // would silently disable UDS admission for that endpoint in production.
+        require_configured_adapter_peers(&hardware_adapters, &sandbox_adapter)?;
         Ok(Self {
             node_id,
             socket,
@@ -225,6 +266,31 @@ impl Args {
             adapter_poll_interval,
         })
     }
+}
+
+#[cfg(unix)]
+fn require_configured_adapter_peers(
+    hardware_adapters: &[cy_adapter_client::HardwareAdapterEndpoint],
+    sandbox_adapter: &cy_sandbox_client::SandboxAdapterEndpoint,
+) -> std::io::Result<()> {
+    for endpoint in hardware_adapters {
+        if !endpoint.peer_credentials.is_configured() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "hardware adapter '{}' requires at least one --hardware-adapter-peer-uid or --hardware-adapter-peer-gid",
+                    endpoint.adapter_id
+                ),
+            ));
+        }
+    }
+    if !sandbox_adapter.peer_credentials.is_configured() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sandbox adapter requires at least one --sandbox-adapter-peer-uid or --sandbox-adapter-peer-gid",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -347,4 +413,53 @@ fn prepare_socket_path(path: &std::path::Path) -> Result<(), std::io::Error> {
     }
     fs::remove_file(path)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::require_configured_adapter_peers;
+    use cy_adapter_client::{HardwareAdapterEndpoint, PeerCredentialExpectation};
+    use cy_sandbox_client::SandboxAdapterEndpoint;
+    use std::path::PathBuf;
+
+    fn hardware(id: &str) -> HardwareAdapterEndpoint {
+        HardwareAdapterEndpoint::new(id, PathBuf::from("/run/cyrene/test-hardware.sock"))
+    }
+
+    fn sandbox() -> SandboxAdapterEndpoint {
+        SandboxAdapterEndpoint::new("sandboxd", PathBuf::from("/run/cyrene/test-sandbox.sock"))
+    }
+
+    #[test]
+    fn gate_rejects_unconfigured_hardware_adapter() {
+        let hw = hardware("nvidia");
+        let sb = sandbox();
+        assert!(require_configured_adapter_peers(&[hw], &sb).is_err());
+    }
+
+    #[test]
+    fn gate_rejects_unconfigured_sandbox_adapter() {
+        let mut hw = hardware("nvidia");
+        hw.peer_credentials = PeerCredentialExpectation {
+            uid: Some(0),
+            gid: None,
+        };
+        let sb = sandbox();
+        assert!(require_configured_adapter_peers(&[hw], &sb).is_err());
+    }
+
+    #[test]
+    fn gate_accepts_fully_configured_endpoints() {
+        let mut hw = hardware("nvidia");
+        hw.peer_credentials = PeerCredentialExpectation {
+            uid: Some(0),
+            gid: None,
+        };
+        let mut sb = sandbox();
+        sb.peer_credentials = PeerCredentialExpectation {
+            uid: Some(0),
+            gid: None,
+        };
+        assert!(require_configured_adapter_peers(&[hw], &sb).is_ok());
+    }
 }
