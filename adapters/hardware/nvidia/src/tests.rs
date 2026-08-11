@@ -138,7 +138,8 @@ mod linux_uds {
     /// closed.
     fn spawn_nobody_client(socket_path: &std::path::Path) -> nix::unistd::Pid {
         let path = socket_path.to_path_buf();
-        match nix::unistd::fork().expect("fork") {
+        // SAFETY: forking a throwaway single-threaded test process before dropping privileges
+        match unsafe { nix::unistd::fork() }.expect("fork") {
             nix::unistd::ForkResult::Child => {
                 let nobody = nix::unistd::User::from_name("nobody")
                     .expect("resolve nobody")

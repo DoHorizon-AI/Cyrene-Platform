@@ -19,9 +19,11 @@ jobs:
       - name: Install CI prerequisites
         run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - name: Install pinned Buf
-        uses: bufbuild/buf-setup-action@v1
+        uses: bufbuild/buf-action@v1
         with:
+          setup_only: true
           version: 1.45.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check architecture governance
         run: bash tools/ci/check-architecture-governance.sh
       - name: Check Core v1 contract

@@ -8,7 +8,7 @@
 //! 3. **围栏令牌 (Fence Token)**：每次分配赋予单调递增的 fence token，租约释放必须携带正确的令牌，彻底杜绝延迟网络包或旧任务错误释放新租约的竞态条件；
 //! 4. **资源隔离封锁 (Quarantine)**：支持把不再可信的资源标记为隔离状态，阻止后续分配。
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::{
     collections::{BTreeMap, BTreeSet},

@@ -10,7 +10,7 @@
 //! - **沙箱与进程生命周期**：[`LaunchPlan`], [`ProcessHandle`], [`CleanupReport`], [`StopRequest`]
 //! - **核心端口 Trait**：[`ResourceProvider`], [`ResourceLeaseManager`], [`ProcessRuntime`], [`SandboxBackend`] 等
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 pub mod authority;
 pub mod binding;

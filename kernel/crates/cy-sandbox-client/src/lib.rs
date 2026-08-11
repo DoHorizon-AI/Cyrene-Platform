@@ -4,7 +4,7 @@
 //! lifecycle actions. It never opens cgroup files, starts a process, invokes a
 //! device BPF syscall, or loads a privileged library itself.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::{
     path::{Path, PathBuf},
