@@ -3,7 +3,7 @@
 #[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cy_proto::sandbox_v1;
-    use cyrene_sandboxd::{handle_request, CgroupV2Config, CgroupV2Runtime};
+    use cyrene_sandboxd::{handle_request, verify_client_peer, CgroupV2Config, CgroupV2Runtime};
     use prost::Message;
     use std::{
         env, fs,
@@ -61,39 +61,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(error) => eprintln!("sandboxd accept failed: {error}"),
-        }
-    }
-
-    fn verify_client_peer(
-        stream: &UnixStream,
-        expected_uid: Option<u32>,
-        expected_gid: Option<u32>,
-    ) -> std::io::Result<()> {
-        if expected_uid.is_none() && expected_gid.is_none() {
-            return Ok(());
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let credentials =
-                nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
-                    .map_err(std::io::Error::other)?;
-            if expected_uid.is_some_and(|uid| uid != credentials.uid())
-                || expected_gid.is_some_and(|gid| gid != credentials.gid())
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "UDS peer credentials do not match configured Kernel identity",
-                ));
-            }
-            Ok(())
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = stream;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "UDS peer credential checks require Linux",
-            ))
         }
     }
 

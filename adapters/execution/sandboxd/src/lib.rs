@@ -8,6 +8,7 @@
 
 pub(crate) mod bpf;
 pub(crate) mod config;
+mod peer;
 mod protocol;
 pub(crate) mod runtime;
 pub(crate) mod sys;
@@ -17,6 +18,9 @@ mod tests;
 
 pub use bpf::LinuxDeviceMapper;
 pub use config::{CgroupV2Config, OwnedCgroupCleanupReport};
+pub use peer::client_peer_credentials_allowed;
+#[cfg(unix)]
+pub use peer::verify_client_peer;
 pub use protocol::handle_request;
 pub use runtime::CgroupV2Runtime;
 pub use sys::read_oom_kill_count;

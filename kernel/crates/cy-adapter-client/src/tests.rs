@@ -139,6 +139,38 @@ fn peer_credential_policy_rejects_a_mismatched_adapter_peer() {
 }
 
 #[test]
+fn peer_credential_policy_covers_partial_and_empty_expectations() {
+    // (expected_uid, expected_gid, actual_uid, actual_gid, accepted)
+    let cases = [
+        (Some(1000), None, 1000, 9999, true),
+        (Some(1000), None, 1001, 1000, false),
+        (None, Some(2000), 9999, 2000, true),
+        (None, Some(2000), 2000, 2001, false),
+        (None, None, 0, 0, true),
+        (None, None, u32::MAX, u32::MAX, true),
+        (Some(1000), Some(2000), 1001, 2001, false),
+        (Some(1000), Some(2000), 1000, 2001, false),
+        (Some(1000), Some(2000), 1000, 2000, true),
+    ];
+    for (uid, gid, actual_uid, actual_gid, accepted) in cases {
+        let policy = PeerCredentialExpectation { uid, gid };
+        assert_eq!(policy.is_configured(), uid.is_some() || gid.is_some());
+        let verdict = policy.verify("test", actual_uid, actual_gid);
+        assert_eq!(
+            verdict.is_ok(),
+            accepted,
+            "unexpected verdict for expectation ({uid:?}, {gid:?}) against ({actual_uid}, {actual_gid})"
+        );
+        if !accepted {
+            assert_eq!(
+                verdict.unwrap_err().reason_code,
+                "ADAPTER_PEER_CREDENTIAL_MISMATCH"
+            );
+        }
+    }
+}
+
+#[test]
 fn expired_or_missing_inventory_facts_fail_closed() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -235,4 +267,116 @@ fn registry_rejects_duplicate_device_ids_across_adapters() {
             .reason_code,
         "ADAPTER_RESOURCE_ID_COLLISION"
     );
+}
+
+/// Real Unix-domain-socket coverage for the Kernel-side peer-credential
+/// admission check. Gated to Linux because SO_PEERCRED is the supported
+/// credential source; these cases are compiled out on other hosts.
+#[cfg(target_os = "linux")]
+mod linux_uds {
+    use std::{
+        fs,
+        os::unix::net::{UnixListener, UnixStream},
+        path::PathBuf,
+        sync::mpsc,
+        time::Duration,
+    };
+
+    use crate::{
+        credential::PeerCredentialExpectation,
+        transport::{exchange, read_frame, write_frame},
+    };
+
+    /// SO_PEERCRED on a loopback socket pair reports this process, which is
+    /// the ground truth the Kernel-side check compares against.
+    fn own_peer_credentials() -> PeerCredentialExpectation {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let credentials = nix::sys::socket::getsockopt(
+            &stream,
+            nix::sys::socket::sockopt::PeerCredentials,
+        )
+        .unwrap();
+        PeerCredentialExpectation {
+            uid: Some(credentials.uid()),
+            gid: Some(credentials.gid()),
+        }
+    }
+
+    fn socket_path(tag: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "cyrene-adapter-client-{}-{tag}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory.join("adapter.sock")
+    }
+
+    #[test]
+    fn exchange_completes_when_peer_matches_configured_identity() {
+        let socket = socket_path("positive");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let payload = read_frame(&mut stream).unwrap();
+            write_frame(&mut stream, &payload).unwrap();
+        });
+        let reply = exchange(
+            "test-adapter",
+            &socket,
+            Duration::from_secs(2),
+            own_peer_credentials(),
+            b"ping",
+        )
+        .unwrap();
+        assert_eq!(reply, b"ping");
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn exchange_fails_closed_before_writing_when_peer_mismatches() {
+        let socket = socket_path("negative");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let observed = read_frame(&mut stream).map(|_| ());
+            let _ = observed_tx.send(observed);
+        });
+        let mut expected = own_peer_credentials();
+        expected.uid = expected.uid.map(|uid| uid.wrapping_add(1));
+        let error = exchange(
+            "test-adapter",
+            &socket,
+            Duration::from_secs(2),
+            expected,
+            b"ping",
+        )
+        .unwrap_err();
+        assert_eq!(error.reason_code, "ADAPTER_PEER_CREDENTIAL_MISMATCH");
+        // The server must never observe a protocol frame from the rejected
+        // client: its bounded read has to time out.
+        let observed = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let error = observed.unwrap_err();
+        assert!(
+            error.kind() == std::io::ErrorKind::WouldBlock
+                || error.kind() == std::io::ErrorKind::TimedOut,
+            "server must time out waiting for a frame that was never sent, got {error}"
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    /// A true multi-account end-to-end run (Kernel process and adapter owned
+    /// by different local users, e.g. setuid to `nobody`) needs root and a
+    /// dedicated Linux acceptance host. It is exercised there via
+    /// `cargo test -p cy-adapter-client -- --ignored`.
+    #[test]
+    #[ignore = "requires root and a second local account; run in the Linux acceptance environment"]
+    fn peer_credentials_reject_a_different_local_account() {
+        unimplemented!("covered by the Linux acceptance environment, see doc comment")
+    }
 }
