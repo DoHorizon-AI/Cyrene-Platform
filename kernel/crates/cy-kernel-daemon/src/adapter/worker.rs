@@ -577,9 +577,7 @@ impl KernelServiceAdapter {
                                 Some(lease),
                                 "HEARTBEAT_TIMEOUT_REAPED",
                             ) {
-                                eprintln!(
-                                    "runtime journal WatchdogReaped write failed: {error}"
-                                );
+                                eprintln!("runtime journal WatchdogReaped write failed: {error}");
                             }
                             self.instances
                                 .lock()
@@ -594,9 +592,7 @@ impl KernelServiceAdapter {
                         lease.as_ref(),
                         &report.reason_code,
                     ) {
-                        eprintln!(
-                            "runtime journal InstanceCleanupFailed write failed: {error}"
-                        );
+                        eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
                     }
                 }
             } else {
@@ -606,9 +602,7 @@ impl KernelServiceAdapter {
                     lease.as_ref(),
                     "WATCHDOG_STOP_FAILED",
                 ) {
-                    eprintln!(
-                        "runtime journal InstanceCleanupFailed write failed: {error}"
-                    );
+                    eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
                 }
             }
         }
