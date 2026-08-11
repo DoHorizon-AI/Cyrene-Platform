@@ -10,7 +10,9 @@ jobs:
   rust-core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - name: Install CI prerequisites
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
