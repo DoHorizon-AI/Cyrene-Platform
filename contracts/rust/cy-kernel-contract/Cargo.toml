@@ -1,0 +1,10 @@
+[package]
+name = "cy-kernel-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust projection of the CYRENE Kernel Semantic Contract"
+license = "Apache-2.0"
+
+[lib]
+name = "cy_kernel_contract"
+path = "src/lib.rs"

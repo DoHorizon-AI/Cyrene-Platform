@@ -16,15 +16,14 @@ use std::{
 };
 
 use cy_kernel_api::{
-    AcceleratorDevice, AcceleratorKind, AcceleratorLink, AcceleratorLinkType, AcceleratorProvider,
-    AcceleratorVendor, CapabilityFact, DeviceBinding, DeviceNode, EnforcementMode,
-    EnforcementReport, HealthReport, HostInventoryProvider, InventorySnapshot, NodeCapabilities,
-    ProviderError,
+    semantic::{self, Resource, ResourceState},
+    CapabilityFact, DeviceBinding, DeviceNode, EnforcementMode, EnforcementReport, HealthReport,
+    HostInventoryProvider, InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,
 };
-use cy_proto::{core_v1, hardware_v1};
+use cy_proto::{core_v1, hardware_v1, semantic_v1};
 use prost::Message;
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Optional UDS peer identity constraint from static node configuration. The
@@ -99,9 +98,9 @@ impl HardwareAdapterEndpoint {
 
 /// Common port implemented by any external hardware adapter client. It lets
 /// the Kernel aggregate several UDS Sidecars without learning their vendors.
-pub trait HardwareAdapter: HostInventoryProvider + AcceleratorProvider {}
+pub trait HardwareAdapter: HostInventoryProvider + ResourceProvider {}
 
-impl<T> HardwareAdapter for T where T: HostInventoryProvider + AcceleratorProvider {}
+impl<T> HardwareAdapter for T where T: HostInventoryProvider + ResourceProvider {}
 
 /// Generic registry/aggregator for independent external hardware adapters.
 /// It owns routing provenance and a Kernel-local monotonic aggregate generation;
@@ -236,15 +235,15 @@ impl HostInventoryProvider for UdsHardwareAdapterClient {
             .all(|fact| fact.available);
         Ok(InventorySnapshot {
             generation: inventory.generation,
-            devices: inventory
-                .devices
+            resources: inventory
+                .resources
                 .into_iter()
-                .map(|device| {
-                    let mut device = device_from_proto(device);
-                    device.adapter_id = adapter_id.clone();
-                    device
+                .map(|resource| {
+                    let mut resource = resource_from_proto(resource)?;
+                    resource.provider.id = adapter_id.clone();
+                    Ok(resource)
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, ProviderError>>()?,
             capabilities: NodeCapabilities {
                 ready,
                 facts,
@@ -258,41 +257,53 @@ impl HostInventoryProvider for UdsHardwareAdapterClient {
     }
 }
 
-impl AcceleratorProvider for UdsHardwareAdapterClient {
+impl ResourceProvider for UdsHardwareAdapterClient {
     fn adapter_id(&self) -> &str {
         &self.adapter_id
     }
 
-    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
-        Ok(HostInventoryProvider::probe_inventory(self)?.devices)
+    fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
+        Ok(HostInventoryProvider::probe_inventory(self)?.resources)
     }
 
-    fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError> {
-        self.create_binding_for_generation(device, 0)
+    fn create_binding(&self, resource: &Resource) -> Result<DeviceBinding, ProviderError> {
+        self.create_binding_for_generation(resource, 0)
     }
 
+    #[allow(deprecated)]
     fn create_binding_for_generation(
         &self,
-        device: &AcceleratorDevice,
+        resource: &Resource,
         expected_inventory_generation: u64,
     ) -> Result<DeviceBinding, ProviderError> {
         let response = self.call(hardware_v1::adapter_request::Body::CreateBinding(
             hardware_v1::CreateBindingRequest {
-                device_id: device.device_id.clone(),
+                device_id: resource.identity.id.clone(),
                 expected_inventory_generation,
+                resource: Some(identity_to_proto(&resource.identity)),
             },
         ))?;
         match response.body {
             Some(hardware_v1::adapter_response::Body::Binding(binding)) => {
-                if binding.device_id != device.device_id {
+                let returned = binding.resource.as_ref();
+                let returned_id = returned
+                    .map(|identity| identity.id.as_str())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or(&binding.device_id);
+                if returned_id != resource.identity.id
+                    || returned.is_some_and(|identity| {
+                        identity.generation != 0
+                            && identity.generation != resource.identity.generation
+                    })
+                {
                     return Err(ProviderError::new(
                         &self.adapter_id,
-                        "ADAPTER_BINDING_DEVICE_MISMATCH",
-                        "adapter returned a binding for another device",
+                        "ADAPTER_BINDING_RESOURCE_MISMATCH",
+                        "adapter returned a binding for another resource incarnation",
                     ));
                 }
                 Ok(DeviceBinding {
-                    device_id: binding.device_id,
+                    resource_id: returned_id.to_string(),
                     nodes: binding
                         .nodes
                         .into_iter()
@@ -318,17 +329,21 @@ impl AcceleratorProvider for UdsHardwareAdapterClient {
         }
     }
 
-    fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError> {
+    fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError> {
         HostInventoryProvider::probe_inventory(self)?
-            .devices
+            .resources
             .into_iter()
-            .find(|device| device.device_id == device_id)
-            .map(|device| device.health)
+            .find(|resource| resource.identity.id == resource_id)
+            .map(|resource| HealthReport {
+                healthy: Some(resource.state == ResourceState::Ready),
+                reason_code: resource.reason_code,
+                summary: resource.summary,
+            })
             .ok_or_else(|| {
                 ProviderError::new(
                     &self.adapter_id,
-                    "DEVICE_NOT_FOUND",
-                    "device is absent from adapter inventory",
+                    "RESOURCE_NOT_FOUND",
+                    "resource is absent from adapter inventory",
                 )
             })
     }
@@ -396,10 +411,10 @@ impl UdsHardwareAdapterRegistry {
     }
 
     fn aggregate_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
-        let mut devices = Vec::new();
+        let mut resources = Vec::new();
         let mut facts = Vec::new();
         let mut enforcement = Vec::new();
-        let mut seen_device_ids = BTreeSet::new();
+        let mut seen_resource_ids = BTreeSet::new();
         let mut fingerprint_parts = Vec::new();
         let mut ready = true;
 
@@ -421,18 +436,18 @@ impl UdsHardwareAdapterRegistry {
             }
             ready &= snapshot.capabilities.ready;
             fingerprint_parts.push(format!("{adapter_id}:{snapshot:?}"));
-            for mut device in snapshot.devices {
-                if !seen_device_ids.insert(device.device_id.clone()) {
+            for mut resource in snapshot.resources {
+                if !seen_resource_ids.insert(resource.identity.id.clone()) {
                     return Err(ProviderError::new(
                         "hardware-adapter-registry",
-                        "ADAPTER_DEVICE_ID_COLLISION",
-                        &device.device_id,
+                        "ADAPTER_RESOURCE_ID_COLLISION",
+                        &resource.identity.id,
                     ));
                 }
                 // Registry configuration, not adapter-supplied data, is the
                 // provenance authority used for binding routing.
-                device.adapter_id = adapter_id.clone();
-                devices.push(device);
+                resource.provider.id = adapter_id.clone();
+                resources.push(resource);
             }
             facts.extend(snapshot.capabilities.facts.into_iter().map(|mut fact| {
                 fact.name = format!("adapter.{adapter_id}.{}", fact.name);
@@ -464,7 +479,7 @@ impl UdsHardwareAdapterRegistry {
         };
         Ok(InventorySnapshot {
             generation,
-            devices,
+            resources,
             capabilities: NodeCapabilities {
                 ready,
                 facts,
@@ -473,22 +488,22 @@ impl UdsHardwareAdapterRegistry {
         })
     }
 
-    fn adapter_for_device(
+    fn adapter_for_resource(
         &self,
-        device: &AcceleratorDevice,
+        resource: &Resource,
     ) -> Result<&Arc<dyn HardwareAdapter>, ProviderError> {
-        if device.adapter_id.is_empty() {
+        if resource.provider.id.is_empty() {
             return Err(ProviderError::new(
                 "hardware-adapter-registry",
-                "DEVICE_PROVENANCE_MISSING",
-                &device.device_id,
+                "RESOURCE_PROVENANCE_MISSING",
+                &resource.identity.id,
             ));
         }
-        self.adapters.get(&device.adapter_id).ok_or_else(|| {
+        self.adapters.get(&resource.provider.id).ok_or_else(|| {
             ProviderError::new(
                 "hardware-adapter-registry",
-                "DEVICE_ADAPTER_NOT_REGISTERED",
-                &device.adapter_id,
+                "RESOURCE_PROVIDER_NOT_REGISTERED",
+                &resource.provider.id,
             )
         })
     }
@@ -500,47 +515,53 @@ impl HostInventoryProvider for UdsHardwareAdapterRegistry {
     }
 }
 
-impl AcceleratorProvider for UdsHardwareAdapterRegistry {
+impl ResourceProvider for UdsHardwareAdapterRegistry {
     fn adapter_id(&self) -> &str {
         "uds-hardware-adapter-registry"
     }
 
-    fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
-        Ok(self.aggregate_inventory()?.devices)
+    fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
+        Ok(self.aggregate_inventory()?.resources)
     }
 
-    fn create_binding(&self, device: &AcceleratorDevice) -> Result<DeviceBinding, ProviderError> {
-        self.create_binding_for_generation(device, 0)
+    fn create_binding(&self, resource: &Resource) -> Result<DeviceBinding, ProviderError> {
+        self.create_binding_for_generation(resource, 0)
     }
 
     fn create_binding_for_generation(
         &self,
-        device: &AcceleratorDevice,
+        resource: &Resource,
         expected_inventory_generation: u64,
     ) -> Result<DeviceBinding, ProviderError> {
         let binding = self
-            .adapter_for_device(device)?
-            .create_binding_for_generation(device, expected_inventory_generation)?;
-        if binding.device_id != device.device_id || binding.adapter_id != device.adapter_id {
+            .adapter_for_resource(resource)?
+            .create_binding_for_generation(resource, expected_inventory_generation)?;
+        if binding.resource_id != resource.identity.id || binding.adapter_id != resource.provider.id
+        {
             return Err(ProviderError::new(
                 "hardware-adapter-registry",
                 "ADAPTER_BINDING_PROVENANCE_MISMATCH",
-                &device.device_id,
+                &resource.identity.id,
             ));
         }
         Ok(binding)
     }
 
-    fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError> {
-        let device = self
+    fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError> {
+        let resource = self
             .aggregate_inventory()?
-            .devices
+            .resources
             .into_iter()
-            .find(|device| device.device_id == device_id)
+            .find(|resource| resource.identity.id == resource_id)
             .ok_or_else(|| {
-                ProviderError::new("hardware-adapter-registry", "DEVICE_NOT_FOUND", device_id)
+                ProviderError::new(
+                    "hardware-adapter-registry",
+                    "RESOURCE_NOT_FOUND",
+                    resource_id,
+                )
             })?;
-        self.adapter_for_device(&device)?.read_health(device_id)
+        self.adapter_for_resource(&resource)?
+            .read_health(resource_id)
     }
 }
 
@@ -708,50 +729,104 @@ pub fn read_frame(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
     Ok(payload)
 }
 
-pub fn device_from_proto(device: core_v1::AcceleratorDevice) -> AcceleratorDevice {
-    AcceleratorDevice {
-        device_id: device.device_id,
-        adapter_id: String::new(),
-        kind: accelerator_kind_from_proto(device.kind),
-        vendor: accelerator_vendor_from_proto(device.vendor),
-        device_family: device.device_family,
-        pci_address: (!device.pci_address.is_empty()).then_some(device.pci_address),
-        numa_node: device.numa_node,
-        total_memory_bytes: (device.total_memory_bytes != 0).then_some(device.total_memory_bytes),
-        allocatable_memory_bytes: (device.allocatable_memory_bytes != 0)
-            .then_some(device.allocatable_memory_bytes),
-        features: device.features,
-        device_nodes: Vec::new(),
-        links: device
-            .links
+pub fn resource_from_proto(resource: semantic_v1::Resource) -> Result<Resource, ProviderError> {
+    let identity = resource.identity.ok_or_else(|| {
+        ProviderError::new(
+            "hardware-adapter-protocol",
+            "RESOURCE_IDENTITY_MISSING",
+            "resource identity is required",
+        )
+    })?;
+    let provider = resource.provider.ok_or_else(|| {
+        ProviderError::new(
+            "hardware-adapter-protocol",
+            "RESOURCE_PROVIDER_MISSING",
+            "resource provider identity is required",
+        )
+    })?;
+    let resource = Resource {
+        identity: identity_from_proto(identity),
+        provider: identity_from_proto(provider),
+        resource_class: resource.resource_class,
+        capabilities: resource
+            .capabilities
             .into_iter()
-            .map(|link| AcceleratorLink {
-                peer_device_id: link.peer_device_id,
-                link_type: accelerator_link_type_from_proto(link.link_type),
-                link_count: (link.link_count != 0).then_some(link.link_count),
-                width: (link.width != 0).then_some(link.width),
-                bandwidth_bytes_per_second: (link.bandwidth_bytes_per_second != 0)
-                    .then_some(link.bandwidth_bytes_per_second),
-                stable: link.stable,
+            .map(|capability| semantic::Capability {
+                id: capability.id,
+                revision: capability.revision,
+                properties: capability.properties.into_iter().collect(),
             })
             .collect(),
-        health: health_from_proto(device.health),
+        capacity: resource
+            .capacity
+            .into_iter()
+            .map(|(key, quantity)| {
+                (
+                    key,
+                    semantic::Quantity {
+                        value: quantity.value,
+                        unit: quantity.unit,
+                    },
+                )
+            })
+            .collect(),
+        attributes: resource.attributes.into_iter().collect(),
+        state: resource_state_from_proto(resource.state)?,
+        reason_code: resource.reason_code,
+        summary: resource.summary,
+        links: resource
+            .links
+            .into_iter()
+            .map(|link| {
+                let peer = link.peer.ok_or_else(|| {
+                    ProviderError::new(
+                        "hardware-adapter-protocol",
+                        "TOPOLOGY_PEER_MISSING",
+                        "topology link peer identity is required",
+                    )
+                })?;
+                Ok(semantic::TopologyLink {
+                    peer: identity_from_proto(peer),
+                    kind: link.kind,
+                    properties: link.properties.into_iter().collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?,
+    };
+    resource.validate().map_err(|error| {
+        ProviderError::new(
+            "hardware-adapter-protocol",
+            error.reason_code,
+            &error.message,
+        )
+    })?;
+    Ok(resource)
+}
+
+fn identity_to_proto(identity: &semantic::Identity) -> semantic_v1::Identity {
+    semantic_v1::Identity {
+        id: identity.id.clone(),
+        generation: identity.generation,
     }
 }
 
-fn health_from_proto(health: Option<core_v1::HealthReport>) -> HealthReport {
-    let health = health.unwrap_or_default();
-    let healthy = match core_v1::HealthStatus::try_from(health.status)
-        .unwrap_or(core_v1::HealthStatus::Unknown)
-    {
-        core_v1::HealthStatus::Healthy => Some(true),
-        core_v1::HealthStatus::Degraded | core_v1::HealthStatus::Unhealthy => Some(false),
-        _ => None,
-    };
-    HealthReport {
-        healthy,
-        reason_code: health.reason_code,
-        summary: health.summary,
+fn identity_from_proto(identity: semantic_v1::Identity) -> semantic::Identity {
+    semantic::Identity {
+        id: identity.id,
+        generation: identity.generation,
+    }
+}
+
+fn resource_state_from_proto(value: i32) -> Result<ResourceState, ProviderError> {
+    match semantic_v1::ResourceState::try_from(value) {
+        Ok(semantic_v1::ResourceState::Ready) => Ok(ResourceState::Ready),
+        Ok(semantic_v1::ResourceState::Degraded) => Ok(ResourceState::Degraded),
+        Ok(semantic_v1::ResourceState::Unavailable) => Ok(ResourceState::Unavailable),
+        Ok(semantic_v1::ResourceState::Unspecified) | Err(_) => Err(ProviderError::new(
+            "hardware-adapter-protocol",
+            "UNKNOWN_ENUM_VALUE",
+            "resource state must be a known, specified semantic value",
+        )),
     }
 }
 
@@ -769,36 +844,6 @@ fn enforcement_from_proto(report: core_v1::EnforcementReport) -> EnforcementRepo
     }
 }
 
-fn accelerator_kind_from_proto(value: i32) -> AcceleratorKind {
-    match core_v1::AcceleratorKind::try_from(value).unwrap_or(core_v1::AcceleratorKind::Unspecified)
-    {
-        core_v1::AcceleratorKind::Gpu => AcceleratorKind::Gpu,
-        core_v1::AcceleratorKind::Npu => AcceleratorKind::Npu,
-        core_v1::AcceleratorKind::Tpu => AcceleratorKind::Tpu,
-        _ => AcceleratorKind::Other,
-    }
-}
-fn accelerator_vendor_from_proto(value: i32) -> AcceleratorVendor {
-    match core_v1::AcceleratorVendor::try_from(value)
-        .unwrap_or(core_v1::AcceleratorVendor::Unspecified)
-    {
-        core_v1::AcceleratorVendor::Nvidia => AcceleratorVendor::Nvidia,
-        core_v1::AcceleratorVendor::Amd => AcceleratorVendor::Amd,
-        core_v1::AcceleratorVendor::HuaweiAscend => AcceleratorVendor::HuaweiAscend,
-        core_v1::AcceleratorVendor::Intel => AcceleratorVendor::Intel,
-        _ => AcceleratorVendor::Other,
-    }
-}
-fn accelerator_link_type_from_proto(value: i32) -> AcceleratorLinkType {
-    match core_v1::AcceleratorLinkType::try_from(value)
-        .unwrap_or(core_v1::AcceleratorLinkType::Unspecified)
-    {
-        core_v1::AcceleratorLinkType::Pcie => AcceleratorLinkType::Pcie,
-        core_v1::AcceleratorLinkType::Nvlink => AcceleratorLinkType::Nvlink,
-        core_v1::AcceleratorLinkType::Xgmi => AcceleratorLinkType::Xgmi,
-        _ => AcceleratorLinkType::Other,
-    }
-}
 fn enforcement_mode_from_proto(value: i32) -> EnforcementMode {
     match core_v1::EnforcementMode::try_from(value).unwrap_or(core_v1::EnforcementMode::Unspecified)
     {
@@ -811,6 +856,7 @@ fn enforcement_mode_from_proto(value: i32) -> EnforcementMode {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -822,25 +868,24 @@ mod tests {
     }
 
     impl FakeAdapter {
-        fn device(&self) -> AcceleratorDevice {
-            AcceleratorDevice {
-                device_id: self.device_id.clone(),
-                adapter_id: self.id.clone(),
-                kind: AcceleratorKind::Gpu,
-                vendor: AcceleratorVendor::Other,
-                device_family: "test".to_string(),
-                pci_address: None,
-                numa_node: None,
-                total_memory_bytes: None,
-                allocatable_memory_bytes: None,
-                features: Vec::new(),
-                device_nodes: Vec::new(),
-                links: Vec::new(),
-                health: HealthReport {
-                    healthy: Some(true),
-                    reason_code: "TEST".to_string(),
-                    summary: "healthy".to_string(),
+        fn resource(&self) -> Resource {
+            Resource {
+                identity: semantic::Identity {
+                    id: self.device_id.clone(),
+                    generation: 1,
                 },
+                provider: semantic::Identity {
+                    id: self.id.clone(),
+                    generation: 1,
+                },
+                resource_class: "accelerator".to_string(),
+                capabilities: Vec::new(),
+                capacity: BTreeMap::new(),
+                attributes: BTreeMap::new(),
+                state: ResourceState::Ready,
+                reason_code: "test".to_string(),
+                summary: "healthy".to_string(),
+                links: Vec::new(),
             }
         }
     }
@@ -849,7 +894,7 @@ mod tests {
         fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
             Ok(InventorySnapshot {
                 generation: 1,
-                devices: vec![self.device()],
+                resources: vec![self.resource()],
                 capabilities: NodeCapabilities {
                     ready: true,
                     facts: Vec::new(),
@@ -859,28 +904,25 @@ mod tests {
         }
     }
 
-    impl AcceleratorProvider for FakeAdapter {
+    impl ResourceProvider for FakeAdapter {
         fn adapter_id(&self) -> &str {
             &self.id
         }
 
-        fn probe_inventory(&self) -> Result<Vec<AcceleratorDevice>, ProviderError> {
-            Ok(vec![self.device()])
+        fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
+            Ok(vec![self.resource()])
         }
 
-        fn create_binding(
-            &self,
-            device: &AcceleratorDevice,
-        ) -> Result<DeviceBinding, ProviderError> {
-            if device.device_id != self.device_id {
+        fn create_binding(&self, resource: &Resource) -> Result<DeviceBinding, ProviderError> {
+            if resource.identity.id != self.device_id {
                 return Err(ProviderError::new(
                     &self.id,
-                    "DEVICE_NOT_FOUND",
-                    &device.device_id,
+                    "RESOURCE_NOT_FOUND",
+                    &resource.identity.id,
                 ));
             }
             Ok(DeviceBinding {
-                device_id: device.device_id.clone(),
+                resource_id: resource.identity.id.clone(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
                 required_gids: Vec::new(),
@@ -890,11 +932,19 @@ mod tests {
             })
         }
 
-        fn read_health(&self, device_id: &str) -> Result<HealthReport, ProviderError> {
-            if device_id != self.device_id {
-                return Err(ProviderError::new(&self.id, "DEVICE_NOT_FOUND", device_id));
+        fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError> {
+            if resource_id != self.device_id {
+                return Err(ProviderError::new(
+                    &self.id,
+                    "RESOURCE_NOT_FOUND",
+                    resource_id,
+                ));
             }
-            Ok(self.device().health)
+            Ok(HealthReport {
+                healthy: Some(true),
+                reason_code: "TEST".to_string(),
+                summary: "healthy".to_string(),
+            })
         }
     }
 
@@ -906,8 +956,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_health_remains_unknown() {
-        assert_eq!(health_from_proto(None).healthy, None);
+    fn unknown_resource_state_is_rejected() {
+        assert_eq!(
+            resource_state_from_proto(semantic_v1::ResourceState::Unspecified as i32)
+                .unwrap_err()
+                .reason_code,
+            "UNKNOWN_ENUM_VALUE"
+        );
     }
 
     #[test]
@@ -943,6 +998,7 @@ mod tests {
                 seconds: now.saturating_add(30),
                 nanos: 0,
             }),
+            resources: Vec::new(),
         };
         assert!(ensure_inventory_fresh("test", &valid).is_ok());
         let expired = hardware_v1::HardwareInventory {
@@ -980,18 +1036,18 @@ mod tests {
         ])
         .unwrap();
         let inventory = HostInventoryProvider::probe_inventory(&registry).unwrap();
-        assert_eq!(inventory.devices.len(), 2);
-        let device = inventory
-            .devices
+        assert_eq!(inventory.resources.len(), 2);
+        let resource = inventory
+            .resources
             .iter()
-            .find(|device| device.device_id == "gpu-b")
+            .find(|resource| resource.identity.id == "gpu-b")
             .unwrap();
-        assert_eq!(device.adapter_id, "adapter_b");
+        assert_eq!(resource.provider.id, "adapter_b");
         let binding = registry
-            .create_binding_for_generation(device, inventory.generation)
+            .create_binding_for_generation(resource, inventory.generation)
             .unwrap();
         assert_eq!(binding.adapter_id, "adapter_b");
-        assert_eq!(binding.device_id, "gpu-b");
+        assert_eq!(binding.resource_id, "gpu-b");
     }
 
     #[test]
@@ -1017,7 +1073,7 @@ mod tests {
             HostInventoryProvider::probe_inventory(&registry)
                 .unwrap_err()
                 .reason_code,
-            "ADAPTER_DEVICE_ID_COLLISION"
+            "ADAPTER_RESOURCE_ID_COLLISION"
         );
     }
 }

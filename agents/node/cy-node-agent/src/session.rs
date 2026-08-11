@@ -7,6 +7,7 @@ use cy_proto::core_v1::{
     control_plane_to_node, node_to_control_plane, ControlPlaneToNode, KernelCommand, NodeHeartbeat,
     NodeHello, NodeRef, NodeToControlPlane, NodeWelcome,
 };
+use cy_proto::semantic_v1::ContractRevision;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -29,15 +30,18 @@ pub enum NodeControlSessionError {
     StaleControlFrame { received: u64, accepted: u64 },
     #[error("kernel command id is required")]
     MissingCommandId,
+    #[error("node-control welcome did not select the offered semantic contract")]
+    UnsupportedSemanticContract,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum SessionState {
     AwaitingWelcome,
     Established {
         session_id: String,
         desired_generation: u64,
         last_control_sequence: u64,
+        selected_contract: ContractRevision,
     },
 }
 
@@ -84,6 +88,7 @@ impl NodeControlSession {
             min_protocol_version: self.min_protocol_version,
             max_protocol_version: self.max_protocol_version,
             resume_token: self.resume_token.clone(),
+            offered_contracts: vec![semantic_contract_revision()],
         }))
     }
 
@@ -116,6 +121,11 @@ impl NodeControlSession {
         if welcome.session_id.is_empty() || frame.session_id != welcome.session_id {
             return Err(NodeControlSessionError::MissingSessionId);
         }
+        let selected_contract = welcome
+            .selected_contract
+            .clone()
+            .filter(is_supported_semantic_contract)
+            .ok_or(NodeControlSessionError::UnsupportedSemanticContract)?;
         if !welcome.resume_token.is_empty() {
             self.resume_token = welcome.resume_token.clone();
         }
@@ -124,6 +134,7 @@ impl NodeControlSession {
             session_id: welcome.session_id.clone(),
             desired_generation: welcome.desired_generation,
             last_control_sequence: frame.sequence_number,
+            selected_contract,
         };
         Ok(welcome.clone())
     }
@@ -213,6 +224,15 @@ impl NodeControlSession {
         matches!(self.state, SessionState::Established { .. })
     }
 
+    pub fn selected_contract(&self) -> Option<&ContractRevision> {
+        match &self.state {
+            SessionState::Established {
+                selected_contract, ..
+            } => Some(selected_contract),
+            SessionState::AwaitingWelcome => None,
+        }
+    }
+
     /// Wrap a completed typed Kernel command so that it is bound to the
     /// currently accepted control-plane session.
     pub fn command_result(
@@ -237,6 +257,18 @@ impl NodeControlSession {
     }
 }
 
+fn semantic_contract_revision() -> ContractRevision {
+    ContractRevision {
+        contract_id: "cyrene.kernel.semantic".to_string(),
+        major: 1,
+        minor: 0,
+    }
+}
+
+fn is_supported_semantic_contract(revision: &ContractRevision) -> bool {
+    revision.contract_id == "cyrene.kernel.semantic" && revision.major == 1 && revision.minor == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +284,7 @@ mod tests {
                 heartbeat_interval: None,
                 server_time: None,
                 resume_token: "resume-2".into(),
+                selected_contract: Some(semantic_contract_revision()),
             })),
             session_id: "session-1".into(),
         }
@@ -268,6 +301,10 @@ mod tests {
             Some(node_to_control_plane::Body::Hello(NodeHello { .. }))
         ));
         assert_eq!(session.session_id(), None);
+        let Some(node_to_control_plane::Body::Hello(hello)) = hello.body else {
+            panic!("first node-control frame must be hello");
+        };
+        assert_eq!(hello.offered_contracts, vec![semantic_contract_revision()]);
 
         let welcome = session.accept_welcome(welcome_frame()).unwrap();
 
@@ -275,6 +312,10 @@ mod tests {
         assert_eq!(session.session_id(), Some("session-1"));
         assert_eq!(session.desired_generation(), Some(3));
         assert_eq!(session.resume_token(), "resume-2");
+        assert_eq!(
+            session.selected_contract(),
+            Some(&semantic_contract_revision())
+        );
     }
 
     #[test]

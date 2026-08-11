@@ -288,6 +288,13 @@ dependencies = [
 [[package]]
 name = "cy-kernel-api"
 version = "0.1.0"
+dependencies = [
+ "cy-kernel-contract",
+]
+
+[[package]]
+name = "cy-kernel-contract"
+version = "0.1.0"
 
 [[package]]
 name = "cy-kernel-daemon"
@@ -334,6 +341,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "cy-proto",
+ "prost",
  "prost-types",
  "serde",
  "serde_json",

@@ -187,7 +187,7 @@ fn limits_from_proto(value: sandbox_v1::SandboxLimits) -> CgroupLimits {
 
 fn binding_from_proto(value: sandbox_v1::SandboxDeviceBinding) -> DeviceBinding {
     DeviceBinding {
-        device_id: value.device_id,
+        resource_id: value.device_id,
         nodes: value
             .nodes
             .into_iter()

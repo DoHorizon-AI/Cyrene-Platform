@@ -31,6 +31,12 @@ if rg -n -i 'nvidia-smi|rocm-smi|/dev/nvidia|libnvidia|libloading|dlopen|ascend-
   failed=1
 fi
 
+if rg -n 'pub enum Accelerator|pub struct AcceleratorDevice|trait AcceleratorProvider' \
+  kernel --glob '*.rs'; then
+  echo "Kernel public Rust ports must use Resource/Capability, not accelerator vendor types" >&2
+  failed=1
+fi
+
 if rg -n 'unsafe\s*\{|unsafe extern|libc::|\bCommand\b|/sys/fs/cgroup|/proc/self/cgroup|BPF_' kernel --glob '*.rs'; then
   echo "Kernel must remain pure-safe and must not contain privileged sandbox implementation details" >&2
   failed=1

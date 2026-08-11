@@ -89,11 +89,67 @@ object WorkerControlTck {
         }
     }
 
+    private fun semanticTraceResult(trace: String): String {
+        var state = "AWAIT_HELLO"
+        var workerGeneration = 0
+        var leaseGeneration = 0
+        var fence = 0
+        var shutdownId = ""
+        trace.split(";").forEach { raw ->
+            val (direction, kind, rawWorker, rawLease, rawFence, identifier) = raw.split(":", limit = 6)
+            val current = Triple(rawWorker.toInt(), rawLease.toInt(), rawFence.toInt())
+            val expected = Triple(workerGeneration, leaseGeneration, fence)
+            when (state) {
+                "AWAIT_HELLO" -> {
+                    if (direction != "W2K" || kind != "HELLO" || 0 in listOf(current.first, current.second, current.third)) {
+                        return "HELLO_REQUIRED"
+                    }
+                    workerGeneration = current.first
+                    leaseGeneration = current.second
+                    fence = current.third
+                    state = "AWAIT_WELCOME"
+                }
+                "AWAIT_WELCOME" -> {
+                    if (direction != "K2W" || kind != "WELCOME") return "WELCOME_REQUIRED"
+                    if (current != expected) return "FENCE_MISMATCH"
+                    state = "RUNNING"
+                }
+                "RUNNING" -> {
+                    if (current != expected) return "FENCE_MISMATCH"
+                    when {
+                        direction == "W2K" && kind == "HEARTBEAT" -> Unit
+                        direction == "K2W" && kind == "HEARTBEAT_ACK" -> Unit
+                        direction == "K2W" && kind == "SHUTDOWN" && identifier.isNotEmpty() -> {
+                            shutdownId = identifier
+                            state = "AWAIT_SHUTDOWN_ACK"
+                        }
+                        else -> return "FRAME_INVALID"
+                    }
+                }
+                "AWAIT_SHUTDOWN_ACK" -> {
+                    if (current != expected) return "FENCE_MISMATCH"
+                    if (direction != "W2K" || kind != "SHUTDOWN_ACK") return "SHUTDOWN_ACK_INVALID"
+                    if (identifier != shutdownId) return "SHUTDOWN_ID_MISMATCH"
+                    state = "STOPPED"
+                }
+                else -> return "FRAME_AFTER_STOP"
+            }
+        }
+        return if (state == "STOPPED") "ACCEPT" else "TRACE_INCOMPLETE"
+    }
+
+    private fun verifySemanticScenarios(root: File) {
+        rows(File(root, "semantic_scenarios.tsv")).forEach { (name, expected, trace) ->
+            check(semanticTraceResult(trace) == expected) { "$name: expected $expected" }
+        }
+    }
+
     @JvmStatic
     fun main(args: Array<String>) {
         val root = File(if (args.isNotEmpty()) args[0] else ".")
         verifyVectors(root)
         verifyScenarios(root)
+        verifySemanticScenarios(root)
         println("Kotlin Worker-control TCK v1 passed")
     }
 }

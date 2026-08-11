@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.core.v1";
+
+// Canonical gRPC projection of the language-neutral Kernel authority. The
+// authenticated Principal is injected by the UDS or mTLS transport boundary;
+// it is deliberately never a caller-controlled request field.
+service KernelAuthorityService {
+  rpc Negotiate(NegotiateRequest) returns (cyrene.semantic.v1.ContractRevision);
+
+  rpc AcquireLease(AcquireSemanticLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+  rpc RenewLease(RenewLeaseRequest) returns (cyrene.semantic.v1.Lease);
+  rpc ReleaseLease(ReleaseSemanticLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+
+  rpc StartWorker(StartWorkerRequest) returns (cyrene.semantic.v1.Operation);
+  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (cyrene.semantic.v1.Worker);
+  rpc StopWorker(StopWorkerRequest) returns (cyrene.semantic.v1.Operation);
+
+  rpc CreateOperation(CreateOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+  rpc ReportOperation(ReportOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+  rpc CancelOperation(CancelSemanticOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+
+  rpc PublishEndpoint(PublishEndpointRequest) returns (cyrene.semantic.v1.Endpoint);
+  rpc AuthorizeEndpoint(AuthorizeEndpointRequest)
+      returns (cyrene.semantic.v1.EndpointGrant);
+  rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
+  rpc SubscribeEvents(SubscribeEventsRequest)
+      returns (cyrene.semantic.v1.EventPage);
+}
+
+// Dedicated Worker liveness/drain channel. It is served only on the Worker
+// control socket and therefore cannot invoke authority actions.
+service WorkerControlService {
+  rpc Connect(stream WorkerControlToKernel)
+      returns (stream KernelToWorkerControl);
+}
+
+// A call proves that the client selected a compatible semantic revision. It
+// contains correlation/idempotency metadata only, never identity or policy.
+message AuthorityCallContext {
+  cyrene.semantic.v1.ContractRevision contract = 1;
+  string request_id = 2;
+  string idempotency_key = 3;
+}
+
+message NegotiateRequest {
+  repeated cyrene.semantic.v1.ContractRevision offered = 1;
+}
+
+message AcquireSemanticLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity holder = 2;
+  cyrene.semantic.v1.ResourceQuery query = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message RenewLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message ReleaseSemanticLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+}
+
+message StartWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Worker worker = 2;
+}
+
+message HeartbeatWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+}
+
+message StopWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+  google.protobuf.Duration grace_period = 5;
+}
+
+message CreateOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Operation operation = 2;
+}
+
+message ReportOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Operation operation = 2;
+}
+
+message CancelSemanticOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity operation = 2;
+}
+
+message PublishEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Endpoint endpoint = 2;
+}
+
+message AuthorizeEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EndpointGrant grant = 2;
+}
+
+message RevokeEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity grant = 2;
+}
+
+message SubscribeEventsRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EventCursor cursor = 2;
+  uint32 page_size = 3;
+}
+
+message WorkerControlToKernel {
+  AuthorityCallContext context = 1;
+  oneof body {
+    WorkerControlHello hello = 10;
+    WorkerControlHeartbeat heartbeat = 11;
+    WorkerControlShutdownAck shutdown_ack = 12;
+  }
+}
+
+message WorkerControlHello {
+  cyrene.semantic.v1.Identity worker = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+}
+
+message WorkerControlHeartbeat {
+  cyrene.semantic.v1.Identity worker = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+}
+
+message WorkerControlShutdownAck {
+  cyrene.semantic.v1.Identity worker = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+  string shutdown_id = 4;
+  bool drained = 5;
+}
+
+message KernelToWorkerControl {
+  oneof body {
+    WorkerControlWelcome welcome = 1;
+    WorkerControlHeartbeatAck heartbeat_ack = 2;
+    WorkerControlShutdown shutdown = 3;
+  }
+}
+
+message WorkerControlWelcome {
+  cyrene.semantic.v1.Worker worker = 1;
+  google.protobuf.Duration next_heartbeat_after = 2;
+}
+
+message WorkerControlHeartbeatAck {
+  cyrene.semantic.v1.Worker worker = 1;
+  google.protobuf.Duration next_heartbeat_after = 2;
+}
+
+message WorkerControlShutdown {
+  cyrene.semantic.v1.Identity worker = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+  string shutdown_id = 4;
+  google.protobuf.Duration ack_deadline = 5;
+  string reason_code = 6;
+}

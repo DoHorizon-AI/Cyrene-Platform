@@ -9,16 +9,16 @@ use std::{
 };
 
 use cy_kernel_api::{
-    AcceleratorDevice, AcceleratorKind, AcceleratorLinkType, AcceleratorProvider,
-    AcceleratorVendor, DeviceBinding, EnforcementMode, HealthReport, HostInventoryProvider,
-    ProviderError,
+    semantic::{self, Resource},
+    DeviceBinding, EnforcementMode, HostInventoryProvider, ProviderError, ResourceProvider,
 };
-use cy_proto::{core_v1, hardware_v1};
+use cy_proto::{core_v1, hardware_v1, semantic_v1};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Handle one bounded local-adapter request.  The caller owns transport and
 /// process supervision; this function has no access to the Kernel process.
+#[allow(deprecated)]
 pub fn handle_request(
     provider: &discovery::NvidiaSmiProvider,
     request: hardware_v1::AdapterRequest,
@@ -42,7 +42,7 @@ pub fn handle_request(
                     body: Some(hardware_v1::adapter_response::Body::Inventory(
                         hardware_v1::HardwareInventory {
                             generation: inventory.generation,
-                            devices: inventory.devices.iter().map(device_to_proto).collect(),
+                            devices: Vec::new(),
                             facts: inventory
                                 .capabilities
                                 .facts
@@ -62,6 +62,7 @@ pub fn handle_request(
                                 .collect(),
                             sampled_at: Some(now_timestamp()),
                             expires_at: Some(timestamp_after(Duration::from_secs(15))),
+                            resources: inventory.resources.iter().map(resource_to_proto).collect(),
                         },
                     )),
                 },
@@ -70,11 +71,11 @@ pub fn handle_request(
         }
         Some(hardware_v1::adapter_request::Body::CreateBinding(request)) => {
             match create_binding(provider, &request) {
-                Ok(binding) => hardware_v1::AdapterResponse {
+                Ok((binding, resource)) => hardware_v1::AdapterResponse {
                     protocol_version: PROTOCOL_VERSION,
                     adapter_id,
                     body: Some(hardware_v1::adapter_response::Body::Binding(
-                        binding_to_proto(binding),
+                        binding_to_proto(binding, resource),
                     )),
                 },
                 Err(error) => provider_error_response(&adapter_id, error),
@@ -114,10 +115,11 @@ fn timestamp_after(duration: Duration) -> prost_types::Timestamp {
     timestamp
 }
 
+#[allow(deprecated)]
 fn create_binding(
     provider: &discovery::NvidiaSmiProvider,
     request: &hardware_v1::CreateBindingRequest,
-) -> Result<DeviceBinding, ProviderError> {
+) -> Result<(DeviceBinding, semantic::Identity), ProviderError> {
     let inventory = HostInventoryProvider::probe_inventory(provider)?;
     if request.expected_inventory_generation != 0
         && request.expected_inventory_generation != inventory.generation
@@ -128,18 +130,34 @@ fn create_binding(
             "binding request is based on a stale hardware inventory",
         ));
     }
-    let device = inventory
-        .devices
+    let requested_resource = request.resource.as_ref();
+    let resource_id = requested_resource
+        .map(|resource| resource.id.as_str())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&request.device_id);
+    let resource = inventory
+        .resources
         .iter()
-        .find(|device| device.device_id == request.device_id)
+        .find(|resource| resource.identity.id == resource_id)
         .ok_or_else(|| {
             ProviderError::new(
                 provider.adapter_id(),
-                "DEVICE_NOT_FOUND",
-                "device is absent",
+                "RESOURCE_NOT_FOUND",
+                "resource is absent",
             )
         })?;
-    provider.create_binding(device)
+    if requested_resource.is_some_and(|requested| {
+        requested.generation != 0 && requested.generation != resource.identity.generation
+    }) {
+        return Err(ProviderError::new(
+            provider.adapter_id(),
+            "RESOURCE_GENERATION_STALE",
+            "binding request is based on a stale resource generation",
+        ));
+    }
+    provider
+        .create_binding(resource)
+        .map(|binding| (binding, resource.identity.clone()))
 }
 
 fn provider_error_response(adapter_id: &str, error: ProviderError) -> hardware_v1::AdapterResponse {
@@ -165,38 +183,71 @@ fn error_response(
     }
 }
 
-fn device_to_proto(device: &AcceleratorDevice) -> core_v1::AcceleratorDevice {
-    core_v1::AcceleratorDevice {
-        device_id: device.device_id.clone(),
-        kind: accelerator_kind_to_proto(device.kind),
-        vendor: accelerator_vendor_to_proto(device.vendor),
-        other_vendor_id: String::new(),
-        device_family: device.device_family.clone(),
-        pci_address: device.pci_address.clone().unwrap_or_default(),
-        total_memory_bytes: device.total_memory_bytes.unwrap_or_default(),
-        allocatable_memory_bytes: device.allocatable_memory_bytes.unwrap_or_default(),
-        features: device.features.clone(),
-        partitions: Vec::new(),
-        health: Some(health_to_proto(&device.health)),
-        numa_node: device.numa_node,
-        links: device
+fn resource_to_proto(resource: &Resource) -> semantic_v1::Resource {
+    semantic_v1::Resource {
+        identity: Some(identity_to_proto(&resource.identity)),
+        provider: Some(identity_to_proto(&resource.provider)),
+        resource_class: resource.resource_class.clone(),
+        capabilities: resource
+            .capabilities
+            .iter()
+            .map(|capability| semantic_v1::Capability {
+                id: capability.id.clone(),
+                revision: capability.revision,
+                properties: capability.properties.clone().into_iter().collect(),
+            })
+            .collect(),
+        capacity: resource
+            .capacity
+            .iter()
+            .map(|(key, quantity)| {
+                (
+                    key.clone(),
+                    semantic_v1::Quantity {
+                        value: quantity.value,
+                        unit: quantity.unit.clone(),
+                    },
+                )
+            })
+            .collect(),
+        attributes: resource.attributes.clone().into_iter().collect(),
+        state: resource_state_to_proto(resource.state),
+        reason_code: resource.reason_code.clone(),
+        summary: resource.summary.clone(),
+        links: resource
             .links
             .iter()
-            .map(|link| core_v1::AcceleratorLink {
-                peer_device_id: link.peer_device_id.clone(),
-                link_type: accelerator_link_type_to_proto(link.link_type),
-                link_count: link.link_count.unwrap_or_default(),
-                width: link.width.unwrap_or_default(),
-                bandwidth_bytes_per_second: link.bandwidth_bytes_per_second.unwrap_or_default(),
-                stable: link.stable,
+            .map(|link| semantic_v1::TopologyLink {
+                peer: Some(identity_to_proto(&link.peer)),
+                kind: link.kind.clone(),
+                properties: link.properties.clone().into_iter().collect(),
             })
             .collect(),
     }
 }
 
-fn binding_to_proto(binding: DeviceBinding) -> hardware_v1::DeviceBinding {
+fn identity_to_proto(identity: &semantic::Identity) -> semantic_v1::Identity {
+    semantic_v1::Identity {
+        id: identity.id.clone(),
+        generation: identity.generation,
+    }
+}
+
+fn resource_state_to_proto(state: semantic::ResourceState) -> i32 {
+    match state {
+        semantic::ResourceState::Ready => semantic_v1::ResourceState::Ready as i32,
+        semantic::ResourceState::Degraded => semantic_v1::ResourceState::Degraded as i32,
+        semantic::ResourceState::Unavailable => semantic_v1::ResourceState::Unavailable as i32,
+    }
+}
+
+#[allow(deprecated)]
+fn binding_to_proto(
+    binding: DeviceBinding,
+    resource: semantic::Identity,
+) -> hardware_v1::DeviceBinding {
     hardware_v1::DeviceBinding {
-        device_id: binding.device_id,
+        device_id: binding.resource_id.clone(),
         nodes: binding
             .nodes
             .into_iter()
@@ -211,56 +262,19 @@ fn binding_to_proto(binding: DeviceBinding) -> hardware_v1::DeviceBinding {
         required_gids: binding.required_gids,
         enforcement: enforcement_mode_to_proto(binding.enforcement),
         reason_code: binding.reason_code,
-    }
-}
-
-fn health_to_proto(health: &HealthReport) -> core_v1::HealthReport {
-    let status = match health.healthy {
-        Some(true) => core_v1::HealthStatus::Healthy,
-        Some(false) => core_v1::HealthStatus::Unhealthy,
-        None => core_v1::HealthStatus::Unknown,
-    };
-    core_v1::HealthReport {
-        status: status as i32,
-        reason_code: health.reason_code.clone(),
-        summary: health.summary.clone(),
+        resource: Some(identity_to_proto(&resource)),
     }
 }
 
 fn enforcement_to_proto(report: cy_kernel_api::EnforcementReport) -> core_v1::EnforcementReport {
     core_v1::EnforcementReport {
-        resource_kind: core_v1::ResourceKind::Accelerator as i32,
+        resource_kind: core_v1::ResourceKind::Unspecified as i32,
         mode: enforcement_mode_to_proto(report.mode),
         adapter_id: report.adapter_id,
         reason_code: report.reason_code,
     }
 }
 
-fn accelerator_kind_to_proto(value: AcceleratorKind) -> i32 {
-    match value {
-        AcceleratorKind::Gpu => core_v1::AcceleratorKind::Gpu as i32,
-        AcceleratorKind::Npu => core_v1::AcceleratorKind::Npu as i32,
-        AcceleratorKind::Tpu => core_v1::AcceleratorKind::Tpu as i32,
-        AcceleratorKind::Other => core_v1::AcceleratorKind::Other as i32,
-    }
-}
-fn accelerator_vendor_to_proto(value: AcceleratorVendor) -> i32 {
-    match value {
-        AcceleratorVendor::Nvidia => core_v1::AcceleratorVendor::Nvidia as i32,
-        AcceleratorVendor::Amd => core_v1::AcceleratorVendor::Amd as i32,
-        AcceleratorVendor::HuaweiAscend => core_v1::AcceleratorVendor::HuaweiAscend as i32,
-        AcceleratorVendor::Intel => core_v1::AcceleratorVendor::Intel as i32,
-        AcceleratorVendor::Other => core_v1::AcceleratorVendor::Other as i32,
-    }
-}
-fn accelerator_link_type_to_proto(value: AcceleratorLinkType) -> i32 {
-    match value {
-        AcceleratorLinkType::Pcie => core_v1::AcceleratorLinkType::Pcie as i32,
-        AcceleratorLinkType::Nvlink => core_v1::AcceleratorLinkType::Nvlink as i32,
-        AcceleratorLinkType::Xgmi => core_v1::AcceleratorLinkType::Xgmi as i32,
-        AcceleratorLinkType::Other => core_v1::AcceleratorLinkType::Other as i32,
-    }
-}
 fn enforcement_mode_to_proto(value: EnforcementMode) -> i32 {
     match value {
         EnforcementMode::Hard => core_v1::EnforcementMode::Hard as i32,

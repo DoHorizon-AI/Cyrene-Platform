@@ -3,7 +3,7 @@
 - 状态：Normative / P2 boundary implemented in Core
 - 日期：2026-08-10
 - 范围：多仓库规划、内核与框架边界、分布式控制契约
-- 本轮变更：落实硬件适配器进程外化、版本化 UDS 协议和 Kernel 边界门禁；不将厂商 C ABI 放入 Kernel
+- 本轮变更：冻结 Kernel Semantic Contract v1；落实硬件适配器进程外化、版本化 UDS 协议和 Kernel 边界门禁；不将厂商 C ABI 放入 Kernel
 - 文档权威：本文是合并后的唯一架构正文；原讨论稿中的冲突决策以本文已确认的方案 A 为准
 
 ## 1. 结论先行
@@ -32,15 +32,17 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
    回收、device BPF 与 namespace 由独立 sandboxd 执行；GPU 发现、厂商 CLI、驱动
    C ABI、厂商 sysfs/procfs 与设备节点枚举由独立 Hardware Adapter Host 执行；它们
    既不是可安装业务插件，也不在 Kernel 地址空间。
-5. **当前阶段不需要 C 核心或 Kernel C ABI。**
+5. **当前阶段不需要 C 核心或进程内 Kernel C ABI。**
    Rust 足以承担节点运行时；确实需要厂商 C API 时，只能放在隔离 Adapter Host
-   内部，Kernel 对外保持版本化 Protobuf 契约。
+   内部。未来可提供外部 native client C ABI，但它只能把 Kernel Semantic Contract
+   投影到 UDS，不能把动态库加载进 Kernel 地址空间。
 6. **控制流、事件流和数据流分离。**
    模型、数据集、checkpoint 和张量不经过普通 Kernel RPC 或 Kotlin 控制面。
 7. **采用方案 A：Core 单独开源，官方服务插件各自独立建仓。**
    Core 不包含任何官方 App 源码；每个插件仓库独立发布、测试和签名。
-8. **跨语言只有一个线协议权威。**
-   Protobuf 是 Rust、Kotlin、Python 和 TypeScript SDK 的唯一生成源。
+8. **跨语言只有一个语义权威。**
+   Kernel Semantic Contract 定义对象、状态机与不变量；Protobuf 是当前标准线协议
+   投影，C ABI、Stable JVM SPI 与 Python SDK 必须表达同一语义，不能成为第二权威。
 9. **UI 与 Shell 属于服务插件。**
    Core 只发布客户端协议与 SDK，不保存产品界面。普通服务提供 UI extension，
    Navigator 服务仓库可提供官方 Tauri/Web 组合壳；客户端仍不能直连 Kernel。
@@ -150,7 +152,24 @@ Kernel 不能被称为完全“无状态”。进程、租约、重启计数和�
 > 期望状态，Rust 上报观察状态，双方通过 generation、fence token 和
 > idempotency key 收敛。
 
-### 3.1 资源分配的双层权威
+### 3.1 Kernel Semantic Contract
+
+Kernel 的长期兼容边界不是 Rust struct、gRPC service、UDS frame、C ABI 或
+Kotlin class，而是 [Kernel Semantic Contract v1](contracts/kernel-semantic-contract-v1.md)。
+它只冻结 `Principal`、`Provider`、`Resource`、`Lease`、`Worker`、`Operation`、
+`Capability`、`Endpoint`、`Event` 九个对象及其身份、状态机、fence、事件顺序和
+reconciliation 不变量。
+
+Capability 匹配必须是有界且确定的：名称相等、整数 revision 下限、属性精确匹配、
+同单位无符号容量比较。Kernel 禁止执行任意 schema、表达式、脚本或 Provider 回调。
+Endpoint 只保存授权事实，数据直接在 Worker/Provider 间传输。Provider 只上报事实，
+不能覆盖 Kernel 持有的 Lease、Fence、Worker 或 Operation 权威。
+
+`cyrene.core.v1` 中现有 Plugin 命名 RPC 在消费者迁移期间是兼容投影；所有新接口必须
+使用上述语义名词。兼容层可翻译旧请求，但不能把业务、语言、容器或厂商概念带入
+`cyrene.semantic.v1`。
+
+### 3.2 资源分配的双层权威
 
 - Kotlin 决定工作负载放到哪个节点、请求多少 GPU/CPU/内存以及优先级。
   这是调度策略。
@@ -160,7 +179,7 @@ Kernel 不能被称为完全“无状态”。进程、租约、重启计数和�
   `CUDA_VISIBLE_DEVICES` 值。
 - 启动失败时，内联申请的租约必须原子回滚；已有租约由 TTL 或显式释放控制。
 
-### 3.2 标准控制流程
+### 3.3 标准控制流程
 
 ```mermaid
 sequenceDiagram
@@ -194,7 +213,7 @@ generation 和错误语义完全相同。直连模式只是传输拓扑变化，
 幂等键和能力引用。模型权重、数据集、checkpoint、日志正文和张量不作为
 普通 KernelService 消息经过 Kotlin。
 
-### 3.3 通信平面
+### 3.4 通信平面
 
 | 平面    | 用途                                    | 推荐传输                                                         |
 | ----- | ------------------------------------- | ------------------------------------------------------------ |
@@ -211,7 +230,7 @@ token 协商；断线重连后先对账 desired/observed generation，再接收�
 无序混用两种命令通道。若确需故障切换，同一节点同一时刻只能有一个持有效
 session lease 的命令来源。
 
-### 3.4 连接故障与恢复规则
+### 3.5 连接故障与恢复规则
 
 | 场景                | 首期规则                                                                        |
 | ----------------- | --------------------------------------------------------------------------- |

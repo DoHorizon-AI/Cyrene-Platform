@@ -1,0 +1,6 @@
+# name|source_matches|cursor_sequence|oldest_available|latest_available|limit|expected_status|expected_sequences
+current_page|true|5|3|8|3|CURRENT|6,7,8
+current_limited|true|5|3|8|2|CURRENT|6,7
+current_empty|true|8|3|8|3|CURRENT|-
+cursor_gap|true|1|3|8|3|GAP|-
+source_changed|false|5|3|8|3|SOURCE_CHANGED|-

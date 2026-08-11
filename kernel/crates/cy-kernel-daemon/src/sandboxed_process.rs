@@ -173,7 +173,7 @@ mod tests {
                 limits: CgroupLimits::default(),
             },
             DeviceBinding {
-                device_id: "gpu-0".into(),
+                resource_id: "gpu-0".into(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
                 required_gids: Vec::new(),

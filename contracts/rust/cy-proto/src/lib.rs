@@ -5,10 +5,14 @@
 //! 下的 Protobuf 文件生成的。
 //! Proto 文件是整个平台的单一契约事实来源（Single Source of Truth），包含：
 //! - 节点问候与握手协议 ([`core_v1::NodeHello`], [`core_v1::NodeWelcome`])
-//! - 硬件加速卡拓扑与设备信息 ([`core_v1::AcceleratorDevice`])
-//! - 资源租约管理与围栏令牌 ([`core_v1::ReserveResourcesRequest`], [`core_v1::ResourceLease`])
+//! - 通用资源与能力事实 ([`semantic_v1::Resource`], [`semantic_v1::Capability`])
+//! - 资源租约管理与围栏令牌 ([`core_v1::AcquireLeaseRequest`], [`semantic_v1::Lease`])
 //! - 插件进程生命周期与清理状态 ([`core_v1::PluginProcess`])
 //! - 控制面下发指令与心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportHeartbeatResponse`])
+
+// Prost owns the generated enum representation; wire compatibility takes
+// precedence over hand-boxing generated variants in this projection crate.
+#![allow(clippy::large_enum_variant)]
 
 pub mod google {
     pub mod rpc {
@@ -35,6 +39,12 @@ pub mod cyrene {
             tonic::include_proto!("cyrene.sandbox.v1");
         }
     }
+
+    pub mod semantic {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.semantic.v1");
+        }
+    }
 }
 
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
@@ -43,10 +53,13 @@ pub use cyrene::core::v1 as core_v1;
 pub use cyrene::hardware::v1 as hardware_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.
 pub use cyrene::sandbox::v1 as sandbox_v1;
+/// Transport projection of the Kernel Semantic Contract v1 nouns.
+pub use cyrene::semantic::v1 as semantic_v1;
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
-    use super::{core_v1, hardware_v1, sandbox_v1};
+    use super::{core_v1, hardware_v1, sandbox_v1, semantic_v1};
     use prost::Message;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
@@ -286,6 +299,7 @@ mod tests {
                 hardware_v1::CreateBindingRequest {
                     device_id: "device-1".to_string(),
                     expected_inventory_generation: 42,
+                    resource: None,
                 },
             )),
         };
@@ -314,5 +328,35 @@ mod tests {
             decoded.body,
             Some(sandbox_v1::sandbox_request::Body::Preflight(_))
         ));
+    }
+
+    #[test]
+    fn semantic_contract_projection_round_trips_generic_resources() {
+        let resource = semantic_v1::Resource {
+            identity: Some(semantic_v1::Identity {
+                id: "resource-1".to_string(),
+                generation: 7,
+            }),
+            provider: Some(semantic_v1::Identity {
+                id: "provider-1".to_string(),
+                generation: 3,
+            }),
+            resource_class: "accelerator".to_string(),
+            capabilities: vec![semantic_v1::Capability {
+                id: "accelerator.compute".to_string(),
+                revision: 1,
+                properties: Default::default(),
+            }],
+            capacity: Default::default(),
+            attributes: Default::default(),
+            state: semantic_v1::ResourceState::Ready as i32,
+            reason_code: "ready".to_string(),
+            summary: "resource is ready".to_string(),
+            links: Vec::new(),
+        };
+        let encoded = resource.encode_to_vec();
+        let decoded = semantic_v1::Resource::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded, resource);
+        assert_eq!(decoded.resource_class, "accelerator");
     }
 }

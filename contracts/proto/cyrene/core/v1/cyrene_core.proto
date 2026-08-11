@@ -7,6 +7,7 @@ import "cyrene/core/v1/kernel_runtime.proto";
 import "cyrene/core/v1/node_control.proto";
 import "cyrene/core/v1/plugin_lifecycle.proto";
 import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
 
 option java_multiple_files = true;
 option java_package = "io.cyrene.proto.core.v1";
@@ -21,9 +22,17 @@ service KernelService {
   rpc GetKernelCapabilities(GetKernelCapabilitiesRequest)
       returns (KernelCapabilities);
   rpc ReserveResources(ReserveResourcesRequest)
-      returns (ResourceLease);
+      returns (ResourceLease) {
+    option deprecated = true;
+  }
+  rpc AcquireLease(AcquireLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
   rpc ReleaseResources(ReleaseResourcesRequest)
-      returns (ResourceLease);
+      returns (ResourceLease) {
+    option deprecated = true;
+  }
+  rpc ReleaseLease(ReleaseLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
   rpc LaunchPlugin(LaunchPluginRequest)
       returns (Operation);
   rpc TerminatePlugin(TerminatePluginRequest)

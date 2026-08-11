@@ -2,22 +2,24 @@
 //!
 //! 【核心设计：乐观代数版本 + 围栏令牌 (Generations & Fencing)】
 //! 在大规模异构 AI 集群调度中，硬件状态瞬息万变（如热拔插、故障隔离、抢占调度）。
-//! 本模块实现了内存态的加速卡资源租约管理器 [`InMemoryResourceManager`]，具备以下核心保障：
-//! 1. **原子独占分配**：同一物理卡同一时刻只能被单个租约持有，并发争抢下通过互斥锁与集合过滤保证绝对不发生重复分配；
+//! 本模块实现了内存态的通用资源租约管理器 [`InMemoryResourceManager`]，具备以下核心保障：
+//! 1. **原子独占分配**：同一资源同一时刻只能被单个租约持有，并发争抢下通过互斥锁与集合过滤保证绝对不发生重复分配；
 //! 2. **代数版本校验 (Inventory Generation)**：租约申请必须带上客户端发起请求时所基于的代数（`expected_inventory_generation`），若硬件清单发生刷新则乐观拒绝陈旧请求；
 //! 3. **围栏令牌 (Fence Token)**：每次分配赋予单调递增的 fence token，租约释放必须携带正确的令牌，彻底杜绝延迟网络包或旧任务错误释放新租约的竞态条件；
-//! 4. **硬件隔离封锁 (Quarantine)**：支持在检测到硬件故障时将特定 GPU 标记为隔离状态，阻止后续调度分配。
+//! 4. **资源隔离封锁 (Quarantine)**：支持把不再可信的资源标记为隔离状态，阻止后续分配。
 
 #![forbid(unsafe_code)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use cy_kernel_api::{
-    AcceleratorDevice, EnforcementMode, InventorySnapshot, LeaseState, NodeCapabilities,
-    ProviderError, ResourceAllocation, ResourceLease, ResourceLeaseManager, ResourceRequest,
+    semantic::{Resource, ResourceState},
+    EnforcementMode, InventorySnapshot, LeaseState, NodeCapabilities, ProviderError,
+    ResourceAllocation, ResourceLease, ResourceLeaseManager, ResourceRequest,
 };
 
 /// 内部受互斥锁保护的资源状态集
@@ -25,11 +27,11 @@ use cy_kernel_api::{
 struct State {
     /// 硬件清单版本代数（由外部事实源单调提供）
     generation: u64,
-    /// 当前受管的所有加速卡设备字典 (`device_id -> AcceleratorDevice`)
-    devices: BTreeMap<String, AcceleratorDevice>,
-    /// 已被租约占用的设备 ID 集合
+    /// 当前受管的所有通用资源事实 (`resource_id -> Resource`)
+    resources: BTreeMap<String, Resource>,
+    /// 已被租约占用的资源 ID 集合
     allocated: BTreeSet<String>,
-    /// 因故障已被隔离封锁的设备 ID 集合
+    /// 因故障已被隔离封锁的资源 ID 集合
     quarantined: BTreeSet<String>,
     /// 活跃与历史租约记录 (`lease_name -> ResourceLease`)
     leases: BTreeMap<String, ResourceLease>,
@@ -48,8 +50,8 @@ pub struct InMemoryResourceManager {
 
 impl InMemoryResourceManager {
     /// 创建资源管理器实例并初始化可用硬件清单
-    pub fn new(node_id: impl Into<String>, devices: Vec<AcceleratorDevice>) -> Self {
-        Self::with_next_fence_token(node_id, devices, 1)
+    pub fn new(node_id: impl Into<String>, resources: Vec<Resource>) -> Self {
+        Self::with_next_fence_token(node_id, resources, 1)
     }
 
     /// Creates a fresh in-memory ledger with a persisted lower bound for its
@@ -58,18 +60,18 @@ impl InMemoryResourceManager {
     /// accidentally match a newly recreated lease name.
     pub fn with_next_fence_token(
         node_id: impl Into<String>,
-        devices: Vec<AcceleratorDevice>,
+        resources: Vec<Resource>,
         next_fence_token: u64,
     ) -> Self {
-        let devices = devices
+        let resources = resources
             .into_iter()
-            .map(|device| (device.device_id.clone(), device))
+            .map(|resource| (resource.identity.id.clone(), resource))
             .collect();
         Self {
             node_id: node_id.into(),
             state: Arc::new(Mutex::new(State {
                 generation: 1,
-                devices,
+                resources,
                 allocated: BTreeSet::new(),
                 quarantined: BTreeSet::new(),
                 leases: BTreeMap::new(),
@@ -98,15 +100,15 @@ impl InMemoryResourceManager {
                 ),
             ));
         }
-        let mut devices = snapshot
-            .devices
+        let mut resources = snapshot
+            .resources
             .into_iter()
-            .map(|device| (device.device_id.clone(), device))
+            .map(|resource| (resource.identity.id.clone(), resource))
             .collect::<BTreeMap<_, _>>();
 
         if snapshot.generation == state.generation
-            && !state.devices.is_empty()
-            && state.devices != devices
+            && !state.resources.is_empty()
+            && state.resources != resources
         {
             return Err(ProviderError::new(
                 "resource-manager",
@@ -116,56 +118,55 @@ impl InMemoryResourceManager {
         }
 
         let allocated = state.allocated.iter().cloned().collect::<Vec<_>>();
-        for device_id in allocated {
-            if let Some(device) = devices.get_mut(&device_id) {
-                if device.health.healthy != Some(true) {
-                    state.quarantined.insert(device_id.clone());
+        for resource_id in allocated {
+            if let Some(resource) = resources.get_mut(&resource_id) {
+                if resource.state != ResourceState::Ready {
+                    state.quarantined.insert(resource_id.clone());
                 }
                 continue;
             }
-            if let Some(previous) = state.devices.get(&device_id).cloned() {
+            if let Some(previous) = state.resources.get(&resource_id).cloned() {
                 let mut retained = previous;
-                retained.health.healthy = Some(false);
-                retained.health.reason_code = "DEVICE_MISSING_FROM_ADAPTER".to_string();
-                retained.health.summary =
-                    "retained only until the active lease is released".to_string();
-                devices.insert(device_id.clone(), retained);
-                state.quarantined.insert(device_id.clone());
+                retained.state = ResourceState::Unavailable;
+                retained.reason_code = "resource-missing-from-provider".to_string();
+                retained.summary = "retained only until the active lease is released".to_string();
+                resources.insert(resource_id.clone(), retained);
+                state.quarantined.insert(resource_id.clone());
             }
         }
-        for (device_id, device) in &devices {
-            if device.health.healthy != Some(true) {
-                state.quarantined.insert(device_id.clone());
+        for (resource_id, resource) in &resources {
+            if resource.state != ResourceState::Ready {
+                state.quarantined.insert(resource_id.clone());
             }
         }
         state
             .quarantined
-            .retain(|device_id| devices.contains_key(device_id));
+            .retain(|resource_id| resources.contains_key(resource_id));
         state.generation = snapshot.generation;
-        state.devices = devices;
+        state.resources = resources;
         Ok(())
     }
 
-    /// 将指定设备置入隔离封锁状态（如硬件掉卡、ECC 错误、过热等）
-    pub fn quarantine(&self, device_id: &str, reason_code: &str) -> Result<(), ProviderError> {
+    /// 将指定资源置入隔离封锁状态
+    pub fn quarantine(&self, resource_id: &str, reason_code: &str) -> Result<(), ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
-        let device = state
-            .devices
-            .get_mut(device_id)
-            .ok_or_else(|| ProviderError::new("resource-manager", "DEVICE_NOT_FOUND", device_id))?;
-        device.health.healthy = Some(false);
-        device.health.reason_code = reason_code.to_string();
-        state.quarantined.insert(device_id.to_string());
+        let resource = state.resources.get_mut(resource_id).ok_or_else(|| {
+            ProviderError::new("resource-manager", "RESOURCE_NOT_FOUND", resource_id)
+        })?;
+        resource.state = ResourceState::Unavailable;
+        resource.reason_code = reason_code.to_ascii_lowercase().replace('_', "-");
+        resource.summary = "resource was quarantined by the Kernel authority".to_string();
+        state.quarantined.insert(resource_id.to_string());
         Ok(())
     }
 
-    /// 检查指定设备当前是否处于已分配占用状态
-    pub fn is_allocated(&self, device_id: &str) -> bool {
+    /// 检查指定资源当前是否处于已分配占用状态
+    pub fn is_allocated(&self, resource_id: &str) -> bool {
         self.state
             .lock()
             .expect("resource state lock poisoned")
             .allocated
-            .contains(device_id)
+            .contains(resource_id)
     }
 
     /// 获取所属节点 ID
@@ -180,7 +181,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         let state = self.state.lock().expect("resource state lock poisoned");
         InventorySnapshot {
             generation: state.generation,
-            devices: state.devices.values().cloned().collect(),
+            resources: state.resources.values().cloned().collect(),
             capabilities: NodeCapabilities {
                 ready: state.quarantined.is_empty(),
                 facts: Vec::new(),
@@ -198,10 +199,11 @@ impl ResourceLeaseManager for InMemoryResourceManager {
     /// # 校验步骤
     /// 1. 校验 `expected_inventory_generation` 是否与当前代数完全一致；
     /// 2. 校验 `lease_name` 是否已存在（防止重复创建）；
-    /// 3. 筛选满足「未分配 + 未隔离 + 健康 + 厂商匹配 + 显存满足」的候选设备；
-    /// 4. 设备数量充足则生成新围栏令牌并原子标记占用。
+    /// 3. 通过有界 `ResourceQuery` 筛选未分配、未隔离且状态就绪的候选资源；
+    /// 4. 资源数量充足则生成新围栏令牌并原子标记占用。
     fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now_unix_ms());
         if request.expected_inventory_generation != state.generation {
             return Err(ProviderError::new(
                 "resource-manager",
@@ -220,25 +222,32 @@ impl ResourceLeaseManager for InMemoryResourceManager {
             ));
         }
 
+        request.query.validate().map_err(|error| {
+            ProviderError::new("resource-manager", error.reason_code, &error.message)
+        })?;
+        if request
+            .expires_at_unix_ms
+            .is_some_and(|expires_at| expires_at <= now_unix_ms())
+        {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_EXPIRY_INVALID",
+                "lease expiry must be in the future",
+            ));
+        }
+
         let candidates = state
-            .devices
+            .resources
             .values()
-            .filter(|device| !state.allocated.contains(&device.device_id))
-            .filter(|device| !state.quarantined.contains(&device.device_id))
-            .filter(|device| device.health.healthy == Some(true))
-            .filter(|device| request.vendor.is_none_or(|vendor| device.vendor == vendor))
-            .filter(|device| {
-                request.min_memory_bytes.is_none_or(|minimum| {
-                    device
-                        .total_memory_bytes
-                        .is_some_and(|value| value >= minimum)
-                })
-            })
-            .take(request.count)
+            .filter(|resource| !state.allocated.contains(&resource.identity.id))
+            .filter(|resource| !state.quarantined.contains(&resource.identity.id))
+            .filter(|resource| resource.state == ResourceState::Ready)
+            .filter(|resource| request.query.matches(resource))
+            .take(request.query.count as usize)
             .cloned()
             .collect::<Vec<_>>();
 
-        if candidates.len() != request.count {
+        if candidates.len() != request.query.count as usize {
             return Err(ProviderError::new(
                 "resource-manager",
                 "INSUFFICIENT_RESOURCES",
@@ -250,22 +259,25 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         state.next_fence_token = state.next_fence_token.saturating_add(1);
         let allocations = candidates
             .iter()
-            .map(|device| {
-                state.allocated.insert(device.device_id.clone());
+            .map(|resource| {
+                state.allocated.insert(resource.identity.id.clone());
                 ResourceAllocation {
-                    allocation_id: format!("{}:{}", request.lease_name, device.device_id),
-                    device_id: device.device_id.clone(),
-                    granted_memory_bytes: device.allocatable_memory_bytes,
+                    allocation_id: format!("{}:{}", request.lease_name, resource.identity.id),
+                    resource: resource.identity.clone(),
+                    granted_capacity: resource.capacity.clone(),
                     enforcement: EnforcementMode::ObserveOnly,
                 }
             })
             .collect::<Vec<_>>();
         let lease = ResourceLease {
             name: request.lease_name.clone(),
+            generation: 1,
             state: LeaseState::Active,
+            holder: request.holder,
             allocations,
             inventory_generation: state.generation,
             fence_token,
+            expires_at_unix_ms: request.expires_at_unix_ms,
             limits: request.limits,
         };
         state.leases.insert(request.lease_name, lease.clone());
@@ -274,13 +286,63 @@ impl ResourceLeaseManager for InMemoryResourceManager {
 
     /// 读取租约当前快照
     fn get_lease(&self, lease_name: &str) -> Result<ResourceLease, ProviderError> {
-        self.state
-            .lock()
-            .expect("resource state lock poisoned")
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now_unix_ms());
+        state
             .leases
             .get(lease_name)
             .cloned()
             .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))
+    }
+
+    /// 延长已有的活跃租约，而不改变该租约已授予的资源权威。围栏令牌与
+    /// 过期时间的单调性让重放包和陈旧控制面都无法缩短或劫持现有租约。
+    fn renew(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        let now = now_unix_ms();
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now);
+        if expires_at_unix_ms <= now {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_EXPIRY_INVALID",
+                "lease renewal expiry must be in the future",
+            ));
+        }
+        let lease = state
+            .leases
+            .get_mut(lease_name)
+            .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))?;
+        if lease.fence_token != fence_token {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "STALE_FENCE_TOKEN",
+                lease_name,
+            ));
+        }
+        if lease.state != LeaseState::Active {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_NOT_ACTIVE",
+                lease_name,
+            ));
+        }
+        if lease
+            .expires_at_unix_ms
+            .is_some_and(|current| expires_at_unix_ms <= current)
+        {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_EXPIRY_REGRESSION",
+                "lease renewal expiry must extend the current expiry",
+            ));
+        }
+        lease.expires_at_unix_ms = Some(expires_at_unix_ms);
+        Ok(lease.clone())
     }
 
     /// 释放硬件资源租约
@@ -289,6 +351,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
     /// 必须提供与租约生成时一致的 `fence_token`，防止陈旧或并发释放请求造成状态错乱。
     fn release(&self, lease_name: &str, fence_token: u64) -> Result<(), ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now_unix_ms());
         let allocations = {
             let lease = state.leases.get(lease_name).ok_or_else(|| {
                 ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name)
@@ -306,7 +369,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
             lease.allocations.clone()
         };
         for allocation in &allocations {
-            state.allocated.remove(&allocation.device_id);
+            state.allocated.remove(&allocation.resource.id);
         }
         state
             .leases
@@ -317,53 +380,143 @@ impl ResourceLeaseManager for InMemoryResourceManager {
     }
 }
 
+fn expire_due_leases(state: &mut State, now_unix_ms: u64) {
+    let due = state
+        .leases
+        .iter()
+        .filter(|(_, lease)| {
+            lease.state == LeaseState::Active
+                && lease
+                    .expires_at_unix_ms
+                    .is_some_and(|expires_at| expires_at <= now_unix_ms)
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    for name in due {
+        let resources = state
+            .leases
+            .get(&name)
+            .map(|lease| {
+                lease
+                    .allocations
+                    .iter()
+                    .map(|allocation| allocation.resource.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for resource_id in resources {
+            state.allocated.remove(&resource_id);
+        }
+        if let Some(lease) = state.leases.get_mut(&name) {
+            lease.state = LeaseState::Expired;
+        }
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cy_kernel_api::{AcceleratorKind, AcceleratorVendor, HealthReport};
+    use cy_kernel_api::semantic::{
+        Capability, CapabilityRequirement, Identity, Quantity, ResourceQuery,
+    };
     use std::thread;
 
-    fn device(id: &str) -> AcceleratorDevice {
-        AcceleratorDevice {
-            device_id: id.to_string(),
-            adapter_id: "test-adapter".to_string(),
-            kind: AcceleratorKind::Gpu,
-            vendor: AcceleratorVendor::Nvidia,
-            device_family: "test".to_string(),
-            pci_address: None,
-            numa_node: Some(0),
-            total_memory_bytes: Some(40 * 1024 * 1024 * 1024),
-            allocatable_memory_bytes: Some(40 * 1024 * 1024 * 1024),
-            features: Vec::new(),
-            device_nodes: Vec::new(),
-            links: Vec::new(),
-            health: HealthReport {
-                healthy: Some(true),
-                reason_code: "TEST".to_string(),
-                summary: "healthy".to_string(),
+    fn resource(id: &str) -> Resource {
+        Resource {
+            identity: Identity {
+                id: id.to_string(),
+                generation: 1,
             },
+            provider: Identity {
+                id: "test-provider".to_string(),
+                generation: 1,
+            },
+            resource_class: "accelerator".to_string(),
+            capabilities: vec![
+                Capability {
+                    id: "accelerator.compute".to_string(),
+                    revision: 1,
+                    properties: BTreeMap::new(),
+                },
+                Capability {
+                    id: "vendor.test.compute".to_string(),
+                    revision: 1,
+                    properties: BTreeMap::new(),
+                },
+            ],
+            capacity: BTreeMap::from([
+                (
+                    "memory.total".to_string(),
+                    Quantity {
+                        value: 40 * 1024 * 1024 * 1024,
+                        unit: "byte".to_string(),
+                    },
+                ),
+                (
+                    "memory.allocatable".to_string(),
+                    Quantity {
+                        value: 40 * 1024 * 1024 * 1024,
+                        unit: "byte".to_string(),
+                    },
+                ),
+            ]),
+            attributes: BTreeMap::new(),
+            state: ResourceState::Ready,
+            reason_code: "test-ready".to_string(),
+            summary: "healthy".to_string(),
+            links: Vec::new(),
+        }
+    }
+
+    fn request(name: impl Into<String>, generation: u64) -> ResourceRequest {
+        ResourceRequest {
+            lease_name: name.into(),
+            expected_inventory_generation: generation,
+            holder: Identity {
+                id: "worker/test".to_string(),
+                generation: 1,
+            },
+            query: ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::from([(
+                    "memory.allocatable".to_string(),
+                    Quantity {
+                        value: 1,
+                        unit: "byte".to_string(),
+                    },
+                )]),
+            },
+            expires_at_unix_ms: None,
+            limits: Default::default(),
         }
     }
 
     #[test]
-    fn concurrent_reservation_never_duplicates_a_device() {
+    fn concurrent_reservation_never_duplicates_a_resource() {
         let manager = Arc::new(InMemoryResourceManager::new(
             "node-1",
-            vec![device("gpu-0")],
+            vec![resource("resource-0")],
         ));
         let generation = manager.inventory().generation;
         let mut workers = Vec::new();
         for index in 0..100 {
             let manager = Arc::clone(&manager);
             workers.push(thread::spawn(move || {
-                manager.reserve(ResourceRequest {
-                    lease_name: format!("lease-{index}"),
-                    expected_inventory_generation: generation,
-                    count: 1,
-                    vendor: Some(AcceleratorVendor::Nvidia),
-                    min_memory_bytes: Some(1),
-                    limits: Default::default(),
-                })
+                manager.reserve(request(format!("lease-{index}"), generation))
             }));
         }
         let successful = workers
@@ -371,22 +524,13 @@ mod tests {
             .filter_map(|worker| worker.join().unwrap().ok())
             .collect::<Vec<_>>();
         assert_eq!(successful.len(), 1);
-        assert!(manager.is_allocated("gpu-0"));
+        assert!(manager.is_allocated("resource-0"));
     }
 
     #[test]
     fn stale_generation_and_fence_are_rejected() {
-        let manager = InMemoryResourceManager::new("node-1", vec![device("gpu-0")]);
-        let lease = manager
-            .reserve(ResourceRequest {
-                lease_name: "lease-1".to_string(),
-                expected_inventory_generation: 1,
-                count: 1,
-                vendor: None,
-                min_memory_bytes: None,
-                limits: Default::default(),
-            })
-            .unwrap();
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let lease = manager.reserve(request("lease-1", 1)).unwrap();
         assert_eq!(
             manager
                 .release(&lease.name, lease.fence_token + 1)
@@ -395,23 +539,17 @@ mod tests {
             "STALE_FENCE_TOKEN"
         );
         manager.release(&lease.name, lease.fence_token).unwrap();
-        assert!(!manager.is_allocated("gpu-0"));
+        assert!(!manager.is_allocated("resource-0"));
     }
 
     #[test]
     fn recovered_fence_floor_invalidates_a_prior_kernel_epoch() {
-        let manager =
-            InMemoryResourceManager::with_next_fence_token("node-1", vec![device("gpu-0")], 42);
-        let lease = manager
-            .reserve(ResourceRequest {
-                lease_name: "lease-after-restart".to_string(),
-                expected_inventory_generation: 1,
-                count: 1,
-                vendor: None,
-                min_memory_bytes: None,
-                limits: Default::default(),
-            })
-            .unwrap();
+        let manager = InMemoryResourceManager::with_next_fence_token(
+            "node-1",
+            vec![resource("resource-0")],
+            42,
+        );
+        let lease = manager.reserve(request("lease-after-restart", 1)).unwrap();
         assert_eq!(lease.fence_token, 42);
         assert_eq!(
             manager.release(&lease.name, 41).unwrap_err().reason_code,
@@ -420,12 +558,40 @@ mod tests {
     }
 
     #[test]
+    fn renewal_requires_the_active_fence_and_only_extends_expiry() {
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let mut requested = request("lease-1", 1);
+        requested.expires_at_unix_ms = Some(now_unix_ms() + 1_000);
+        let lease = manager.reserve(requested).unwrap();
+
+        assert_eq!(
+            manager
+                .renew(&lease.name, lease.fence_token + 1, now_unix_ms() + 2_000)
+                .unwrap_err()
+                .reason_code,
+            "STALE_FENCE_TOKEN"
+        );
+        assert_eq!(
+            manager
+                .renew(&lease.name, lease.fence_token, now_unix_ms() + 500)
+                .unwrap_err()
+                .reason_code,
+            "LEASE_EXPIRY_REGRESSION"
+        );
+        let renewed = manager
+            .renew(&lease.name, lease.fence_token, now_unix_ms() + 3_000)
+            .unwrap();
+        assert_eq!(renewed.fence_token, lease.fence_token);
+        assert!(renewed.expires_at_unix_ms > lease.expires_at_unix_ms);
+    }
+
+    #[test]
     fn adapter_generation_regression_and_unversioned_changes_are_rejected() {
-        let manager = InMemoryResourceManager::new("node-1", vec![device("gpu-0")]);
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
         let error = manager
             .refresh_inventory(InventorySnapshot {
                 generation: 0,
-                devices: vec![device("gpu-0")],
+                resources: vec![resource("resource-0")],
                 capabilities: NodeCapabilities {
                     ready: true,
                     facts: Vec::new(),
@@ -438,7 +604,7 @@ mod tests {
         let error = manager
             .refresh_inventory(InventorySnapshot {
                 generation: 1,
-                devices: vec![device("gpu-other")],
+                resources: vec![resource("resource-other")],
                 capabilities: NodeCapabilities {
                     ready: true,
                     facts: Vec::new(),
@@ -447,5 +613,25 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error.reason_code, "INVENTORY_GENERATION_CONFLICT");
+    }
+
+    #[test]
+    fn capability_query_is_generic_and_lease_expiry_releases_authority() {
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let mut lease_request = request("lease-expiring", 1);
+        lease_request.query.required_capabilities = vec![CapabilityRequirement {
+            id: "vendor.test.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }];
+        lease_request.expires_at_unix_ms = Some(now_unix_ms().saturating_add(25));
+        let lease = manager.reserve(lease_request).unwrap();
+        thread::sleep(std::time::Duration::from_millis(40));
+
+        assert_eq!(
+            manager.get_lease(&lease.name).unwrap().state,
+            LeaseState::Expired
+        );
+        assert!(!manager.is_allocated("resource-0"));
     }
 }
