@@ -297,3 +297,16 @@ capabilities = ["openai-compatible-relay", "streaming-http", "remote-model-routi
 Each component MUST carry `id`, `kind`, `edition`, `version`. `runtime` is
 recommended per component; `capabilities` (free-form array), `license_gate`,
 `status`, and `source_target` are optional.
+## Boundary applicability
+
+This specification governs only an installable `capability-plugin` or an
+installable component within a `service-bundle`. It is not a manifest format for
+the Kernel, Control Plane, Adapter Host, product Service, infrastructure asset or
+an extracted compatibility snapshot. Their classification is normative in
+[`Platform Component Boundary v1`](contracts/platform-component-boundary-v1.md)
+and [`component-catalog.v1.json`](../contracts/registries/component-catalog.v1.json).
+
+A `compatibility-snapshot` must not be made discoverable merely by adding a
+`plugin.toml`: it first needs a versioned extension contract, out-of-process
+runtime, activation path and TCK. A product service instead provides `service.json`
+validated by `contracts/schemas/service.schema.json`.
