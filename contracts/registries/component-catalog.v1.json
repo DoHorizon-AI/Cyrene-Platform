@@ -72,8 +72,8 @@
     {
       "path": "plugins/cy-plugin-compat-rules",
       "id": "com.cy.compat-rules",
-      "class": "capability-plugin",
-      "state": "legacy-candidate"
+      "class": "compatibility-snapshot",
+      "state": "needs-compatibility-contract"
     },
     {
       "path": "plugins/cy-plugin-content-policy",
@@ -192,8 +192,8 @@
     {
       "path": "plugins/docker-uv-builder",
       "id": "com.cy.runtime.docker-uv",
-      "class": "capability-plugin",
-      "state": "legacy-candidate"
+      "class": "compatibility-snapshot",
+      "state": "needs-runtime-builder-contract"
     },
     {
       "path": "plugins/enterprise-bundle",
@@ -204,14 +204,14 @@
     {
       "path": "plugins/hf-model-analyzer",
       "id": "com.cy.model.hf-analyzer",
-      "class": "capability-plugin",
-      "state": "legacy-candidate"
+      "class": "compatibility-snapshot",
+      "state": "needs-model-analyzer-contract"
     },
     {
       "path": "plugins/llama-factory-training",
       "id": "com.cy.training.llama-factory",
-      "class": "capability-plugin",
-      "state": "legacy-candidate"
+      "class": "compatibility-snapshot",
+      "state": "needs-training-contract"
     },
     {
       "path": "plugins/nvidia-probe",
@@ -222,14 +222,14 @@
     {
       "path": "plugins/tensorrt-quantization",
       "id": "com.cy.quantization.tensorrt",
-      "class": "capability-plugin",
-      "state": "descriptor-missing"
+      "class": "compatibility-snapshot",
+      "state": "needs-quantization-contract"
     },
     {
       "path": "plugins/vllm-engine",
       "id": "com.cy.execution.vllm",
-      "class": "capability-plugin",
-      "state": "legacy-candidate"
+      "class": "compatibility-snapshot",
+      "state": "needs-execution-contract"
     }
   ]
 }
