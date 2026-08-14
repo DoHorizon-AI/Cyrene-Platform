@@ -60,6 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    // Bootstrap initial hardware facts into the resource manager ledger at startup
+    daemon.refresh_inventory_facts().map_err(|e| {
+        std::io::Error::other(format!(
+            "failed to populate initial hardware inventory: {e}"
+        ))
+    })?;
     let heartbeat = WorkerHeartbeatConfig {
         socket_path: args.worker_control_socket.clone(),
         interval: args.heartbeat_interval,

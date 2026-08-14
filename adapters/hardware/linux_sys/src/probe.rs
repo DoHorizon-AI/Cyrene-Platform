@@ -294,6 +294,7 @@ impl ResourceProvider for LinuxSystemProvider {
             },
         );
 
+        let clean_arch = cpu_info.architecture.to_ascii_lowercase().replace('_', "");
         let cpu_capabilities = vec![
             Capability {
                 id: "compute.cpu".to_string(),
@@ -301,7 +302,7 @@ impl ResourceProvider for LinuxSystemProvider {
                 properties: BTreeMap::new(),
             },
             Capability {
-                id: format!("cpu.arch.{}", cpu_info.architecture),
+                id: format!("cpu.arch.{clean_arch}"),
                 revision: 1,
                 properties: BTreeMap::new(),
             },
