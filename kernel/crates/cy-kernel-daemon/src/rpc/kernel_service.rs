@@ -1,6 +1,6 @@
 //! `core_v1::KernelService` gRPC 服务实现。
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cy_kernel_api::{ProviderError, ResourceRequest, RuntimeJournalEvent, VerifiedInstallation};
 use cy_proto::{core_v1, semantic_v1};
@@ -16,7 +16,7 @@ use crate::{
         semantic_identity_from_proto, semantic_query_from_proto, to_proto_lease,
         to_semantic_proto_lease,
     },
-    sandboxed_process::SandboxedProcess,
+    watchdog::InstanceActor,
     session::ManagedProcess,
 };
 
@@ -309,8 +309,16 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 self.release_owned_lease(owned_lease, &lease);
                 provider_status(error)
             })?;
-        let mut instance = SandboxedProcess::new(self.daemon.sandbox.clone(), plan, binding);
-        if let Err(error) = instance.start() {
+        let mut actor = InstanceActor::new(
+            instance_name.clone(),
+            lease.name.clone(),
+            lease.fence_token,
+            self.daemon.sandbox.clone(),
+            plan,
+            binding,
+            self.heartbeat.timeout,
+        );
+        if let Err(error) = actor.start() {
             self.release_owned_lease(owned_lease, &lease);
             return Err(provider_status(error));
         }
@@ -324,13 +332,12 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .insert(
                 instance_name.clone(),
                 ManagedProcess {
-                    instance,
+                    actor,
                     lease: Some(lease_ref.clone()),
                     semantic_worker: None,
                     plugin,
                     generation: lease_ref.fence_token,
                     accepted_sequence: 0,
-                    last_heartbeat: Instant::now(),
                     last_heartbeat_at: None,
                     runtime_state: core_v1::PluginRuntimeState::Starting as i32,
                     health: None,
@@ -383,7 +390,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 .get_mut(&request.process_name)
                 .ok_or_else(|| Status::not_found("plugin process is not managed by this Kernel"))?;
             let report = process
-                .instance
+                .actor
                 .stop(&cy_kernel_api::StopRequest {
                     grace_period,
                     immediate,
@@ -472,7 +479,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 Status::failed_precondition("operation target is no longer managed")
             })?;
             let report = process
-                .instance
+                .actor
                 .stop(&cy_kernel_api::StopRequest {
                     grace_period: self.heartbeat.graceful_stop,
                     immediate: false,

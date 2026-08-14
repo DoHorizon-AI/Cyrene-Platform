@@ -91,7 +91,7 @@ impl KernelServiceAdapter {
             ));
         }
         process.accepted_sequence = sequence_number;
-        process.last_heartbeat = Instant::now();
+        process.actor.on_heartbeat_received(Instant::now());
         process.last_heartbeat_at = observed_at.or_else(|| Some(now_timestamp()));
         process.runtime_state = runtime_state;
         process.health = health;
@@ -487,7 +487,7 @@ impl KernelServiceAdapter {
             ));
         }
         worker.state = semantic::WorkerState::Running;
-        process.last_heartbeat = Instant::now();
+        process.actor.on_heartbeat_received(Instant::now());
         process.last_heartbeat_at = Some(now_timestamp());
         let response = worker.clone();
         drop(instances);
@@ -524,7 +524,9 @@ impl KernelServiceAdapter {
                 .iter()
                 .filter(|(_, process)| {
                     !process.watchdog_triggered
-                        && process.last_heartbeat.elapsed() > self.heartbeat.timeout
+                        && process.actor.last_heartbeat().map_or(false, |last| {
+                            last.elapsed() > process.actor.heartbeat_deadline()
+                        })
                 })
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>()
@@ -554,7 +556,7 @@ impl KernelServiceAdapter {
                 };
                 process.watchdog_triggered = true;
                 let lease = process.lease.clone();
-                match process.instance.stop(&cy_kernel_api::StopRequest {
+                match process.actor.stop(&cy_kernel_api::StopRequest {
                     grace_period: self.heartbeat.graceful_stop,
                     immediate: false,
                 }) {

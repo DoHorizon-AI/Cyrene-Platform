@@ -9,8 +9,8 @@ use super::common::{
 };
 use crate::{
     daemon::KernelDaemon,
-    sandboxed_process::SandboxedProcessState,
     session::{ManagedProcess, WorkerHeartbeatConfig},
+    watchdog::InstanceActorState,
 };
 
 pub(crate) fn to_plugin_instance(
@@ -52,13 +52,18 @@ pub(crate) fn to_plugin_instance(
 }
 
 pub(crate) fn managed_runtime_state(process: &ManagedProcess) -> i32 {
-    match process.instance.state() {
-        SandboxedProcessState::Discovered => core_v1::PluginRuntimeState::Discovered as i32,
-        SandboxedProcessState::Starting => core_v1::PluginRuntimeState::Starting as i32,
-        SandboxedProcessState::Healthy => process.runtime_state,
-        SandboxedProcessState::Stopping => core_v1::PluginRuntimeState::Stopping as i32,
-        SandboxedProcessState::Stopped => core_v1::PluginRuntimeState::Stopped as i32,
-        SandboxedProcessState::Quarantined => core_v1::PluginRuntimeState::Quarantined as i32,
+    // `InstanceActor` is the single source of truth for kernel-side lifecycle.
+    // `Healthy` surfaces the worker-reported `runtime_state` (preserving prior
+    // behavior); `Degraded` reuses the last worker-reported value because
+    // `PluginRuntimeState` has no degraded variant.
+    match process.actor.state() {
+        InstanceActorState::Starting => core_v1::PluginRuntimeState::Starting as i32,
+        InstanceActorState::Healthy => process.runtime_state,
+        InstanceActorState::Degraded => process.runtime_state,
+        InstanceActorState::Draining => core_v1::PluginRuntimeState::Stopping as i32,
+        InstanceActorState::Stopping => core_v1::PluginRuntimeState::Stopping as i32,
+        InstanceActorState::Stopped => core_v1::PluginRuntimeState::Stopped as i32,
+        InstanceActorState::Quarantined => core_v1::PluginRuntimeState::Quarantined as i32,
     }
 }
 

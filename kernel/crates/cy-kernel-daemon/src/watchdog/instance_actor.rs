@@ -93,6 +93,18 @@ impl InstanceActor {
         self.state
     }
 
+    /// Read-only access to the last observed heartbeat timestamp. Used by the
+    /// kernel watchdog scan loop without requiring `&mut` borrow.
+    pub fn last_heartbeat(&self) -> Option<Instant> {
+        self.last_heartbeat
+    }
+
+    /// Read-only access to the configured heartbeat deadline. Used by the
+    /// kernel watchdog scan loop to detect overdue instances.
+    pub fn heartbeat_deadline(&self) -> Duration {
+        self.heartbeat_deadline
+    }
+
     /// Attach a communication channel to the sandboxed worker.
     pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<Envelope>) {
         self.transport_tx = Some(tx);

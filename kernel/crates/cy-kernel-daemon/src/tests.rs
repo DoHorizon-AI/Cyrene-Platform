@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use cy_kernel_api::{
@@ -31,8 +31,8 @@ use crate::{
     },
     daemon::KernelDaemon,
     peer_cred::{principal_from_peer_cred, PeerCred},
-    sandboxed_process::SandboxedProcess,
     session::{ManagedProcess, WorkerHeartbeatConfig},
+    watchdog::InstanceActor,
 };
 
 const AUTHORITY_TEST_PEER: PeerCred = PeerCred {
@@ -255,26 +255,7 @@ fn managed_test_process(
     lease: Option<core_v1::ResourceLeaseRef>,
 ) -> ManagedProcess {
     ManagedProcess {
-        instance: SandboxedProcess::new(
-            Arc::new(FakeSandbox),
-            LaunchPlan {
-                instance_name: instance_name.to_string(),
-                executable: PathBuf::from("worker"),
-                args: Vec::new(),
-                environment: BTreeMap::new(),
-                cgroup_name: format!("instance-{instance_name}"),
-                limits: CgroupLimits::default(),
-            },
-            DeviceBinding {
-                resource_id: "none".to_string(),
-                nodes: Vec::new(),
-                environment: BTreeMap::new(),
-                required_gids: Vec::new(),
-                enforcement: EnforcementMode::Unenforced,
-                adapter_id: "test".to_string(),
-                reason_code: "TEST".to_string(),
-            },
-        ),
+        actor: InstanceActor::new_for_test(),
         lease,
         semantic_worker: None,
         plugin: core_v1::InstalledPluginRef {
@@ -288,7 +269,6 @@ fn managed_test_process(
         },
         generation,
         accepted_sequence: 0,
-        last_heartbeat: Instant::now(),
         last_heartbeat_at: None,
         runtime_state: core_v1::PluginRuntimeState::Starting as i32,
         health: None,
@@ -705,6 +685,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         CancelSemanticOperationRequest, CreateOperationRequest, HeartbeatWorkerRequest,
         ReportOperationRequest, StartWorkerRequest, StopWorkerRequest, SubscribeEventsRequest,
     };
+    use crate::watchdog::InstanceActorState;
 
     let adapter = semantic_worker_adapter();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -764,6 +745,19 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .into_inner();
     assert_eq!(started.kind, "worker.start");
     assert_eq!(started.state, semantic_v1::OperationState::Running as i32);
+    // Direction 2: the launched worker must be driven by the wired-up
+    // InstanceActor, not a bare SandboxedProcess.
+    assert_eq!(
+        adapter
+            .instances
+            .lock()
+            .unwrap()
+            .get("worker-1")
+            .expect("started worker must be registered")
+            .actor
+            .state(),
+        InstanceActorState::Healthy
+    );
     let stored_principal = adapter
         .instances
         .lock()

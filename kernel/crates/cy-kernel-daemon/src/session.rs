@@ -2,7 +2,7 @@
 
 use std::{
     path::PathBuf,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use cy_kernel_api::semantic;
@@ -10,7 +10,7 @@ use cy_proto::core_v1;
 use tokio::sync::mpsc;
 use tonic::Status;
 
-use crate::sandboxed_process::SandboxedProcess;
+use crate::watchdog::InstanceActor;
 
 /// Worker heartbeat policy injected into every managed worker process.
 #[derive(Debug, Clone)]
@@ -37,13 +37,12 @@ impl Default for WorkerHeartbeatConfig {
 }
 
 pub(crate) struct ManagedProcess {
-    pub(crate) instance: SandboxedProcess,
+    pub(crate) actor: InstanceActor,
     pub(crate) lease: Option<core_v1::ResourceLeaseRef>,
     pub(crate) semantic_worker: Option<semantic::Worker>,
     pub(crate) plugin: core_v1::InstalledPluginRef,
     pub(crate) generation: u64,
     pub(crate) accepted_sequence: u64,
-    pub(crate) last_heartbeat: Instant,
     pub(crate) last_heartbeat_at: Option<prost_types::Timestamp>,
     pub(crate) runtime_state: i32,
     pub(crate) health: Option<core_v1::HealthReport>,

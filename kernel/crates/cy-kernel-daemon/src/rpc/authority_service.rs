@@ -1,6 +1,6 @@
 //! `core_v1::KernelAuthorityService` gRPC 语义权威服务实现。
 
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
 
 use cy_kernel_api::{semantic, CgroupLimits, LeaseState, ResourceRequest, RuntimeJournalEvent};
 use cy_proto::{core_v1, semantic_v1};
@@ -20,7 +20,7 @@ use crate::{
         validate_authority_context,
     },
     peer_cred::principal_from_request,
-    sandboxed_process::SandboxedProcess,
+    watchdog::InstanceActor,
     session::ManagedProcess,
 };
 
@@ -258,8 +258,16 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         plan.environment = binding
             .merge_environment(&plan.environment)
             .map_err(provider_status)?;
-        let mut instance = SandboxedProcess::new(self.daemon.sandbox.clone(), plan, binding);
-        instance.start().map_err(provider_status)?;
+        let mut actor = InstanceActor::new(
+            worker.identity.id.clone(),
+            lease.name.clone(),
+            lease.fence_token,
+            self.daemon.sandbox.clone(),
+            plan,
+            binding,
+            self.heartbeat.timeout,
+        );
+        actor.start().map_err(provider_status)?;
         worker.state = semantic::WorkerState::Starting;
         let lease_ref = core_v1::ResourceLeaseRef {
             lease_name: lease.name.clone(),
@@ -271,13 +279,12 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             .insert(
                 worker.identity.id.clone(),
                 ManagedProcess {
-                    instance,
+                    actor,
                     lease: Some(lease_ref.clone()),
                     semantic_worker: Some(worker.clone()),
                     plugin: core_v1::InstalledPluginRef::default(),
                     generation: lease.fence_token,
                     accepted_sequence: 0,
-                    last_heartbeat: Instant::now(),
                     last_heartbeat_at: None,
                     runtime_state: core_v1::PluginRuntimeState::Starting as i32,
                     health: None,
@@ -393,7 +400,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             }
             worker.state = semantic::WorkerState::Draining;
             let report = process
-                .instance
+                .actor
                 .stop(&cy_kernel_api::StopRequest {
                     grace_period,
                     immediate: false,
