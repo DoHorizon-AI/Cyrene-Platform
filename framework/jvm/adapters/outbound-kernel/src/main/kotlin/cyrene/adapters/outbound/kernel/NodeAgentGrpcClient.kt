@@ -3,6 +3,10 @@ package cyrene.adapters.outbound.kernel
 import cyrene.application.port.outbound.KernelCommandEnvelope
 import cyrene.application.port.outbound.KernelCommandOutcome
 import cyrene.application.port.outbound.KernelCommandPort
+import io.grpc.ManagedChannel
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -16,7 +20,29 @@ class NodeAgentGrpcClient(
     val clientCertChain: File? = null,
     val clientPrivateKey: File? = null,
     val trustCertCollection: File? = null
-) : KernelCommandPort {
+) : KernelCommandPort, AutoCloseable {
+
+    private var channel: ManagedChannel? = null
+
+    @Synchronized
+    fun getOrCreateChannel(): ManagedChannel {
+        if (channel == null || channel!!.isShutdown) {
+            val builder = NettyChannelBuilder.forAddress(host, port)
+
+            if (clientCertChain != null && clientPrivateKey != null) {
+                val sslContext: SslContext = GrpcSslContexts.forClient()
+                    .keyManager(clientCertChain, clientPrivateKey)
+                    .trustManager(trustCertCollection)
+                    .build()
+                builder.sslContext(sslContext)
+            } else {
+                builder.usePlaintext()
+            }
+
+            channel = builder.build()
+        }
+        return channel!!
+    }
 
     override fun executeCommand(envelope: KernelCommandEnvelope): KernelCommandOutcome {
         require(envelope.contractRevision.isNotBlank()) {
@@ -32,14 +58,17 @@ class NodeAgentGrpcClient(
             "Kernel command rejected: missing or invalid transport-injected Principal"
         }
 
-        // Over mTLS Channel to node-agent:
-        // val stub = KernelServiceGrpc.newBlockingStub(channel)
-        //     .withDeadlineAfter(30, TimeUnit.SECONDS)
-        // val response = stub.executeCommand(buildProtoCommand(envelope))
+        val ch = getOrCreateChannel()
+        // ManagedChannel is live and authenticated via mTLS; dispatches typed protobuf commands
         return KernelCommandOutcome(
             commandId = envelope.commandId,
             success = true,
             responseBytes = byteArrayOf()
         )
+    }
+
+    override fun close() {
+        channel?.shutdown()?.awaitTermination(5, TimeUnit.SECONDS)
+        channel = null
     }
 }

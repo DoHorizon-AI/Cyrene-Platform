@@ -1,6 +1,12 @@
 package cyrene.adapters.inbound.grpc
 
+import io.grpc.Server
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
+import io.grpc.netty.shaded.io.netty.handler.ssl.ClientAuth
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
 import java.io.File
+import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
 
 /**
@@ -13,28 +19,48 @@ class NodeControlGrpcServer(
     val certChainFile: File? = null,
     val privateKeyFile: File? = null,
     val trustCertCollectionFile: File? = null
-) {
-    @Volatile
-    private var isRunning: Boolean = false
+) : AutoCloseable {
+    private var server: Server? = null
 
+    @Synchronized
     fun start(): NodeControlGrpcServer {
-        // In real JVM environment with grpc-netty:
-        // val builder = NettyServerBuilder.forPort(port).addService(nodeControlService)
-        // if (certChainFile != null && privateKeyFile != null) {
-        //     val sslContext = GrpcSslContexts.forServer(certChainFile, privateKeyFile)
-        //         .trustManager(trustCertCollectionFile)
-        //         .clientAuth(ClientAuth.REQUIRE)
-        //         .build()
-        //     builder.sslContext(sslContext)
-        // }
-        // server = builder.build().start()
-        isRunning = true
+        if (server != null && !server!!.isShutdown) {
+            return this
+        }
+
+        val builder = NettyServerBuilder.forAddress(InetSocketAddress("0.0.0.0", port))
+
+        // Real mTLS Dual-Certificate assembly
+        if (certChainFile != null && privateKeyFile != null) {
+            val sslContext: SslContext = GrpcSslContexts.forServer(certChainFile, privateKeyFile)
+                .trustManager(trustCertCollectionFile)
+                .clientAuth(ClientAuth.REQUIRE)
+                .build()
+            builder.sslContext(sslContext)
+        }
+
+        server = builder.build().start()
         return this
     }
 
+    @Synchronized
     fun stop(timeoutSeconds: Long = 5) {
-        isRunning = false
+        server?.let {
+            it.shutdown()
+            try {
+                if (!it.awaitTermination(timeoutSeconds, TimeUnit.SECONDS)) {
+                    it.shutdownNow()
+                }
+            } catch (e: InterruptedException) {
+                it.shutdownNow()
+            }
+            server = null
+        }
     }
 
-    fun isRunning(): Boolean = isRunning
+    fun isRunning(): Boolean = server != null && !server!!.isShutdown && !server!!.isTerminated
+
+    override fun close() {
+        stop()
+    }
 }
