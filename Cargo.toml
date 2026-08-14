@@ -19,8 +19,6 @@ members = [
     "framework/crates/cy-installation-resolver",
     "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
-    # cy-plugin-supervisor: DEPRECATED — removed from workspace. All plugin lifecycle
-    # is now managed by cy-kernel-daemon::watchdog::InstanceActor + sandboxd. See ADR-PLUGIN-RUNTIME.
     "sdk/rust/cy-worker-sdk",
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）
