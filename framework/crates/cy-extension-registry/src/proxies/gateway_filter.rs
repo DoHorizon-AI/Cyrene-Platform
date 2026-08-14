@@ -5,30 +5,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_platform_api::{
     GatewayFilter, Plugin, PluginCapabilities, PluginError, PluginKind, PLUGIN_API_VERSION,
 };
 use cy_plugin_protocol::pb::{invoke_result, FilterRequest, Invoke};
-use cy_plugin_supervisor::PluginSupervisor;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_supervisor;
+use crate::helper::prepare_instance_actor;
 
 /// 8. Remote Gateway Filter Proxy
 pub struct RemoteGatewayFilter {
     plugin_id: String,
-    supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+    actor: Arc<AsyncMutex<InstanceActor>>,
     capabilities: PluginCapabilities,
 }
 
 impl RemoteGatewayFilter {
     pub fn new(
         plugin_id: impl Into<String>,
-        supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+        actor: Arc<AsyncMutex<InstanceActor>>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
-            supervisor,
+            actor,
             capabilities: Default::default(),
         }
     }
@@ -56,7 +56,7 @@ impl GatewayFilter for RemoteGatewayFilter {
         headers: &HashMap<String, String>,
         body: &str,
     ) -> Result<bool, PluginError> {
-        let mut sup = prepare_supervisor(&self.plugin_id, &self.supervisor).await?;
+        let mut actor = prepare_instance_actor(&self.plugin_id, &self.actor).await?;
         let invoke_req = Invoke {
             extension_point: "gateway-filter".to_string(),
             method: "filter_request".to_string(),
@@ -67,7 +67,7 @@ impl GatewayFilter for RemoteGatewayFilter {
                 },
             )),
         };
-        let res = sup
+        let res = actor
             .invoke(invoke_req, Duration::from_secs(10))
             .await
             .map_err(|e| PluginError::Execution(e.to_string()))?;

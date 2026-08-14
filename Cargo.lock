@@ -267,10 +267,11 @@ name = "cy-extension-registry"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cy-kernel-api",
+ "cy-kernel-daemon",
  "cy-manifest",
  "cy-platform-api",
  "cy-plugin-protocol",
- "cy-plugin-supervisor",
  "serde_json",
  "tokio",
 ]
@@ -303,6 +304,7 @@ version = "0.1.0"
 dependencies = [
  "cy-adapter-client",
  "cy-kernel-api",
+ "cy-plugin-protocol",
  "cy-proto",
  "cy-resource-manager",
  "nix",
@@ -310,6 +312,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "uuid",
 ]
 
 [[package]]
@@ -374,22 +377,6 @@ dependencies = [
  "prost-build",
  "protoc-bin-vendored",
  "thiserror",
-]
-
-[[package]]
-name = "cy-plugin-supervisor"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cy-local-transport",
- "cy-manifest",
- "cy-plugin-protocol",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

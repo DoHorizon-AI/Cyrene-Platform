@@ -4,31 +4,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_manifest::HardwareManifest;
 use cy_platform_api::{
     Plugin, PluginCapabilities, PluginError, PluginKind, Probe, PLUGIN_API_VERSION,
 };
 use cy_plugin_protocol::pb::{invoke_result, DetectHardwareRequest, Invoke};
-use cy_plugin_supervisor::PluginSupervisor;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_supervisor;
+use crate::helper::prepare_instance_actor;
 
 /// 1. 远程硬件探针代理
 pub struct RemoteProbe {
     plugin_id: String,
-    supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+    actor: Arc<AsyncMutex<InstanceActor>>,
     capabilities: PluginCapabilities,
 }
 
 impl RemoteProbe {
     pub fn new(
         plugin_id: impl Into<String>,
-        supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+        actor: Arc<AsyncMutex<InstanceActor>>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
-            supervisor,
+            actor,
             capabilities: Default::default(),
         }
     }
@@ -55,7 +55,7 @@ impl Plugin for RemoteProbe {
 #[async_trait]
 impl Probe for RemoteProbe {
     async fn detect_hardware(&self) -> Result<HardwareManifest, PluginError> {
-        let mut sup = prepare_supervisor(&self.plugin_id, &self.supervisor).await?;
+        let mut actor = prepare_instance_actor(&self.plugin_id, &self.actor).await?;
         let invoke_req = Invoke {
             extension_point: "probe".to_string(),
             method: "detect_hardware".to_string(),
@@ -63,7 +63,7 @@ impl Probe for RemoteProbe {
                 DetectHardwareRequest {},
             )),
         };
-        let res = sup
+        let res = actor
             .invoke(invoke_req, Duration::from_secs(10))
             .await
             .map_err(|e| PluginError::Execution(e.to_string()))?;

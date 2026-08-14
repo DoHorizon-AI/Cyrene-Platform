@@ -4,31 +4,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_manifest::{CheckpointMetadata, RuntimeManifest, TrainingRevision};
 use cy_platform_api::{
     Plugin, PluginCapabilities, PluginError, PluginKind, TrainingBackend, PLUGIN_API_VERSION,
 };
 use cy_plugin_protocol::pb::{invoke_result, Invoke, RunTrainingStepRequest};
-use cy_plugin_supervisor::PluginSupervisor;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_supervisor;
+use crate::helper::prepare_instance_actor;
 
 /// 6. Remote Training Backend Proxy
 pub struct RemoteTrainingBackend {
     plugin_id: String,
-    supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+    actor: Arc<AsyncMutex<InstanceActor>>,
     capabilities: PluginCapabilities,
 }
 
 impl RemoteTrainingBackend {
     pub fn new(
         plugin_id: impl Into<String>,
-        supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+        actor: Arc<AsyncMutex<InstanceActor>>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
-            supervisor,
+            actor,
             capabilities: Default::default(),
         }
     }
@@ -56,7 +56,7 @@ impl TrainingBackend for RemoteTrainingBackend {
         runtime: &RuntimeManifest,
         revision: &TrainingRevision,
     ) -> Result<CheckpointMetadata, PluginError> {
-        let mut sup = prepare_supervisor(&self.plugin_id, &self.supervisor).await?;
+        let mut actor = prepare_instance_actor(&self.plugin_id, &self.actor).await?;
         let runtime_json =
             serde_json::to_string(runtime).map_err(|e| PluginError::Execution(e.to_string()))?;
         let revision_json =
@@ -72,7 +72,7 @@ impl TrainingBackend for RemoteTrainingBackend {
                 },
             )),
         };
-        let res = sup
+        let res = actor
             .invoke(invoke_req, Duration::from_secs(60))
             .await
             .map_err(|e| PluginError::Execution(e.to_string()))?;

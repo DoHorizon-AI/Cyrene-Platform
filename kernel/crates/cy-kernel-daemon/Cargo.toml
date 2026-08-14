@@ -9,11 +9,18 @@ license = "Apache-2.0"
 name = "cy_kernel_daemon"
 path = "src/lib.rs"
 
+[features]
+# Exposes test-only constructors (e.g. InstanceActor::new_for_test) for use in
+# integration/unit tests in downstream crates.
+test-utils = []
+
 [dependencies]
 cy-adapter-client = { path = "../cy-adapter-client" }
 cy-kernel-api = { path = "../cy-kernel-api" }
 cy-resource-manager = { path = "../cy-resource-manager" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
+cy-plugin-protocol = { path = "../../../contracts/rust/cy-plugin-protocol" }
+uuid = { version = "1", features = ["v4"] }
 prost-types = "0.12"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }

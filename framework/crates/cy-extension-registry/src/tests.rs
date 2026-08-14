@@ -15,7 +15,7 @@ use cy_platform_api::{
     PluginCapabilities, PluginError, PluginKind, Probe, Quantization, RuntimeBuilder, Storage,
     TrainingBackend, PLUGIN_API_VERSION,
 };
-use cy_plugin_supervisor::PluginSupervisor;
+use cy_kernel_daemon::watchdog::InstanceActor;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::*;
@@ -539,35 +539,36 @@ async fn test_extension_registry_all_extension_points() {
 
 #[test]
 fn test_generic_remote_plugin_kind_parsing() {
-    let dummy_supervisor = Arc::new(AsyncMutex::new(PluginSupervisor::new(
-        "test-plugin",
-        "dummy_executable",
-        vec![],
-    )));
+    // InstanceActor requires a real SandboxedProcess; we test kind-parsing
+    // without touching the actor's I/O by using the type-parse branch only.
+    // (actor() accessor is available but we don't call any async methods here)
+    fn make_actor() -> Arc<AsyncMutex<InstanceActor>> {
+        Arc::new(AsyncMutex::new(InstanceActor::new_for_test()))
+    }
 
-    let bundle = GenericRemotePlugin::new("b1", "bundle", dummy_supervisor.clone());
+    let bundle = GenericRemotePlugin::new("b1", "bundle", make_actor());
     assert_eq!(bundle.kind(), PluginKind::Bundle);
     assert_eq!(bundle.id(), "b1");
     assert_eq!(bundle.api_version(), PLUGIN_API_VERSION);
-    assert_eq!(bundle.supervisor().try_lock().is_ok(), true);
+    assert!(bundle.actor().try_lock().is_ok());
 
-    let service = GenericRemotePlugin::new("s1", "service", dummy_supervisor.clone());
+    let service = GenericRemotePlugin::new("s1", "service", make_actor());
     assert_eq!(service.kind(), PluginKind::Service);
 
-    let library = GenericRemotePlugin::new("l1", "library", dummy_supervisor.clone());
+    let library = GenericRemotePlugin::new("l1", "library", make_actor());
     assert_eq!(library.kind(), PluginKind::Library);
 
-    let py_pkg = GenericRemotePlugin::new("p1", "python-package", dummy_supervisor.clone());
+    let py_pkg = GenericRemotePlugin::new("p1", "python-package", make_actor());
     assert_eq!(py_pkg.kind(), PluginKind::PythonPackage);
 
     let proto_srv =
-        GenericRemotePlugin::new("ps1", "protocol-and-services", dummy_supervisor.clone());
+        GenericRemotePlugin::new("ps1", "protocol-and-services", make_actor());
     assert_eq!(proto_srv.kind(), PluginKind::ProtocolAndServices);
 
-    let deploy = GenericRemotePlugin::new("d1", "deployment-assets", dummy_supervisor.clone());
+    let deploy = GenericRemotePlugin::new("d1", "deployment-assets", make_actor());
     assert_eq!(deploy.kind(), PluginKind::DeploymentAssets);
 
-    let fallback = GenericRemotePlugin::new("f1", "unknown-kind", dummy_supervisor);
+    let fallback = GenericRemotePlugin::new("f1", "unknown-kind", make_actor());
     assert_eq!(fallback.kind(), PluginKind::Probe);
 }
 

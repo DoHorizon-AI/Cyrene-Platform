@@ -4,10 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cy-plugin-supervisor = { path = "../cy-plugin-supervisor" }
+cy-kernel-daemon = { path = "../../../kernel/crates/cy-kernel-daemon" }
+cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
 cy-plugin-protocol = { path = "../../../contracts/rust/cy-plugin-protocol" }
 cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
+cy-platform-api = { version = "0.1.0", path = "../cy-platform-api" }
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 serde_json = "1.0"
-cy-platform-api = { version = "0.1.0", path = "../cy-platform-api" }
+
+[dev-dependencies]
+cy-kernel-daemon = { path = "../../../kernel/crates/cy-kernel-daemon", features = ["test-utils"] }

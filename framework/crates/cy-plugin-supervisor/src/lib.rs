@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use cy_local_transport::{LocalTransport, StdioTransport, TransportError};
+use cy_local_transport::TransportError;
 use cy_plugin_protocol::pb::{
     envelope, plugin_error_payload, Cancel, Hello, Invoke, InvokeResult, Shutdown,
 };
@@ -320,175 +320,24 @@ impl PluginSupervisor {
         )))
     }
 
-    /// 启动插件子进程，建立零端口 stdio 管道并执行 Hello/HelloAck 握手与能力协商
-    pub async fn start(&mut self, timeout: Duration) -> Result<(), SupervisorError> {
+    /// 启动插件子进程握手（必须先通过 attach_transport_channel 挂接 SandboxedProcess 强隔离通道）
+    pub async fn start(&mut self, _timeout: Duration) -> Result<(), SupervisorError> {
         if self.state == PluginRuntimeState::Quarantined {
             return Err(SupervisorError::Quarantined);
         }
 
-        self.state = PluginRuntimeState::Starting;
-        let arg_refs: Vec<&str> = self.args.iter().map(|s| s.as_str()).collect();
-
-        let mut transport = match StdioTransport::spawn(&self.executable, &arg_refs) {
-            Ok(t) => t,
-            Err(e) => {
-                self.state = PluginRuntimeState::Unavailable;
-                self.state_reason = Some(format!("Failed to spawn executable: {e}"));
-                return Err(SupervisorError::LaunchFailed(e.to_string()));
-            }
-        };
-
-        self.state = PluginRuntimeState::Handshaking;
-
-        // 构造 Hello 握手信封
-        let hello_req = Envelope {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            trace_id: uuid::Uuid::new_v4().to_string(),
-            plugin_id: self.plugin_id.clone(),
-            protocol_version: CURRENT_PROTOCOL_VERSION,
-            deadline_ms: (Utc::now() + chrono::Duration::milliseconds(timeout.as_millis() as i64))
-                .timestamp_millis(),
-            sequence_number: 0,
-            payload: Some(envelope::Payload::Hello(Hello {
-                min_protocol_version: CURRENT_PROTOCOL_VERSION,
-                max_protocol_version: CURRENT_PROTOCOL_VERSION,
-                host_version: env!("CARGO_PKG_VERSION").to_string(),
-            })),
-        };
-
-        transport.send(hello_req).await?;
-
-        // 限时等待 HelloAck 握手确认
-        let ack_res = tokio::time::timeout(timeout, transport.receive()).await;
-        match ack_res {
-            Ok(Ok(Some(Envelope {
-                payload: Some(envelope::Payload::HelloAck(ack)),
-                ..
-            }))) => {
-                if ack.selected_protocol_version != CURRENT_PROTOCOL_VERSION {
-                    self.state = PluginRuntimeState::Incompatible;
-                    self.state_reason = Some(format!(
-                        "Protocol version mismatch: host={}, plugin={}",
-                        CURRENT_PROTOCOL_VERSION, ack.selected_protocol_version
-                    ));
-                    let _ = transport.close().await;
-                    return Err(SupervisorError::IncompatibleProtocolVersion {
-                        expected: CURRENT_PROTOCOL_VERSION,
-                        got: ack.selected_protocol_version,
-                    });
-                }
-
-                if !ack.plugin_id.is_empty() && ack.plugin_id != self.plugin_id {
-                    self.state = PluginRuntimeState::Incompatible;
-                    self.state_reason = Some(format!(
-                        "Plugin identity mismatch: expected={}, got={}",
-                        self.plugin_id, ack.plugin_id
-                    ));
-                    let _ = transport.close().await;
-                    return Err(SupervisorError::LaunchFailed(format!(
-                        "Plugin identity mismatch: expected={}, got={}",
-                        self.plugin_id, ack.plugin_id
-                    )));
-                }
-
-                if !ack.api_version.is_empty() && !ack.api_version.starts_with('1') {
-                    self.state = PluginRuntimeState::Incompatible;
-                    self.state_reason = Some(format!(
-                        "Incompatible API version: host=1.0, plugin={}",
-                        ack.api_version
-                    ));
-                    let _ = transport.close().await;
-                    return Err(SupervisorError::LaunchFailed(format!(
-                        "Incompatible API version: plugin reported {}",
-                        ack.api_version
-                    )));
-                }
-
-                self.declared_capabilities = ack.declared_capabilities;
-                self.negotiated_api_version = Some(ack.api_version);
-                self.metrics = ack.metrics;
-                if !ack.capabilities_json.is_empty() {
-                    if let Ok(manifest) = serde_json::from_str(&ack.capabilities_json) {
-                        self.capabilities_manifest = manifest;
-                    }
-                }
-                self.state = PluginRuntimeState::Healthy;
-                self.state_reason = None;
-                info!("Plugin {} launched and healthy.", self.plugin_id);
-
-                // 启动后台多路复用调度任务 (Multiplexer Task)
-                let (tx, mut rx) = mpsc::channel::<Envelope>(100);
-                self.transport_tx = Some(tx);
-                let pending = self.pending_requests.clone();
-                let plugin_id = self.plugin_id.clone();
-
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            msg = rx.recv() => {
-                                match msg {
-                                    Some(env) => {
-                                        if transport.send(env).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    None => break, // tx dropped
-                                }
-                            }
-                            res = transport.receive() => {
-                                match res {
-                                    Ok(Some(env)) => {
-                                        let mut map = pending.lock().await;
-                                        if let Some(sender) = map.remove(&env.request_id) {
-                                            let _ = sender.send(env);
-                                        } else {
-                                            warn!("Late or unknown response received for request_id: {} from plugin {}", env.request_id, plugin_id);
-                                        }
-                                    }
-                                    _ => break, // EOF or error
-                                }
-                            }
-                        }
-                    }
-                    let _ = transport.close().await;
-                });
-
-                Ok(())
-            }
-            Ok(Ok(Some(Envelope {
-                payload: Some(envelope::Payload::Error(err)),
-                ..
-            }))) => {
-                self.state = PluginRuntimeState::Unavailable;
-                self.state_reason = Some(format!("Handshake rejected by plugin: {}", err.message));
-                let _ = transport.close().await;
-                Err(SupervisorError::PluginRpc {
-                    code: plugin_error_payload::Code::try_from(err.code)
-                        .unwrap_or(plugin_error_payload::Code::Unknown),
-                    message: err.message,
-                })
-            }
-            Ok(Ok(None)) | Ok(Ok(Some(_))) => {
-                self.state = PluginRuntimeState::Crashed;
-                self.state_reason = Some("Process closed stream during handshake".to_string());
-                let _ = transport.close().await;
-                Err(SupervisorError::LaunchFailed(
-                    "Unexpected stream EOF during handshake".to_string(),
-                ))
-            }
-            Ok(Err(e)) => {
-                self.state = PluginRuntimeState::Crashed;
-                self.state_reason = Some(format!("Transport error during handshake: {e}"));
-                let _ = transport.close().await;
-                Err(SupervisorError::Transport(e))
-            }
-            Err(_) => {
-                self.state = PluginRuntimeState::Quarantined;
-                self.state_reason = Some("Handshake timeout".to_string());
-                let _ = transport.close().await;
-                Err(SupervisorError::HandshakeTimeout(timeout))
-            }
+        if self.transport_tx.is_none() {
+            self.state = PluginRuntimeState::Unavailable;
+            self.state_reason = Some(
+                "Bare process spawning is removed; transport channel must be attached via attach_transport_channel (managed by Kernel InstanceActor / SandboxedProcess)".to_string(),
+            );
+            return Err(SupervisorError::LaunchFailed(
+                "Bare process spawning is decommissioned; attach_transport_channel required".to_string(),
+            ));
         }
+
+        self.state = PluginRuntimeState::Healthy;
+        Ok(())
     }
 
     /// 向插件子进程发起异步扩展点 RPC 调用并限时等待响应

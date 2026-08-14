@@ -1,6 +1,7 @@
 //! Instance-level Watchdog Actor implementation.
 
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,6 +10,12 @@ use cy_kernel_api::{
     CleanupReport, DeviceBinding, LaunchPlan, ProcessHandle, ProviderError, SandboxBackend,
     StopRequest,
 };
+use cy_plugin_protocol::{
+    envelope::Payload,
+    pb::{Invoke, InvokeResult},
+    Envelope, CURRENT_PROTOCOL_VERSION,
+};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use crate::sandboxed_process::SandboxedProcess;
 
@@ -42,6 +49,8 @@ pub struct InstanceActor {
     last_heartbeat: Option<Instant>,
     heartbeat_deadline: Duration,
     crash_timestamps: Vec<Instant>,
+    transport_tx: Option<mpsc::Sender<Envelope>>,
+    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<Envelope>>>>,
 }
 
 impl InstanceActor {
@@ -63,6 +72,8 @@ impl InstanceActor {
             last_heartbeat: None,
             heartbeat_deadline,
             crash_timestamps: Vec::new(),
+            transport_tx: None,
+            pending_requests: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 
@@ -80,6 +91,105 @@ impl InstanceActor {
 
     pub fn state(&self) -> InstanceActorState {
         self.state
+    }
+
+    /// Attach a communication channel to the sandboxed worker.
+    pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<Envelope>) {
+        self.transport_tx = Some(tx);
+        if self.state == InstanceActorState::Starting || self.state == InstanceActorState::Stopped {
+            self.state = InstanceActorState::Healthy;
+        }
+    }
+
+    /// Access the pending request map for incoming response routing.
+    pub fn pending_requests(&self) -> Arc<AsyncMutex<HashMap<String, oneshot::Sender<Envelope>>>> {
+        self.pending_requests.clone()
+    }
+
+    /// Invoke an extension point RPC on the running sandboxed worker.
+    pub async fn invoke(
+        &mut self,
+        invoke_payload: Invoke,
+        timeout: Duration,
+    ) -> Result<InvokeResult, ProviderError> {
+        if self.state == InstanceActorState::Quarantined {
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "INSTANCE_QUARANTINED",
+                "instance is quarantined; invoke forbidden",
+            ));
+        }
+        if self.state == InstanceActorState::Draining {
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "INSTANCE_DRAINING",
+                "instance is draining; new invokes rejected",
+            ));
+        }
+
+        let tx = self.transport_tx.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                "instance-watchdog",
+                "TRANSPORT_UNAVAILABLE",
+                "instance transport channel not attached",
+            )
+        })?.clone();
+
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let env = Envelope {
+            request_id: req_id.clone(),
+            trace_id: uuid::Uuid::new_v4().to_string(),
+            plugin_id: self.instance_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: timeout.as_millis() as i64,
+            sequence_number: 0,
+            payload: Some(Payload::Invoke(invoke_payload)),
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.pending_requests.lock().await.insert(req_id.clone(), reply_tx);
+
+        if tx.send(env).await.is_err() {
+            self.pending_requests.lock().await.remove(&req_id);
+            self.record_crash(Instant::now());
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "TRANSPORT_SEND_FAILED",
+                "failed to send envelope to instance transport",
+            ));
+        }
+
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(Ok(Envelope {
+                payload: Some(Payload::InvokeResult(res)),
+                ..
+            })) => Ok(res),
+            Ok(Ok(Envelope {
+                payload: Some(Payload::Error(err)),
+                ..
+            })) => Err(ProviderError::new(
+                "instance-watchdog",
+                "INVOKE_ERROR",
+                &err.message,
+            )),
+            Ok(Ok(_)) | Ok(Err(_)) => {
+                self.record_crash(Instant::now());
+                Err(ProviderError::new(
+                    "instance-watchdog",
+                    "INSTANCE_CRASHED",
+                    "instance channel closed or invalid response",
+                ))
+            }
+            Err(_) => {
+                self.pending_requests.lock().await.remove(&req_id);
+                self.record_crash(Instant::now());
+                Err(ProviderError::new(
+                    "instance-watchdog",
+                    "INVOKE_TIMEOUT",
+                    "invoke request timed out",
+                ))
+            }
+        }
     }
 
     /// Launch the process inside the privileged sandbox.
@@ -191,6 +301,90 @@ impl InstanceActor {
             self.state = InstanceActorState::Quarantined;
         }
         Ok(report)
+    }
+}
+
+/// Test-only helper: construct a no-op `InstanceActor` for struct-level unit tests.
+#[cfg(any(test, feature = "test-utils"))]
+impl InstanceActor {
+    pub fn new_for_test() -> Self {
+        use cy_kernel_api::{
+            CgroupLimits, CgroupTelemetry, DeviceBinding, EnforcementMode, LaunchPlan,
+            NodeCapabilities, ProcessHandle, ProcessRuntime, ProviderError, SandboxBackend,
+            StopRequest,
+        };
+        use std::{collections::BTreeMap, path::PathBuf};
+
+        struct NoopSandbox;
+        impl ProcessRuntime for NoopSandbox {
+            fn preflight(&self) -> NodeCapabilities {
+                NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                }
+            }
+            fn launch(
+                &self,
+                _plan: &LaunchPlan,
+                _binding: &DeviceBinding,
+            ) -> Result<ProcessHandle, ProviderError> {
+                Ok(ProcessHandle {
+                    pid: 99999,
+                    cgroup_path: PathBuf::from("/dev/null"),
+                    start_time_ticks: None,
+                })
+            }
+            fn stop(
+                &self,
+                _handle: &ProcessHandle,
+                _request: &StopRequest,
+            ) -> Result<cy_kernel_api::CleanupReport, ProviderError> {
+                Ok(cy_kernel_api::CleanupReport {
+                    complete: true,
+                    exit_code: Some(0),
+                    oom_killed: false,
+                    conditions: Vec::new(),
+                    reason_code: "NOOP".to_string(),
+                })
+            }
+            fn telemetry(
+                &self,
+                _handle: &ProcessHandle,
+            ) -> Result<CgroupTelemetry, ProviderError> {
+                Ok(CgroupTelemetry::default())
+            }
+        }
+        impl SandboxBackend for NoopSandbox {
+            fn backend_id(&self) -> &str {
+                "noop-test"
+            }
+        }
+
+        Self::new(
+            "test-instance",
+            "test-lease",
+            0,
+            Arc::new(NoopSandbox),
+            LaunchPlan {
+                instance_name: "test".to_string(),
+                executable: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+                cgroup_name: "test".to_string(),
+                limits: CgroupLimits::default(),
+            },
+            DeviceBinding {
+                resource_id: "test".to_string(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: Vec::new(),
+                enforcement: EnforcementMode::Soft,
+                adapter_id: "test".to_string(),
+                reason_code: "test".to_string(),
+            },
+            Duration::from_secs(30),
+        )
     }
 }
 

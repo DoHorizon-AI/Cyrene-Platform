@@ -4,30 +4,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_platform_api::{
     Notification, Plugin, PluginCapabilities, PluginError, PluginKind, PLUGIN_API_VERSION,
 };
 use cy_plugin_protocol::pb::{Invoke, SendNotificationRequest};
-use cy_plugin_supervisor::PluginSupervisor;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_supervisor;
+use crate::helper::prepare_instance_actor;
 
 /// 9. Remote Notification Proxy
 pub struct RemoteNotification {
     plugin_id: String,
-    supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+    actor: Arc<AsyncMutex<InstanceActor>>,
     capabilities: PluginCapabilities,
 }
 
 impl RemoteNotification {
     pub fn new(
         plugin_id: impl Into<String>,
-        supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+        actor: Arc<AsyncMutex<InstanceActor>>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
-            supervisor,
+            actor,
             capabilities: Default::default(),
         }
     }
@@ -56,7 +56,7 @@ impl Notification for RemoteNotification {
         message: &str,
         level: &str,
     ) -> Result<(), PluginError> {
-        let mut sup = prepare_supervisor(&self.plugin_id, &self.supervisor).await?;
+        let mut actor = prepare_instance_actor(&self.plugin_id, &self.actor).await?;
         let invoke_req = Invoke {
             extension_point: "notification".to_string(),
             method: "send_notification".to_string(),
@@ -68,7 +68,7 @@ impl Notification for RemoteNotification {
                 },
             )),
         };
-        let _ = sup
+        let _ = actor
             .invoke(invoke_req, Duration::from_secs(10))
             .await
             .map_err(|e| PluginError::Execution(e.to_string()))?;

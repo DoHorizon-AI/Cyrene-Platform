@@ -139,8 +139,8 @@ class NodeControlService : NodeRegistrationUseCase, BindableService {
             while (offset < bytes.size) {
                 val (tag, nextOff) = decodeVarint(bytes, offset)
                 offset = nextOff
-                val fieldNum = tag ushr 3
-                val wireType = tag and 7
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 7).toInt()
 
                 when {
                     fieldNum == 1 && wireType == 2 -> {
@@ -195,14 +195,14 @@ class NodeControlService : NodeRegistrationUseCase, BindableService {
             while (offset < end) {
                 val (tag, nextOff) = decodeVarint(bytes, offset)
                 offset = nextOff
-                val fieldNum = tag ushr 3
-                val wireType = tag and 7
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 7).toInt()
 
                 when {
                     fieldNum == 1 && wireType == 2 -> { // NodeRef
-                        val (subLen, subOff) = decodeVarint(bytes, offset)
-                        nodeId = parseNodeRefId(bytes, subOff, subLen.toInt())
-                        offset = subOff + subLen.toInt()
+                        val (len, strOff) = decodeVarint(bytes, offset)
+                        nodeId = parseNodeRefId(bytes, strOff, len.toInt())
+                        offset = strOff + len.toInt()
                     }
                     fieldNum == 2 && wireType == 2 -> {
                         val (len, strOff) = decodeVarint(bytes, offset)
@@ -210,14 +210,14 @@ class NodeControlService : NodeRegistrationUseCase, BindableService {
                         offset = strOff + len.toInt()
                     }
                     fieldNum == 3 && wireType == 0 -> {
-                        val (v, vOff) = decodeVarint(bytes, offset)
+                        val (v, next) = decodeVarint(bytes, offset)
                         minProto = v.toInt()
-                        offset = vOff
+                        offset = next
                     }
                     fieldNum == 4 && wireType == 0 -> {
-                        val (v, vOff) = decodeVarint(bytes, offset)
+                        val (v, next) = decodeVarint(bytes, offset)
                         maxProto = v.toInt()
-                        offset = vOff
+                        offset = next
                     }
                     wireType == 0 -> {
                         val (_, next) = decodeVarint(bytes, offset)
@@ -242,19 +242,19 @@ class NodeControlService : NodeRegistrationUseCase, BindableService {
             while (offset < end) {
                 val (tag, nextOff) = decodeVarint(bytes, offset)
                 offset = nextOff
-                val fieldNum = tag ushr 3
-                val wireType = tag and 7
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 7).toInt()
 
                 when {
                     fieldNum == 1 && wireType == 2 -> {
-                        val (subLen, subOff) = decodeVarint(bytes, offset)
-                        nodeId = parseNodeRefId(bytes, subOff, subLen.toInt())
-                        offset = subOff + subLen.toInt()
+                        val (len, strOff) = decodeVarint(bytes, offset)
+                        nodeId = parseNodeRefId(bytes, strOff, len.toInt())
+                        offset = strOff + len.toInt()
                     }
                     fieldNum == 2 && wireType == 0 -> {
-                        val (v, vOff) = decodeVarint(bytes, offset)
+                        val (v, next) = decodeVarint(bytes, offset)
                         obsGen = v
-                        offset = vOff
+                        offset = next
                     }
                     wireType == 0 -> {
                         val (_, next) = decodeVarint(bytes, offset)
@@ -277,14 +277,16 @@ class NodeControlService : NodeRegistrationUseCase, BindableService {
             while (offset < end) {
                 val (tag, nextOff) = decodeVarint(bytes, offset)
                 offset = nextOff
-                if ((tag ushr 3) == 1 && (tag and 7) == 2) {
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 7).toInt()
+                if (fieldNum == 1 && wireType == 2) {
                     val (len, strOff) = decodeVarint(bytes, offset)
                     id = String(bytes, strOff, len.toInt(), Charsets.UTF_8)
                     offset = strOff + len.toInt()
-                } else if ((tag and 7) == 0) {
+                } else if (wireType == 0) {
                     val (_, next) = decodeVarint(bytes, offset)
                     offset = next
-                } else if ((tag and 7) == 2) {
+                } else if (wireType == 2) {
                     val (len, next) = decodeVarint(bytes, offset)
                     offset = next + len.toInt()
                 } else offset++

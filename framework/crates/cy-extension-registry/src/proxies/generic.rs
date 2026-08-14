@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
+use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_platform_api::{Plugin, PluginCapabilities, PluginKind, PLUGIN_API_VERSION};
-use cy_plugin_supervisor::PluginSupervisor;
 use tokio::sync::Mutex as AsyncMutex;
 
 /// Generic Remote Proxy for arbitrary non-extension-point plugins (services, libraries, bundles).
 pub struct GenericRemotePlugin {
     plugin_id: String,
     kind: PluginKind,
-    supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+    actor: Arc<AsyncMutex<InstanceActor>>,
     capabilities: PluginCapabilities,
 }
 
@@ -18,7 +18,7 @@ impl GenericRemotePlugin {
     pub fn new(
         plugin_id: impl Into<String>,
         kind_str: &str,
-        supervisor: Arc<AsyncMutex<PluginSupervisor>>,
+        actor: Arc<AsyncMutex<InstanceActor>>,
     ) -> Self {
         let kind = match kind_str {
             "bundle" => PluginKind::Bundle,
@@ -32,12 +32,12 @@ impl GenericRemotePlugin {
         Self {
             plugin_id: plugin_id.into(),
             kind,
-            supervisor,
+            actor,
             capabilities: Default::default(),
         }
     }
-    pub fn supervisor(&self) -> &Arc<AsyncMutex<PluginSupervisor>> {
-        &self.supervisor
+    pub fn actor(&self) -> &Arc<AsyncMutex<InstanceActor>> {
+        &self.actor
     }
 }
 
