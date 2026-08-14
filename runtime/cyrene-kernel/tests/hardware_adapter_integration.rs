@@ -273,5 +273,79 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     let released_lease = daemon.lease("test-workload-lease-1")?;
     assert_eq!(released_lease.state, LeaseState::Released);
 
+    // 10. Stale-generation rejection assertion (ADR Gate 4)
+    let stale_request = ResourceRequest {
+        lease_name: "test-stale-lease".to_string(),
+        expected_inventory_generation: initial_snapshot.generation + 999, // Stale generation
+        holder: semantic::Identity {
+            id: "worker-1".to_string(),
+            generation: 1,
+        },
+        query: semantic::ResourceQuery {
+            resource_class: target_resource.resource_class.clone(),
+            count: 1,
+            required_capabilities: Vec::new(),
+            minimum_capacity: std::collections::BTreeMap::new(),
+        },
+        expires_at_unix_ms: Some(9999999999999),
+        limits: CgroupLimits::default(),
+    };
+    let stale_err = daemon.reserve(stale_request).unwrap_err();
+    assert_eq!(stale_err.reason_code, "STALE_INVENTORY_GENERATION");
+
+    Ok(())
+}
+
+#[test]
+fn test_kernel_daemon_rejects_corrupted_adapter_frame_fail_closed(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let bad_socket = dir.path().join("bad_adapter.sock");
+
+    // Start a server that writes garbage protobuf bytes
+    let bad_listener = UnixListener::bind(&bad_socket)?;
+    thread::spawn(move || {
+        for stream in bad_listener.incoming() {
+            if let Ok(mut stream) = stream {
+                // Read client request
+                let _ = read_frame(&mut stream);
+                // Return corrupted payload (e.g. invalid protobuf bytes)
+                let garbage = vec![0xFF, 0xFF, 0xFF, 0xFF];
+                let _ = write_frame(&mut stream, &garbage);
+            }
+        }
+    });
+
+    thread::sleep(Duration::from_millis(50));
+
+    let bad_endpoint = HardwareAdapterEndpoint::new("bad-adapter", &bad_socket)
+        .with_peer_credentials(PeerCredentialExpectation::default());
+
+    let sandbox = Arc::new(MockSandbox { ready: true });
+    let resources = Arc::new(InMemoryResourceManager::with_next_fence_token(
+        "node-bad",
+        Vec::new(),
+        1,
+    ));
+
+    let daemon = KernelDaemon::with_hardware_adapters(
+        vec![bad_endpoint],
+        resources,
+        sandbox,
+        "node-bad",
+        1,
+    )?;
+
+    // Probing a corrupted adapter must fail-closed (return ProviderError) and not panic
+    let probe_result = daemon.inventory();
+    assert!(
+        probe_result.is_err(),
+        "Corrupted frame must return Err (fail-closed)"
+    );
+    let err = probe_result.unwrap_err();
+    assert_eq!(err.adapter_id, "hardware-adapter-registry");
+    assert_eq!(err.reason_code, "ADAPTER_UNAVAILABLE");
+    assert!(err.message.contains("bad-adapter"));
+
     Ok(())
 }
