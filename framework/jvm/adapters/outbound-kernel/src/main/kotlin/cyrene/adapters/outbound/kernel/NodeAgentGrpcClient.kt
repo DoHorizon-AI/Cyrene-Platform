@@ -3,26 +3,43 @@ package cyrene.adapters.outbound.kernel
 import cyrene.application.port.outbound.KernelCommandEnvelope
 import cyrene.application.port.outbound.KernelCommandOutcome
 import cyrene.application.port.outbound.KernelCommandPort
+import io.grpc.CallOptions
 import io.grpc.ManagedChannel
+import io.grpc.MethodDescriptor
+import io.grpc.StatusRuntimeException
 import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext
+import io.grpc.stub.ClientCalls
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 /**
  * Production gRPC Client connected to Rust `cy-node-agent` over mTLS.
- * Injects required ContractRevision, Request ID, Idempotency Key, and transport Principal.
+ * Injects required ContractRevision, Request ID, Idempotency Key, and transport Principal,
+ * and executes real gRPC binary/Protobuf RPC over HTTP/2 Netty Channel.
  */
 class NodeAgentGrpcClient(
     val host: String = "127.0.0.1",
     val port: Int = 50052,
     val clientCertChain: File? = null,
     val clientPrivateKey: File? = null,
-    val trustCertCollection: File? = null
+    val trustCertCollection: File? = null,
+    val defaultTimeoutSeconds: Long = 30
 ) : KernelCommandPort, AutoCloseable {
 
     private var channel: ManagedChannel? = null
+
+    // MethodDescriptor for KernelService/ExecuteCommand matching node-agent specification
+    private val executeCommandMethod: MethodDescriptor<ByteArray, ByteArray> =
+        MethodDescriptor.newBuilder<ByteArray, ByteArray>()
+            .setType(MethodDescriptor.MethodType.UNARY)
+            .setFullMethodName(MethodDescriptor.generateFullMethodName("cyrene.core.v1.KernelService", "ExecuteCommand"))
+            .setRequestMarshaller(ByteArrayMarshaller)
+            .setResponseMarshaller(ByteArrayMarshaller)
+            .build()
 
     @Synchronized
     fun getOrCreateChannel(): ManagedChannel {
@@ -59,16 +76,38 @@ class NodeAgentGrpcClient(
         }
 
         val ch = getOrCreateChannel()
-        // ManagedChannel is live and authenticated via mTLS; dispatches typed protobuf commands
-        return KernelCommandOutcome(
-            commandId = envelope.commandId,
-            success = true,
-            responseBytes = byteArrayOf()
-        )
+        val callOptions = CallOptions.DEFAULT.withDeadlineAfter(defaultTimeoutSeconds, TimeUnit.SECONDS)
+
+        return try {
+            val responseBytes = ClientCalls.blockingUnaryCall(
+                ch,
+                executeCommandMethod,
+                callOptions,
+                envelope.payloadBytes
+            )
+            KernelCommandOutcome(
+                commandId = envelope.commandId,
+                success = true,
+                responseBytes = responseBytes ?: byteArrayOf()
+            )
+        } catch (e: StatusRuntimeException) {
+            KernelCommandOutcome(
+                commandId = envelope.commandId,
+                success = false,
+                responseBytes = byteArrayOf(),
+                errorCode = e.status.code.name,
+                errorMessage = e.status.description ?: e.message
+            )
+        }
     }
 
     override fun close() {
         channel?.shutdown()?.awaitTermination(5, TimeUnit.SECONDS)
         channel = null
+    }
+
+    private object ByteArrayMarshaller : MethodDescriptor.Marshaller<ByteArray> {
+        override fun stream(value: ByteArray): InputStream = ByteArrayInputStream(value)
+        override fun parse(stream: InputStream): ByteArray = stream.readBytes()
     }
 }

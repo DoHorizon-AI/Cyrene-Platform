@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
  * Handles server lifecycle (bind, start, shutdown) and TLS certificates per node-agent specification.
  */
 class NodeControlGrpcServer(
+    val bindHost: String = "127.0.0.1",
     val port: Int = 50051,
     val nodeControlService: NodeControlService = NodeControlService(),
     val certChainFile: File? = null,
@@ -28,7 +29,7 @@ class NodeControlGrpcServer(
             return this
         }
 
-        val builder = NettyServerBuilder.forAddress(InetSocketAddress("0.0.0.0", port))
+        val builder = NettyServerBuilder.forAddress(InetSocketAddress(bindHost, port))
 
         // Real mTLS Dual-Certificate assembly
         if (certChainFile != null && privateKeyFile != null) {
