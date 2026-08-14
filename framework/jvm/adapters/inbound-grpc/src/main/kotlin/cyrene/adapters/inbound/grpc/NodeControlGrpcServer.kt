@@ -30,6 +30,7 @@ class NodeControlGrpcServer(
         }
 
         val builder = NettyServerBuilder.forAddress(InetSocketAddress(bindHost, port))
+            .addService(nodeControlService)
 
         // Real mTLS Dual-Certificate assembly
         if (certChainFile != null && privateKeyFile != null) {

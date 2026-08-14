@@ -14,6 +14,7 @@ import io.grpc.stub.ClientCalls
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -32,14 +33,23 @@ class NodeAgentGrpcClient(
 
     private var channel: ManagedChannel? = null
 
-    // MethodDescriptor for KernelService/ExecuteCommand matching node-agent specification
-    private val executeCommandMethod: MethodDescriptor<ByteArray, ByteArray> =
-        MethodDescriptor.newBuilder<ByteArray, ByteArray>()
-            .setType(MethodDescriptor.MethodType.UNARY)
-            .setFullMethodName(MethodDescriptor.generateFullMethodName("cyrene.core.v1.KernelService", "ExecuteCommand"))
-            .setRequestMarshaller(ByteArrayMarshaller)
-            .setResponseMarshaller(ByteArrayMarshaller)
-            .build()
+    private val methodDescriptors = ConcurrentHashMap<String, MethodDescriptor<ByteArray, ByteArray>>()
+
+    /**
+     * Obtains or registers a canonical MethodDescriptor for the targeted Service & RPC method
+     * matching the cyrene.core.v1 contracts.
+     */
+    fun getMethodDescriptor(serviceName: String, methodName: String): MethodDescriptor<ByteArray, ByteArray> {
+        val fullName = MethodDescriptor.generateFullMethodName(serviceName, methodName)
+        return methodDescriptors.computeIfAbsent(fullName) {
+            MethodDescriptor.newBuilder<ByteArray, ByteArray>()
+                .setType(MethodDescriptor.MethodType.UNARY)
+                .setFullMethodName(fullName)
+                .setRequestMarshaller(ByteArrayMarshaller)
+                .setResponseMarshaller(ByteArrayMarshaller)
+                .build()
+        }
+    }
 
     @Synchronized
     fun getOrCreateChannel(): ManagedChannel {
@@ -78,10 +88,13 @@ class NodeAgentGrpcClient(
         val ch = getOrCreateChannel()
         val callOptions = CallOptions.DEFAULT.withDeadlineAfter(defaultTimeoutSeconds, TimeUnit.SECONDS)
 
+        // Maps to canonical cyrene.core.v1.KernelAuthorityService actions
+        val descriptor = getMethodDescriptor("cyrene.core.v1.KernelAuthorityService", envelope.commandId.ifBlank { "Execute" })
+
         return try {
             val responseBytes = ClientCalls.blockingUnaryCall(
                 ch,
-                executeCommandMethod,
+                descriptor,
                 callOptions,
                 envelope.payloadBytes
             )
