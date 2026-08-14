@@ -280,6 +280,7 @@ name = "cy-installation-resolver"
 version = "0.1.0"
 dependencies = [
  "cy-kernel-api",
+ "cy-manifest",
  "serde",
  "serde_json",
  "tempfile",

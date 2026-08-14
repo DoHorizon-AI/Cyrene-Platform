@@ -95,6 +95,35 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
         })?;
         validate_installation_record(&record, installation)?;
 
+        let manifest_path = installation_path.join("manifest.json");
+        if manifest_path.exists() {
+            let manifest_content = fs::read_to_string(&manifest_path).map_err(|error| {
+                ProviderError::new(
+                    "filesystem-plugin-resolver",
+                    "INSTALLATION_MANIFEST_READ_FAILED",
+                    &error.to_string(),
+                )
+            })?;
+            let manifest: cy_manifest::PluginManifest =
+                serde_json::from_str(&manifest_content).map_err(|error| {
+                    ProviderError::new(
+                        "filesystem-plugin-resolver",
+                        "INSTALLATION_MANIFEST_INVALID",
+                        &error.to_string(),
+                    )
+                })?;
+            if manifest.plugin.id != record.installation_name {
+                return Err(ProviderError::new(
+                    "filesystem-plugin-resolver",
+                    "INSTALLATION_MANIFEST_ID_MISMATCH",
+                    &format!(
+                        "manifest id {} does not match installation name {}",
+                        manifest.plugin.id, record.installation_name
+                    ),
+                ));
+            }
+        }
+
         let executable = if record.executable.is_absolute() {
             record.executable
         } else {
@@ -383,5 +412,51 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.installation.manifest_digest, DIGEST);
         assert_eq!(resolved.plan.instance_name, "worker-1");
+    }
+
+    #[test]
+    fn validates_optional_manifest_json_when_present() {
+        let directory = tempfile::tempdir().unwrap();
+        write_record(
+            directory.path(),
+            "https://issuer.example/workload/demo",
+            DIGEST,
+        );
+
+        let manifest_content = r#"{
+            "plugin": {
+                "id": "demo-plugin",
+                "name": "Demo Plugin",
+                "version": "1.0.0",
+                "api_version": "1.0",
+                "kind": "probe",
+                "edition": "community",
+                "runtime": "subprocess-python"
+            }
+        }"#;
+        std::fs::write(
+            directory.path().join("demo-plugin").join("manifest.json"),
+            manifest_content,
+        )
+        .unwrap();
+
+        // Valid manifest should pass
+        let resolved = FilesystemInstalledPluginResolver::new(directory.path())
+            .resolve_launch_plan(&installation(), "instance-1")
+            .unwrap();
+        assert_eq!(resolved.installation.installation_name, "demo-plugin");
+
+        // Mismatched manifest ID should fail
+        let bad_manifest = manifest_content.replace(r#""id": "demo-plugin""#, r#""id": "other-id""#);
+        std::fs::write(
+            directory.path().join("demo-plugin").join("manifest.json"),
+            bad_manifest,
+        )
+        .unwrap();
+
+        let error = FilesystemInstalledPluginResolver::new(directory.path())
+            .resolve_launch_plan(&installation(), "instance-1")
+            .unwrap_err();
+        assert_eq!(error.reason_code, "INSTALLATION_MANIFEST_ID_MISMATCH");
     }
 }
