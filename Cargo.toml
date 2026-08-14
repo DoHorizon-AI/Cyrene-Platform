@@ -14,12 +14,13 @@ members = [
     "kernel/crates/cy-sandbox-client",
     "kernel/crates/cy-kernel-daemon",
 
-    # 3. 框架层 (Framework Crates)
+    # 3. 框架层与 SDK (Framework & SDK Crates)
     "framework/crates/cy-extension-registry",
     "framework/crates/cy-installation-resolver",
     "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
     "framework/crates/cy-plugin-supervisor",
+    "sdk/rust/cy-worker-sdk",
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）
     "runtime/cyrene-kernel",

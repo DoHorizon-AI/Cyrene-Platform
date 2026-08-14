@@ -421,6 +421,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-worker-sdk"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cy-plugin-protocol",
+ "prost",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "cyrene-kernel"
 version = "0.1.0"
 dependencies = [
