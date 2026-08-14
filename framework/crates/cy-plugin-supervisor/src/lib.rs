@@ -607,4 +607,66 @@ impl PluginSupervisor {
         self.state = PluginRuntimeState::Stopped;
         Ok(())
     }
+
+    /// 附加已由 Kernel SandboxedProcess / sandboxd 建立的传输通道，避免裸进程拉起
+    pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<Envelope>) {
+        self.transport_tx = Some(tx);
+        self.state = PluginRuntimeState::Healthy;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crash_tracker_sliding_window_quarantine() {
+        let mut tracker = CrashTracker::new(3, Duration::from_secs(60));
+        assert!(!tracker.record_crash()); // 1st crash
+        assert!(!tracker.record_crash()); // 2nd crash
+        assert!(tracker.record_crash());  // 3rd crash triggers quarantine!
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_attached_transport_invoke() {
+        let mut supervisor = PluginSupervisor::new("test-plugin", "dummy", vec![]);
+        let (tx, mut rx) = mpsc::channel::<Envelope>(10);
+        supervisor.attach_transport_channel(tx);
+
+        let pending = supervisor.pending_requests.clone();
+
+        // Spawn mock worker loop responding to invoke requests
+        tokio::spawn(async move {
+            if let Some(req) = rx.recv().await {
+                let resp = Envelope {
+                    request_id: req.request_id.clone(),
+                    trace_id: req.trace_id.clone(),
+                    plugin_id: req.plugin_id.clone(),
+                    protocol_version: 1,
+                    deadline_ms: 0,
+                    sequence_number: 1,
+                    payload: Some(envelope::Payload::InvokeResult(InvokeResult {
+                        response: None,
+                    })),
+                };
+                let mut map = pending.lock().await;
+                if let Some(sender) = map.remove(&req.request_id) {
+                    let _ = sender.send(resp);
+                }
+            }
+        });
+
+        let result = supervisor
+            .invoke(
+                Invoke {
+                    extension_point: "Probe".to_string(),
+                    method: "test".to_string(),
+                    request: None,
+                },
+                Duration::from_secs(2),
+            )
+            .await;
+
+        assert!(result.is_ok(), "Invoke over attached transport must succeed");
+    }
 }
