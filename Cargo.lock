@@ -440,6 +440,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cyrene-linux-sys-adapter"
+version = "0.1.0"
+dependencies = [
+ "cy-kernel-api",
+ "cy-proto",
+ "libc",
+ "prost",
+ "prost-types",
+ "tempfile",
+]
+
+[[package]]
 name = "cyrene-nvidia-adapter"
 version = "0.1.0"
 dependencies = [
@@ -456,9 +468,11 @@ version = "0.1.0"
 dependencies = [
  "cy-kernel-api",
  "cy-proto",
+ "cy-sandbox-client",
  "libc",
  "nix",
  "prost",
+ "tempfile",
 ]
 
 [[package]]

@@ -27,6 +27,7 @@ members = [
 
     # 5. 进程外硬件适配器（不属于 Kernel 进程）
     "adapters/hardware/nvidia",
+    "adapters/hardware/linux_sys",
     "adapters/execution/sandboxd",
 ]
 
