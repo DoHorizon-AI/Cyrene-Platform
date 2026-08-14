@@ -301,17 +301,48 @@ class Configure:
         return inst
 
 
-@dataclasses.dataclass
 class Invoke:
-    capability: str = ""
-    action: str = ""
+    extension_point: str = ""
+    method: str = ""
+    payload_tag: int = 10
     payload: bytes = b""
+
+    def __init__(
+        self,
+        extension_point: str = "",
+        method: str = "",
+        payload_tag: int = 10,
+        payload: bytes = b"",
+        capability: str = "",
+        action: str = "",
+    ):
+        self.extension_point = extension_point or capability
+        self.method = method or action
+        self.payload_tag = payload_tag
+        self.payload = payload
+
+    @property
+    def capability(self) -> str:
+        return self.extension_point
+
+    @capability.setter
+    def capability(self, val: str) -> None:
+        self.extension_point = val
+
+    @property
+    def action(self) -> str:
+        return self.method
+
+    @action.setter
+    def action(self, val: str) -> None:
+        self.method = val
 
     def encode(self) -> bytes:
         out = bytearray()
-        out.extend(encode_string_field(1, self.capability))
-        out.extend(encode_string_field(2, self.action))
-        out.extend(encode_bytes_field(3, self.payload))
+        out.extend(encode_string_field(1, self.extension_point))
+        out.extend(encode_string_field(2, self.method))
+        if self.payload:
+            out.extend(encode_bytes_field(self.payload_tag, self.payload))
         return bytes(out)
 
     @classmethod
@@ -323,14 +354,15 @@ class Invoke:
             field_num, wire_type = tag >> 3, tag & 7
             if field_num == 1 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
-                inst.capability = data[offset:offset + length].decode("utf-8", "replace")
+                inst.extension_point = data[offset:offset + length].decode("utf-8", "replace")
                 offset += length
             elif field_num == 2 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
-                inst.action = data[offset:offset + length].decode("utf-8", "replace")
+                inst.method = data[offset:offset + length].decode("utf-8", "replace")
                 offset += length
-            elif field_num == 3 and wire_type == 2:
+            elif field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
+                inst.payload_tag = field_num
                 inst.payload = data[offset:offset + length]
                 offset += length
             elif wire_type == 0:
@@ -343,10 +375,11 @@ class Invoke:
 
 @dataclasses.dataclass
 class InvokeResult:
+    response_tag: int = 10
     payload: bytes = b""
 
     def encode(self) -> bytes:
-        return encode_bytes_field(1, self.payload)
+        return encode_bytes_field(self.response_tag, self.payload)
 
     @classmethod
     def decode(cls, data: bytes) -> InvokeResult:
@@ -355,16 +388,16 @@ class InvokeResult:
         while offset < len(data):
             tag, offset = decode_varint(data, offset)
             field_num, wire_type = tag >> 3, tag & 7
-            if field_num == 1 and wire_type == 2:
+            if field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
+                inst.response_tag = field_num
                 inst.payload = data[offset:offset + length]
                 offset += length
-            else:
-                if wire_type == 0:
-                    _, offset = decode_varint(data, offset)
-                elif wire_type == 2:
-                    length, offset = decode_varint(data, offset)
-                    offset += length
+            elif wire_type == 0:
+                _, offset = decode_varint(data, offset)
+            elif wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                offset += length
         return inst
 
 
