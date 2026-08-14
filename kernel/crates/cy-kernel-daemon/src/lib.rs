@@ -18,6 +18,7 @@ pub mod peer_cred;
 pub(crate) mod rpc;
 pub(crate) mod sandboxed_process;
 pub(crate) mod session;
+pub mod watchdog;
 
 #[cfg(test)]
 mod tests;
@@ -25,3 +26,4 @@ mod tests;
 pub use adapter::KernelServiceAdapter;
 pub use daemon::KernelDaemon;
 pub use session::WorkerHeartbeatConfig;
+pub use watchdog::{InstanceActor, InstanceActorState, InstanceHealthVerdict};

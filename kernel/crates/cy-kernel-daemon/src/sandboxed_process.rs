@@ -46,7 +46,14 @@ impl SandboxedProcess {
         self.state
     }
 
+    pub fn handle(&self) -> Option<&ProcessHandle> {
+        self.handle.as_ref()
+    }
+
     pub fn start(&mut self) -> Result<&ProcessHandle, ProviderError> {
+        if self.handle.is_some() {
+            return Ok(self.handle.as_ref().expect("handle is present"));
+        }
         self.state = SandboxedProcessState::Starting;
         match self.runtime.launch(&self.plan, &self.binding) {
             Ok(handle) => {
