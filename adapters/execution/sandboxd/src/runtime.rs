@@ -547,6 +547,10 @@ impl ProcessRuntime for CgroupV2Runtime {
             if exit_code.is_none() {
                 exit_code = self.wait_child(handle.pid, request.grace_period);
             }
+            wait_until_empty(
+                &handle.cgroup_path,
+                request.grace_period.max(Duration::from_millis(500)),
+            );
         }
         let complete = self.cgroup_is_empty(&handle.cgroup_path)
             && !self
