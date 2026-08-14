@@ -1,5 +1,11 @@
 //! CYRENE 插件进程监管器与多路复用 RPC 路由层 (Plugin Supervisor & RPC Multiplexer).
 //!
+//! # 架构过渡说明 (Architecture Transition Note)
+//! 根据 `ADR-PLUGIN-RUNTIME` 与 `ADR-HARDWARE-ADAPTER-BOUNDARY`，本 crate 原生的裸子进程
+//! 拉起模式正在过渡迁移至内核级 [`cy_kernel_daemon::watchdog::InstanceActor`] 与
+//! [`cy_kernel_daemon::SandboxedProcess`] + `sandboxd` 强隔离沙箱底座。
+//! 生产 Worker 实例生命周期与 Fencing 门禁由 Kernel Watchdog 全权接管。
+//!
 //! 【插件进程生命周期与韧性架构】
 //! 每个外部插件（Python / JVM 子进程）在平台中由一个专属的 [`PluginSupervisor`] 实例进行全程生命周期管控：
 //! 1. **全状态机跟踪 ([`PluginRuntimeState`])**：精细化追踪插件从发现、解析、拉起、握手、健康、降级到崩溃、隔离的 13 种状态；

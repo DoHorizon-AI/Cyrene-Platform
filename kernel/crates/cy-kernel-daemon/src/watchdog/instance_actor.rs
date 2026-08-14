@@ -109,6 +109,28 @@ impl InstanceActor {
             }
         }
     }
+    /// Validate that the caller's fence token matches the active instance lease fence token.
+    /// Rejects stale requests per ADR-HARDWARE-ADAPTER-BOUNDARY and Kernel Semantic Contract v1.
+    pub fn validate_fence_token(&self, token: u64) -> Result<(), ProviderError> {
+        if token != self.fence_token {
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "FENCE_TOKEN_MISMATCH",
+                &format!(
+                    "stale fence token {token}; active instance lease token is {}",
+                    self.fence_token
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Mark the instance as Draining (rejecting new work while active tasks finish).
+    pub fn drain(&mut self) {
+        if self.state == InstanceActorState::Healthy || self.state == InstanceActorState::Degraded {
+            self.state = InstanceActorState::Draining;
+        }
+    }
 
     /// Record a received heartbeat from the worker.
     pub fn on_heartbeat_received(&mut self, now: Instant) -> InstanceHealthVerdict {
@@ -321,5 +343,40 @@ mod tests {
         // Subsequent start should fail closed
         let start_err = actor.start().unwrap_err();
         assert_eq!(start_err.reason_code, "INSTANCE_QUARANTINED");
+    }
+
+    #[test]
+    fn test_actor_fence_token_validation_and_draining() {
+        let sandbox = Arc::new(MockSandbox { should_fail: false });
+        let mut actor = InstanceActor::new(
+            "inst-fence",
+            "lease-fence",
+            100,
+            sandbox,
+            sample_plan(),
+            sample_binding(),
+            Duration::from_secs(5),
+        );
+
+        actor.start().expect("start should succeed");
+
+        // Valid fence token matches active lease
+        assert!(actor.validate_fence_token(100).is_ok());
+
+        // Stale fence token is rejected
+        let err = actor.validate_fence_token(99).unwrap_err();
+        assert_eq!(err.reason_code, "FENCE_TOKEN_MISMATCH");
+
+        // Drain transitions state to Draining
+        actor.drain();
+        assert_eq!(actor.state(), InstanceActorState::Draining);
+
+        // Stop cleanly transitions Draining -> Stopped
+        let stop_res = actor.stop(&StopRequest {
+            grace_period: Duration::from_millis(500),
+            immediate: false,
+        });
+        assert!(stop_res.is_ok());
+        assert_eq!(actor.state(), InstanceActorState::Stopped);
     }
 }
