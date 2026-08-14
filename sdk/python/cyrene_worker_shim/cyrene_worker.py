@@ -722,5 +722,16 @@ def run_worker_stream(
 
 
 def run_worker_stdio(worker: CyreneWorker) -> None:
-    """Run worker on standard input/output streams."""
+    """Run worker on standard input/output streams with POSIX SIGTERM signal handling."""
+    import signal
+
+    def handle_sigterm(signum, frame):
+        log("Received OS SIGTERM signal, exiting cleanly")
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, handle_sigterm)
+    except Exception:
+        pass
+
     run_worker_stream(sys.stdin.buffer, sys.stdout.buffer, worker)

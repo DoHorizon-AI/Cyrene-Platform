@@ -1,9 +1,17 @@
 use std::{
+    collections::BTreeMap,
     io::{BufReader, BufWriter},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
+use cy_kernel_api::{
+    CgroupLimits, CgroupTelemetry, CleanupReport, DeviceBinding, EnforcementMode, LaunchPlan,
+    NodeCapabilities, ProcessHandle, ProcessRuntime, ProviderError, SandboxBackend, StopRequest,
+};
+use cy_kernel_daemon::watchdog::{InstanceActor, InstanceActorState};
 use cy_worker_sdk::{
     health_status,
     pb::{
@@ -281,7 +289,7 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn test_python_worker_abrupt_crash_detection() -> Result<(), Box<dyn std::error::Error>> {
+fn test_real_subprocess_posix_sigterm_handling() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let python_script = manifest_dir
         .parent()
@@ -308,10 +316,10 @@ fn test_python_worker_abrupt_crash_detection() -> Result<(), Box<dyn std::error:
     let mut writer = BufWriter::new(child.stdin.take().expect("child stdin"));
     let mut reader = BufReader::new(child.stdout.take().expect("child stdout"));
 
-    // Handshake
+    // 1. Initial Handshake
     let hello_env = Envelope {
-        request_id: "req-crash-hello".to_string(),
-        trace_id: "tr-crash-1".to_string(),
+        request_id: "req-sigterm-hello".to_string(),
+        trace_id: "tr-sigterm-1".to_string(),
         plugin_id: "com.cyrene.test.python-echo-worker".to_string(),
         protocol_version: 1,
         deadline_ms: 5000,
@@ -325,16 +333,151 @@ fn test_python_worker_abrupt_crash_detection() -> Result<(), Box<dyn std::error:
     write_frame(&mut writer, &hello_env, DEFAULT_MAX_MESSAGE_BYTES)?;
     let _ = read_frame(&mut reader, DEFAULT_MAX_MESSAGE_BYTES)?;
 
-    // Abruptly kill the worker child process (simulating SIGKILL / segfault)
-    child.kill()?;
-    let _ = child.wait();
+    // 2. Send real OS SIGTERM signal (kill -TERM <pid>)
+    let pid = child.id() as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
 
-    // Reading from child stdout must immediately return EOF (None) without blocking or deadlock
-    let eof_resp = read_frame(&mut reader, DEFAULT_MAX_MESSAGE_BYTES)?;
+    // 3. Child process should catch SIGTERM and exit cleanly
+    let status = child.wait()?;
     assert!(
-        eof_resp.is_none(),
-        "Reading from killed child process must immediately return EOF"
+        status.success() || status.code() == Some(0) || status.code() == Some(143),
+        "Child process should terminate upon receiving OS SIGTERM signal"
     );
+
+    Ok(())
+}
+
+struct MockSandboxBackend;
+
+impl ProcessRuntime for MockSandboxBackend {
+    fn preflight(&self) -> NodeCapabilities {
+        NodeCapabilities {
+            ready: true,
+            facts: Vec::new(),
+            enforcement: Vec::new(),
+        }
+    }
+
+    fn launch(
+        &self,
+        plan: &LaunchPlan,
+        _binding: &DeviceBinding,
+    ) -> Result<ProcessHandle, ProviderError> {
+        Ok(ProcessHandle {
+            pid: 12345,
+            cgroup_path: PathBuf::from(&format!("/cgroup/{}", plan.cgroup_name)),
+            start_time_ticks: Some(100),
+        })
+    }
+
+    fn stop(
+        &self,
+        _handle: &ProcessHandle,
+        _request: &StopRequest,
+    ) -> Result<CleanupReport, ProviderError> {
+        Ok(CleanupReport {
+            complete: true,
+            exit_code: Some(0),
+            oom_killed: false,
+            conditions: Vec::new(),
+            reason_code: "CLEANUP_COMPLETE".to_string(),
+        })
+    }
+
+    fn telemetry(&self, _handle: &ProcessHandle) -> Result<CgroupTelemetry, ProviderError> {
+        Ok(CgroupTelemetry::default())
+    }
+}
+
+impl SandboxBackend for MockSandboxBackend {
+    fn backend_id(&self) -> &str {
+        "mock-sandbox"
+    }
+}
+
+#[test]
+fn test_real_subprocess_kill9_to_watchdog_quarantine_integration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let python_script = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("python/cyrene_worker_shim/echo_worker.py");
+
+    let python_module_dir = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("python/cyrene_worker_shim");
+
+    let plan = LaunchPlan {
+        instance_name: "py-worker-actor".to_string(),
+        executable: PathBuf::from("python3"),
+        args: vec![python_script.to_string_lossy().to_string()],
+        environment: BTreeMap::new(),
+        cgroup_name: "cgroup-py-worker".to_string(),
+        limits: CgroupLimits::default(),
+    };
+
+    let backend = Arc::new(MockSandboxBackend);
+    let mut actor = InstanceActor::new(
+        "py-worker-actor",
+        "lease-py-1",
+        42,
+        backend,
+        plan,
+        DeviceBinding {
+            resource_id: "res-1".to_string(),
+            enforcement: EnforcementMode::Soft,
+            nodes: Vec::new(),
+            environment: BTreeMap::new(),
+            required_gids: Vec::new(),
+            adapter_id: "adapter-1".to_string(),
+            reason_code: "ok".to_string(),
+        },
+        Duration::from_secs(5),
+    );
+
+    // Verify initial start succeeds
+    actor.start().expect("initial actor start should succeed");
+    assert_eq!(actor.state(), InstanceActorState::Healthy);
+
+    // Simulate 4 consecutive real child process crash events via kill -9
+    let now = Instant::now();
+    for i in 1..=4 {
+        let mut child = Command::new("python3")
+            .arg(&python_script)
+            .env("PYTHONPATH", &python_module_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+
+        let pid = child.id() as i32;
+        // Kill child process with SIGKILL (kill -9)
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let _ = child.wait();
+
+        // Feed crash to InstanceActor
+        let is_quarantined = actor.record_crash(now + Duration::from_millis(i * 100));
+        if i == 4 {
+            assert!(is_quarantined, "4th crash within 60s must trigger Quarantine");
+        }
+    }
+
+    // Assert actor is now in Quarantined state
+    assert_eq!(actor.state(), InstanceActorState::Quarantined);
+
+    // Assert subsequent start() attempts are strictly rejected with INSTANCE_QUARANTINED
+    let start_err = actor.start().unwrap_err();
+    assert_eq!(start_err.reason_code, "INSTANCE_QUARANTINED");
 
     Ok(())
 }

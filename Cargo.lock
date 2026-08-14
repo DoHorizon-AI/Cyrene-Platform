@@ -425,7 +425,10 @@ name = "cy-worker-sdk"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cy-kernel-api",
+ "cy-kernel-daemon",
  "cy-plugin-protocol",
+ "libc",
  "prost",
  "tempfile",
  "thiserror",
