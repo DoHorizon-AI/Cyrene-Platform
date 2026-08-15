@@ -4,7 +4,7 @@
 //! business concepts. The Kernel only owns launch, bounded stop, and cleanup
 //! truth; framework-specific plugin RPC belongs outside `kernel/`.
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use cy_kernel_api::{
     CleanupReport, DeviceBinding, LaunchPlan, ProcessHandle, ProviderError, SandboxBackend,
@@ -50,6 +50,12 @@ impl SandboxedProcess {
         self.handle.as_ref()
     }
 
+    pub fn transport_socket(&self) -> Option<&Path> {
+        self.handle
+            .as_ref()
+            .and_then(|handle| handle.transport_socket.as_deref())
+    }
+
     pub fn start(&mut self) -> Result<&ProcessHandle, ProviderError> {
         if self.handle.is_some() {
             return Ok(self.handle.as_ref().expect("handle is present"));
@@ -87,6 +93,9 @@ impl SandboxedProcess {
         } else {
             SandboxedProcessState::Quarantined
         };
+        if report.complete {
+            self.handle = None;
+        }
         self.last_cleanup = Some(report);
         Ok(self.last_cleanup.as_ref().expect("cleanup was just stored"))
     }
@@ -133,6 +142,7 @@ mod tests {
                 pid: 42,
                 cgroup_path: PathBuf::from("/test"),
                 start_time_ticks: Some(1),
+                transport_socket: None,
             })
         }
 
@@ -178,6 +188,7 @@ mod tests {
                 environment: BTreeMap::new(),
                 cgroup_name: "instance-1".into(),
                 limits: CgroupLimits::default(),
+                transport_socket: None,
             },
             DeviceBinding {
                 resource_id: "gpu-0".into(),
@@ -217,5 +228,8 @@ mod tests {
             .unwrap();
         assert!(report.complete);
         assert_eq!(process.state(), SandboxedProcessState::Stopped);
+        process
+            .start()
+            .expect("a completely cleaned process can restart");
     }
 }

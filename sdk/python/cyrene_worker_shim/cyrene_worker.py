@@ -15,7 +15,7 @@ import sys
 from typing import BinaryIO, Dict, List, Optional, Tuple
 
 
-DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024  # 64 MiB
+DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024  # 1 MiB
 CURRENT_PROTOCOL_VERSION = 1
 
 
@@ -67,6 +67,10 @@ def encode_uint32_field(field_number: int, value: int) -> bytes:
     if value == 0:
         return b""
     return encode_tag(field_number, 0) + encode_varint(value)
+
+
+def encode_uint64_field(field_number: int, value: int) -> bytes:
+    return encode_uint32_field(field_number, value)
 
 
 def encode_int64_field(field_number: int, value: int) -> bytes:
@@ -301,6 +305,40 @@ class Configure:
         return inst
 
 
+@dataclasses.dataclass
+class Cancel:
+    target_request_id: str = ""
+    reason: str = ""
+
+    def encode(self) -> bytes:
+        return (
+            encode_string_field(1, self.target_request_id)
+            + encode_string_field(2, self.reason)
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> Cancel:
+        inst = cls()
+        offset = 0
+        while offset < len(data):
+            tag, offset = decode_varint(data, offset)
+            field_num, wire_type = tag >> 3, tag & 7
+            if field_num == 1 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.target_request_id = data[offset:offset + length].decode("utf-8", "replace")
+                offset += length
+            elif field_num == 2 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.reason = data[offset:offset + length].decode("utf-8", "replace")
+                offset += length
+            elif wire_type == 0:
+                _, offset = decode_varint(data, offset)
+            elif wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                offset += length
+        return inst
+
+
 class Invoke:
     extension_point: str = ""
     method: str = ""
@@ -448,6 +486,8 @@ class Envelope:
     protocol_version: int = 1
     deadline_ms: int = 0
     sequence_number: int = 0
+    generation: int = 0
+    fence_token: int = 0
     payload_tag: int = 0
     payload: Optional[object] = None
 
@@ -459,6 +499,8 @@ class Envelope:
         out.extend(encode_uint32_field(4, self.protocol_version))
         out.extend(encode_int64_field(5, self.deadline_ms))
         out.extend(encode_uint32_field(6, self.sequence_number))
+        out.extend(encode_uint64_field(7, self.generation))
+        out.extend(encode_uint64_field(8, self.fence_token))
 
         if self.payload is not None:
             if isinstance(self.payload, Hello):
@@ -467,6 +509,8 @@ class Envelope:
                 out.extend(encode_len_delimited(11, self.payload.encode()))
             elif isinstance(self.payload, Configure):
                 out.extend(encode_len_delimited(12, self.payload.encode()))
+            elif isinstance(self.payload, Cancel):
+                out.extend(encode_len_delimited(13, self.payload.encode()))
             elif isinstance(self.payload, HealthCheck):
                 out.extend(encode_len_delimited(14, self.payload.encode()))
             elif isinstance(self.payload, HealthStatus):
@@ -507,6 +551,10 @@ class Envelope:
                 inst.deadline_ms, offset = decode_varint(data, offset)
             elif field_num == 6 and wire_type == 0:
                 inst.sequence_number, offset = decode_varint(data, offset)
+            elif field_num == 7 and wire_type == 0:
+                inst.generation, offset = decode_varint(data, offset)
+            elif field_num == 8 and wire_type == 0:
+                inst.fence_token, offset = decode_varint(data, offset)
             elif field_num == 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = 10
@@ -521,6 +569,11 @@ class Envelope:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = 12
                 inst.payload = Configure.decode(data[offset:offset + length])
+                offset += length
+            elif field_num == 13 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_tag = 13
+                inst.payload = Cancel.decode(data[offset:offset + length])
                 offset += length
             elif field_num == 14 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
@@ -682,6 +735,10 @@ def run_worker_stream(
                     resp_payload = HealthStatus(status=0, message="Configured")
                 else:
                     resp_payload = PluginErrorPayload(code=3, message=err)
+            elif req_env.payload_tag == 13:  # Cancel
+                cancel = req_env.payload if isinstance(req_env.payload, Cancel) else Cancel()
+                worker.on_cancel(cancel.target_request_id, cancel.reason)
+                continue
             elif req_env.payload_tag == 20:  # Invoke
                 inv = req_env.payload if isinstance(req_env.payload, Invoke) else Invoke()
                 ok, res_bytes = worker.on_invoke(inv.capability, inv.action, inv.payload)
@@ -700,6 +757,8 @@ def run_worker_stream(
                     protocol_version=CURRENT_PROTOCOL_VERSION,
                     deadline_ms=0,
                     sequence_number=seq,
+                    generation=req_env.generation,
+                    fence_token=req_env.fence_token,
                     payload=resp_payload,
                 )
                 write_frame(resp_env.encode(), writer, max_frame_bytes)
@@ -714,6 +773,8 @@ def run_worker_stream(
                 protocol_version=CURRENT_PROTOCOL_VERSION,
                 deadline_ms=0,
                 sequence_number=seq,
+                generation=req_env.generation,
+                fence_token=req_env.fence_token,
                 payload=resp_payload,
             )
             write_frame(resp_env.encode(), writer, max_frame_bytes)

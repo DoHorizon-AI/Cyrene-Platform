@@ -16,6 +16,7 @@ pub(crate) const OWNED_INSTANCE_PREFIX: &str = "instance-";
 #[derive(Debug, Clone)]
 pub struct CgroupV2Config {
     pub root: PathBuf,
+    pub transport_root: PathBuf,
     /// Enables loading and attaching real `BPF_PROG_TYPE_CGROUP_DEVICE` filters.
     /// A failed program load or attach always rejects a HARD launch.
     pub device_bpf_enabled: bool,
@@ -25,6 +26,7 @@ impl CgroupV2Config {
     pub fn host_default() -> Self {
         Self {
             root: PathBuf::from("/sys/fs/cgroup/cyrene"),
+            transport_root: PathBuf::from("/run/cyrene/workers"),
             device_bpf_enabled: true,
         }
     }

@@ -75,9 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let adapter = KernelServiceAdapter::new(
         daemon,
-        Arc::new(FilesystemInstalledPluginResolver::new(
-            args.installations_root,
-        )),
+        Arc::new(
+            FilesystemInstalledPluginResolver::new(args.installations_root)
+                .with_worker_transport_root(args.worker_transport_root.clone()),
+        ),
     )
     .with_worker_heartbeat(heartbeat)
     .with_adapter_poll_interval(args.adapter_poll_interval)
@@ -118,6 +119,7 @@ struct Args {
     hardware_adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
     sandbox_adapter: cy_sandbox_client::SandboxAdapterEndpoint,
     installations_root: std::path::PathBuf,
+    worker_transport_root: std::path::PathBuf,
     runtime_journal: std::path::PathBuf,
     heartbeat_interval: std::time::Duration,
     heartbeat_timeout: std::time::Duration,
@@ -137,6 +139,7 @@ impl Args {
         let mut hardware_adapters = Vec::new();
         let mut sandbox_adapter = None;
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
+        let mut worker_transport_root = PathBuf::from("/run/cyrene/workers");
         let mut runtime_journal = PathBuf::from("/var/lib/cyrene/runtime/journal.jsonl");
         let mut heartbeat_interval = Duration::from_secs(5);
         let mut heartbeat_timeout = Duration::from_secs(20);
@@ -187,6 +190,7 @@ impl Args {
                     })?)
                 }
                 "--installations-root" => installations_root = PathBuf::from(value()?),
+                "--worker-transport-root" => worker_transport_root = PathBuf::from(value()?),
                 "--runtime-journal" => runtime_journal = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-timeout-ms" => heartbeat_timeout = Duration::from_millis(value()?.parse()?),
@@ -264,6 +268,7 @@ impl Args {
             hardware_adapters,
             sandbox_adapter,
             installations_root,
+            worker_transport_root,
             runtime_journal,
             heartbeat_interval,
             heartbeat_timeout,

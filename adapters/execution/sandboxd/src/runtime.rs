@@ -4,10 +4,19 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::{Child, Command},
-    sync::Mutex,
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use std::os::unix::{
+    fs::{FileTypeExt, PermissionsExt},
+    net::{UnixListener, UnixStream},
 };
 
 #[cfg(target_os = "linux")]
@@ -48,18 +57,162 @@ struct TrackedChild {
     child: Child,
     #[cfg(target_os = "linux")]
     pidfd: Option<OwnedFd>,
+    #[cfg(unix)]
+    transport: Option<WorkerTransportControl>,
 }
 
 impl TrackedChild {
-    fn new(child: Child) -> Self {
+    fn new(child: Child, #[cfg(unix)] transport: Option<WorkerTransportControl>) -> Self {
         #[cfg(target_os = "linux")]
         let pidfd = open_pidfd(child.id());
         Self {
             child,
             #[cfg(target_os = "linux")]
             pidfd,
+            #[cfg(unix)]
+            transport,
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct WorkerTransportControl {
+    stop: Arc<AtomicBool>,
+    socket_path: PathBuf,
+    stream: Arc<Mutex<Option<UnixStream>>>,
+}
+
+#[cfg(unix)]
+impl WorkerTransportControl {
+    fn new(socket_path: PathBuf) -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            socket_path,
+            stream: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut stream) = self.stream.lock() {
+            if let Some(stream) = stream.take() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        let _ = fs::remove_file(&self.socket_path);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WorkerTransportControl {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(unix)]
+fn bind_worker_transport(path: &Path) -> Result<UnixListener, ProviderError> {
+    let parent = path.parent().ok_or_else(|| {
+        ProviderError::new(
+            "native-process",
+            "WORKER_TRANSPORT_PATH_INVALID",
+            "worker transport socket needs a parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        ProviderError::new(
+            "native-process",
+            "WORKER_TRANSPORT_PARENT_FAILED",
+            &error.to_string(),
+        )
+    })?;
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            ProviderError::new(
+                "native-process",
+                "WORKER_TRANSPORT_STAT_FAILED",
+                &error.to_string(),
+            )
+        })?;
+        if !metadata.file_type().is_socket() {
+            return Err(ProviderError::new(
+                "native-process",
+                "WORKER_TRANSPORT_PATH_INVALID",
+                "refusing to replace a non-socket worker transport path",
+            ));
+        }
+        fs::remove_file(path).map_err(|error| {
+            ProviderError::new(
+                "native-process",
+                "WORKER_TRANSPORT_REMOVE_FAILED",
+                &error.to_string(),
+            )
+        })?;
+    }
+    let listener = UnixListener::bind(path).map_err(|error| {
+        ProviderError::new(
+            "native-process",
+            "WORKER_TRANSPORT_BIND_FAILED",
+            &error.to_string(),
+        )
+    })?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o660)).map_err(|error| {
+        ProviderError::new(
+            "native-process",
+            "WORKER_TRANSPORT_PERMISSIONS_FAILED",
+            &error.to_string(),
+        )
+    })?;
+    listener.set_nonblocking(true).map_err(|error| {
+        ProviderError::new(
+            "native-process",
+            "WORKER_TRANSPORT_NONBLOCKING_FAILED",
+            &error.to_string(),
+        )
+    })?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn start_worker_transport_bridge(
+    listener: UnixListener,
+    mut stdin: std::process::ChildStdin,
+    mut stdout: std::process::ChildStdout,
+    control: WorkerTransportControl,
+) {
+    thread::spawn(move || {
+        while !control.stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let Ok(read_stream) = stream.try_clone() else {
+                        control.stop();
+                        return;
+                    };
+                    if let Ok(mut current) = control.stream.lock() {
+                        *current = stream.try_clone().ok();
+                    }
+                    thread::spawn(move || {
+                        let mut read_stream = read_stream;
+                        let _ = std::io::copy(&mut read_stream, &mut stdin);
+                    });
+                    let mut write_stream = stream;
+                    let _ = std::io::copy(&mut stdout, &mut write_stream);
+                    control.stop();
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => {
+                    control.stop();
+                    return;
+                }
+            }
+        }
+        control.stop();
+    });
 }
 
 impl CgroupV2Runtime {
@@ -498,8 +651,42 @@ impl ProcessRuntime for CgroupV2Runtime {
             return Err(error);
         }
         let environment = binding.merge_environment(&plan.environment)?;
+        #[cfg(unix)]
+        let transport_listener = if let Some(path) = plan.transport_socket.as_ref() {
+            if !path.is_absolute()
+                || !path.starts_with(&self.config.transport_root)
+                || path.parent() != Some(self.config.transport_root.as_path())
+            {
+                let _ = self.kill_cgroup(&cgroup_path);
+                let _ = fs::remove_dir(&cgroup_path);
+                return Err(ProviderError::new(
+                    "native-process",
+                    "WORKER_TRANSPORT_PATH_INVALID",
+                    "worker transport socket must be a direct child of sandboxd transport_root",
+                ));
+            }
+            match bind_worker_transport(path) {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let mut command = Command::new(&plan.executable);
-        command.args(&plan.args).envs(environment);
+        command
+            .args(&plan.args)
+            .envs(environment)
+            .stderr(Stdio::inherit());
+        #[cfg(unix)]
+        if transport_listener.is_some() {
+            command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null()).stdout(Stdio::null());
+        }
         #[cfg(target_os = "linux")]
         unsafe {
             use std::os::unix::process::CommandExt;
@@ -508,9 +695,72 @@ impl ProcessRuntime for CgroupV2Runtime {
                 Ok(())
             });
         }
-        let child = command.spawn().map_err(|error| {
-            ProviderError::new("native-process", "SPAWN_FAILED", &error.to_string())
-        })?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = plan.transport_socket.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
+                let _ = self.kill_cgroup(&cgroup_path);
+                let _ = fs::remove_dir(&cgroup_path);
+                return Err(ProviderError::new(
+                    "native-process",
+                    "SPAWN_FAILED",
+                    &error.to_string(),
+                ));
+            }
+        };
+        #[cfg(unix)]
+        let transport = if let Some(listener) = transport_listener {
+            let stdin = match child.stdin.take() {
+                Some(stdin) => stdin,
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(
+                        plan.transport_socket
+                            .as_ref()
+                            .expect("transport listener has a path"),
+                    );
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(ProviderError::new(
+                        "native-process",
+                        "WORKER_TRANSPORT_PIPE_FAILED",
+                        "worker stdin was not piped",
+                    ));
+                }
+            };
+            let stdout = match child.stdout.take() {
+                Some(stdout) => stdout,
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(
+                        plan.transport_socket
+                            .as_ref()
+                            .expect("transport listener has a path"),
+                    );
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(ProviderError::new(
+                        "native-process",
+                        "WORKER_TRANSPORT_PIPE_FAILED",
+                        "worker stdout was not piped",
+                    ));
+                }
+            };
+            let path = plan
+                .transport_socket
+                .as_ref()
+                .expect("transport listener has a path")
+                .clone();
+            let control = WorkerTransportControl::new(path);
+            start_worker_transport_bridge(listener, stdin, stdout, control.clone());
+            Some(control)
+        } else {
+            None
+        };
         let pid = child.id();
         if let Err(error) = self.attach(&cgroup_path, pid) {
             let mut child = child;
@@ -523,11 +773,12 @@ impl ProcessRuntime for CgroupV2Runtime {
         self.children
             .lock()
             .map_err(|_| ProviderError::new("native-process", "LOCK_POISONED", "child table"))?
-            .insert(pid, TrackedChild::new(child));
+            .insert(pid, TrackedChild::new(child, transport));
         Ok(ProcessHandle {
             pid,
             cgroup_path,
             start_time_ticks: proc_start_time(pid),
+            transport_socket: plan.transport_socket.clone(),
         })
     }
 
@@ -536,6 +787,14 @@ impl ProcessRuntime for CgroupV2Runtime {
         handle: &ProcessHandle,
         request: &StopRequest,
     ) -> Result<CleanupReport, ProviderError> {
+        #[cfg(unix)]
+        if let Ok(children) = self.children.lock() {
+            if let Some(child) = children.get(&handle.pid) {
+                if let Some(transport) = child.transport.as_ref() {
+                    transport.stop();
+                }
+            }
+        }
         let before_oom = read_oom_kill_count(&handle.cgroup_path);
         let mut exit_code = None;
         if !request.immediate {
@@ -600,5 +859,54 @@ impl ProcessRuntime for CgroupV2Runtime {
 impl SandboxBackend for CgroupV2Runtime {
     fn backend_id(&self) -> &str {
         "native-cgroup-v2"
+    }
+}
+
+#[cfg(all(test, unix))]
+mod transport_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn worker_stdio_bridge_round_trips_bytes_without_protocol_knowledge() {
+        let socket =
+            std::env::temp_dir().join(format!("cyrene-bridge-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&socket);
+        let listener = bind_worker_transport(&socket).expect("bind worker socket");
+        let mut child = Command::new("sh")
+            .args(["-c", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn byte worker");
+        let stdin = child.stdin.take().expect("worker stdin");
+        let stdout = child.stdout.take().expect("worker stdout");
+        let control = WorkerTransportControl::new(socket.clone());
+        start_worker_transport_bridge(listener, stdin, stdout, control.clone());
+
+        let mut stream = None;
+        for _ in 0..50 {
+            match UnixStream::connect(&socket) {
+                Ok(value) => {
+                    stream = Some(value);
+                    break;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let mut stream = stream.expect("worker bridge should accept a client");
+        stream.write_all(b"hello\n").expect("write worker input");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("close worker input");
+        let mut response = [0_u8; 5];
+        stream
+            .read_exact(&mut response)
+            .expect("read worker output");
+        assert_eq!(&response, b"hello");
+        let status = child.wait().expect("wait byte worker");
+        assert!(status.success());
+        control.stop();
+        assert!(!socket.exists());
     }
 }

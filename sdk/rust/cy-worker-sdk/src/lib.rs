@@ -146,6 +146,8 @@ pub fn run_worker_stream<R: Read, W: Write, T: CyreneWorker>(
     while let Some(req_env) = read_frame(&mut reader, max_frame_bytes)? {
         let req_id = req_env.request_id.clone();
         let trace_id = req_env.trace_id.clone();
+        let generation = req_env.generation;
+        let fence_token = req_env.fence_token;
         let plugin_id = worker.plugin_id().to_string();
 
         let resp_payload = match req_env.payload {
@@ -198,6 +200,8 @@ pub fn run_worker_stream<R: Read, W: Write, T: CyreneWorker>(
                     protocol_version: CURRENT_PROTOCOL_VERSION,
                     deadline_ms: 0,
                     sequence_number: sequence_number.wrapping_add(1),
+                    generation,
+                    fence_token,
                     payload: Some(Payload::HealthStatus(HealthStatus {
                         status: health_status::Status::Healthy as i32,
                         message: "Shutdown ACK".to_string(),
@@ -221,6 +225,8 @@ pub fn run_worker_stream<R: Read, W: Write, T: CyreneWorker>(
             protocol_version: CURRENT_PROTOCOL_VERSION,
             deadline_ms: 0,
             sequence_number,
+            generation,
+            fence_token,
             payload: Some(resp_payload),
         };
 
@@ -275,6 +281,8 @@ mod tests {
             protocol_version: 1,
             deadline_ms: 5000,
             sequence_number: 0,
+            generation: 1,
+            fence_token: 1,
             payload: Some(Payload::Hello(Hello {
                 min_protocol_version: 1,
                 max_protocol_version: 1,
@@ -291,6 +299,8 @@ mod tests {
             protocol_version: 1,
             deadline_ms: 1000,
             sequence_number: 1,
+            generation: 1,
+            fence_token: 1,
             payload: Some(Payload::HealthCheck(HealthCheck {})),
         };
         write_frame(&mut input_buffer, &health_env, DEFAULT_MAX_MESSAGE_BYTES).unwrap();
@@ -303,6 +313,8 @@ mod tests {
             protocol_version: 1,
             deadline_ms: 2000,
             sequence_number: 2,
+            generation: 1,
+            fence_token: 1,
             payload: Some(Payload::Shutdown(Shutdown {
                 grace_period_ms: 500,
             })),

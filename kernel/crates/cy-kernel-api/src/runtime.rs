@@ -28,6 +28,8 @@ pub struct ProcessHandle {
     pub cgroup_path: PathBuf,
     /// 进程启动时间滴答数（用于校验 PID 复用）
     pub start_time_ticks: Option<u64>,
+    /// Opaque worker byte-stream endpoint returned by sandboxd.
+    pub transport_socket: Option<PathBuf>,
 }
 
 /// 进程运行状态与异常条件

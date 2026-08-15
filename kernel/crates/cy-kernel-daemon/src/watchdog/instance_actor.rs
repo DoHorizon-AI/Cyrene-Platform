@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,11 +10,6 @@ use std::{
 use cy_kernel_api::{
     CleanupReport, DeviceBinding, LaunchPlan, ProcessHandle, ProviderError, SandboxBackend,
     StopRequest,
-};
-use cy_plugin_protocol::{
-    envelope::Payload,
-    pb::{Invoke, InvokeResult},
-    Envelope, CURRENT_PROTOCOL_VERSION,
 };
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
@@ -39,6 +35,57 @@ pub enum InstanceHealthVerdict {
     Quarantined,
 }
 
+/// Protocol-neutral command sent to the framework-owned worker transport.
+#[derive(Debug)]
+pub enum WorkerTransportCommand {
+    Request(WorkerTransportRequest),
+    Cancel {
+        request_id: String,
+        generation: u64,
+        fence_token: u64,
+    },
+}
+
+#[derive(Debug)]
+pub struct WorkerTransportRequest {
+    pub request_id: String,
+    pub generation: u64,
+    pub fence_token: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct WorkerTransportResponse {
+    pub request_id: String,
+    pub generation: u64,
+    pub fence_token: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct WorkerTransportDispatcher {
+    generation: u64,
+    fence_token: u64,
+    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
+}
+
+impl WorkerTransportDispatcher {
+    pub async fn dispatch(&self, response: WorkerTransportResponse) -> bool {
+        if response.generation != self.generation || response.fence_token != self.fence_token {
+            return false;
+        }
+        let Some(reply) = self
+            .pending_requests
+            .lock()
+            .await
+            .remove(&response.request_id)
+        else {
+            return false;
+        };
+        reply.send(response).is_ok()
+    }
+}
+
 /// Actor representing one running instance managed by the Kernel.
 pub struct InstanceActor {
     instance_id: String,
@@ -49,8 +96,9 @@ pub struct InstanceActor {
     last_heartbeat: Option<Instant>,
     heartbeat_deadline: Duration,
     crash_timestamps: Vec<Instant>,
-    transport_tx: Option<mpsc::Sender<Envelope>>,
-    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<Envelope>>>>,
+    generation: u64,
+    transport_tx: Option<mpsc::Sender<WorkerTransportCommand>>,
+    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
 }
 
 impl InstanceActor {
@@ -72,6 +120,7 @@ impl InstanceActor {
             last_heartbeat: None,
             heartbeat_deadline,
             crash_timestamps: Vec::new(),
+            generation: 0,
             transport_tx: None,
             pending_requests: Arc::new(AsyncMutex::new(HashMap::new())),
         }
@@ -93,6 +142,10 @@ impl InstanceActor {
         self.state
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Read-only access to the last observed heartbeat timestamp. Used by the
     /// kernel watchdog scan loop without requiring `&mut` borrow.
     pub fn last_heartbeat(&self) -> Option<Instant> {
@@ -106,24 +159,70 @@ impl InstanceActor {
     }
 
     /// Attach a communication channel to the sandboxed worker.
-    pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<Envelope>) {
+    pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<WorkerTransportCommand>) {
         self.transport_tx = Some(tx);
         if self.state == InstanceActorState::Starting || self.state == InstanceActorState::Stopped {
             self.state = InstanceActorState::Healthy;
         }
     }
 
+    pub fn transport_attached(&self) -> bool {
+        self.transport_tx.is_some()
+    }
+
+    pub fn transport_socket(&self) -> Option<PathBuf> {
+        self.process.transport_socket().map(PathBuf::from)
+    }
+
     /// Access the pending request map for incoming response routing.
-    pub fn pending_requests(&self) -> Arc<AsyncMutex<HashMap<String, oneshot::Sender<Envelope>>>> {
-        self.pending_requests.clone()
+    pub async fn dispatch_transport_response(&self, response: WorkerTransportResponse) -> bool {
+        self.transport_dispatcher().dispatch(response).await
+    }
+
+    pub fn transport_dispatcher(&self) -> WorkerTransportDispatcher {
+        WorkerTransportDispatcher {
+            generation: self.generation,
+            fence_token: self.fence_token,
+            pending_requests: self.pending_requests.clone(),
+        }
+    }
+
+    /// Detach a failed transport only if it still belongs to the active
+    /// generation and fence. Dropping pending senders wakes blocked invokes;
+    /// an invoke waiting on one records the crash when it observes closure.
+    pub async fn mark_transport_lost(&mut self, generation: u64, fence_token: u64) -> bool {
+        if generation != self.generation
+            || fence_token != self.fence_token
+            || self.transport_tx.take().is_none()
+        {
+            return false;
+        }
+
+        let had_pending_requests = {
+            let mut pending = self.pending_requests.lock().await;
+            let had_pending_requests = !pending.is_empty();
+            pending.clear();
+            had_pending_requests
+        };
+        if !had_pending_requests
+            && !matches!(
+                self.state,
+                InstanceActorState::Stopping
+                    | InstanceActorState::Stopped
+                    | InstanceActorState::Quarantined
+            )
+        {
+            self.record_crash(Instant::now());
+        }
+        true
     }
 
     /// Invoke an extension point RPC on the running sandboxed worker.
-    pub async fn invoke(
+    pub async fn invoke_raw(
         &mut self,
-        invoke_payload: Invoke,
+        payload: Vec<u8>,
         timeout: Duration,
-    ) -> Result<InvokeResult, ProviderError> {
+    ) -> Result<Vec<u8>, ProviderError> {
         if self.state == InstanceActorState::Quarantined {
             return Err(ProviderError::new(
                 "instance-watchdog",
@@ -139,30 +238,37 @@ impl InstanceActor {
             ));
         }
 
-        let tx = self.transport_tx.as_ref().ok_or_else(|| {
-            ProviderError::new(
-                "instance-watchdog",
-                "TRANSPORT_UNAVAILABLE",
-                "instance transport channel not attached",
-            )
-        })?.clone();
+        let tx = self
+            .transport_tx
+            .as_ref()
+            .ok_or_else(|| {
+                ProviderError::new(
+                    "instance-watchdog",
+                    "TRANSPORT_UNAVAILABLE",
+                    "instance transport channel not attached",
+                )
+            })?
+            .clone();
 
         let req_id = uuid::Uuid::new_v4().to_string();
-        let env = Envelope {
-            request_id: req_id.clone(),
-            trace_id: uuid::Uuid::new_v4().to_string(),
-            plugin_id: self.instance_id.clone(),
-            protocol_version: CURRENT_PROTOCOL_VERSION,
-            deadline_ms: timeout.as_millis() as i64,
-            sequence_number: 0,
-            payload: Some(Payload::Invoke(invoke_payload)),
-        };
-
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.pending_requests.lock().await.insert(req_id.clone(), reply_tx);
+        self.pending_requests
+            .lock()
+            .await
+            .insert(req_id.clone(), reply_tx);
 
-        if tx.send(env).await.is_err() {
+        if tx
+            .send(WorkerTransportCommand::Request(WorkerTransportRequest {
+                request_id: req_id.clone(),
+                generation: self.generation,
+                fence_token: self.fence_token,
+                payload,
+            }))
+            .await
+            .is_err()
+        {
             self.pending_requests.lock().await.remove(&req_id);
+            self.transport_tx = None;
             self.record_crash(Instant::now());
             return Err(ProviderError::new(
                 "instance-watchdog",
@@ -172,19 +278,9 @@ impl InstanceActor {
         }
 
         match tokio::time::timeout(timeout, reply_rx).await {
-            Ok(Ok(Envelope {
-                payload: Some(Payload::InvokeResult(res)),
-                ..
-            })) => Ok(res),
-            Ok(Ok(Envelope {
-                payload: Some(Payload::Error(err)),
-                ..
-            })) => Err(ProviderError::new(
-                "instance-watchdog",
-                "INVOKE_ERROR",
-                &err.message,
-            )),
+            Ok(Ok(response)) if response.request_id == req_id => Ok(response.payload),
             Ok(Ok(_)) | Ok(Err(_)) => {
+                self.transport_tx = None;
                 self.record_crash(Instant::now());
                 Err(ProviderError::new(
                     "instance-watchdog",
@@ -194,6 +290,16 @@ impl InstanceActor {
             }
             Err(_) => {
                 self.pending_requests.lock().await.remove(&req_id);
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    tx.send(WorkerTransportCommand::Cancel {
+                        request_id: req_id.clone(),
+                        generation: self.generation,
+                        fence_token: self.fence_token,
+                    }),
+                )
+                .await;
+                self.transport_tx = None;
                 self.record_crash(Instant::now());
                 Err(ProviderError::new(
                     "instance-watchdog",
@@ -214,9 +320,29 @@ impl InstanceActor {
             ));
         }
 
+        let restarting_after_failure =
+            self.state == InstanceActorState::Stopped && self.process.handle().is_some();
         self.state = InstanceActorState::Starting;
+        if restarting_after_failure
+            && self
+                .process
+                .stop(&StopRequest {
+                    grace_period: Duration::from_millis(500),
+                    immediate: true,
+                })
+                .map(|report| !report.complete)
+                .unwrap_or(true)
+        {
+            self.state = InstanceActorState::Quarantined;
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "RESTART_CLEANUP_FAILED",
+                "previous worker process could not be completely cleaned up",
+            ));
+        }
         match self.process.start() {
             Ok(_) => {
+                self.generation = self.generation.wrapping_add(1).max(1);
                 self.state = InstanceActorState::Healthy;
                 self.last_heartbeat = Some(Instant::now());
                 Ok(self
@@ -261,7 +387,8 @@ impl InstanceActor {
         }
 
         self.last_heartbeat = Some(now);
-        if self.state == InstanceActorState::Degraded || self.state == InstanceActorState::Starting {
+        if self.state == InstanceActorState::Degraded || self.state == InstanceActorState::Starting
+        {
             self.state = InstanceActorState::Healthy;
         }
         InstanceHealthVerdict::Healthy
@@ -304,7 +431,14 @@ impl InstanceActor {
     /// Gracefully stop the sandboxed instance.
     pub fn stop(&mut self, request: &StopRequest) -> Result<&CleanupReport, ProviderError> {
         self.state = InstanceActorState::Stopping;
-        let report = self.process.stop(request)?;
+        self.transport_tx.take();
+        let report = match self.process.stop(request) {
+            Ok(report) => report,
+            Err(error) => {
+                self.state = InstanceActorState::Quarantined;
+                return Err(error);
+            }
+        };
         if report.complete {
             if self.state != InstanceActorState::Quarantined {
                 self.state = InstanceActorState::Stopped;
@@ -320,6 +454,14 @@ impl InstanceActor {
 #[cfg(any(test, feature = "test-utils"))]
 impl InstanceActor {
     pub fn new_for_test() -> Self {
+        Self::new_for_test_inner(None)
+    }
+
+    pub fn new_for_test_with_transport(socket: impl Into<PathBuf>) -> Self {
+        Self::new_for_test_inner(Some(socket.into()))
+    }
+
+    fn new_for_test_inner(transport_socket: Option<PathBuf>) -> Self {
         use cy_kernel_api::{
             CgroupLimits, CgroupTelemetry, DeviceBinding, EnforcementMode, LaunchPlan,
             NodeCapabilities, ProcessHandle, ProcessRuntime, ProviderError, SandboxBackend,
@@ -327,7 +469,9 @@ impl InstanceActor {
         };
         use std::{collections::BTreeMap, path::PathBuf};
 
-        struct NoopSandbox;
+        struct NoopSandbox {
+            transport_socket: Option<PathBuf>,
+        }
         impl ProcessRuntime for NoopSandbox {
             fn preflight(&self) -> NodeCapabilities {
                 NodeCapabilities {
@@ -345,6 +489,7 @@ impl InstanceActor {
                     pid: 99999,
                     cgroup_path: PathBuf::from("/dev/null"),
                     start_time_ticks: None,
+                    transport_socket: self.transport_socket.clone(),
                 })
             }
             fn stop(
@@ -360,10 +505,7 @@ impl InstanceActor {
                     reason_code: "NOOP".to_string(),
                 })
             }
-            fn telemetry(
-                &self,
-                _handle: &ProcessHandle,
-            ) -> Result<CgroupTelemetry, ProviderError> {
+            fn telemetry(&self, _handle: &ProcessHandle) -> Result<CgroupTelemetry, ProviderError> {
                 Ok(CgroupTelemetry::default())
             }
         }
@@ -377,7 +519,7 @@ impl InstanceActor {
             "test-instance",
             "test-lease",
             0,
-            Arc::new(NoopSandbox),
+            Arc::new(NoopSandbox { transport_socket }),
             LaunchPlan {
                 instance_name: "test".to_string(),
                 executable: PathBuf::from("/bin/true"),
@@ -385,6 +527,7 @@ impl InstanceActor {
                 environment: BTreeMap::new(),
                 cgroup_name: "test".to_string(),
                 limits: CgroupLimits::default(),
+                transport_socket: None,
             },
             DeviceBinding {
                 resource_id: "test".to_string(),
@@ -433,6 +576,7 @@ mod tests {
                 pid: 12345,
                 cgroup_path: PathBuf::from(&format!("/cgroup/{}", plan.cgroup_name)),
                 start_time_ticks: Some(100),
+                transport_socket: None,
             })
         }
 
@@ -469,6 +613,7 @@ mod tests {
             environment: BTreeMap::new(),
             cgroup_name: "instance-inst-1".to_string(),
             limits: CgroupLimits::default(),
+            transport_socket: None,
         }
     }
 
@@ -584,5 +729,21 @@ mod tests {
         });
         assert!(stop_res.is_ok());
         assert_eq!(actor.state(), InstanceActorState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn transport_loss_detaches_only_the_active_generation() {
+        let mut actor = InstanceActor::new_for_test();
+        actor.start().expect("start should succeed");
+        let (tx, _rx) = mpsc::channel(1);
+        actor.attach_transport_channel(tx);
+        assert_eq!(actor.generation(), 1);
+
+        assert!(!actor.mark_transport_lost(0, 0).await);
+        assert!(actor.transport_attached());
+        assert!(actor.mark_transport_lost(1, 0).await);
+        assert!(!actor.transport_attached());
+        assert_eq!(actor.state(), InstanceActorState::Stopped);
+        assert!(!actor.mark_transport_lost(1, 0).await);
     }
 }

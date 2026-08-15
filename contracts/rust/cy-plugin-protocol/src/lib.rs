@@ -3,7 +3,7 @@
 //! 【零端口通信与二进制封包】
 //! CYRENE 插件进程间通信采用基于 stdio / UDS 的零端口方案，消除网络端口占用与外部嗅探风险：
 //! 1. **4 字节大端长度前缀 (4-Byte Big-Endian Length-Prefixed Framing)**：每个消息帧由 4 字节的负载长度字段与后续紧跟的 Protobuf [`Envelope`] 二进制载荷构成；
-//! 2. **封包容量上限防护**：默认限制单包最大长度为 64 MiB ([`DEFAULT_MAX_MESSAGE_BYTES`])，防止恶意/异常数据导致内存耗尽攻击；
+//! 2. **封包容量上限防护**：默认限制单包最大长度为 1 MiB ([`DEFAULT_MAX_MESSAGE_BYTES`])，防止恶意/异常数据导致内存耗尽攻击；
 //! 3. **粘包与半包解析 ([`FramedCodec::decode`])**：基于 `bytes::BytesMut` 缓冲区维护，自动处理流式 I/O 中的分包与合并。
 
 pub mod pb {
@@ -16,8 +16,8 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use thiserror::Error;
 
-/// 单条消息最大允许字节数（默认 64 MiB）
-pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// 单条消息最大允许字节数（默认 1 MiB）
+pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// 本 Crate 支持的有线协议版本号
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
 
@@ -126,6 +126,8 @@ mod tests {
             protocol_version: 1,
             deadline_ms: 1000,
             sequence_number: 0,
+            generation: 1,
+            fence_token: 1,
             payload: Some(envelope::Payload::Hello(Hello {
                 min_protocol_version: 1,
                 max_protocol_version: 1,
@@ -157,6 +159,8 @@ mod tests {
             protocol_version: 1,
             deadline_ms: 0,
             sequence_number: 0,
+            generation: 1,
+            fence_token: 1,
             payload: None,
         };
 
@@ -174,6 +178,8 @@ mod tests {
             protocol_version: 1,
             deadline_ms: 0,
             sequence_number: 0,
+            generation: 1,
+            fence_token: 1,
             payload: None,
         };
 

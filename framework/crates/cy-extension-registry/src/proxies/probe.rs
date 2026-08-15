@@ -12,7 +12,7 @@ use cy_platform_api::{
 use cy_plugin_protocol::pb::{invoke_result, DetectHardwareRequest, Invoke};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_instance_actor;
+use crate::helper::{invoke_actor, prepare_instance_actor};
 
 /// 1. 远程硬件探针代理
 pub struct RemoteProbe {
@@ -22,10 +22,7 @@ pub struct RemoteProbe {
 }
 
 impl RemoteProbe {
-    pub fn new(
-        plugin_id: impl Into<String>,
-        actor: Arc<AsyncMutex<InstanceActor>>,
-    ) -> Self {
+    pub fn new(plugin_id: impl Into<String>, actor: Arc<AsyncMutex<InstanceActor>>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             actor,
@@ -63,10 +60,7 @@ impl Probe for RemoteProbe {
                 DetectHardwareRequest {},
             )),
         };
-        let res = actor
-            .invoke(invoke_req, Duration::from_secs(10))
-            .await
-            .map_err(|e| PluginError::Execution(e.to_string()))?;
+        let res = invoke_actor(&mut actor, invoke_req, Duration::from_secs(10)).await?;
         if let Some(invoke_result::Response::DetectHardware(resp)) = res.response {
             return serde_json::from_str(&resp.hardware_manifest_json)
                 .map_err(|e| PluginError::Execution(e.to_string()));

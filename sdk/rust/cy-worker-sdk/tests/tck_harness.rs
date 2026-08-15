@@ -11,9 +11,8 @@ use std::{
 };
 
 use cy_worker_sdk::{
-    health_status, read_frame, run_worker_stream, write_frame, CyreneWorker, Envelope,
-    HealthCheck, HealthStatus, Hello, Payload, Shutdown, CURRENT_PROTOCOL_VERSION,
-    DEFAULT_MAX_MESSAGE_BYTES,
+    health_status, read_frame, run_worker_stream, write_frame, CyreneWorker, Envelope, HealthCheck,
+    HealthStatus, Hello, Payload, Shutdown, CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_MESSAGE_BYTES,
 };
 
 struct EchoWorker {
@@ -111,6 +110,8 @@ impl HostWatchdogSession {
             protocol_version: CURRENT_PROTOCOL_VERSION,
             deadline_ms: 5000,
             sequence_number: self.request_sequence,
+            generation: 1,
+            fence_token: 1,
             payload: Some(Payload::Hello(Hello {
                 min_protocol_version: 1,
                 max_protocol_version: 1,
@@ -128,6 +129,8 @@ impl HostWatchdogSession {
             protocol_version: CURRENT_PROTOCOL_VERSION,
             deadline_ms,
             sequence_number: self.request_sequence,
+            generation: 1,
+            fence_token: 1,
             payload: Some(Payload::HealthCheck(HealthCheck {})),
         }
     }
@@ -141,6 +144,8 @@ impl HostWatchdogSession {
             protocol_version: CURRENT_PROTOCOL_VERSION,
             deadline_ms: grace_period_ms as i64 + 1000,
             sequence_number: self.request_sequence,
+            generation: 1,
+            fence_token: 1,
             payload: Some(Payload::Shutdown(Shutdown { grace_period_ms })),
         }
     }
@@ -152,7 +157,12 @@ fn test_tck_conformance_handshake_heartbeat_shutdown() {
     let (worker, health_counter, shutdown_counter) = EchoWorker::new("com.cyrene.test.worker");
 
     let mut host_tx = Vec::new();
-    write_frame(&mut host_tx, &watchdog.build_hello(), DEFAULT_MAX_MESSAGE_BYTES).unwrap();
+    write_frame(
+        &mut host_tx,
+        &watchdog.build_hello(),
+        DEFAULT_MAX_MESSAGE_BYTES,
+    )
+    .unwrap();
     write_frame(
         &mut host_tx,
         &watchdog.build_health_check(1000),
@@ -188,7 +198,9 @@ fn test_tck_conformance_handshake_heartbeat_shutdown() {
         Some(Payload::HelloAck(ack)) => {
             assert_eq!(ack.plugin_id, "com.cyrene.test.worker");
             assert_eq!(ack.selected_protocol_version, 1);
-            assert!(ack.declared_capabilities.contains(&"ModelAnalyzer".to_string()));
+            assert!(ack
+                .declared_capabilities
+                .contains(&"ModelAnalyzer".to_string()));
             assert_eq!(ack.metrics.get("backend").unwrap(), "native-rust");
         }
         other => panic!("expected HelloAck, got {other:?}"),

@@ -165,6 +165,11 @@ impl ProcessRuntime for UdsSandboxAdapterClient {
                 cgroup_name: plan.cgroup_name.clone(),
                 limits: Some(limits_to_proto(&plan.limits)),
                 binding: Some(binding_to_proto(binding)),
+                transport_socket_path: plan
+                    .transport_socket
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
             },
         ))?;
         match response.body {
@@ -287,6 +292,11 @@ fn handle_to_proto(value: &ProcessHandle) -> sandbox_v1::SandboxProcessHandle {
         pid: value.pid,
         cgroup_path: value.cgroup_path.to_string_lossy().into_owned(),
         start_time_ticks: value.start_time_ticks,
+        transport_socket_path: value
+            .transport_socket
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -304,6 +314,8 @@ fn handle_from_proto(
         pid: value.pid,
         cgroup_path: PathBuf::from(value.cgroup_path),
         start_time_ticks: value.start_time_ticks,
+        transport_socket: (!value.transport_socket_path.is_empty())
+            .then(|| PathBuf::from(value.transport_socket_path)),
     })
 }
 

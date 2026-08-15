@@ -15,8 +15,8 @@ use cy_kernel_daemon::watchdog::{InstanceActor, InstanceActorState};
 use cy_worker_sdk::{
     health_status,
     pb::{
-        invoke::Request as InvokeReq, invoke_result::Response as InvokeResp,
-        DetectHardwareRequest, Envelope, HealthCheck, Hello, Invoke, Shutdown,
+        invoke::Request as InvokeReq, invoke_result::Response as InvokeResp, DetectHardwareRequest,
+        Envelope, HealthCheck, Hello, Invoke, Shutdown,
     },
     read_frame, write_frame, Payload, DEFAULT_MAX_MESSAGE_BYTES,
 };
@@ -59,6 +59,8 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         protocol_version: 1,
         deadline_ms: 5000,
         sequence_number: 1,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Hello(Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
@@ -87,6 +89,8 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         protocol_version: 1,
         deadline_ms: 2000,
         sequence_number: 2,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::HealthCheck(HealthCheck {})),
     };
     write_frame(&mut writer, &health_env, DEFAULT_MAX_MESSAGE_BYTES)?;
@@ -109,6 +113,8 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         protocol_version: 1,
         deadline_ms: 5000,
         sequence_number: 3,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Invoke(Invoke {
             extension_point: "Probe".to_string(),
             method: "detect_hardware".to_string(),
@@ -138,6 +144,8 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         protocol_version: 1,
         deadline_ms: 2000,
         sequence_number: 4,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Shutdown(Shutdown {
             grace_period_ms: 500,
         })),
@@ -194,6 +202,8 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         protocol_version: 1,
         deadline_ms: 5000,
         sequence_number: 1,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Hello(Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
@@ -209,7 +219,9 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         Some(Payload::HelloAck(ack)) => {
             assert_eq!(ack.plugin_id, "com.cyrene.test.python-echo-worker");
             assert_eq!(ack.selected_protocol_version, 1);
-            assert!(ack.declared_capabilities.contains(&"PythonShim".to_string()));
+            assert!(ack
+                .declared_capabilities
+                .contains(&"PythonShim".to_string()));
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }
@@ -222,6 +234,8 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         protocol_version: 1,
         deadline_ms: 2000,
         sequence_number: 2,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::HealthCheck(HealthCheck {})),
     };
     write_frame(&mut writer, &health_env, DEFAULT_MAX_MESSAGE_BYTES)?;
@@ -244,6 +258,8 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         protocol_version: 1,
         deadline_ms: 5000,
         sequence_number: 3,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Invoke(Invoke {
             extension_point: "Probe".to_string(),
             method: "detect_hardware".to_string(),
@@ -268,6 +284,8 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         protocol_version: 1,
         deadline_ms: 2000,
         sequence_number: 4,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Shutdown(Shutdown {
             grace_period_ms: 500,
         })),
@@ -324,6 +342,8 @@ fn test_real_subprocess_posix_sigterm_handling() -> Result<(), Box<dyn std::erro
         protocol_version: 1,
         deadline_ms: 5000,
         sequence_number: 1,
+        generation: 1,
+        fence_token: 1,
         payload: Some(Payload::Hello(Hello {
             min_protocol_version: 1,
             max_protocol_version: 1,
@@ -369,6 +389,7 @@ impl ProcessRuntime for MockSandboxBackend {
             pid: 12345,
             cgroup_path: PathBuf::from(&format!("/cgroup/{}", plan.cgroup_name)),
             start_time_ticks: Some(100),
+            transport_socket: None,
         })
     }
 
@@ -422,6 +443,7 @@ fn test_real_subprocess_kill9_to_watchdog_quarantine_integration(
         environment: BTreeMap::new(),
         cgroup_name: "cgroup-py-worker".to_string(),
         limits: CgroupLimits::default(),
+        transport_socket: None,
     };
 
     let backend = Arc::new(MockSandboxBackend);
@@ -468,7 +490,10 @@ fn test_real_subprocess_kill9_to_watchdog_quarantine_integration(
         // Feed crash to InstanceActor
         let is_quarantined = actor.record_crash(now + Duration::from_millis(i * 100));
         if i == 4 {
-            assert!(is_quarantined, "4th crash within 60s must trigger Quarantine");
+            assert!(
+                is_quarantined,
+                "4th crash within 60s must trigger Quarantine"
+            );
         }
     }
 

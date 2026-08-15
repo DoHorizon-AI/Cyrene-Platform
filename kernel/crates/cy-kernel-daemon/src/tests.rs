@@ -225,6 +225,7 @@ impl ProcessRuntime for FakeSandbox {
             pid: 1,
             cgroup_path: PathBuf::from("/test"),
             start_time_ticks: None,
+            transport_socket: None,
         })
     }
 
@@ -341,6 +342,7 @@ impl InstalledPluginResolver for TestWorkerResolver {
                 environment: BTreeMap::new(),
                 cgroup_name: format!("instance-{}", worker.identity.id),
                 limits: CgroupLimits::default(),
+                transport_socket: None,
             },
         })
     }
@@ -680,12 +682,12 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
 
 #[test]
 fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
+    use crate::watchdog::InstanceActorState;
     use core_v1::{
         kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
         CancelSemanticOperationRequest, CreateOperationRequest, HeartbeatWorkerRequest,
         ReportOperationRequest, StartWorkerRequest, StopWorkerRequest, SubscribeEventsRequest,
     };
-    use crate::watchdog::InstanceActorState;
 
     let adapter = semantic_worker_adapter();
     let runtime = tokio::runtime::Builder::new_current_thread()

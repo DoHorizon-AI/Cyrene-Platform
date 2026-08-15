@@ -20,6 +20,8 @@ message Envelope {
   uint32 protocol_version = 4;
   int64 deadline_ms = 5;
   uint64 sequence_number = 6;
+  uint64 generation = 7;
+  uint64 fence_token = 8;
 
   oneof payload {
     // Control & Lifecycle

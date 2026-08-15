@@ -11,7 +11,7 @@ use cy_platform_api::{
 use cy_plugin_protocol::pb::{Invoke, SendNotificationRequest};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_instance_actor;
+use crate::helper::{invoke_actor, prepare_instance_actor};
 
 /// 9. Remote Notification Proxy
 pub struct RemoteNotification {
@@ -21,10 +21,7 @@ pub struct RemoteNotification {
 }
 
 impl RemoteNotification {
-    pub fn new(
-        plugin_id: impl Into<String>,
-        actor: Arc<AsyncMutex<InstanceActor>>,
-    ) -> Self {
+    pub fn new(plugin_id: impl Into<String>, actor: Arc<AsyncMutex<InstanceActor>>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             actor,
@@ -68,10 +65,7 @@ impl Notification for RemoteNotification {
                 },
             )),
         };
-        let _ = actor
-            .invoke(invoke_req, Duration::from_secs(10))
-            .await
-            .map_err(|e| PluginError::Execution(e.to_string()))?;
+        let _ = invoke_actor(&mut actor, invoke_req, Duration::from_secs(10)).await?;
         Ok(())
     }
 }

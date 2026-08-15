@@ -12,7 +12,7 @@ use cy_platform_api::{
 use cy_plugin_protocol::pb::{invoke_result, Invoke, RunTrainingStepRequest};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_instance_actor;
+use crate::helper::{invoke_actor, prepare_instance_actor};
 
 /// 6. Remote Training Backend Proxy
 pub struct RemoteTrainingBackend {
@@ -22,10 +22,7 @@ pub struct RemoteTrainingBackend {
 }
 
 impl RemoteTrainingBackend {
-    pub fn new(
-        plugin_id: impl Into<String>,
-        actor: Arc<AsyncMutex<InstanceActor>>,
-    ) -> Self {
+    pub fn new(plugin_id: impl Into<String>, actor: Arc<AsyncMutex<InstanceActor>>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             actor,
@@ -72,10 +69,7 @@ impl TrainingBackend for RemoteTrainingBackend {
                 },
             )),
         };
-        let res = actor
-            .invoke(invoke_req, Duration::from_secs(60))
-            .await
-            .map_err(|e| PluginError::Execution(e.to_string()))?;
+        let res = invoke_actor(&mut actor, invoke_req, Duration::from_secs(60)).await?;
         if let Some(invoke_result::Response::RunTrainingStep(resp)) = res.response {
             return serde_json::from_str(&resp.checkpoint_metadata_json)
                 .map_err(|e| PluginError::Execution(e.to_string()));

@@ -18,11 +18,20 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct FilesystemInstalledPluginResolver {
     root: PathBuf,
+    transport_root: PathBuf,
 }
 
 impl FilesystemInstalledPluginResolver {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            transport_root: PathBuf::from("/run/cyrene/workers"),
+        }
+    }
+
+    pub fn with_worker_transport_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.transport_root = root.into();
+        self
     }
 }
 
@@ -104,8 +113,8 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
                     &error.to_string(),
                 )
             })?;
-            let manifest: cy_manifest::PluginManifest =
-                serde_json::from_str(&manifest_content).map_err(|error| {
+            let manifest: cy_manifest::PluginManifest = serde_json::from_str(&manifest_content)
+                .map_err(|error| {
                     ProviderError::new(
                         "filesystem-plugin-resolver",
                         "INSTALLATION_MANIFEST_INVALID",
@@ -160,6 +169,7 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
                 environment: record.environment,
                 cgroup_name: format!("instance-{instance_name}"),
                 limits: CgroupLimits::default(),
+                transport_socket: Some(self.transport_root.join(format!("{instance_name}.sock"))),
             },
         })
     }
@@ -447,7 +457,8 @@ mod tests {
         assert_eq!(resolved.installation.installation_name, "demo-plugin");
 
         // Mismatched manifest ID should fail
-        let bad_manifest = manifest_content.replace(r#""id": "demo-plugin""#, r#""id": "other-id""#);
+        let bad_manifest =
+            manifest_content.replace(r#""id": "demo-plugin""#, r#""id": "other-id""#);
         std::fs::write(
             directory.path().join("demo-plugin").join("manifest.json"),
             bad_manifest,

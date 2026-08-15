@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let runtime = Arc::new(CgroupV2Runtime::new(CgroupV2Config {
         root,
+        transport_root: args.transport_root.clone(),
         device_bpf_enabled: !args.disable_device_bpf,
     }));
     runtime.initialize_owned_root()?;
@@ -107,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         adapter_id: String,
         socket: PathBuf,
         cgroup_root: Option<PathBuf>,
+        transport_root: PathBuf,
         disable_device_bpf: bool,
         allowed_client_uid: Option<u32>,
         allowed_client_gid: Option<u32>,
@@ -118,6 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut adapter_id = "sandboxd".to_string();
             let mut socket = PathBuf::from("/run/cyrene/sandboxd.sock");
             let mut cgroup_root = None;
+            let mut transport_root = PathBuf::from("/run/cyrene/workers");
             let mut disable_device_bpf = false;
             let mut allowed_client_uid = None;
             let mut allowed_client_gid = None;
@@ -134,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--adapter-id" => adapter_id = value()?,
                     "--socket" => socket = PathBuf::from(value()?),
                     "--cgroup-root" => cgroup_root = Some(PathBuf::from(value()?)),
+                    "--transport-root" => transport_root = PathBuf::from(value()?),
                     "--disable-device-bpf" => disable_device_bpf = true,
                     "--allowed-client-uid" => {
                         allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
@@ -175,12 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::io::ErrorKind::InvalidInput,
                     "cyrene-sandboxd requires at least one of --allowed-client-uid or --allowed-client-gid to enforce UDS admission",
                 )
-                .into());
+                    .into());
             }
             Ok(Self {
                 adapter_id,
                 socket,
                 cgroup_root,
+                transport_root,
                 disable_device_bpf,
                 allowed_client_uid,
                 allowed_client_gid,

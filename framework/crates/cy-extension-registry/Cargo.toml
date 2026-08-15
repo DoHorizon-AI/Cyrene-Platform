@@ -11,7 +11,10 @@ cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
 cy-platform-api = { version = "0.1.0", path = "../cy-platform-api" }
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
+bytes = "1.0"
+thiserror = "1.0"
 serde_json = "1.0"
+prost = "0.12"
 
 [dev-dependencies]
 cy-kernel-daemon = { path = "../../../kernel/crates/cy-kernel-daemon", features = ["test-utils"] }

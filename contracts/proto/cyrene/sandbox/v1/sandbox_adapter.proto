@@ -27,6 +27,9 @@ message SandboxLaunchRequest {
   string cgroup_name = 5;
   SandboxLimits limits = 6;
   SandboxDeviceBinding binding = 7;
+  // Optional bounded worker byte-stream endpoint. sandboxd owns the stdio
+  // bridge; the Kernel never interprets the worker protocol on this channel.
+  string transport_socket_path = 8;
 }
 
 message SandboxStopRequest {
@@ -108,6 +111,7 @@ message SandboxProcessHandle {
   uint32 pid = 1;
   string cgroup_path = 2;
   optional uint64 start_time_ticks = 3;
+  string transport_socket_path = 4;
 }
 
 message SandboxProcessCondition {

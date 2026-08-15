@@ -2,8 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_manifest::{
     ArtifactKind, ArtifactManifest, CheckpointMetadata, Confidence, CpuInfo, Decision,
     HardwareManifest, HardwareProfile, Interconnect, Lineage, ModelManifest, OsInfo,
@@ -15,7 +17,6 @@ use cy_platform_api::{
     PluginCapabilities, PluginError, PluginKind, Probe, Quantization, RuntimeBuilder, Storage,
     TrainingBackend, PLUGIN_API_VERSION,
 };
-use cy_kernel_daemon::watchdog::InstanceActor;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::*;
@@ -561,8 +562,7 @@ fn test_generic_remote_plugin_kind_parsing() {
     let py_pkg = GenericRemotePlugin::new("p1", "python-package", make_actor());
     assert_eq!(py_pkg.kind(), PluginKind::PythonPackage);
 
-    let proto_srv =
-        GenericRemotePlugin::new("ps1", "protocol-and-services", make_actor());
+    let proto_srv = GenericRemotePlugin::new("ps1", "protocol-and-services", make_actor());
     assert_eq!(proto_srv.kind(), PluginKind::ProtocolAndServices);
 
     let deploy = GenericRemotePlugin::new("d1", "deployment-assets", make_actor());
@@ -587,4 +587,136 @@ fn test_proxy_type_aliases_compatibility() {
     assert_same_type::<RemoteNotification, NotificationProxy>();
     assert_same_type::<RemoteStorage, StorageProxy>();
     assert_same_type::<GenericRemotePlugin, GenericPluginProxy>();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses() {
+    use cy_plugin_protocol::{
+        envelope::Payload,
+        pb::{invoke_result, Envelope, InvokeResult, SendNotificationResponse},
+        CURRENT_PROTOCOL_VERSION,
+    };
+    use tokio::net::UnixListener;
+
+    let socket = std::env::temp_dir().join(format!("cyrene-ext-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).expect("bind worker transport socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept worker transport");
+        let (mut reader, mut writer) = stream.into_split();
+        let mut buffer = bytes::BytesMut::with_capacity(4096);
+        let request = crate::transport::read_frame(&mut reader, &mut buffer)
+            .await
+            .expect("read invoke")
+            .expect("invoke frame");
+        assert_eq!(request.plugin_id, "test-instance");
+        assert_eq!(request.generation, 1);
+        assert_eq!(request.fence_token, 0);
+        let wrong = Envelope {
+            request_id: "not-the-request".to_string(),
+            trace_id: request.trace_id.clone(),
+            plugin_id: request.plugin_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: 1,
+            generation: request.generation,
+            fence_token: request.fence_token,
+            payload: Some(Payload::InvokeResult(InvokeResult {
+                response: Some(invoke_result::Response::SendNotification(
+                    SendNotificationResponse { success: true },
+                )),
+            })),
+        };
+        crate::transport::write_frame(&mut writer, &wrong)
+            .await
+            .expect("write unmatched response");
+        let response = Envelope {
+            request_id: request.request_id,
+            trace_id: request.trace_id,
+            plugin_id: request.plugin_id,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: 2,
+            generation: request.generation,
+            fence_token: 0,
+            payload: Some(Payload::InvokeResult(InvokeResult {
+                response: Some(invoke_result::Response::SendNotification(
+                    SendNotificationResponse { success: true },
+                )),
+            })),
+        };
+        crate::transport::write_frame(&mut writer, &response)
+            .await
+            .expect("write correlated response");
+    });
+
+    let actor = Arc::new(AsyncMutex::new(InstanceActor::new_for_test_with_transport(
+        &socket,
+    )));
+    let notification = RemoteNotification::new("test-instance", actor);
+    notification
+        .send_notification("deploy", "ok", "info")
+        .await
+        .expect("remote notification should complete over worker socket");
+    server.await.expect("worker transport server task");
+    let _ = std::fs::remove_file(socket);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn invoke_timeout_sends_protocol_cancel_before_actor_fails_closed() {
+    use cy_plugin_protocol::envelope::Payload;
+    use cy_plugin_protocol::pb::Invoke;
+    use prost::Message;
+    use tokio::net::UnixListener;
+
+    let socket = std::env::temp_dir().join(format!(
+        "cyrene-extension-timeout-{}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).expect("bind worker transport socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept worker transport");
+        let (mut reader, _) = stream.into_split();
+        let mut buffer = bytes::BytesMut::with_capacity(4096);
+        let invoke = crate::transport::read_frame(&mut reader, &mut buffer)
+            .await
+            .expect("read invoke")
+            .expect("invoke frame");
+        assert!(matches!(invoke.payload, Some(Payload::Invoke(_))));
+        let cancel = crate::transport::read_frame(&mut reader, &mut buffer)
+            .await
+            .expect("read cancellation")
+            .expect("cancel frame");
+        match cancel.payload {
+            Some(Payload::Cancel(cancel)) => {
+                assert_eq!(cancel.target_request_id, invoke.request_id)
+            }
+            other => panic!("expected protocol cancellation, got {other:?}"),
+        }
+    });
+
+    let actor = Arc::new(AsyncMutex::new(InstanceActor::new_for_test_with_transport(
+        &socket,
+    )));
+    let mut actor = crate::helper::prepare_instance_actor("test-instance", &actor)
+        .await
+        .expect("attach transport");
+    let error = actor
+        .invoke_raw(
+            Invoke {
+                extension_point: "test".to_string(),
+                method: "timeout".to_string(),
+                request: None,
+            }
+            .encode_to_vec(),
+            Duration::from_millis(25),
+        )
+        .await
+        .expect_err("invoke must time out");
+    assert_eq!(error.reason_code, "INVOKE_TIMEOUT");
+    server.await.expect("worker cancellation server task");
+    let _ = std::fs::remove_file(socket);
 }

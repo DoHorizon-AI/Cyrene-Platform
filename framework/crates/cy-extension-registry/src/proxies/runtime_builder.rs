@@ -12,7 +12,7 @@ use cy_platform_api::{
 use cy_plugin_protocol::pb::{invoke_result, BuildRuntimeRequest, Invoke};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_instance_actor;
+use crate::helper::{invoke_actor, prepare_instance_actor};
 
 /// 4. Remote Runtime Builder Proxy
 pub struct RemoteRuntimeBuilder {
@@ -22,10 +22,7 @@ pub struct RemoteRuntimeBuilder {
 }
 
 impl RemoteRuntimeBuilder {
-    pub fn new(
-        plugin_id: impl Into<String>,
-        actor: Arc<AsyncMutex<InstanceActor>>,
-    ) -> Self {
+    pub fn new(plugin_id: impl Into<String>, actor: Arc<AsyncMutex<InstanceActor>>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             actor,
@@ -76,10 +73,7 @@ impl RuntimeBuilder for RemoteRuntimeBuilder {
                 },
             )),
         };
-        let res = actor
-            .invoke(invoke_req, Duration::from_secs(30))
-            .await
-            .map_err(|e| PluginError::Execution(e.to_string()))?;
+        let res = invoke_actor(&mut actor, invoke_req, Duration::from_secs(30)).await?;
         if let Some(invoke_result::Response::BuildRuntime(resp)) = res.response {
             return serde_json::from_str(&resp.runtime_manifest_json)
                 .map_err(|e| PluginError::Execution(e.to_string()));

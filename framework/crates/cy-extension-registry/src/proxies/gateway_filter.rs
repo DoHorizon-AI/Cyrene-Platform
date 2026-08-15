@@ -12,7 +12,7 @@ use cy_platform_api::{
 use cy_plugin_protocol::pb::{invoke_result, FilterRequest, Invoke};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::helper::prepare_instance_actor;
+use crate::helper::{invoke_actor, prepare_instance_actor};
 
 /// 8. Remote Gateway Filter Proxy
 pub struct RemoteGatewayFilter {
@@ -22,10 +22,7 @@ pub struct RemoteGatewayFilter {
 }
 
 impl RemoteGatewayFilter {
-    pub fn new(
-        plugin_id: impl Into<String>,
-        actor: Arc<AsyncMutex<InstanceActor>>,
-    ) -> Self {
+    pub fn new(plugin_id: impl Into<String>, actor: Arc<AsyncMutex<InstanceActor>>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             actor,
@@ -67,10 +64,7 @@ impl GatewayFilter for RemoteGatewayFilter {
                 },
             )),
         };
-        let res = actor
-            .invoke(invoke_req, Duration::from_secs(10))
-            .await
-            .map_err(|e| PluginError::Execution(e.to_string()))?;
+        let res = invoke_actor(&mut actor, invoke_req, Duration::from_secs(10)).await?;
         if let Some(invoke_result::Response::FilterResponseData(resp)) = res.response {
             return Ok(resp.allow);
         }

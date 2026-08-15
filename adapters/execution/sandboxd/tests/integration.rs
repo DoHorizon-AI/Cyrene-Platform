@@ -28,6 +28,7 @@ fn start_mock_sandboxd(
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
     let runtime = Arc::new(CgroupV2Runtime::new(CgroupV2Config {
         root: cgroup_root,
+        transport_root: socket_path.parent().unwrap().join("workers"),
         device_bpf_enabled: false,
     }));
 
@@ -101,7 +102,10 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
 
     // 1. Preflight test over UDS
     let caps = client.preflight();
-    assert!(caps.ready, "preflight should report ready on valid cgroup setup");
+    assert!(
+        caps.ready,
+        "preflight should report ready on valid cgroup setup"
+    );
 
     // 2. Hard device enforcement denial when device-bpf is disabled
     let plan = LaunchPlan {
@@ -110,6 +114,7 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
         args: Vec::new(),
         environment: BTreeMap::new(),
         cgroup_name: "instance-test-1".to_string(),
+        transport_socket: None,
         limits: CgroupLimits {
             cpu_max_millicores: Some(500),
             memory_max_bytes: Some(64 * 1024 * 1024),
@@ -128,7 +133,10 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
     };
 
     let launch_result = client.launch(&plan, &hard_binding);
-    assert!(launch_result.is_err(), "hard device binding without bpf must fail closed");
+    assert!(
+        launch_result.is_err(),
+        "hard device binding without bpf must fail closed"
+    );
     let err = launch_result.unwrap_err();
     assert_eq!(err.reason_code, "HARD_ENFORCEMENT_UNAVAILABLE");
 
@@ -158,6 +166,7 @@ fn test_uds_kernel_sandbox_soft_enforcement_roundtrip() {
         args: vec!["10".to_string()],
         environment: BTreeMap::new(),
         cgroup_name: "instance-test-2".to_string(),
+        transport_socket: None,
         limits: CgroupLimits {
             cpu_max_millicores: Some(1000),
             memory_max_bytes: Some(128 * 1024 * 1024),

@@ -95,6 +95,8 @@ fn launch_request(
         environment: request.environment.into_iter().collect(),
         cgroup_name: request.cgroup_name,
         limits: limits_from_proto(limits),
+        transport_socket: (!request.transport_socket_path.is_empty())
+            .then(|| PathBuf::from(request.transport_socket_path)),
     };
     runtime.launch(&plan, &binding_from_proto(binding))
 }
@@ -211,6 +213,10 @@ fn handle_to_proto(value: ProcessHandle) -> sandbox_v1::SandboxProcessHandle {
         pid: value.pid,
         cgroup_path: value.cgroup_path.to_string_lossy().into_owned(),
         start_time_ticks: value.start_time_ticks,
+        transport_socket_path: value
+            .transport_socket
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -228,6 +234,8 @@ fn handle_from_proto(
         pid: value.pid,
         cgroup_path: PathBuf::from(value.cgroup_path),
         start_time_ticks: value.start_time_ticks,
+        transport_socket: (!value.transport_socket_path.is_empty())
+            .then(|| PathBuf::from(value.transport_socket_path)),
     })
 }
 
@@ -320,6 +328,7 @@ mod tests {
                 pid: 42,
                 cgroup_path: PathBuf::from("/test/instance-worker"),
                 start_time_ticks: Some(1),
+                transport_socket: None,
             })
         }
 
@@ -375,6 +384,7 @@ mod tests {
                             adapter_id: "nvidia".to_string(),
                             reason_code: "TEST".to_string(),
                         }),
+                        transport_socket_path: String::new(),
                     },
                 )),
             },

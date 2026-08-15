@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from cyrene_worker import (
-    CyreneWorker, Envelope, Hello, HealthCheck, Shutdown, Invoke,
+    Cancel, CyreneWorker, Envelope, Hello, HealthCheck, Shutdown, Invoke,
     run_worker_stream, write_frame, read_frame
 )
 
@@ -21,8 +21,12 @@ class MyWorker(CyreneWorker):
     def on_invoke(self, capability: str, action: str, payload: bytes):
         return True, b'ANALYSIS_OK:' + payload
 
+    def on_cancel(self, target_request_id: str, reason: str) -> None:
+        self.cancelled = (target_request_id, reason)
+
 def main():
     worker = MyWorker()
+    worker.cancelled = None
     inp = io.BytesIO()
     out = io.BytesIO()
 
@@ -38,9 +42,13 @@ def main():
     e3 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
     write_frame(e3.encode(), inp)
 
-    # 4. Shutdown
-    e4 = Envelope(request_id='req-4', plugin_id='com.cy.analyzer', payload=Shutdown(grace_period_ms=500))
+    # 4. Cancel (no response frame)
+    e4 = Envelope(request_id='cancel-1', plugin_id='com.cy.analyzer', payload=Cancel(target_request_id='req-3', reason='deadline'))
     write_frame(e4.encode(), inp)
+
+    # 5. Shutdown
+    e5 = Envelope(request_id='req-4', plugin_id='com.cy.analyzer', payload=Shutdown(grace_period_ms=500))
+    write_frame(e5.encode(), inp)
 
     inp.seek(0)
     run_worker_stream(inp, out, worker)
@@ -69,6 +77,7 @@ def main():
     assert r3.request_id == 'req-3'
     assert r3.payload_tag == 21, f'expected InvokeResult(21), got {r3.payload_tag}'
     assert r3.payload.payload == b'ANALYSIS_OK:data123'
+    assert worker.cancelled == ('req-3', 'deadline')
 
     f4 = read_frame(out)
     assert f4 is not None

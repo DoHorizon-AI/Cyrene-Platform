@@ -3,20 +3,21 @@
 //! MIGRATION NOTE: The previous version of this test used `PluginSupervisor::new()` to spawn
 //! a JVM worker via stdio. Since all plugin lifecycle is now managed by `InstanceActor` and the
 //! sandboxd channel, this test needs to:
-//!   1. Use the sandboxd UDS client to establish a transport channel.
-//!   2. Call `InstanceActor::attach_transport_channel` with the resulting `mpsc::Sender<Envelope>`.
+//!   1. Use the sandboxd UDS client to obtain the opaque worker socket endpoint.
+//!   2. Let the framework transport attach `WorkerTransportCommand` to the actor.
 //!   3. Then use `RemoteNotification` / `RemoteExecutionEngine` as before.
 //!
-//! The test body is marked `#[ignore]` until the sandboxd e2e wire-up is complete.
+//! The test remains `#[ignore]` because this repository does not ship a runnable
+//! JVM worker installation record and supervised sandboxd fixture.
 //! See: `kernel/crates/cy-kernel-daemon/src/watchdog/instance_actor.rs` and
 //!      `adapters/execution/sandboxd/`.
 
 use std::process::Command;
 
 /// JVM plugin full wire-protocol lifecycle test.
-/// Ignored until sandboxd UDS transport channel is wired end-to-end.
+/// Ignored until a real JVM worker installation and sandboxd fixture are available.
 #[tokio::test]
-#[ignore = "Pending sandboxd e2e wire-up; PluginSupervisor stdio path removed"]
+#[ignore = "No runnable JVM worker installation/sandboxd fixture in this repository"]
 async fn test_jvm_plugin_full_wire_protocol_lifecycle() {
     // Check java availability
     let java_check = Command::new("java").arg("-version").output();
@@ -37,15 +38,13 @@ async fn test_jvm_plugin_full_wire_protocol_lifecycle() {
         return;
     }
 
-    // TODO: Replace with InstanceActor construction + attach_transport_channel once
-    // sandboxd UDS transport is wired end-to-end:
+    // TODO: Replace with a verified installation and a running sandboxd service
+    // once this repository carries a runnable JVM worker artifact:
     //
     //   let sandbox_client = UdsSandboxAdapterClient::connect(sandboxd_socket).await?;
     //   let mut actor = InstanceActor::new("jvm-poc", "lease-jvm", 1,
     //       Arc::new(sandbox_client), plan, binding, Duration::from_secs(30));
     //   actor.start().unwrap();
-    //   let (tx, rx) = mpsc::channel(32);
-    //   actor.attach_transport_channel(tx);
     //   let actor_arc = Arc::new(AsyncMutex::new(actor));
     //
     //   let notification = RemoteNotification::new("jvm-poc", actor_arc.clone());

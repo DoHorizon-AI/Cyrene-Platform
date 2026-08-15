@@ -13,6 +13,8 @@ use crate::{bpf::LinuxDeviceMapper, config::CgroupV2Config, runtime::CgroupV2Run
 fn config(root: PathBuf) -> CgroupV2Config {
     CgroupV2Config {
         root,
+        transport_root: std::env::temp_dir()
+            .join(format!("cyrene-transport-{}", std::process::id())),
         device_bpf_enabled: false,
     }
 }
@@ -64,6 +66,7 @@ fn telemetry_uses_kernel_files_without_estimation() {
         pid: 1,
         cgroup_path: root.clone(),
         start_time_ticks: None,
+        transport_socket: None,
     });
     assert_eq!(telemetry.memory_current_bytes, Some(42));
     assert_eq!(telemetry.cpu_usage_usec, Some(11));
@@ -150,7 +153,10 @@ mod linux_uds {
     use std::{
         fs,
         io::{Read, Write},
-        os::unix::net::{UnixListener, UnixStream},
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         path::PathBuf,
         time::Duration,
     };
@@ -273,6 +279,15 @@ mod linux_uds {
         let socket = socket_path("multiacct");
         let listener = UnixListener::bind(&socket).unwrap();
         let (trusted_uid, _trusted_gid) = own_credentials();
+        if trusted_uid != 0 {
+            eprintln!(
+                "SKIP: multi-account UDS acceptance requires root to drop the child to nobody; current uid={trusted_uid}"
+            );
+            drop(listener);
+            let _ = fs::remove_dir_all(socket.parent().unwrap());
+            return;
+        }
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o777)).unwrap();
 
         let child = spawn_nobody_client(&socket);
         let (stream, _) = listener.accept().unwrap();
