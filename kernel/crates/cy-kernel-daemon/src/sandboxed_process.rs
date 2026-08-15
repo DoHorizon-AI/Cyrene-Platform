@@ -42,6 +42,7 @@ impl SandboxedProcess {
         }
     }
 
+    #[allow(dead_code)]
     pub fn state(&self) -> SandboxedProcessState {
         self.state
     }
@@ -56,6 +57,7 @@ impl SandboxedProcess {
             .and_then(|handle| handle.transport_socket.as_deref())
     }
 
+    #[allow(clippy::unnecessary_unwrap)]
     pub fn start(&mut self) -> Result<&ProcessHandle, ProviderError> {
         if self.handle.is_some() {
             return Ok(self.handle.as_ref().expect("handle is present"));

@@ -80,19 +80,17 @@ fn serve_linux_adapter(
     listener: UnixListener,
     provider: cyrene_linux_sys_adapter::LinuxSystemProvider,
 ) {
-    for stream in listener.incoming() {
-        if let Ok(mut stream) = stream {
-            while let Ok(frame) = read_frame(&mut stream) {
-                if let Ok(req) = hardware_v1::AdapterRequest::decode(&frame[..]) {
-                    let resp = cyrene_linux_sys_adapter::handle_request(&provider, req);
-                    let mut out = Vec::new();
-                    resp.encode(&mut out).unwrap();
-                    if write_frame(&mut stream, &out).is_err() {
-                        break;
-                    }
-                } else {
+    for mut stream in listener.incoming().flatten() {
+        while let Ok(frame) = read_frame(&mut stream) {
+            if let Ok(req) = hardware_v1::AdapterRequest::decode(&frame[..]) {
+                let resp = cyrene_linux_sys_adapter::handle_request(&provider, req);
+                let mut out = Vec::new();
+                resp.encode(&mut out).unwrap();
+                if write_frame(&mut stream, &out).is_err() {
                     break;
                 }
+            } else {
+                break;
             }
         }
     }
@@ -102,19 +100,17 @@ fn serve_nvidia_adapter(
     listener: UnixListener,
     provider: cyrene_nvidia_adapter::discovery::NvidiaSmiProvider,
 ) {
-    for stream in listener.incoming() {
-        if let Ok(mut stream) = stream {
-            while let Ok(frame) = read_frame(&mut stream) {
-                if let Ok(req) = hardware_v1::AdapterRequest::decode(&frame[..]) {
-                    let resp = cyrene_nvidia_adapter::handle_request(&provider, req);
-                    let mut out = Vec::new();
-                    resp.encode(&mut out).unwrap();
-                    if write_frame(&mut stream, &out).is_err() {
-                        break;
-                    }
-                } else {
+    for mut stream in listener.incoming().flatten() {
+        while let Ok(frame) = read_frame(&mut stream) {
+            if let Ok(req) = hardware_v1::AdapterRequest::decode(&frame[..]) {
+                let resp = cyrene_nvidia_adapter::handle_request(&provider, req);
+                let mut out = Vec::new();
+                resp.encode(&mut out).unwrap();
+                if write_frame(&mut stream, &out).is_err() {
                     break;
                 }
+            } else {
+                break;
             }
         }
     }
@@ -305,14 +301,12 @@ fn test_kernel_daemon_rejects_corrupted_adapter_frame_fail_closed(
     // Start a server that writes garbage protobuf bytes
     let bad_listener = UnixListener::bind(&bad_socket)?;
     thread::spawn(move || {
-        for stream in bad_listener.incoming() {
-            if let Ok(mut stream) = stream {
-                // Read client request
-                let _ = read_frame(&mut stream);
-                // Return corrupted payload (e.g. invalid protobuf bytes)
-                let garbage = vec![0xFF, 0xFF, 0xFF, 0xFF];
-                let _ = write_frame(&mut stream, &garbage);
-            }
+        for mut stream in bad_listener.incoming().flatten() {
+            // Read client request
+            let _ = read_frame(&mut stream);
+            // Return corrupted payload (e.g. invalid protobuf bytes)
+            let garbage = vec![0xFF, 0xFF, 0xFF, 0xFF];
+            let _ = write_frame(&mut stream, &garbage);
         }
     });
 

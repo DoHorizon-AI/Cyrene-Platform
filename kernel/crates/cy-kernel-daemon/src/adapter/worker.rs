@@ -524,9 +524,10 @@ impl KernelServiceAdapter {
                 .iter()
                 .filter(|(_, process)| {
                     !process.watchdog_triggered
-                        && process.actor.last_heartbeat().map_or(false, |last| {
-                            last.elapsed() > process.actor.heartbeat_deadline()
-                        })
+                        && process
+                            .actor
+                            .last_heartbeat()
+                            .is_some_and(|last| last.elapsed() > process.actor.heartbeat_deadline())
                 })
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>()

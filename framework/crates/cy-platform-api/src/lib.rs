@@ -2,16 +2,16 @@
 //!
 //! 【平台扩展架构】
 //! 定义了平台与各功能插件之间交互的 10 大标准化扩展点 SPI Traits（Service Provider Interfaces）：
-//! 1. [`Probe`]: 宿主机物理硬件与环境探测；
-//! 2. [`ModelAnalyzer`]: 模型权重与架构静态/动态分析；
-//! 3. [`CompatRule`]: 硬件与算子兼容性规则引擎；
-//! 4. [`RuntimeBuilder`]: 推理执行运行时镜像/环境构建器；
+//! 1. [`Probe`][]: 宿主机物理硬件与环境探测；
+//! 2. [`ModelAnalyzer`][]: 模型权重与架构静态/动态分析；
+//! 3. [`CompatRule`][]: 硬件与算子兼容性规则引擎；
+//! 4. [`RuntimeBuilder`][]: 推理执行运行时镜像/环境构建器；
 //! 5. [`ExecutionEngine`]: 推理执行引擎（如 vLLM / TensorRT-LLM）；
-//! 6. [`TrainingBackend`]: 训练与微调后端引擎；
+//! 6. [`TrainingBackend`][]: 训练与微调后端引擎；
 //! 7. [`Quantization`]: 模型量化压缩器（AWQ, GPTQ, SmoothQuant 等）；
-//! 8. [`GatewayFilter`]: 请求网关路由、鉴权与前置/后置过滤器；
-//! 9. [`Notification`]: 告警、事件与状态通知管道；
-//! 10. [`Storage`]: 产物（模型权重、数据集、检查点）存储读写适配器。
+//! 8. [`GatewayFilter`][]: 请求网关路由、鉴权与前置/后置过滤器；
+//! 9. [`Notification`][]: 告警、事件与状态通知管道；
+//! 10. [`Storage`][]: 产物（模型权重、数据集、检查点）存储读写适配器。
 
 pub mod builtin;
 use async_trait::async_trait;

@@ -224,7 +224,7 @@ mod tests {
     /// Crash/restart must not reuse fence tokens. The fence floor is taken from
     /// the durably persisted journal (`recover()` returns max historical fence
     /// + 1); a fresh manager seeded with that floor must allocate a strictly
-    /// greater token than the lease that existed before the restart.
+    ///   greater token than the lease that existed before the restart.
     #[test]
     fn crash_restart_does_not_reuse_fence_tokens() {
         use cy_kernel_api::{

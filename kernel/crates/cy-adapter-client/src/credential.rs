@@ -54,7 +54,7 @@ pub(crate) fn verify_connected_peer(
                         &error.to_string(),
                     )
                 })?;
-        return expected.verify(adapter_id, credentials.uid(), credentials.gid());
+        expected.verify(adapter_id, credentials.uid(), credentials.gid())
     }
     #[cfg(not(target_os = "linux"))]
     {

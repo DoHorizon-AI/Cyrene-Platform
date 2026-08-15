@@ -46,11 +46,11 @@ impl KernelService for MockKernelService {
             inventory_generation: 1,
             observed_at: None,
             capacity: None,
-            accelerators: vec![],
             sandbox_backends: vec!["cgroupv2-linux".to_string()],
             enforcement: vec![],
             feature_flags: vec!["cgroup-v2".to_string()],
             resources: vec![],
+            ..Default::default()
         }))
     }
 
@@ -64,11 +64,11 @@ impl KernelService for MockKernelService {
             node: req.node,
             state: cy_proto::core_v1::LeaseState::Active as i32,
             granted: req.requirements,
-            accelerators: vec![],
             enforcement: vec![],
             expires_at: None,
             fence_token: 100,
             inventory_generation: 1,
+            ..Default::default()
         }))
     }
 
@@ -88,11 +88,11 @@ impl KernelService for MockKernelService {
             node: None,
             state: cy_proto::core_v1::LeaseState::Released as i32,
             granted: None,
-            accelerators: vec![],
             enforcement: vec![],
             expires_at: None,
             fence_token: 100,
             inventory_generation: 1,
+            ..Default::default()
         }))
     }
 
