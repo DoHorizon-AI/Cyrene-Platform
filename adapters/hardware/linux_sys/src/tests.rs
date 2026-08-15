@@ -274,16 +274,56 @@ fn peer_credential_policy_allows_matching_and_rejects_mismatch() {
     assert!(client_peer_credentials_allowed(1000, 2000, None, None));
 
     // Only UID configured
-    assert!(client_peer_credentials_allowed(1000, 9999, Some(1000), None));
-    assert!(!client_peer_credentials_allowed(1001, 2000, Some(1000), None));
+    assert!(client_peer_credentials_allowed(
+        1000,
+        9999,
+        Some(1000),
+        None
+    ));
+    assert!(!client_peer_credentials_allowed(
+        1001,
+        2000,
+        Some(1000),
+        None
+    ));
 
     // Only GID configured
-    assert!(client_peer_credentials_allowed(9999, 2000, None, Some(2000)));
-    assert!(!client_peer_credentials_allowed(1000, 2001, None, Some(2000)));
+    assert!(client_peer_credentials_allowed(
+        9999,
+        2000,
+        None,
+        Some(2000)
+    ));
+    assert!(!client_peer_credentials_allowed(
+        1000,
+        2001,
+        None,
+        Some(2000)
+    ));
 
     // Both UID and GID configured (AND semantics)
-    assert!(client_peer_credentials_allowed(1000, 2000, Some(1000), Some(2000)));
-    assert!(!client_peer_credentials_allowed(1001, 2000, Some(1000), Some(2000)));
-    assert!(!client_peer_credentials_allowed(1000, 2001, Some(1000), Some(2000)));
-    assert!(!client_peer_credentials_allowed(1001, 2001, Some(1000), Some(2000)));
+    assert!(client_peer_credentials_allowed(
+        1000,
+        2000,
+        Some(1000),
+        Some(2000)
+    ));
+    assert!(!client_peer_credentials_allowed(
+        1001,
+        2000,
+        Some(1000),
+        Some(2000)
+    ));
+    assert!(!client_peer_credentials_allowed(
+        1000,
+        2001,
+        Some(1000),
+        Some(2000)
+    ));
+    assert!(!client_peer_credentials_allowed(
+        1001,
+        2001,
+        Some(1000),
+        Some(2000)
+    ));
 }

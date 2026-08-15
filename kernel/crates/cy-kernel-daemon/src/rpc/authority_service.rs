@@ -20,8 +20,8 @@ use crate::{
         validate_authority_context,
     },
     peer_cred::principal_from_request,
-    watchdog::InstanceActor,
     session::ManagedProcess,
+    watchdog::InstanceActor,
 };
 
 #[tonic::async_trait]

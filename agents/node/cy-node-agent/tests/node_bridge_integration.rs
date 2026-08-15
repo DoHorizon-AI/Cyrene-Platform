@@ -5,8 +5,7 @@ use cy_node_agent::{
 };
 use cy_proto::{
     core_v1::{
-        control_plane_to_node,
-        kernel_authority_command, kernel_authority_command_result,
+        control_plane_to_node, kernel_authority_command, kernel_authority_command_result,
         kernel_authority_service_server::{KernelAuthorityService, KernelAuthorityServiceServer},
         kernel_command, kernel_command_result,
         kernel_service_server::{KernelService, KernelServiceServer},
@@ -297,14 +296,8 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     assert_eq!(discovered_node.node_epoch, 10);
 
     // 4. Establish a Fenced NodeControlSession
-    let mut session = NodeControlSession::new(
-        "node-worker-alpha",
-        10,
-        "1.0.0".to_string(),
-        1,
-        1,
-        "",
-    );
+    let mut session =
+        NodeControlSession::new("node-worker-alpha", 10, "1.0.0".to_string(), 1, 1, "");
     session.hello();
 
     let welcome_frame = ControlPlaneToNode {
@@ -335,22 +328,20 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "frame-cmd-1".to_string(),
         sequence_number: 2,
         session_id: "sess-12345".to_string(),
-        body: Some(control_plane_to_node::Body::Command(
-            KernelCommand {
-                command_id: "cmd-res-1".to_string(),
-                request: Some(kernel_command::Request::ReserveResources(
-                    ReserveResourcesRequest {
-                        node: Some(NodeRef {
-                            node_id: "node-worker-alpha".to_string(),
-                            node_epoch: 10,
-                        }),
-                        mutation: None,
-                        requirements: None,
-                        ttl: None,
-                    },
-                )),
-            },
-        )),
+        body: Some(control_plane_to_node::Body::Command(KernelCommand {
+            command_id: "cmd-res-1".to_string(),
+            request: Some(kernel_command::Request::ReserveResources(
+                ReserveResourcesRequest {
+                    node: Some(NodeRef {
+                        node_id: "node-worker-alpha".to_string(),
+                        node_epoch: 10,
+                    }),
+                    mutation: None,
+                    requirements: None,
+                    ttl: None,
+                },
+            )),
+        })),
     };
 
     let response_frame = bridge.forward(&mut session, reserve_frame).await?;
@@ -375,32 +366,28 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "frame-cmd-2".to_string(),
         sequence_number: 3,
         session_id: "sess-12345".to_string(),
-        body: Some(control_plane_to_node::Body::Command(
-            KernelCommand {
-                command_id: "cmd-start-worker-1".to_string(),
-                request: Some(kernel_command::Request::Authority(
-                    KernelAuthorityCommand {
-                        request: Some(kernel_authority_command::Request::StartWorker(
-                            StartWorkerRequest {
-                                worker: Some(cy_proto::semantic_v1::Worker {
-                                    identity: Some(cy_proto::semantic_v1::Identity {
-                                        id: "worker-embed-01".to_string(),
-                                        generation: 1,
-                                    }),
-                                    principal: None,
-                                    provider: None,
-                                    lease: None,
-                                    state: WorkerState::Running as i32,
-                                    execution_ref: String::new(),
-                                    limits: HashMap::new(),
-                                }),
-                                context: None,
-                            },
-                        )),
+        body: Some(control_plane_to_node::Body::Command(KernelCommand {
+            command_id: "cmd-start-worker-1".to_string(),
+            request: Some(kernel_command::Request::Authority(KernelAuthorityCommand {
+                request: Some(kernel_authority_command::Request::StartWorker(
+                    StartWorkerRequest {
+                        worker: Some(cy_proto::semantic_v1::Worker {
+                            identity: Some(cy_proto::semantic_v1::Identity {
+                                id: "worker-embed-01".to_string(),
+                                generation: 1,
+                            }),
+                            principal: None,
+                            provider: None,
+                            lease: None,
+                            state: WorkerState::Running as i32,
+                            execution_ref: String::new(),
+                            limits: HashMap::new(),
+                        }),
+                        context: None,
                     },
                 )),
-            },
-        )),
+            })),
+        })),
     };
 
     let start_worker_response = bridge.forward(&mut session, start_worker_frame).await?;
@@ -428,12 +415,10 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "frame-stale".to_string(),
         sequence_number: 2, // sequence already consumed!
         session_id: "sess-12345".to_string(),
-        body: Some(control_plane_to_node::Body::Command(
-            KernelCommand {
-                command_id: "cmd-stale".to_string(),
-                request: None,
-            },
-        )),
+        body: Some(control_plane_to_node::Body::Command(KernelCommand {
+            command_id: "cmd-stale".to_string(),
+            request: None,
+        })),
     };
     let fence_err = bridge.forward(&mut session, stale_frame).await.unwrap_err();
     assert_eq!(

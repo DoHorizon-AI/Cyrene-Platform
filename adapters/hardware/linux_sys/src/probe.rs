@@ -161,7 +161,10 @@ impl LinuxSystemProvider {
                 available: cgroup_v2,
                 required: true,
                 detail: if cgroup_v2 {
-                    format!("controllers: {}", controllers_content.as_deref().unwrap_or_default().trim())
+                    format!(
+                        "controllers: {}",
+                        controllers_content.as_deref().unwrap_or_default().trim()
+                    )
                 } else {
                     "cgroup v2 controllers not mounted".to_string()
                 },
@@ -331,7 +334,10 @@ impl ResourceProvider for LinuxSystemProvider {
         };
 
         let mut mem_attributes = BTreeMap::new();
-        mem_attributes.insert("swap.enabled".to_string(), (mem_info.swap_total_bytes > 0).to_string());
+        mem_attributes.insert(
+            "swap.enabled".to_string(),
+            (mem_info.swap_total_bytes > 0).to_string(),
+        );
         mem_attributes.insert("numa.nodes".to_string(), numa_nodes.to_string());
 
         let mut mem_capacity = BTreeMap::new();
@@ -586,7 +592,8 @@ fn probe_pidfd_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: pidfd_open has no pointer arguments. A valid return closes it.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id() as libc::pid_t, 0) };
+        let fd =
+            unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id() as libc::pid_t, 0) };
         if fd >= 0 {
             unsafe { libc::close(fd as libc::c_int) };
             true

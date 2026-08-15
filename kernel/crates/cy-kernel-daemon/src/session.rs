@@ -1,9 +1,6 @@
 //! Worker and managed process session types.
 
-use std::{
-    path::PathBuf,
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
 use cy_kernel_api::semantic;
 use cy_proto::core_v1;

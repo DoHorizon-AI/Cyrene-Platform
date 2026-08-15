@@ -16,8 +16,8 @@ use crate::{
         semantic_identity_from_proto, semantic_query_from_proto, to_proto_lease,
         to_semantic_proto_lease,
     },
-    watchdog::InstanceActor,
     session::ManagedProcess,
+    watchdog::InstanceActor,
 };
 
 #[tonic::async_trait]
