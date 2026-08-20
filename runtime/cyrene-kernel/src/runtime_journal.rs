@@ -150,6 +150,7 @@ fn event_name(event: RuntimeJournalEvent) -> &'static str {
     match event {
         RuntimeJournalEvent::KernelStarted => "KERNEL_STARTED",
         RuntimeJournalEvent::LeaseReserved => "LEASE_RESERVED",
+        RuntimeJournalEvent::LeaseReleaseStarted => "LEASE_RELEASE_STARTED",
         RuntimeJournalEvent::LeaseReleased => "LEASE_RELEASED",
         RuntimeJournalEvent::InstanceLaunched => "INSTANCE_LAUNCHED",
         RuntimeJournalEvent::InstanceTerminated => "INSTANCE_TERMINATED",

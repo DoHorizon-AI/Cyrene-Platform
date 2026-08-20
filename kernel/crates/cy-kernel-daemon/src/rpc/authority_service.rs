@@ -98,7 +98,8 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             // Durable fence record could not be persisted: roll back the
             // in-memory lease so it is never externally visible without the
             // durable evidence the contract requires.
-            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            let _ = self.daemon.begin_release(&lease.name, lease.fence_token);
+            let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
             return Err(provider_status(error));
         }
         Ok(Response::new(to_semantic_proto_lease(&lease)))
@@ -159,9 +160,69 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             lease_name: lease_identity.id.clone(),
             fence_token: request.fence_token,
         };
-        // Persist the durable release record BEFORE releasing in memory
-        // (fail-closed): if the journal write fails we keep the lease rather
-        // than lose the durable evidence of the reservation.
+        // The release decision becomes durable before the lease enters
+        // RELEASING. Resource reuse remains blocked until cleanup confirms it.
+        if let Err(error) = self.record_runtime(
+            RuntimeJournalEvent::LeaseReleaseStarted,
+            None,
+            Some(&journal_lease),
+            "LEASE_RELEASE_STARTED",
+        ) {
+            return Err(provider_status(error));
+        }
+        let releasing = self
+            .daemon
+            .begin_release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
+        let cleanup = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            if let Some((worker_id, process)) = instances.iter_mut().find(|(_, process)| {
+                process.lease.as_ref().is_some_and(|lease| {
+                    lease.lease_name == lease_identity.id
+                        && lease.fence_token == request.fence_token
+                })
+            }) {
+                if let Some(worker) = process.semantic_worker.as_mut() {
+                    worker.state = semantic::WorkerState::Draining;
+                }
+                let report = process
+                    .actor
+                    .stop(&cy_kernel_api::StopRequest {
+                        grace_period: self.heartbeat.graceful_stop,
+                        immediate: false,
+                    })
+                    .map_err(provider_status)?
+                    .clone();
+                if let Some(worker) = process.semantic_worker.as_mut() {
+                    worker.state = if report.complete {
+                        semantic::WorkerState::Stopped
+                    } else {
+                        semantic::WorkerState::Failed
+                    };
+                }
+                Some((worker_id.clone(), report))
+            } else {
+                None
+            }
+        };
+        if let Some((worker_id, report)) = cleanup {
+            self.publish_cleanup_events(&worker_id, &report);
+            if !report.complete {
+                if let Err(error) = self.record_runtime(
+                    RuntimeJournalEvent::InstanceCleanupFailed,
+                    Some(&worker_id),
+                    Some(&journal_lease),
+                    &report.reason_code,
+                ) {
+                    eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                }
+                return Ok(Response::new(to_semantic_proto_lease(&releasing)));
+            }
+            self.instances
+                .lock()
+                .expect("instance lock poisoned")
+                .remove(&worker_id);
+        }
         if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
@@ -171,7 +232,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             return Err(provider_status(error));
         }
         self.daemon
-            .release(&lease_identity.id, request.fence_token)
+            .complete_release(&lease_identity.id, request.fence_token)
             .map_err(provider_status)?;
         let lease = self
             .daemon
@@ -373,6 +434,20 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             .map(proto_duration)
             .transpose()?
             .unwrap_or(self.heartbeat.graceful_stop);
+        let journal_lease = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReleaseStarted,
+            Some(&worker_identity.id),
+            Some(&journal_lease),
+            "LEASE_RELEASE_STARTED",
+        )
+        .map_err(provider_status)?;
+        self.daemon
+            .begin_release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
         let _acknowledged =
             self.request_semantic_worker_shutdown(&worker_identity.id, "STOP_REQUESTED");
         let (worker, report) = {
@@ -416,13 +491,27 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         };
         self.publish_cleanup_events(&worker_identity.id, &report);
         if report.complete {
+            self.record_runtime(
+                RuntimeJournalEvent::LeaseReleased,
+                Some(&worker_identity.id),
+                Some(&journal_lease),
+                "LEASE_RELEASED",
+            )
+            .map_err(provider_status)?;
             self.daemon
-                .release(&lease_identity.id, request.fence_token)
+                .complete_release(&lease_identity.id, request.fence_token)
                 .map_err(provider_status)?;
             self.instances
                 .lock()
                 .expect("instance lock poisoned")
                 .remove(&worker_identity.id);
+        } else if let Err(error) = self.record_runtime(
+            RuntimeJournalEvent::InstanceCleanupFailed,
+            Some(&worker_identity.id),
+            Some(&journal_lease),
+            &report.reason_code,
+        ) {
+            eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
         }
         self.publish_semantic_event(
             worker.identity.clone(),
@@ -617,7 +706,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::PublishEndpointRequest>,
     ) -> Result<Response<semantic_v1::Endpoint>, Status> {
-        let _principal = principal_from_request(&request)?;
+        let principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let endpoint = semantic_endpoint_from_proto(
@@ -625,18 +714,40 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                 .endpoint
                 .ok_or_else(|| Status::invalid_argument("endpoint is required"))?,
         )?;
-        let owner_is_managed = self
+        let owner = self
             .instances
             .lock()
             .expect("instance lock poisoned")
             .get(&endpoint.owner.id)
             .and_then(|process| process.semantic_worker.as_ref())
-            .is_some_and(|worker| worker.identity == endpoint.owner);
-        if !owner_is_managed {
+            .filter(|worker| worker.identity == endpoint.owner)
+            .cloned()
+            .ok_or_else(|| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    "ENDPOINT_OWNER_UNKNOWN",
+                    "endpoint owner is not an active managed Worker incarnation",
+                )
+            })?;
+        if owner.principal != principal.identity {
+            return Err(semantic_status(
+                tonic::Code::PermissionDenied,
+                "AUTHORITY_DENIED",
+                "only the Worker owner Principal may publish an Endpoint",
+            ));
+        }
+        let owner_lease = self
+            .daemon
+            .lease(&owner.lease.id)
+            .map_err(provider_status)?;
+        if owner_lease.generation != owner.lease.generation
+            || owner_lease.holder != owner.identity
+            || owner_lease.state != LeaseState::Active
+        {
             return Err(semantic_status(
                 tonic::Code::FailedPrecondition,
-                "ENDPOINT_OWNER_UNKNOWN",
-                "endpoint owner is not an active managed Worker incarnation",
+                "LEASE_NOT_ACTIVE",
+                "endpoint owner no longer has an active Lease incarnation",
             ));
         }
         let endpoint_key = semantic_identity_key(&endpoint.identity);
@@ -666,7 +777,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::AuthorizeEndpointRequest>,
     ) -> Result<Response<semantic_v1::EndpointGrant>, Status> {
-        let _principal = principal_from_request(&request)?;
+        let principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let grant = semantic_endpoint_grant_from_proto(
@@ -674,15 +785,34 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                 .grant
                 .ok_or_else(|| Status::invalid_argument("endpoint grant is required"))?,
         )?;
-        let endpoint_exists = self
+        let endpoint = self
             .endpoints
             .lock()
             .expect("endpoint lock poisoned")
             .get(&semantic_identity_key(&grant.endpoint))
-            .is_some_and(|endpoint| endpoint.identity == grant.endpoint);
-        if !endpoint_exists {
-            return Err(Status::not_found(
-                "endpoint grant targets an unpublished endpoint",
+            .filter(|endpoint| endpoint.identity == grant.endpoint)
+            .cloned()
+            .ok_or_else(|| Status::not_found("endpoint grant targets an unpublished endpoint"))?;
+        let owner = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&endpoint.owner.id)
+            .and_then(|process| process.semantic_worker.as_ref())
+            .filter(|worker| worker.identity == endpoint.owner)
+            .cloned()
+            .ok_or_else(|| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    "ENDPOINT_OWNER_UNKNOWN",
+                    "endpoint owner is not an active managed Worker incarnation",
+                )
+            })?;
+        if owner.principal != principal.identity {
+            return Err(semantic_status(
+                tonic::Code::PermissionDenied,
+                "AUTHORITY_DENIED",
+                "only the Worker owner Principal may authorize an Endpoint grant",
             ));
         }
         let lease = self
@@ -720,14 +850,59 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         &self,
         request: Request<core_v1::RevokeEndpointRequest>,
     ) -> Result<Response<()>, Status> {
-        let _principal = principal_from_request(&request)?;
+        let principal = principal_from_request(&request)?;
         let request = request.into_inner();
         validate_authority_context(request.context.as_ref())?;
         let grant = semantic_identity_from_proto(request.grant, "grant")?;
+        let grant_key = semantic_identity_key(&grant);
+        let stored_grant = self
+            .endpoint_grants
+            .lock()
+            .expect("endpoint grant lock poisoned")
+            .get(&grant_key)
+            .cloned();
+        if let Some(stored_grant) = stored_grant {
+            let endpoint = self
+                .endpoints
+                .lock()
+                .expect("endpoint lock poisoned")
+                .get(&semantic_identity_key(&stored_grant.endpoint))
+                .filter(|endpoint| endpoint.identity == stored_grant.endpoint)
+                .cloned()
+                .ok_or_else(|| {
+                    semantic_status(
+                        tonic::Code::FailedPrecondition,
+                        "ENDPOINT_OWNER_UNKNOWN",
+                        "endpoint grant no longer has an active endpoint owner",
+                    )
+                })?;
+            let owner = self
+                .instances
+                .lock()
+                .expect("instance lock poisoned")
+                .get(&endpoint.owner.id)
+                .and_then(|process| process.semantic_worker.as_ref())
+                .filter(|worker| worker.identity == endpoint.owner)
+                .cloned()
+                .ok_or_else(|| {
+                    semantic_status(
+                        tonic::Code::FailedPrecondition,
+                        "ENDPOINT_OWNER_UNKNOWN",
+                        "endpoint grant owner is not an active managed Worker incarnation",
+                    )
+                })?;
+            if owner.principal != principal.identity {
+                return Err(semantic_status(
+                    tonic::Code::PermissionDenied,
+                    "AUTHORITY_DENIED",
+                    "only the Worker owner Principal may revoke an Endpoint grant",
+                ));
+            }
+        }
         self.endpoint_grants
             .lock()
             .expect("endpoint grant lock poisoned")
-            .remove(&semantic_identity_key(&grant));
+            .remove(&grant_key);
         Ok(Response::new(()))
     }
 

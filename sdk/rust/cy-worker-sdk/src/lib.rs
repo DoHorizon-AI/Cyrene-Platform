@@ -89,6 +89,11 @@ pub trait CyreneWorker: Send + Sync {
 
     /// Hook invoked when the host requests graceful shutdown.
     fn on_shutdown(&mut self, _grace_period_ms: u32) {}
+
+    /// Hook invoked when the Kernel completes a fence rotation to a new lease generation.
+    /// Workers should reset any in-flight cancellation tokens, clear generation-scoped caches,
+    /// or re-synchronize internal session state.
+    fn on_fence_rotated(&mut self, _new_generation: u64, _new_fence_token: u64) {}
 }
 
 /// Read one length-prefixed Envelope from reader.
@@ -142,6 +147,8 @@ pub fn run_worker_stream<R: Read, W: Write, T: CyreneWorker>(
     max_frame_bytes: usize,
 ) -> Result<(), WorkerError> {
     let mut sequence_number: u64 = 0;
+    let mut active_generation: u64 = 0;
+    let mut active_fence_token: u64 = 0;
 
     while let Some(req_env) = read_frame(&mut reader, max_frame_bytes)? {
         let req_id = req_env.request_id.clone();
@@ -150,71 +157,93 @@ pub fn run_worker_stream<R: Read, W: Write, T: CyreneWorker>(
         let fence_token = req_env.fence_token;
         let plugin_id = worker.plugin_id().to_string();
 
-        let resp_payload = match req_env.payload {
-            Some(Payload::Hello(hello)) => {
-                let selected_version = hello
-                    .max_protocol_version
-                    .min(CURRENT_PROTOCOL_VERSION)
-                    .max(hello.min_protocol_version);
+        let is_stale = generation < active_generation
+            || (generation == active_generation && fence_token < active_fence_token);
 
-                Payload::HelloAck(HelloAck {
-                    selected_protocol_version: selected_version,
-                    plugin_id: worker.plugin_id().to_string(),
-                    plugin_version: worker.plugin_version().to_string(),
-                    api_version: worker.api_version().to_string(),
-                    declared_capabilities: worker.declared_capabilities(),
-                    metrics: worker.metrics(),
-                    capabilities_json: worker.capabilities_json(),
-                })
+        let resp_payload = if is_stale {
+            Payload::Error(PluginErrorPayload {
+                code: plugin_error_payload::Code::PermissionDenied as i32,
+                message: format!(
+                    "FENCED_OUT: request gen={}/fence={} is older than active gen={}/fence={}",
+                    generation, fence_token, active_generation, active_fence_token
+                ),
+                details: "STALE_GENERATION".to_string(),
+            })
+        } else {
+            if active_generation != 0
+                && (generation > active_generation || fence_token > active_fence_token)
+            {
+                worker.on_fence_rotated(generation, fence_token);
             }
-            Some(Payload::HealthCheck(_)) => {
-                let status = worker.on_health_check();
-                Payload::HealthStatus(status)
-            }
-            Some(Payload::Configure(conf)) => match worker.on_configure(&conf.settings) {
-                Ok(()) => Payload::HealthStatus(HealthStatus {
-                    status: health_status::Status::Healthy as i32,
-                    message: "Configured".to_string(),
-                }),
-                Err(err) => Payload::Error(PluginErrorPayload {
-                    code: plugin_error_payload::Code::InvalidInput as i32,
-                    message: err,
+            active_generation = generation;
+            active_fence_token = fence_token;
+
+            match req_env.payload {
+                Some(Payload::Hello(hello)) => {
+                    let selected_version = hello
+                        .max_protocol_version
+                        .min(CURRENT_PROTOCOL_VERSION)
+                        .max(hello.min_protocol_version);
+
+                    Payload::HelloAck(HelloAck {
+                        selected_protocol_version: selected_version,
+                        plugin_id: worker.plugin_id().to_string(),
+                        plugin_version: worker.plugin_version().to_string(),
+                        api_version: worker.api_version().to_string(),
+                        declared_capabilities: worker.declared_capabilities(),
+                        metrics: worker.metrics(),
+                        capabilities_json: worker.capabilities_json(),
+                    })
+                }
+                Some(Payload::HealthCheck(_)) => {
+                    let status = worker.on_health_check();
+                    Payload::HealthStatus(status)
+                }
+                Some(Payload::Configure(conf)) => match worker.on_configure(&conf.settings) {
+                    Ok(()) => Payload::HealthStatus(HealthStatus {
+                        status: health_status::Status::Healthy as i32,
+                        message: "Configured".to_string(),
+                    }),
+                    Err(err) => Payload::Error(PluginErrorPayload {
+                        code: plugin_error_payload::Code::InvalidInput as i32,
+                        message: err,
+                        details: String::new(),
+                    }),
+                },
+                Some(Payload::Invoke(invoke)) => match worker.on_invoke(invoke) {
+                    Ok(result) => Payload::InvokeResult(result),
+                    Err(error) => Payload::Error(error),
+                },
+                Some(Payload::Cancel(cancel)) => {
+                    worker.on_cancel(&cancel.target_request_id, &cancel.reason);
+                    continue;
+                }
+                Some(Payload::Shutdown(shutdown)) => {
+                    worker.on_shutdown(shutdown.grace_period_ms);
+                    // Acknowledge shutdown with healthy status before terminating loop
+                    let resp_env = Envelope {
+                        request_id: req_id,
+                        trace_id,
+                        plugin_id,
+                        protocol_version: CURRENT_PROTOCOL_VERSION,
+                        deadline_ms: 0,
+                        sequence_number: sequence_number.wrapping_add(1),
+                        generation,
+                        fence_token,
+                        payload: Some(Payload::HealthStatus(HealthStatus {
+                            status: health_status::Status::Healthy as i32,
+                            message: "Shutdown ACK".to_string(),
+                        })),
+                    };
+                    write_frame(&mut writer, &resp_env, max_frame_bytes)?;
+                    break;
+                }
+                _ => Payload::Error(PluginErrorPayload {
+                    code: plugin_error_payload::Code::ProtocolError as i32,
+                    message: "Unsupported payload received by worker".to_string(),
                     details: String::new(),
                 }),
-            },
-            Some(Payload::Invoke(invoke)) => match worker.on_invoke(invoke) {
-                Ok(result) => Payload::InvokeResult(result),
-                Err(error) => Payload::Error(error),
-            },
-            Some(Payload::Cancel(cancel)) => {
-                worker.on_cancel(&cancel.target_request_id, &cancel.reason);
-                continue;
             }
-            Some(Payload::Shutdown(shutdown)) => {
-                worker.on_shutdown(shutdown.grace_period_ms);
-                // Acknowledge shutdown with healthy status before terminating loop
-                let resp_env = Envelope {
-                    request_id: req_id,
-                    trace_id,
-                    plugin_id,
-                    protocol_version: CURRENT_PROTOCOL_VERSION,
-                    deadline_ms: 0,
-                    sequence_number: sequence_number.wrapping_add(1),
-                    generation,
-                    fence_token,
-                    payload: Some(Payload::HealthStatus(HealthStatus {
-                        status: health_status::Status::Healthy as i32,
-                        message: "Shutdown ACK".to_string(),
-                    })),
-                };
-                write_frame(&mut writer, &resp_env, max_frame_bytes)?;
-                break;
-            }
-            _ => Payload::Error(PluginErrorPayload {
-                code: plugin_error_payload::Code::ProtocolError as i32,
-                message: "Unsupported payload received by worker".to_string(),
-                details: String::new(),
-            }),
         };
 
         sequence_number = sequence_number.wrapping_add(1);
@@ -376,5 +405,159 @@ mod tests {
         // Stream EOF
         let resp4 = read_frame(&mut out_reader, DEFAULT_MAX_MESSAGE_BYTES).unwrap();
         assert!(resp4.is_none());
+    }
+
+    #[test]
+    fn test_worker_fence_rotation_and_rejection() {
+        use std::sync::{
+            atomic::{AtomicU32, AtomicU64, Ordering},
+            Arc,
+        };
+
+        struct TrackingWorker {
+            rotated_calls: Arc<AtomicU32>,
+            last_gen: Arc<AtomicU64>,
+            last_fence: Arc<AtomicU64>,
+        }
+
+        impl CyreneWorker for TrackingWorker {
+            fn plugin_id(&self) -> &str {
+                "test.worker"
+            }
+            fn plugin_version(&self) -> &str {
+                "1.0.0"
+            }
+            fn api_version(&self) -> &str {
+                "1.0"
+            }
+            fn declared_capabilities(&self) -> Vec<String> {
+                vec!["Probe".to_string()]
+            }
+
+            fn on_fence_rotated(&mut self, new_generation: u64, new_fence_token: u64) {
+                self.rotated_calls.fetch_add(1, Ordering::SeqCst);
+                self.last_gen.store(new_generation, Ordering::SeqCst);
+                self.last_fence.store(new_fence_token, Ordering::SeqCst);
+            }
+        }
+
+        let rotated_calls = Arc::new(AtomicU32::new(0));
+        let last_gen = Arc::new(AtomicU64::new(0));
+        let last_fence = Arc::new(AtomicU64::new(0));
+
+        let worker = TrackingWorker {
+            rotated_calls: rotated_calls.clone(),
+            last_gen: last_gen.clone(),
+            last_fence: last_fence.clone(),
+        };
+
+        let mut input_buffer = Vec::new();
+
+        // 1. Send HealthCheck with generation 2, fence 5
+        let gen2_env = Envelope {
+            request_id: "req-gen2".to_string(),
+            trace_id: "tr-1".to_string(),
+            plugin_id: "test.worker".to_string(),
+            protocol_version: 1,
+            deadline_ms: 1000,
+            sequence_number: 1,
+            generation: 2,
+            fence_token: 5,
+            payload: Some(Payload::HealthCheck(HealthCheck {})),
+        };
+        write_frame(&mut input_buffer, &gen2_env, DEFAULT_MAX_MESSAGE_BYTES).unwrap();
+
+        // 2. Advance generation to 3, fence 6 -> triggers on_fence_rotated
+        let gen3_env = Envelope {
+            request_id: "req-gen3".to_string(),
+            trace_id: "tr-1".to_string(),
+            plugin_id: "test.worker".to_string(),
+            protocol_version: 1,
+            deadline_ms: 1000,
+            sequence_number: 2,
+            generation: 3,
+            fence_token: 6,
+            payload: Some(Payload::HealthCheck(HealthCheck {})),
+        };
+        write_frame(&mut input_buffer, &gen3_env, DEFAULT_MAX_MESSAGE_BYTES).unwrap();
+
+        // 3. Send stale request with generation 1 (older than active generation 3)
+        let stale_env = Envelope {
+            request_id: "req-stale".to_string(),
+            trace_id: "tr-1".to_string(),
+            plugin_id: "test.worker".to_string(),
+            protocol_version: 1,
+            deadline_ms: 1000,
+            sequence_number: 3,
+            generation: 1,
+            fence_token: 5,
+            payload: Some(Payload::HealthCheck(HealthCheck {})),
+        };
+        write_frame(&mut input_buffer, &stale_env, DEFAULT_MAX_MESSAGE_BYTES).unwrap();
+
+        // 4. Shutdown
+        let shutdown_env = Envelope {
+            request_id: "req-shut".to_string(),
+            trace_id: "tr-1".to_string(),
+            plugin_id: "test.worker".to_string(),
+            protocol_version: 1,
+            deadline_ms: 1000,
+            sequence_number: 4,
+            generation: 3,
+            fence_token: 6,
+            payload: Some(Payload::Shutdown(Shutdown { grace_period_ms: 0 })),
+        };
+        write_frame(&mut input_buffer, &shutdown_env, DEFAULT_MAX_MESSAGE_BYTES).unwrap();
+
+        let reader = Cursor::new(input_buffer);
+        let mut output_buffer = Vec::new();
+
+        run_worker_stream(
+            reader,
+            &mut output_buffer,
+            worker,
+            DEFAULT_MAX_MESSAGE_BYTES,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rotated_calls.load(Ordering::SeqCst),
+            1,
+            "on_fence_rotated must be called once upon advancing from gen 2 to 3"
+        );
+        assert_eq!(last_gen.load(Ordering::SeqCst), 3);
+        assert_eq!(last_fence.load(Ordering::SeqCst), 6);
+
+        let mut out_reader = Cursor::new(output_buffer);
+
+        // Resp 1: Success for generation 2
+        let resp1 = read_frame(&mut out_reader, DEFAULT_MAX_MESSAGE_BYTES)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp1.request_id, "req-gen2");
+        assert!(matches!(resp1.payload, Some(Payload::HealthStatus(_))));
+
+        // Resp 2: Success for generation 3
+        let resp2 = read_frame(&mut out_reader, DEFAULT_MAX_MESSAGE_BYTES)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp2.request_id, "req-gen3");
+        assert!(matches!(resp2.payload, Some(Payload::HealthStatus(_))));
+
+        // Resp 3: Error for stale generation 1
+        let resp3 = read_frame(&mut out_reader, DEFAULT_MAX_MESSAGE_BYTES)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp3.request_id, "req-stale");
+        match resp3.payload {
+            Some(Payload::Error(err)) => {
+                assert_eq!(
+                    err.code,
+                    plugin_error_payload::Code::PermissionDenied as i32
+                );
+                assert!(err.message.contains("FENCED_OUT"));
+            }
+            other => panic!("expected Error with FENCED_OUT, got {other:?}"),
+        }
     }
 }

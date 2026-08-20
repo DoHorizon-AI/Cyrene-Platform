@@ -12,10 +12,10 @@
 //!    按扩展点分类（`Probe`, `Storage`, `Notification` 等）分别索引并提供类型安全的高效注册、按 ID 查询
 //!    与批量枚举能力。
 
-pub(crate) mod helper;
+pub mod helper;
 pub(crate) mod proxies;
 pub(crate) mod registry;
-pub(crate) mod transport;
+pub mod transport;
 
 #[cfg(test)]
 mod tests;

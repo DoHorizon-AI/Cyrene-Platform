@@ -235,8 +235,22 @@ impl CgroupV2Runtime {
                 &error.to_string(),
             )
         })?;
-        self.enable_parent_controllers()?;
-        self.cleanup_owned_instances()
+        if !self.config.dev_mode {
+            self.enable_parent_controllers()?;
+            self.cleanup_owned_instances()
+        } else {
+            // Clean up any stale dev instance directories
+            if let Ok(entries) = fs::read_dir(&self.config.root) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if is_owned_instance_name(name) {
+                            let _ = fs::remove_dir_all(entry.path());
+                        }
+                    }
+                }
+            }
+            Ok(OwnedCgroupCleanupReport::default())
+        }
     }
 
     /// Validates a direct instance group name and resolves it beneath the owned root.
@@ -279,17 +293,18 @@ impl CgroupV2Runtime {
                 .any(|controller| controller == name)
         };
         let cgroup_kill = self.config.root.join("cgroup.kill").is_file();
+        let required = !self.config.dev_mode;
         let facts = vec![
-            fact("cgroup-v2", cgroup_v2, true, "owned cgroup.controllers"),
-            fact("cgroup-kill", cgroup_kill, true, "owned cgroup.kill"),
+            fact("cgroup-v2", cgroup_v2, required, "owned cgroup.controllers"),
+            fact("cgroup-kill", cgroup_kill, required, "owned cgroup.kill"),
             fact(
                 "memory-controller",
                 has_controller("memory"),
-                true,
+                required,
                 "memory",
             ),
-            fact("pids-controller", has_controller("pids"), true, "pids"),
-            fact("cpu-controller", has_controller("cpu"), true, "cpu"),
+            fact("pids-controller", has_controller("pids"), required, "pids"),
+            fact("cpu-controller", has_controller("cpu"), required, "cpu"),
             fact(
                 "pidfd",
                 pidfd_available(),
@@ -302,23 +317,34 @@ impl CgroupV2Runtime {
                 false,
                 "HARD binding performs a real load and attach at launch",
             ),
+            fact(
+                "dev-mode",
+                self.config.dev_mode,
+                false,
+                "development mode bypassing hardware cgroup enforcement",
+            ),
         ];
-        let ready = facts
-            .iter()
-            .filter(|fact| fact.required)
-            .all(|fact| fact.available);
+        let ready = self.config.dev_mode
+            || facts
+                .iter()
+                .filter(|fact| fact.required)
+                .all(|fact| fact.available);
         NodeCapabilities {
             ready,
             facts,
             enforcement: vec![EnforcementReport {
                 resource_kind: "process-tree".to_string(),
-                mode: if ready {
+                mode: if self.config.dev_mode {
+                    EnforcementMode::Unenforced
+                } else if ready {
                     EnforcementMode::Hard
                 } else {
                     EnforcementMode::Unenforced
                 },
                 adapter_id: "linux-cgroup-v2".to_string(),
-                reason_code: if ready {
+                reason_code: if self.config.dev_mode {
+                    "DEV_MODE_UNENFORCED".to_string()
+                } else if ready {
                     "CGROUP_V2_READY".to_string()
                 } else {
                     "CGROUP_V2_PREREQUISITES_MISSING".to_string()
@@ -443,7 +469,7 @@ impl CgroupV2Runtime {
         }
     }
 
-    fn create_instance_cgroup(&self, name: &str) -> Result<PathBuf, ProviderError> {
+    pub(crate) fn create_instance_cgroup(&self, name: &str) -> Result<PathBuf, ProviderError> {
         let path = self.cgroup_path(name)?;
         fs::create_dir(&path).map_err(|error| {
             ProviderError::new(
@@ -456,6 +482,9 @@ impl CgroupV2Runtime {
     }
 
     fn apply_limits(&self, cgroup_path: &Path, limits: &CgroupLimits) -> Result<(), ProviderError> {
+        if self.config.dev_mode && !cgroup_path.join("cgroup.procs").exists() {
+            return Ok(());
+        }
         if let Some(millicores) = limits.cpu_max_millicores {
             if millicores == 0 {
                 return Err(ProviderError::new(
@@ -509,6 +538,9 @@ impl CgroupV2Runtime {
     }
 
     fn attach(&self, cgroup_path: &Path, pid: u32) -> Result<(), ProviderError> {
+        if self.config.dev_mode && !cgroup_path.join("cgroup.procs").exists() {
+            return Ok(());
+        }
         fs::write(cgroup_path.join("cgroup.procs"), pid.to_string()).map_err(|error| {
             ProviderError::new(
                 "linux-cgroup-v2",
@@ -519,6 +551,9 @@ impl CgroupV2Runtime {
     }
 
     fn kill_cgroup(&self, cgroup_path: &Path) -> Result<(), ProviderError> {
+        if self.config.dev_mode && !cgroup_path.join("cgroup.kill").exists() {
+            return Ok(());
+        }
         fs::write(cgroup_path.join("cgroup.kill"), "1").map_err(|error| {
             ProviderError::new("linux-cgroup-v2", "CGROUP_KILL_FAILED", &error.to_string())
         })
@@ -595,7 +630,22 @@ impl CgroupV2Runtime {
     fn terminate_pid(&self, pid: u32) {
         #[cfg(unix)]
         unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        #[cfg(windows)]
+        if let Ok(mut children) = self.children.lock() {
+            if let Some(child) = children.get_mut(&pid) {
+                let _ = child.child.kill();
+            }
+        }
+    }
+
+    fn kill_pid(&self, pid: u32) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
         #[cfg(windows)]
         if let Ok(mut children) = self.children.lock() {
@@ -692,6 +742,9 @@ impl ProcessRuntime for CgroupV2Runtime {
             use std::os::unix::process::CommandExt;
             command.pre_exec(|| {
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -797,21 +850,39 @@ impl ProcessRuntime for CgroupV2Runtime {
         }
         let before_oom = read_oom_kill_count(&handle.cgroup_path);
         let mut exit_code = None;
-        if !request.immediate {
+        if request.immediate {
+            if self.config.dev_mode {
+                self.kill_pid(handle.pid);
+                exit_code = self.wait_child(
+                    handle.pid,
+                    request.grace_period.min(Duration::from_millis(500)),
+                );
+            } else if !self.cgroup_is_empty(&handle.cgroup_path) {
+                self.kill_cgroup(&handle.cgroup_path)?;
+                exit_code = self.wait_child(handle.pid, request.grace_period);
+                wait_until_empty(
+                    &handle.cgroup_path,
+                    request.grace_period.max(Duration::from_millis(500)),
+                );
+            }
+        } else {
             self.terminate_pid(handle.pid);
             exit_code = self.wait_child(handle.pid, request.grace_period);
-        }
-        if !self.cgroup_is_empty(&handle.cgroup_path) {
-            self.kill_cgroup(&handle.cgroup_path)?;
             if exit_code.is_none() {
-                exit_code = self.wait_child(handle.pid, request.grace_period);
+                if self.config.dev_mode {
+                    self.kill_pid(handle.pid);
+                    exit_code = self.wait_child(handle.pid, Duration::from_millis(500));
+                } else if !self.cgroup_is_empty(&handle.cgroup_path) {
+                    self.kill_cgroup(&handle.cgroup_path)?;
+                    exit_code = self.wait_child(handle.pid, request.grace_period);
+                    wait_until_empty(
+                        &handle.cgroup_path,
+                        request.grace_period.max(Duration::from_millis(500)),
+                    );
+                }
             }
-            wait_until_empty(
-                &handle.cgroup_path,
-                request.grace_period.max(Duration::from_millis(500)),
-            );
         }
-        let complete = self.cgroup_is_empty(&handle.cgroup_path)
+        let complete = (self.config.dev_mode || self.cgroup_is_empty(&handle.cgroup_path))
             && !self
                 .children
                 .lock()
@@ -836,7 +907,11 @@ impl ProcessRuntime for CgroupV2Runtime {
             });
         }
         if complete {
-            let _ = fs::remove_dir(&handle.cgroup_path);
+            if self.config.dev_mode {
+                let _ = fs::remove_dir_all(&handle.cgroup_path);
+            } else {
+                let _ = fs::remove_dir(&handle.cgroup_path);
+            }
         }
         Ok(CleanupReport {
             complete,

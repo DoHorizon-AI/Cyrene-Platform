@@ -345,13 +345,44 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         Ok(lease.clone())
     }
 
-    /// 释放硬件资源租约
-    ///
-    /// # 安全校验
-    /// 必须提供与租约生成时一致的 `fence_token`，防止陈旧或并发释放请求造成状态错乱。
-    fn release(&self, lease_name: &str, fence_token: u64) -> Result<(), ProviderError> {
+    fn begin_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
         expire_due_leases(&mut state, now_unix_ms());
+        let lease = state
+            .leases
+            .get_mut(lease_name)
+            .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))?;
+        if lease.fence_token != fence_token {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "STALE_FENCE_TOKEN",
+                lease_name,
+            ));
+        }
+        match lease.state {
+            LeaseState::Active => lease.state = LeaseState::Releasing,
+            LeaseState::Releasing | LeaseState::Released => {}
+            _ => {
+                return Err(ProviderError::new(
+                    "resource-manager",
+                    "LEASE_NOT_ACTIVE",
+                    lease_name,
+                ));
+            }
+        }
+        Ok(lease.clone())
+    }
+
+    fn complete_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        let mut state = self.state.lock().expect("resource state lock poisoned");
         let allocations = {
             let lease = state.leases.get(lease_name).ok_or_else(|| {
                 ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name)
@@ -364,19 +395,54 @@ impl ResourceLeaseManager for InMemoryResourceManager {
                 ));
             }
             if lease.state == LeaseState::Released {
-                return Ok(());
+                return Ok(lease.clone());
+            }
+            if lease.state != LeaseState::Releasing {
+                return Err(ProviderError::new(
+                    "resource-manager",
+                    "LEASE_NOT_RELEASING",
+                    lease_name,
+                ));
             }
             lease.allocations.clone()
         };
         for allocation in &allocations {
             state.allocated.remove(&allocation.resource.id);
         }
-        state
+        let lease = state
             .leases
             .get_mut(lease_name)
-            .expect("lease was checked above")
-            .state = LeaseState::Released;
-        Ok(())
+            .expect("lease was checked above");
+        lease.state = LeaseState::Released;
+        Ok(lease.clone())
+    }
+
+    fn fail_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        let lease = state
+            .leases
+            .get_mut(lease_name)
+            .ok_or_else(|| ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name))?;
+        if lease.fence_token != fence_token {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "STALE_FENCE_TOKEN",
+                lease_name,
+            ));
+        }
+        if lease.state != LeaseState::Releasing && lease.state != LeaseState::Failed {
+            return Err(ProviderError::new(
+                "resource-manager",
+                "LEASE_NOT_RELEASING",
+                lease_name,
+            ));
+        }
+        lease.state = LeaseState::Failed;
+        Ok(lease.clone())
     }
 }
 
@@ -564,18 +630,56 @@ mod tests {
     }
 
     #[test]
-    fn stale_generation_and_fence_are_rejected() {
+    fn release_requires_current_fence_and_cleanup_confirmation() {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
         let lease = manager.reserve(request("lease-1", 1)).unwrap();
         assert_eq!(
             manager
-                .release(&lease.name, lease.fence_token + 1)
+                .begin_release(&lease.name, lease.fence_token + 1)
                 .unwrap_err()
                 .reason_code,
             "STALE_FENCE_TOKEN"
         );
-        manager.release(&lease.name, lease.fence_token).unwrap();
+        let releasing = manager
+            .begin_release(&lease.name, lease.fence_token)
+            .unwrap();
+        assert_eq!(releasing.state, LeaseState::Releasing);
+        assert!(manager.is_allocated("resource-0"));
+        assert_eq!(
+            manager
+                .reserve(request("lease-2", 1))
+                .unwrap_err()
+                .reason_code,
+            "INSUFFICIENT_RESOURCES"
+        );
+        let released = manager
+            .complete_release(&lease.name, lease.fence_token)
+            .unwrap();
+        assert_eq!(released.state, LeaseState::Released);
         assert!(!manager.is_allocated("resource-0"));
+    }
+
+    #[test]
+    fn failed_cleanup_keeps_the_resource_unavailable() {
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+
+        manager
+            .begin_release(&lease.name, lease.fence_token)
+            .unwrap();
+        let failed = manager
+            .fail_release(&lease.name, lease.fence_token)
+            .unwrap();
+
+        assert_eq!(failed.state, LeaseState::Failed);
+        assert!(manager.is_allocated("resource-0"));
+        assert_eq!(
+            manager
+                .reserve(request("lease-2", 1))
+                .unwrap_err()
+                .reason_code,
+            "INSUFFICIENT_RESOURCES"
+        );
     }
 
     #[test]
@@ -588,7 +692,10 @@ mod tests {
         let lease = manager.reserve(request("lease-after-restart", 1)).unwrap();
         assert_eq!(lease.fence_token, 42);
         assert_eq!(
-            manager.release(&lease.name, 41).unwrap_err().reason_code,
+            manager
+                .begin_release(&lease.name, 41)
+                .unwrap_err()
+                .reason_code,
             "STALE_FENCE_TOKEN"
         );
     }

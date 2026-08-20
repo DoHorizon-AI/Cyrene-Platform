@@ -97,6 +97,7 @@ pub struct InstanceActor {
     heartbeat_deadline: Duration,
     crash_timestamps: Vec<Instant>,
     generation: u64,
+    consecutive_timeouts: u32,
     transport_tx: Option<mpsc::Sender<WorkerTransportCommand>>,
     pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
 }
@@ -121,6 +122,7 @@ impl InstanceActor {
             heartbeat_deadline,
             crash_timestamps: Vec::new(),
             generation: 0,
+            consecutive_timeouts: 0,
             transport_tx: None,
             pending_requests: Arc::new(AsyncMutex::new(HashMap::new())),
         }
@@ -146,6 +148,10 @@ impl InstanceActor {
         self.generation
     }
 
+    pub fn consecutive_timeouts(&self) -> u32 {
+        self.consecutive_timeouts
+    }
+
     /// Read-only access to the last observed heartbeat timestamp. Used by the
     /// kernel watchdog scan loop without requiring `&mut` borrow.
     pub fn last_heartbeat(&self) -> Option<Instant> {
@@ -161,6 +167,7 @@ impl InstanceActor {
     /// Attach a communication channel to the sandboxed worker.
     pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<WorkerTransportCommand>) {
         self.transport_tx = Some(tx);
+        self.consecutive_timeouts = 0;
         if self.state == InstanceActorState::Starting || self.state == InstanceActorState::Stopped {
             self.state = InstanceActorState::Healthy;
         }
@@ -278,8 +285,12 @@ impl InstanceActor {
         }
 
         match tokio::time::timeout(timeout, reply_rx).await {
-            Ok(Ok(response)) if response.request_id == req_id => Ok(response.payload),
+            Ok(Ok(response)) if response.request_id == req_id => {
+                self.consecutive_timeouts = 0;
+                Ok(response.payload)
+            }
             Ok(Ok(_)) | Ok(Err(_)) => {
+                self.consecutive_timeouts = 0;
                 self.transport_tx = None;
                 self.record_crash(Instant::now());
                 Err(ProviderError::new(
@@ -290,7 +301,7 @@ impl InstanceActor {
             }
             Err(_) => {
                 self.pending_requests.lock().await.remove(&req_id);
-                let _ = tokio::time::timeout(
+                let cancel_send = tokio::time::timeout(
                     Duration::from_millis(100),
                     tx.send(WorkerTransportCommand::Cancel {
                         request_id: req_id.clone(),
@@ -299,8 +310,14 @@ impl InstanceActor {
                     }),
                 )
                 .await;
-                self.transport_tx = None;
-                self.record_crash(Instant::now());
+                self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                if cancel_send.is_err()
+                    || cancel_send.as_ref().is_ok_and(|res| res.is_err())
+                    || self.consecutive_timeouts >= 3
+                {
+                    self.transport_tx = None;
+                    self.record_crash(Instant::now());
+                }
                 Err(ProviderError::new(
                     "instance-watchdog",
                     "INVOKE_TIMEOUT",
@@ -745,5 +762,57 @@ mod tests {
         assert!(!actor.transport_attached());
         assert_eq!(actor.state(), InstanceActorState::Stopped);
         assert!(!actor.mark_transport_lost(1, 0).await);
+    }
+
+    #[tokio::test]
+    async fn single_timeout_preserves_transport_and_tracks_consecutive() {
+        let mut actor = InstanceActor::new_for_test();
+        actor.start().expect("start should succeed");
+        let (tx, mut rx) = mpsc::channel(10);
+        actor.attach_transport_channel(tx);
+
+        // Spawn mock transport receiver that ignores requests (simulating timeout)
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                // Do not reply, just drain command (e.g. Cancel)
+                let _ = cmd;
+            }
+        });
+
+        // 1st timeout: fails with INVOKE_TIMEOUT, consecutive_timeouts = 1, transport STILL attached
+        let err1 = actor
+            .invoke_raw(vec![1, 2, 3], Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(err1.reason_code, "INVOKE_TIMEOUT");
+        assert_eq!(actor.consecutive_timeouts(), 1);
+        assert!(
+            actor.transport_attached(),
+            "transport must remain attached on 1st timeout"
+        );
+
+        // 2nd timeout: consecutive_timeouts = 2, transport STILL attached
+        let err2 = actor
+            .invoke_raw(vec![1, 2, 3], Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(err2.reason_code, "INVOKE_TIMEOUT");
+        assert_eq!(actor.consecutive_timeouts(), 2);
+        assert!(
+            actor.transport_attached(),
+            "transport must remain attached on 2nd timeout"
+        );
+
+        // 3rd timeout: threshold reached -> transport detached and crash recorded
+        let err3 = actor
+            .invoke_raw(vec![1, 2, 3], Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(err3.reason_code, "INVOKE_TIMEOUT");
+        assert_eq!(actor.consecutive_timeouts(), 3);
+        assert!(
+            !actor.transport_attached(),
+            "transport must detach after 3rd consecutive timeout"
+        );
     }
 }

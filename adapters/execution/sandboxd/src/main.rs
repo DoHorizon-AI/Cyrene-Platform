@@ -20,12 +20,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse()?;
     let root = match args.cgroup_root {
         Some(root) => root,
-        None => CgroupV2Config::delegated_root("cyrene")?,
+        None => {
+            if args.dev_mode {
+                let uid = unsafe { libc::getuid() };
+                std::env::temp_dir().join(format!("cyrene-dev-cgroup-{}", uid))
+            } else {
+                CgroupV2Config::delegated_root("cyrene")?
+            }
+        }
     };
     let runtime = Arc::new(CgroupV2Runtime::new(CgroupV2Config {
         root,
         transport_root: args.transport_root.clone(),
-        device_bpf_enabled: !args.disable_device_bpf,
+        device_bpf_enabled: !args.disable_device_bpf && !args.dev_mode,
+        dev_mode: args.dev_mode,
     }));
     runtime.initialize_owned_root()?;
 
@@ -110,6 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cgroup_root: Option<PathBuf>,
         transport_root: PathBuf,
         disable_device_bpf: bool,
+        dev_mode: bool,
         allowed_client_uid: Option<u32>,
         allowed_client_gid: Option<u32>,
     }
@@ -122,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut cgroup_root = None;
             let mut transport_root = PathBuf::from("/run/cyrene/workers");
             let mut disable_device_bpf = false;
+            let mut dev_mode = false;
             let mut allowed_client_uid = None;
             let mut allowed_client_gid = None;
             while let Some(argument) = values.next() {
@@ -139,6 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--cgroup-root" => cgroup_root = Some(PathBuf::from(value()?)),
                     "--transport-root" => transport_root = PathBuf::from(value()?),
                     "--disable-device-bpf" => disable_device_bpf = true,
+                    "--dev-mode" => dev_mode = true,
                     "--allowed-client-uid" => {
                         allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
                             std::io::Error::new(
@@ -155,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         })?)
                     }
-                    "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-sandboxd [--adapter-id ID] [--socket PATH] [--cgroup-root PATH] [--disable-device-bpf] [--allowed-client-uid UID] [--allowed-client-gid GID]").into()),
+                    "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-sandboxd [--adapter-id ID] [--socket PATH] [--cgroup-root PATH] [--disable-device-bpf] [--dev-mode] [--allowed-client-uid UID] [--allowed-client-gid GID]").into()),
                     _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
                 }
             }
@@ -170,6 +181,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "sandbox adapter ID must be safe and socket path must be absolute",
                 )
                 .into());
+            }
+            // In dev mode, default allowed_client_uid to own UID if not specified
+            #[cfg(unix)]
+            if dev_mode && allowed_client_uid.is_none() && allowed_client_gid.is_none() {
+                allowed_client_uid = Some(unsafe { libc::getuid() });
             }
             // Fail-closed: sandboxd must be configured with at least one trusted
             // Kernel peer UID/GID; otherwise UDS admission silently allows any
@@ -187,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cgroup_root,
                 transport_root,
                 disable_device_bpf,
+                dev_mode,
                 allowed_client_uid,
                 allowed_client_gid,
             })

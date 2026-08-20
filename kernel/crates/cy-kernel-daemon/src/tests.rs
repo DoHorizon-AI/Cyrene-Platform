@@ -42,10 +42,14 @@ const AUTHORITY_TEST_PEER: PeerCred = PeerCred {
 };
 
 fn authority_request<T>(message: T) -> Request<T> {
+    authority_request_for(AUTHORITY_TEST_PEER, message)
+}
+
+fn authority_request_for<T>(peer: PeerCred, message: T) -> Request<T> {
     let mut request = Request::new(message);
     request
         .extensions_mut()
-        .insert(principal_from_peer_cred(&AUTHORITY_TEST_PEER));
+        .insert(principal_from_peer_cred(&peer));
     request
 }
 
@@ -533,7 +537,7 @@ fn authority_rejects_requests_without_peer_credentials() {
 }
 
 #[test]
-fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
+fn endpoint_authority_requires_the_worker_owner_principal() {
     use core_v1::{
         kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
         AuthorizeEndpointRequest, PublishEndpointRequest, RenewLeaseRequest, RevokeEndpointRequest,
@@ -600,10 +604,7 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
             id: "worker-1".to_string(),
             generation: 1,
         },
-        principal: semantic::Identity {
-            id: "principal-1".to_string(),
-            generation: 1,
-        },
+        principal: principal_from_peer_cred(&AUTHORITY_TEST_PEER).identity,
         provider: semantic::Identity {
             id: "provider-1".to_string(),
             generation: 1,
@@ -648,26 +649,66 @@ fn semantic_authority_renews_leases_and_binds_endpoint_grants_to_the_fence() {
         )
         .unwrap()
         .into_inner();
+    let non_owner = PeerCred {
+        pid: 7171,
+        uid: 2000,
+        gid: 2000,
+    };
+    let denied_publish = runtime.block_on(adapter.publish_endpoint(authority_request_for(
+        non_owner,
+        PublishEndpointRequest {
+            context: Some(authority_context("publish-endpoint-as-non-owner")),
+            endpoint: Some(endpoint.clone()),
+        },
+    )));
+    assert_eq!(
+        denied_publish.unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
+    let grant_request = semantic_v1::EndpointGrant {
+        identity: Some(semantic_v1::Identity {
+            id: "grant-1".to_string(),
+            generation: 1,
+        }),
+        endpoint: endpoint.identity.clone(),
+        grantee: renewed.holder.clone(),
+        lease: renewed.identity.clone(),
+        fence_token: renewed.fence_token,
+        expires_at: renewed.expires_at.clone(),
+    };
+    let denied_authorize = runtime.block_on(adapter.authorize_endpoint(authority_request_for(
+        non_owner,
+        AuthorizeEndpointRequest {
+            context: Some(authority_context("authorize-endpoint-as-non-owner")),
+            grant: Some(grant_request.clone()),
+        },
+    )));
+    assert_eq!(
+        denied_authorize.unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
     let grant = runtime
         .block_on(
             adapter.authorize_endpoint(authority_request(AuthorizeEndpointRequest {
                 context: Some(authority_context("authorize-endpoint")),
-                grant: Some(semantic_v1::EndpointGrant {
-                    identity: Some(semantic_v1::Identity {
-                        id: "grant-1".to_string(),
-                        generation: 1,
-                    }),
-                    endpoint: endpoint.identity.clone(),
-                    grantee: renewed.holder.clone(),
-                    lease: renewed.identity.clone(),
-                    fence_token: renewed.fence_token,
-                    expires_at: renewed.expires_at.clone(),
-                }),
+                grant: Some(grant_request),
             })),
         )
         .unwrap()
         .into_inner();
     assert_eq!(grant.fence_token, renewed.fence_token);
+
+    let denied_revoke = runtime.block_on(adapter.revoke_endpoint(authority_request_for(
+        non_owner,
+        RevokeEndpointRequest {
+            context: Some(authority_context("revoke-endpoint-as-non-owner")),
+            grant: grant.identity.clone(),
+        },
+    )));
+    assert_eq!(
+        denied_revoke.unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
 
     runtime
         .block_on(
@@ -770,10 +811,10 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .principal
         .clone();
     assert_eq!(
-        stored_principal.id, "unix://uid=1000/gid=1000/pid=4242",
+        stored_principal.id, "unix-principal/uid-1000/gid-1000",
         "the authority must not trust Worker.principal from the request body",
     );
-    assert_eq!(stored_principal.generation, 4242);
+    assert_eq!(stored_principal.generation, 1);
 
     let running = runtime
         .block_on(
@@ -1451,11 +1492,12 @@ fn release_lease_fails_closed_when_journal_write_fails() {
         "release_lease must fail when the durable journal write fails"
     );
 
-    // The in-memory lease must still be active: we must not lose the durable
-    // evidence of the reservation by releasing without a persisted record.
+    // Release authority is durable and cleanup is not yet confirmed, so the
+    // lease must remain RELEASING and its resource unavailable. It must never
+    // be reported as RELEASED when the terminal record cannot be persisted.
     let still_held = adapter
         .daemon
         .lease(&lease.identity.as_ref().unwrap().id)
         .unwrap();
-    assert_eq!(still_held.state, cy_kernel_api::LeaseState::Active);
+    assert_eq!(still_held.state, cy_kernel_api::LeaseState::Releasing);
 }

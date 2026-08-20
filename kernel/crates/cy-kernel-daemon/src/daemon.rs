@@ -111,9 +111,31 @@ impl KernelDaemon {
         self.resources.reserve(request)
     }
 
-    /// 释放硬件资源租约
-    pub fn release(&self, lease_name: &str, fence_token: u64) -> Result<(), ProviderError> {
-        self.resources.release(lease_name, fence_token)
+    /// Begins release authority while keeping the physical allocation held.
+    pub fn begin_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        self.resources.begin_release(lease_name, fence_token)
+    }
+
+    /// Confirms cleanup and makes a releasing allocation reusable.
+    pub fn complete_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        self.resources.complete_release(lease_name, fence_token)
+    }
+
+    /// Keeps a failed cleanup allocation unavailable.
+    pub fn fail_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        self.resources.fail_release(lease_name, fence_token)
     }
 
     /// 读取租约当前快照，用于服务层的 fencing 校验与结果回报

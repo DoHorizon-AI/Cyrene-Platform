@@ -30,6 +30,7 @@ fn start_mock_sandboxd(
         root: cgroup_root,
         transport_root: socket_path.parent().unwrap().join("workers"),
         device_bpf_enabled: false,
+        dev_mode: false,
     }));
 
     let listener = UnixListener::bind(&socket_path).expect("bind socket failed");

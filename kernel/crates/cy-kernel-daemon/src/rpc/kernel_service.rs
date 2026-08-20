@@ -85,7 +85,8 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             // Durable fence record could not be persisted: roll back the
             // in-memory lease so it is never externally visible without the
             // durable evidence the contract requires.
-            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            let _ = self.daemon.begin_release(&lease.name, lease.fence_token);
+            let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
             return Err(provider_status(error));
         }
         Ok(Response::new(to_semantic_proto_lease(&lease)))
@@ -120,7 +121,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             return Err(provider_status(error));
         }
         self.daemon
-            .release(&lease_identity.id, request.fence_token)
+            .begin_release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
+        self.daemon
+            .complete_release(&lease_identity.id, request.fence_token)
             .map_err(provider_status)?;
         let lease = self
             .daemon
@@ -168,7 +172,8 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             Some(&journal_lease),
             "LEASE_RESERVED",
         ) {
-            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            let _ = self.daemon.begin_release(&lease.name, lease.fence_token);
+            let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
             return Err(provider_status(error));
         }
         Ok(Response::new(to_proto_lease(
@@ -195,7 +200,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             return Err(provider_status(error));
         }
         self.daemon
-            .release(&lease.lease_name, lease.fence_token)
+            .begin_release(&lease.lease_name, lease.fence_token)
+            .map_err(provider_status)?;
+        self.daemon
+            .complete_release(&lease.lease_name, lease.fence_token)
             .map_err(provider_status)?;
         let lease = self
             .daemon
@@ -419,7 +427,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         }
         if let Some(lease) = lease.as_ref() {
             self.daemon
-                .release(&lease.lease_name, lease.fence_token)
+                .begin_release(&lease.lease_name, lease.fence_token)
+                .map_err(provider_status)?;
+            self.daemon
+                .complete_release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
         if let Err(error) = self.record_runtime(
@@ -504,7 +515,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         }
         if let Some(lease) = lease.as_ref() {
             self.daemon
-                .release(&lease.lease_name, lease.fence_token)
+                .begin_release(&lease.lease_name, lease.fence_token)
+                .map_err(provider_status)?;
+            self.daemon
+                .complete_release(&lease.lease_name, lease.fence_token)
                 .map_err(provider_status)?;
         }
         if let Err(error) = self.record_runtime(

@@ -24,31 +24,39 @@ class MyWorker(CyreneWorker):
     def on_cancel(self, target_request_id: str, reason: str) -> None:
         self.cancelled = (target_request_id, reason)
 
+    def on_fence_rotated(self, new_generation: int, new_fence_token: int) -> None:
+        self.rotated_events.append((new_generation, new_fence_token))
+
 def main():
     worker = MyWorker()
     worker.cancelled = None
+    worker.rotated_events = []
     inp = io.BytesIO()
     out = io.BytesIO()
 
-    # 1. Hello
-    e1 = Envelope(request_id='req-1', plugin_id='com.cy.analyzer', payload=Hello(min_protocol_version=1, max_protocol_version=1))
+    # 1. Hello with generation 2, fence 5
+    e1 = Envelope(request_id='req-1', plugin_id='com.cy.analyzer', generation=2, fence_token=5, payload=Hello(min_protocol_version=1, max_protocol_version=1))
     write_frame(e1.encode(), inp)
 
-    # 2. HealthCheck
-    e2 = Envelope(request_id='req-2', plugin_id='com.cy.analyzer', payload=HealthCheck())
+    # 2. Advance generation to 3, fence 6 -> triggers on_fence_rotated
+    e2 = Envelope(request_id='req-2', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=HealthCheck())
     write_frame(e2.encode(), inp)
 
-    # 3. Invoke
-    e3 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
+    # 3. Stale request with generation 1 -> rejected with FENCED_OUT
+    e3 = Envelope(request_id='req-stale', plugin_id='com.cy.analyzer', generation=1, fence_token=5, payload=HealthCheck())
     write_frame(e3.encode(), inp)
 
-    # 4. Cancel (no response frame)
-    e4 = Envelope(request_id='cancel-1', plugin_id='com.cy.analyzer', payload=Cancel(target_request_id='req-3', reason='deadline'))
+    # 4. Invoke with active generation 3, fence 6
+    e4 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
     write_frame(e4.encode(), inp)
 
-    # 5. Shutdown
-    e5 = Envelope(request_id='req-4', plugin_id='com.cy.analyzer', payload=Shutdown(grace_period_ms=500))
+    # 5. Cancel (no response frame)
+    e5 = Envelope(request_id='cancel-1', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Cancel(target_request_id='req-3', reason='deadline'))
     write_frame(e5.encode(), inp)
+
+    # 6. Shutdown
+    e6 = Envelope(request_id='req-4', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Shutdown(grace_period_ms=500))
+    write_frame(e6.encode(), inp)
 
     inp.seek(0)
     run_worker_stream(inp, out, worker)
@@ -71,6 +79,17 @@ def main():
     assert r2.payload_tag == 15, f'expected HealthStatus(15), got {r2.payload_tag}'
     assert r2.payload.status == 0
 
+    # Verify on_fence_rotated was called for advance to (3, 6)
+    assert worker.rotated_events == [(3, 6)], f'expected [(3, 6)], got {worker.rotated_events}'
+
+    # Verify stale request was rejected with FENCED_OUT
+    f3_stale = read_frame(out)
+    assert f3_stale is not None
+    r3_stale = Envelope.decode(f3_stale)
+    assert r3_stale.request_id == 'req-stale'
+    assert r3_stale.payload_tag == 30, f'expected PluginErrorPayload(30), got {r3_stale.payload_tag}'
+    assert 'FENCED_OUT' in r3_stale.payload.message
+
     f3 = read_frame(out)
     assert f3 is not None
     r3 = Envelope.decode(f3)
@@ -86,7 +105,7 @@ def main():
     assert r4.payload_tag == 15
     assert r4.payload.message == 'Shutdown ACK'
 
-    print('Python Protobuf Envelope Codec & Lifecycle Loop VERIFIED!')
+    print('Python Protobuf Envelope Codec, Lifecycle Loop & Fence Rotation VERIFIED!')
 
 if __name__ == '__main__':
     main()

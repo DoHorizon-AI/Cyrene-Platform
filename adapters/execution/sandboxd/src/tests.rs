@@ -16,7 +16,58 @@ fn config(root: PathBuf) -> CgroupV2Config {
         transport_root: std::env::temp_dir()
             .join(format!("cyrene-transport-{}", std::process::id())),
         device_bpf_enabled: false,
+        dev_mode: false,
     }
+}
+
+#[test]
+fn dev_mode_preflight_reports_ready_without_cgroups() {
+    let root = std::env::temp_dir().join(format!("cyrene-cgroup-dev-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let mut dev_cfg = config(root.clone());
+    dev_cfg.dev_mode = true;
+    let runtime = CgroupV2Runtime::new(dev_cfg);
+    let caps = runtime.preflight_report();
+    assert!(
+        caps.ready,
+        "dev_mode preflight must report ready even without cgroup mounts"
+    );
+    assert_eq!(caps.enforcement[0].mode, EnforcementMode::Unenforced);
+    assert_eq!(caps.enforcement[0].reason_code, "DEV_MODE_UNENFORCED");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dev_mode_initialization_cleans_stale_instance_dirs_and_rejects_duplicate() {
+    let root = std::env::temp_dir().join(format!("cyrene-cgroup-dev-clean-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let mut dev_cfg = config(root.clone());
+    dev_cfg.dev_mode = true;
+    let runtime = CgroupV2Runtime::new(dev_cfg);
+
+    // Pre-create stale instance dir
+    let stale_dir = root.join("instance-stale");
+    fs::create_dir_all(&stale_dir).unwrap();
+    fs::write(stale_dir.join("dummy.txt"), "stale").unwrap();
+
+    runtime.initialize_owned_root().unwrap();
+    assert!(
+        !stale_dir.exists(),
+        "stale instance dir must be cleaned on init"
+    );
+
+    // First create succeeds
+    let res = runtime.create_instance_cgroup("instance-test");
+    assert!(res.is_ok(), "creating instance cgroup must succeed");
+
+    // Second create with same name fails with CGROUP_CREATE_FAILED
+    let res_dup = runtime.create_instance_cgroup("instance-test");
+    assert!(
+        res_dup.is_err(),
+        "duplicate instance name must be rejected in dev mode"
+    );
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

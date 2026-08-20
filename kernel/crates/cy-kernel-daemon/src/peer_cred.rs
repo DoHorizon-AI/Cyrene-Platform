@@ -32,14 +32,15 @@ pub struct PeerCred {
 
 /// Build the contract `Principal` for an attested peer credential.
 ///
-/// The identity `id` encodes the uid/gid/pid so it is stable and
-/// introspectable; `generation` is the pid (never zero for a real peer, but
-/// guarded anyway because `Identity::validate` rejects generation 0).
+/// The peer PID is transport evidence, not a logical subject. Unix policy
+/// currently maps the stable UID/GID subject to one Principal; a future policy
+/// resolver can replace this mapping without making a process incarnation part
+/// of Kernel semantic identity.
 pub fn principal_from_peer_cred(cred: &PeerCred) -> semantic::Principal {
     semantic::Principal {
         identity: semantic::Identity {
-            id: format!("unix://uid={}/gid={}/pid={}", cred.uid, cred.gid, cred.pid),
-            generation: cred.pid.max(1) as u64,
+            id: format!("unix-principal/uid-{}/gid-{}", cred.uid, cred.gid),
+            generation: 1,
         },
     }
 }
@@ -216,15 +217,21 @@ mod tests {
     use tonic::Request;
 
     #[test]
-    fn principal_is_derived_from_the_attested_peer_credential() {
-        let principal = principal_from_peer_cred(&PeerCred {
+    fn principal_identity_is_stable_across_peer_pids() {
+        let first = principal_from_peer_cred(&PeerCred {
             pid: 4242,
             uid: 1000,
             gid: 1001,
         });
+        let second = principal_from_peer_cred(&PeerCred {
+            pid: 8181,
+            uid: 1000,
+            gid: 1001,
+        });
 
-        assert_eq!(principal.identity.id, "unix://uid=1000/gid=1001/pid=4242");
-        assert_eq!(principal.identity.generation, 4242);
+        assert_eq!(first, second);
+        assert_eq!(first.identity.id, "unix-principal/uid-1000/gid-1001");
+        assert_eq!(first.identity.generation, 1);
     }
 
     #[test]
@@ -258,6 +265,6 @@ mod tests {
 
         let request = inject_authority_principal(request).unwrap();
         let principal = principal_from_request(&request).unwrap();
-        assert_eq!(principal.identity.id, "unix://uid=1000/gid=1001/pid=4242");
+        assert_eq!(principal.identity.id, "unix-principal/uid-1000/gid-1001");
     }
 }

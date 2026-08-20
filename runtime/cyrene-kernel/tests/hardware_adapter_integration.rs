@@ -264,8 +264,9 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     assert_eq!(lease.fence_token, 1);
     assert_eq!(lease.state, LeaseState::Active);
 
-    // 9. Release Lease and verify fence token validation
-    daemon.release("test-workload-lease-1", 1)?;
+    // 9. Release Lease after its (empty) physical cleanup is confirmed.
+    daemon.begin_release("test-workload-lease-1", 1)?;
+    daemon.complete_release("test-workload-lease-1", 1)?;
     let released_lease = daemon.lease("test-workload-lease-1")?;
     assert_eq!(released_lease.state, LeaseState::Released);
 

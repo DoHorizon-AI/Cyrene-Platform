@@ -571,7 +571,11 @@ impl KernelServiceAdapter {
                     if let Some(lease) = lease.as_ref() {
                         if self
                             .daemon
-                            .release(&lease.lease_name, lease.fence_token)
+                            .begin_release(&lease.lease_name, lease.fence_token)
+                            .and_then(|_| {
+                                self.daemon
+                                    .complete_release(&lease.lease_name, lease.fence_token)
+                            })
                             .is_ok()
                         {
                             if let Err(error) = self.record_runtime(

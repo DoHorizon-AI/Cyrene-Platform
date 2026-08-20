@@ -21,6 +21,7 @@ pub struct RuntimeJournalRecord {
 pub enum RuntimeJournalEvent {
     KernelStarted,
     LeaseReserved,
+    LeaseReleaseStarted,
     LeaseReleased,
     InstanceLaunched,
     InstanceTerminated,

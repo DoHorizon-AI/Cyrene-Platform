@@ -20,6 +20,8 @@ pub struct CgroupV2Config {
     /// Enables loading and attaching real `BPF_PROG_TYPE_CGROUP_DEVICE` filters.
     /// A failed program load or attach always rejects a HARD launch.
     pub device_bpf_enabled: bool,
+    /// Development fallback mode for non-root / non-cgroup environments.
+    pub dev_mode: bool,
 }
 
 impl CgroupV2Config {
@@ -28,6 +30,7 @@ impl CgroupV2Config {
             root: PathBuf::from("/sys/fs/cgroup/cyrene"),
             transport_root: PathBuf::from("/run/cyrene/workers"),
             device_bpf_enabled: true,
+            dev_mode: false,
         }
     }
 

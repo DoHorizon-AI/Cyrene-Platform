@@ -179,7 +179,13 @@ impl KernelServiceAdapter {
 
     pub(crate) fn release_owned_lease(&self, owned_lease: bool, lease: &ResourceLease) {
         if owned_lease {
-            let _ = self.daemon.release(&lease.name, lease.fence_token);
+            if self
+                .daemon
+                .begin_release(&lease.name, lease.fence_token)
+                .is_ok()
+            {
+                let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
+            }
         }
     }
 }

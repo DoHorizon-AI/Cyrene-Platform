@@ -62,8 +62,27 @@ pub trait ResourceLeaseManager: Send + Sync {
         fence_token: u64,
         expires_at_unix_ms: u64,
     ) -> Result<ResourceLease, ProviderError>;
-    /// 凭围栏令牌释放已占用的资源租约
-    fn release(&self, lease_name: &str, fence_token: u64) -> Result<(), ProviderError>;
+    /// Records the authority decision to release a lease while keeping every
+    /// physical resource unavailable until runtime cleanup is confirmed.
+    fn begin_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError>;
+    /// Completes a release only after the runtime has confirmed physical
+    /// cleanup. This is the only operation that makes resources reusable.
+    fn complete_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError>;
+    /// Records that cleanup could not be confirmed. The allocation remains
+    /// held so a failed cleanup can never be mistaken for a released resource.
+    fn fail_release(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError>;
 }
 
 /// 端口 Trait 4：沙箱进程运行时生命周期管理
