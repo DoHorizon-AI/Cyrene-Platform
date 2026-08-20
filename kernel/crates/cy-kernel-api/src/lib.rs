@@ -29,7 +29,10 @@ pub mod runtime;
 pub use cy_kernel_contract as semantic;
 
 // 扁平导出各子模块中的核心类型与 Trait，保持 100% 向后兼容
-pub use authority::KernelAuthority;
+pub use authority::{
+    AuthorityCallContext, KernelAuthority, KernelProviderAuthority, NamespaceId, ObjectRef,
+    DEFAULT_NAMESPACE,
+};
 pub use binding::DeviceBinding;
 pub use capability::{CapabilityFact, EnforcementMode, EnforcementReport, NodeCapabilities};
 pub use error::ProviderError;

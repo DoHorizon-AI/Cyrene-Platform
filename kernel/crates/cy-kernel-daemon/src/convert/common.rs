@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cy_kernel_api::{semantic, ProviderError};
-use cy_proto::{core_v1, semantic_v1};
+use cy_kernel_api::{semantic, AuthorityCallContext, NamespaceId, ProviderError};
+use cy_proto::{core_v1, core_v2, semantic_v1};
 use tonic::Status;
 
 pub(crate) fn to_semantic_proto_identity(identity: &semantic::Identity) -> semantic_v1::Identity {
@@ -25,15 +25,6 @@ pub(crate) fn semantic_identity_from_proto(
         Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
     })?;
     Ok(identity)
-}
-
-pub(crate) fn semantic_identity_key(identity: &semantic::Identity) -> String {
-    format!(
-        "{}:{}:{}",
-        identity.id.len(),
-        identity.id,
-        identity.generation
-    )
 }
 
 pub(crate) fn semantic_contract_revision_from_proto(
@@ -99,6 +90,90 @@ pub(crate) fn validate_authority_context(
     Ok(context)
 }
 
+/// Projects a validated Core v1 envelope into the authority port metadata.
+pub(crate) fn authority_call_context_from_proto(
+    context: Option<&core_v1::AuthorityCallContext>,
+) -> Result<AuthorityCallContext, Status> {
+    let context = validate_authority_context(context)?;
+    let contract = semantic_contract_revision_from_proto(
+        context
+            .contract
+            .clone()
+            .expect("validated authority context contains a contract"),
+    )
+    .expect("validated authority context contains a valid contract");
+    Ok(AuthorityCallContext {
+        contract,
+        namespace: NamespaceId::default(),
+        request_id: context.request_id.clone(),
+        idempotency_key: context.idempotency_key.clone(),
+    })
+}
+
+/// Core v2 requires an explicit namespace. Core v1 intentionally keeps its
+/// frozen envelope and is projected to `NamespaceId::default()` above.
+pub(crate) fn authority_call_context_from_v2_proto(
+    context: Option<&core_v2::AuthorityCallContext>,
+) -> Result<AuthorityCallContext, Status> {
+    let context = context.ok_or_else(|| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "AUTHORITY_CONTEXT_REQUIRED",
+            "a negotiated authority call context is required",
+        )
+    })?;
+    if context.namespace.is_empty() {
+        return Err(semantic_status(
+            tonic::Code::InvalidArgument,
+            "NAMESPACE_REQUIRED",
+            "Core v2 authority calls require an explicit namespace",
+        ));
+    }
+    let namespace = NamespaceId::new(context.namespace.clone()).map_err(|error| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            &error.reason_code,
+            &error.message,
+        )
+    })?;
+    let offered = context.contract.clone().ok_or_else(|| {
+        semantic_status(
+            tonic::Code::FailedPrecondition,
+            "CONTRACT_NEGOTIATION_REQUIRED",
+            "a selected semantic contract revision is required",
+        )
+    })?;
+    let contract = semantic_contract_revision_from_proto(offered).ok_or_else(|| {
+        semantic_status(
+            tonic::Code::InvalidArgument,
+            "CONTRACT_REVISION_INVALID",
+            "authority call contains an invalid semantic contract revision",
+        )
+    })?;
+    let local = semantic::ContractRevision::current();
+    if local.negotiate(&contract).as_ref() != Some(&contract) {
+        return Err(semantic_status(
+            tonic::Code::FailedPrecondition,
+            "CONTRACT_INCOMPATIBLE",
+            "authority call did not use a revision selected by this Kernel",
+        ));
+    }
+    if context.request_id.is_empty() && context.idempotency_key.is_empty() {
+        return Err(semantic_status(
+            tonic::Code::InvalidArgument,
+            "REQUEST_ID_REQUIRED",
+            "authority call requires request_id or idempotency_key",
+        ));
+    }
+    Ok(AuthorityCallContext {
+        contract,
+        namespace,
+        request_id: context.request_id.clone(),
+        idempotency_key: context.idempotency_key.clone(),
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn authority_lease_name(context: &core_v1::AuthorityCallContext) -> String {
     let key = if context.idempotency_key.is_empty() {
         &context.request_id

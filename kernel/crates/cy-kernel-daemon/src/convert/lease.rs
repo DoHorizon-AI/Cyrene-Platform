@@ -88,6 +88,28 @@ pub(crate) fn to_semantic_proto_lease(lease: &ResourceLease) -> semantic_v1::Lea
     }
 }
 
+pub(crate) fn to_semantic_proto_contract_lease(lease: &semantic::Lease) -> semantic_v1::Lease {
+    semantic_v1::Lease {
+        identity: Some(to_semantic_proto_identity(&lease.identity)),
+        holder: Some(to_semantic_proto_identity(&lease.holder)),
+        resources: lease
+            .resources
+            .iter()
+            .map(to_semantic_proto_identity)
+            .collect(),
+        state: match lease.state {
+            semantic::LeaseState::Active => semantic_v1::LeaseState::Active,
+            semantic::LeaseState::Releasing => semantic_v1::LeaseState::Releasing,
+            semantic::LeaseState::Released => semantic_v1::LeaseState::Released,
+            semantic::LeaseState::Expired => semantic_v1::LeaseState::Expired,
+            semantic::LeaseState::Revoked => semantic_v1::LeaseState::Revoked,
+            semantic::LeaseState::Failed => semantic_v1::LeaseState::Failed,
+        } as i32,
+        fence_token: lease.fence_token,
+        expires_at: lease.expires_at_unix_ms.map(timestamp_from_unix_ms),
+    }
+}
+
 pub(crate) fn legacy_holder(
     mutation: Option<&core_v1::MutationContext>,
     fallback: &str,

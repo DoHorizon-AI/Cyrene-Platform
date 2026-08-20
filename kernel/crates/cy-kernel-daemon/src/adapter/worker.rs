@@ -6,15 +6,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cy_kernel_api::{semantic, LeaseState, RuntimeJournalEvent};
+use cy_kernel_api::{semantic, AuthorityCallContext, RuntimeJournalEvent};
 use cy_proto::core_v1;
 use tonic::Status;
 
 use crate::{
     adapter::KernelServiceAdapter,
     convert::{
-        now_timestamp, provider_status, semantic_identity_from_proto, semantic_status,
-        to_proto_duration, to_semantic_proto_identity,
+        now_timestamp, semantic_identity_from_proto, semantic_status, to_proto_duration,
+        to_semantic_proto_identity,
     },
     session::{
         PendingWorkerShutdown, SemanticWorkerControlSender, SemanticWorkerControlSession,
@@ -164,26 +164,27 @@ impl KernelServiceAdapter {
 
     pub(crate) fn register_semantic_worker_control(
         &self,
+        context: &AuthorityCallContext,
         hello: &core_v1::WorkerControlHello,
         outbound: SemanticWorkerControlSender,
     ) -> Result<(u64, semantic::Worker), Status> {
         let worker_identity = semantic_identity_from_proto(hello.worker.clone(), "worker")?;
         let lease_identity = semantic_identity_from_proto(hello.lease.clone(), "lease")?;
-        let lease = self
-            .daemon
-            .lease(&lease_identity.id)
-            .map_err(provider_status)?;
-        if lease.generation != lease_identity.generation
-            || lease.fence_token != hello.fence_token
-            || lease.holder != worker_identity
-            || lease.state != LeaseState::Active
-        {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "FENCE_MISMATCH",
-                "worker control hello no longer has active lease authority",
-            ));
-        }
+        let worker = self
+            .authority
+            .verify_worker_control(
+                context,
+                &worker_identity,
+                &lease_identity,
+                hello.fence_token,
+            )
+            .map_err(|rejection| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    &rejection.reason_code,
+                    &rejection.message,
+                )
+            })?;
         let connection_id = self.next_control_connection.fetch_add(1, Ordering::Relaxed);
         let mut instances = self.instances.lock().expect("instance lock poisoned");
         let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
@@ -193,21 +194,6 @@ impl KernelServiceAdapter {
                 "worker is not managed by this Kernel",
             )
         })?;
-        let worker = process.semantic_worker.as_ref().ok_or_else(|| {
-            semantic_status(
-                tonic::Code::FailedPrecondition,
-                "WORKER_COMPATIBILITY_ONLY",
-                "legacy plugin process cannot use semantic Worker control",
-            )
-        })?;
-        if worker.identity != worker_identity || worker.lease != lease_identity {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "STALE_GENERATION",
-                "worker identity or lease generation is stale",
-            ));
-        }
-        let worker = worker.clone();
         process.semantic_control = Some(SemanticWorkerControlSession {
             connection_id,
             outbound,
@@ -240,10 +226,20 @@ impl KernelServiceAdapter {
 
     pub(crate) fn accept_semantic_shutdown_ack(
         &self,
+        context: &AuthorityCallContext,
         ack: &core_v1::WorkerControlShutdownAck,
     ) -> Result<(), Status> {
         let worker_identity = semantic_identity_from_proto(ack.worker.clone(), "worker")?;
         let lease_identity = semantic_identity_from_proto(ack.lease.clone(), "lease")?;
+        self.authority
+            .verify_worker_control(context, &worker_identity, &lease_identity, ack.fence_token)
+            .map_err(|rejection| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    &rejection.reason_code,
+                    &rejection.message,
+                )
+            })?;
         let mut instances = self.instances.lock().expect("instance lock poisoned");
         let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
             semantic_status(
@@ -252,18 +248,11 @@ impl KernelServiceAdapter {
                 "worker is not managed by this Kernel",
             )
         })?;
-        let worker = process.semantic_worker.as_ref().ok_or_else(|| {
-            semantic_status(
-                tonic::Code::FailedPrecondition,
-                "WORKER_COMPATIBILITY_ONLY",
-                "legacy plugin process cannot use semantic Worker control",
-            )
-        })?;
         let fence_matches = process
             .lease
             .as_ref()
             .is_some_and(|lease| lease.fence_token == ack.fence_token);
-        if worker.identity != worker_identity || worker.lease != lease_identity || !fence_matches {
+        if !fence_matches {
             return Err(semantic_status(
                 tonic::Code::FailedPrecondition,
                 "FENCE_MISMATCH",
@@ -435,69 +424,20 @@ impl KernelServiceAdapter {
 
     pub(crate) fn accept_semantic_worker_heartbeat(
         &self,
+        context: &AuthorityCallContext,
         worker_identity: semantic::Identity,
         lease_identity: semantic::Identity,
         fence_token: u64,
     ) -> Result<semantic::Worker, Status> {
-        let lease = self
-            .daemon
-            .lease(&lease_identity.id)
-            .map_err(provider_status)?;
-        if lease.generation != lease_identity.generation
-            || lease.fence_token != fence_token
-            || lease.holder != worker_identity
-            || lease.state != LeaseState::Active
-        {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "FENCE_MISMATCH",
-                "worker heartbeat no longer has active lease authority",
-            ));
-        }
-        let mut instances = self.instances.lock().expect("instance lock poisoned");
-        let process = instances.get_mut(&worker_identity.id).ok_or_else(|| {
-            semantic_status(
-                tonic::Code::NotFound,
-                "WORKER_NOT_FOUND",
-                "worker is not managed by this Kernel",
-            )
-        })?;
-        let worker = process.semantic_worker.as_mut().ok_or_else(|| {
-            semantic_status(
-                tonic::Code::FailedPrecondition,
-                "WORKER_COMPATIBILITY_ONLY",
-                "legacy plugin process is not a semantic Worker",
-            )
-        })?;
-        if worker.identity != worker_identity || worker.lease != lease_identity {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "STALE_GENERATION",
-                "worker identity or lease generation is stale",
-            ));
-        }
-        if !worker
-            .state
-            .can_transition_to(semantic::WorkerState::Running)
-        {
-            return Err(semantic_status(
-                tonic::Code::FailedPrecondition,
-                "STATE_TRANSITION_INVALID",
-                "worker cannot enter RUNNING from its current state",
-            ));
-        }
-        worker.state = semantic::WorkerState::Running;
-        process.actor.on_heartbeat_received(Instant::now());
-        process.last_heartbeat_at = Some(now_timestamp());
-        let response = worker.clone();
-        drop(instances);
-        self.publish_semantic_event(
-            response.identity.clone(),
-            "worker.running",
-            "cyrene.worker.v1",
-            Vec::new(),
-        );
-        Ok(response)
+        self.authority
+            .accept_worker_control_heartbeat(context, worker_identity, lease_identity, fence_token)
+            .map_err(|rejection| {
+                semantic_status(
+                    tonic::Code::FailedPrecondition,
+                    &rejection.reason_code,
+                    &rejection.message,
+                )
+            })
     }
 
     pub(crate) fn unregister_pending_shutdown(&self, instance_name: &str, shutdown_id: &str) {
@@ -544,40 +484,77 @@ impl KernelServiceAdapter {
             } else {
                 self.request_worker_shutdown(&name, "HEARTBEAT_TIMEOUT", false)
             };
-            self.publish_runtime_event(
+            let namespace = self
+                .workers
+                .lock()
+                .expect("worker scope lock poisoned")
+                .iter()
+                .find(|(_, instance_name)| *instance_name == &name)
+                .map(|(worker, _)| worker.namespace.clone())
+                .unwrap_or_default();
+            self.publish_runtime_event_in(
+                &namespace,
                 core_v1::RuntimeEventType::WatchdogTriggered,
                 &name,
                 "HEARTBEAT_TIMEOUT",
                 "worker missed its mandatory heartbeat deadline",
             );
-            let (lease, report) = {
+            let lease = {
                 let mut instances = self.instances.lock().expect("instance lock poisoned");
                 let Some(process) = instances.get_mut(&name) else {
                     continue;
                 };
                 process.watchdog_triggered = true;
-                let lease = process.lease.clone();
+                process.lease.clone()
+            };
+            let release_started = if let Some(lease) = lease.as_ref() {
+                if let Err(error) = self.record_runtime(
+                    RuntimeJournalEvent::LeaseReleaseStarted,
+                    Some(&name),
+                    Some(lease),
+                    "LEASE_RELEASE_STARTED",
+                ) {
+                    eprintln!("runtime journal LeaseReleaseStarted write failed: {error}");
+                    false
+                } else {
+                    self.daemon
+                        .begin_release(&lease.lease_name, lease.fence_token)
+                        .is_ok()
+                }
+            } else {
+                true
+            };
+            let report = {
+                let mut instances = self.instances.lock().expect("instance lock poisoned");
+                let Some(process) = instances.get_mut(&name) else {
+                    continue;
+                };
                 match process.actor.stop(&cy_kernel_api::StopRequest {
                     grace_period: self.heartbeat.graceful_stop,
                     immediate: false,
                 }) {
-                    Ok(report) => (lease, Some(report.clone())),
-                    Err(_) => (lease, None),
+                    Ok(report) => Some(report.clone()),
+                    Err(_) => None,
                 }
             };
             if let Some(report) = report.as_ref() {
                 self.publish_cleanup_events(&name, report);
                 if report.complete {
                     if let Some(lease) = lease.as_ref() {
-                        if self
-                            .daemon
-                            .begin_release(&lease.lease_name, lease.fence_token)
-                            .and_then(|_| {
-                                self.daemon
-                                    .complete_release(&lease.lease_name, lease.fence_token)
-                            })
-                            .is_ok()
-                        {
+                        let released = release_started
+                            && self
+                                .record_runtime(
+                                    RuntimeJournalEvent::LeaseReleased,
+                                    Some(&name),
+                                    Some(lease),
+                                    "LEASE_RELEASED",
+                                )
+                                .is_ok()
+                            && self
+                                .daemon
+                                .complete_release(&lease.lease_name, lease.fence_token)
+                                .is_ok();
+                        if released {
                             if let Err(error) = self.record_runtime(
                                 RuntimeJournalEvent::WatchdogReaped,
                                 Some(&name),
@@ -590,9 +567,25 @@ impl KernelServiceAdapter {
                                 .lock()
                                 .expect("instance lock poisoned")
                                 .remove(&name);
+                        } else if release_started {
+                            let _ = self
+                                .daemon
+                                .fail_release(&lease.lease_name, lease.fence_token);
                         }
+                    } else {
+                        self.instances
+                            .lock()
+                            .expect("instance lock poisoned")
+                            .remove(&name);
                     }
                 } else {
+                    if let Some(lease) = lease.as_ref() {
+                        if release_started {
+                            let _ = self
+                                .daemon
+                                .fail_release(&lease.lease_name, lease.fence_token);
+                        }
+                    }
                     if let Err(error) = self.record_runtime(
                         RuntimeJournalEvent::InstanceCleanupFailed,
                         Some(&name),
@@ -603,6 +596,13 @@ impl KernelServiceAdapter {
                     }
                 }
             } else {
+                if let Some(lease) = lease.as_ref() {
+                    if release_started {
+                        let _ = self
+                            .daemon
+                            .fail_release(&lease.lease_name, lease.fence_token);
+                    }
+                }
                 if let Err(error) = self.record_runtime(
                     RuntimeJournalEvent::InstanceCleanupFailed,
                     Some(&name),

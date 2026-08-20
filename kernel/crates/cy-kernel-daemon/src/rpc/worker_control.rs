@@ -8,8 +8,8 @@ use tonic::{Request, Response, Status};
 use crate::{
     adapter::KernelServiceAdapter,
     convert::{
-        semantic_identity_from_proto, semantic_status, to_proto_duration, to_semantic_proto_worker,
-        validate_authority_context,
+        authority_call_context_from_proto, semantic_identity_from_proto, semantic_status,
+        to_proto_duration, to_semantic_proto_worker,
     },
 };
 
@@ -31,7 +31,7 @@ impl core_v1::worker_control_service_server::WorkerControlService for KernelServ
                 "WorkerControlHello must be the first control frame",
             )
         })?;
-        validate_authority_context(first.context.as_ref())?;
+        let context = authority_call_context_from_proto(first.context.as_ref())?;
         let Some(core_v1::worker_control_to_kernel::Body::Hello(hello)) = first.body else {
             return Err(semantic_status(
                 tonic::Code::InvalidArgument,
@@ -41,7 +41,7 @@ impl core_v1::worker_control_service_server::WorkerControlService for KernelServ
         };
         let (outbound, receiver) = mpsc::channel(16);
         let (connection_id, worker) =
-            self.register_semantic_worker_control(&hello, outbound.clone())?;
+            self.register_semantic_worker_control(&context, &hello, outbound.clone())?;
         outbound
             .send(Ok(core_v1::KernelToWorkerControl {
                 body: Some(core_v1::kernel_to_worker_control::Body::Welcome(
@@ -65,44 +65,47 @@ impl core_v1::worker_control_service_server::WorkerControlService for KernelServ
         let worker_generation = worker.identity.generation;
         tokio::spawn(async move {
             while let Ok(Some(frame)) = inbound.message().await {
-                let result = validate_authority_context(frame.context.as_ref()).and_then(|_| {
-                    match frame.body {
-                        Some(core_v1::worker_control_to_kernel::Body::Heartbeat(heartbeat)) => {
-                            let worker = semantic_identity_from_proto(heartbeat.worker, "worker")?;
-                            let lease = semantic_identity_from_proto(heartbeat.lease, "lease")?;
-                            adapter
-                                .accept_semantic_worker_heartbeat(
-                                    worker,
-                                    lease,
-                                    heartbeat.fence_token,
-                                )
-                                .map(|worker| core_v1::KernelToWorkerControl {
-                                    body: Some(
-                                        core_v1::kernel_to_worker_control::Body::HeartbeatAck(
-                                            core_v1::WorkerControlHeartbeatAck {
-                                                worker: Some(to_semantic_proto_worker(&worker)),
-                                                next_heartbeat_after: Some(to_proto_duration(
-                                                    adapter.heartbeat.interval,
-                                                )),
-                                            },
+                let result =
+                    authority_call_context_from_proto(frame.context.as_ref()).and_then(|context| {
+                        match frame.body {
+                            Some(core_v1::worker_control_to_kernel::Body::Heartbeat(heartbeat)) => {
+                                let worker =
+                                    semantic_identity_from_proto(heartbeat.worker, "worker")?;
+                                let lease = semantic_identity_from_proto(heartbeat.lease, "lease")?;
+                                adapter
+                                    .accept_semantic_worker_heartbeat(
+                                        &context,
+                                        worker,
+                                        lease,
+                                        heartbeat.fence_token,
+                                    )
+                                    .map(|worker| core_v1::KernelToWorkerControl {
+                                        body: Some(
+                                            core_v1::kernel_to_worker_control::Body::HeartbeatAck(
+                                                core_v1::WorkerControlHeartbeatAck {
+                                                    worker: Some(to_semantic_proto_worker(&worker)),
+                                                    next_heartbeat_after: Some(to_proto_duration(
+                                                        adapter.heartbeat.interval,
+                                                    )),
+                                                },
+                                            ),
                                         ),
-                                    ),
-                                })
-                                .map(Some)
+                                    })
+                                    .map(Some)
+                            }
+                            Some(core_v1::worker_control_to_kernel::Body::ShutdownAck(ack)) => {
+                                adapter.accept_semantic_shutdown_ack(&context, &ack)?;
+                                Ok(None)
+                            }
+                            Some(core_v1::worker_control_to_kernel::Body::Hello(_)) | None => {
+                                Err(semantic_status(
+                                    tonic::Code::InvalidArgument,
+                                    "WORKER_FRAME_INVALID",
+                                    "WorkerControlHello is valid only as the first control frame",
+                                ))
+                            }
                         }
-                        Some(core_v1::worker_control_to_kernel::Body::ShutdownAck(ack)) => {
-                            adapter.accept_semantic_shutdown_ack(&ack)?;
-                            Ok(None)
-                        }
-                        Some(core_v1::worker_control_to_kernel::Body::Hello(_)) | None => {
-                            Err(semantic_status(
-                                tonic::Code::InvalidArgument,
-                                "WORKER_FRAME_INVALID",
-                                "WorkerControlHello is valid only as the first control frame",
-                            ))
-                        }
-                    }
-                });
+                    });
                 match result {
                     Ok(Some(response)) => {
                         if outbound.send(Ok(response)).await.is_err() {

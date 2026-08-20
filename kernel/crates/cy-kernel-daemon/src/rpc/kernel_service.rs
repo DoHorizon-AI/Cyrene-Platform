@@ -109,20 +109,31 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             lease_name: lease_identity.id.clone(),
             fence_token: request.fence_token,
         };
-        // Persist the durable release record BEFORE releasing in memory
-        // (fail-closed): if the journal write fails we keep the lease rather
-        // than lose the durable evidence of the reservation.
+        // Persist release intent before transitioning to RELEASING. The
+        // allocation remains fenced until cleanup and durable completion.
+        if let Err(error) = self.record_runtime(
+            RuntimeJournalEvent::LeaseReleaseStarted,
+            None,
+            Some(&journal_lease),
+            "LEASE_RELEASE_STARTED",
+        ) {
+            return Err(provider_status(error));
+        }
+        let releasing = self
+            .daemon
+            .begin_release(&lease_identity.id, request.fence_token)
+            .map_err(provider_status)?;
         if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
             Some(&journal_lease),
             "LEASE_RELEASED",
         ) {
+            let _ = self
+                .daemon
+                .fail_release(&releasing.name, request.fence_token);
             return Err(provider_status(error));
         }
-        self.daemon
-            .begin_release(&lease_identity.id, request.fence_token)
-            .map_err(provider_status)?;
         self.daemon
             .complete_release(&lease_identity.id, request.fence_token)
             .map_err(provider_status)?;
@@ -192,16 +203,26 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             .lease
             .ok_or_else(|| Status::invalid_argument("lease reference is required"))?;
         if let Err(error) = self.record_runtime(
+            RuntimeJournalEvent::LeaseReleaseStarted,
+            None,
+            Some(&lease),
+            "LEASE_RELEASE_STARTED",
+        ) {
+            return Err(provider_status(error));
+        }
+        let releasing = self
+            .daemon
+            .begin_release(&lease.lease_name, lease.fence_token)
+            .map_err(provider_status)?;
+        if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             None,
             Some(&lease),
             "LEASE_RELEASED",
         ) {
+            let _ = self.daemon.fail_release(&releasing.name, lease.fence_token);
             return Err(provider_status(error));
         }
-        self.daemon
-            .begin_release(&lease.lease_name, lease.fence_token)
-            .map_err(provider_status)?;
         self.daemon
             .complete_release(&lease.lease_name, lease.fence_token)
             .map_err(provider_status)?;
@@ -273,8 +294,11 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let binding = match self.daemon.binding_for_lease(&lease) {
             Ok(binding) => binding,
             Err(error) => {
-                self.release_owned_lease(owned_lease, &lease);
-                return Err(provider_status(error));
+                return Err(provider_status(
+                    self.release_owned_lease(owned_lease, &lease)
+                        .err()
+                        .unwrap_or(error),
+                ));
             }
         };
         let installation = VerifiedInstallation {
@@ -289,12 +313,17 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         {
             Ok(plan) => plan,
             Err(error) => {
-                self.release_owned_lease(owned_lease, &lease);
-                return Err(provider_status(error));
+                return Err(provider_status(
+                    self.release_owned_lease(owned_lease, &lease)
+                        .err()
+                        .unwrap_or(error),
+                ));
             }
         };
         if resolved.installation != installation {
-            self.release_owned_lease(owned_lease, &lease);
+            if let Err(error) = self.release_owned_lease(owned_lease, &lease) {
+                return Err(provider_status(error));
+            }
             return Err(Status::failed_precondition(
                 "resolver returned a launch plan for another verified installation",
             ));
@@ -308,14 +337,20 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             lease.fence_token,
         )
         .map_err(|error| {
-            self.release_owned_lease(owned_lease, &lease);
-            provider_status(error)
+            provider_status(
+                self.release_owned_lease(owned_lease, &lease)
+                    .err()
+                    .unwrap_or(error),
+            )
         })?;
         plan.environment = binding
             .merge_environment(&plan.environment)
             .map_err(|error| {
-                self.release_owned_lease(owned_lease, &lease);
-                provider_status(error)
+                provider_status(
+                    self.release_owned_lease(owned_lease, &lease)
+                        .err()
+                        .unwrap_or(error),
+                )
             })?;
         let mut actor = InstanceActor::new(
             instance_name.clone(),
@@ -327,8 +362,11 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             self.heartbeat.timeout,
         );
         if let Err(error) = actor.start() {
-            self.release_owned_lease(owned_lease, &lease);
-            return Err(provider_status(error));
+            return Err(provider_status(
+                self.release_owned_lease(owned_lease, &lease)
+                    .err()
+                    .unwrap_or(error),
+            ));
         }
         let lease_ref = core_v1::ResourceLeaseRef {
             lease_name: lease.name,
@@ -392,7 +430,27 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let immediate = request.mode == core_v1::StopMode::Immediate as i32;
         let _acknowledged =
             self.request_worker_shutdown(&request.process_name, "TERMINATE_REQUESTED", immediate);
-        let (lease, report) = {
+        let lease = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&request.process_name)
+            .ok_or_else(|| Status::not_found("plugin process is not managed by this Kernel"))?
+            .lease
+            .clone();
+        if let Some(lease) = lease.as_ref() {
+            self.record_runtime(
+                RuntimeJournalEvent::LeaseReleaseStarted,
+                Some(&request.process_name),
+                Some(lease),
+                "LEASE_RELEASE_STARTED",
+            )
+            .map_err(provider_status)?;
+            self.daemon
+                .begin_release(&lease.lease_name, lease.fence_token)
+                .map_err(provider_status)?;
+        }
+        let report = {
             let mut instances = self.instances.lock().expect("instance lock poisoned");
             let process = instances
                 .get_mut(&request.process_name)
@@ -403,12 +461,24 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     grace_period,
                     immediate,
                 })
-                .map_err(provider_status)?
+                .map_err(|error| {
+                    if let Some(lease) = lease.as_ref() {
+                        let _ = self
+                            .daemon
+                            .fail_release(&lease.lease_name, lease.fence_token);
+                    }
+                    provider_status(error)
+                })?
                 .clone();
-            (process.lease.clone(), report)
+            report
         };
         self.publish_cleanup_events(&request.process_name, &report);
         if !report.complete {
+            if let Some(lease) = lease.as_ref() {
+                let _ = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token);
+            }
             if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
                 Some(&request.process_name),
@@ -426,12 +496,26 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             )));
         }
         if let Some(lease) = lease.as_ref() {
-            self.daemon
-                .begin_release(&lease.lease_name, lease.fence_token)
-                .map_err(provider_status)?;
-            self.daemon
+            if let Err(error) = self.record_runtime(
+                RuntimeJournalEvent::LeaseReleased,
+                Some(&request.process_name),
+                Some(lease),
+                "LEASE_RELEASED",
+            ) {
+                let _ = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token);
+                return Err(provider_status(error));
+            }
+            if let Err(error) = self
+                .daemon
                 .complete_release(&lease.lease_name, lease.fence_token)
-                .map_err(provider_status)?;
+            {
+                let _ = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token);
+                return Err(provider_status(error));
+            }
         }
         if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceTerminated,
@@ -484,7 +568,27 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         }
         let target = operation.target_resource_name;
         let _acknowledged = self.request_worker_shutdown(&target, "OPERATION_CANCELLED", false);
-        let (lease, report) = {
+        let lease = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&target)
+            .ok_or_else(|| Status::failed_precondition("operation target is no longer managed"))?
+            .lease
+            .clone();
+        if let Some(lease) = lease.as_ref() {
+            self.record_runtime(
+                RuntimeJournalEvent::LeaseReleaseStarted,
+                Some(&target),
+                Some(lease),
+                "LEASE_RELEASE_STARTED",
+            )
+            .map_err(provider_status)?;
+            self.daemon
+                .begin_release(&lease.lease_name, lease.fence_token)
+                .map_err(provider_status)?;
+        }
+        let report = {
             let mut instances = self.instances.lock().expect("instance lock poisoned");
             let process = instances.get_mut(&target).ok_or_else(|| {
                 Status::failed_precondition("operation target is no longer managed")
@@ -495,12 +599,24 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     grace_period: self.heartbeat.graceful_stop,
                     immediate: false,
                 })
-                .map_err(provider_status)?
+                .map_err(|error| {
+                    if let Some(lease) = lease.as_ref() {
+                        let _ = self
+                            .daemon
+                            .fail_release(&lease.lease_name, lease.fence_token);
+                    }
+                    provider_status(error)
+                })?
                 .clone();
-            (process.lease.clone(), report)
+            report
         };
         self.publish_cleanup_events(&target, &report);
         if !report.complete {
+            if let Some(lease) = lease.as_ref() {
+                let _ = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token);
+            }
             if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
                 Some(&target),
@@ -514,12 +630,26 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             return Ok(Response::new(self.operation_failure(name, target, &error)));
         }
         if let Some(lease) = lease.as_ref() {
-            self.daemon
-                .begin_release(&lease.lease_name, lease.fence_token)
-                .map_err(provider_status)?;
-            self.daemon
+            if let Err(error) = self.record_runtime(
+                RuntimeJournalEvent::LeaseReleased,
+                Some(&target),
+                Some(lease),
+                "LEASE_RELEASED",
+            ) {
+                let _ = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token);
+                return Err(provider_status(error));
+            }
+            if let Err(error) = self
+                .daemon
                 .complete_release(&lease.lease_name, lease.fence_token)
-                .map_err(provider_status)?;
+            {
+                let _ = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token);
+                return Err(provider_status(error));
+            }
         }
         if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceTerminated,

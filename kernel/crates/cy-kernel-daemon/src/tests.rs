@@ -11,13 +11,14 @@ use std::{
 };
 
 use cy_kernel_api::{
-    semantic, CapabilityFact, CgroupLimits, CleanupReport, DeviceBinding, EnforcementMode,
-    FailingRuntimeJournal, HostInventoryProvider, InstalledPluginResolver, InventorySnapshot,
-    LaunchPlan, NodeCapabilities, ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError,
-    ResolvedLaunchPlan, ResourceProvider, RuntimeJournalEvent, RuntimeJournalRecord,
-    RuntimeJournalSink, SandboxBackend, StopRequest, VerifiedInstallation,
+    semantic, AuthorityCallContext, CapabilityFact, CgroupLimits, CleanupReport, DeviceBinding,
+    EnforcementMode, FailingRuntimeJournal, HostInventoryProvider, InstalledPluginResolver,
+    InventorySnapshot, KernelAuthority, LaunchPlan, NamespaceId, NodeCapabilities, ObjectRef,
+    ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError, ResolvedLaunchPlan,
+    ResourceProvider, RuntimeJournalEvent, RuntimeJournalRecord, RuntimeJournalSink,
+    SandboxBackend, StopRequest, VerifiedInstallation,
 };
-use cy_proto::{core_v1, semantic_v1};
+use cy_proto::{core_v1, core_v2, semantic_v1};
 use cy_resource_manager::InMemoryResourceManager;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -93,14 +94,14 @@ impl ResourceProvider for EmptyHardware {
 
 #[derive(Debug, Clone)]
 struct TestHardware {
-    resource: semantic::Resource,
+    resources: Vec<semantic::Resource>,
 }
 
 impl HostInventoryProvider for TestHardware {
     fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
         Ok(InventorySnapshot {
             generation: 1,
-            resources: vec![self.resource.clone()],
+            resources: self.resources.clone(),
             capabilities: NodeCapabilities {
                 ready: true,
                 facts: Vec::new(),
@@ -116,7 +117,7 @@ impl ResourceProvider for TestHardware {
     }
 
     fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError> {
-        Ok(vec![self.resource.clone()])
+        Ok(self.resources.clone())
     }
 
     fn create_binding(
@@ -147,9 +148,13 @@ impl ResourceProvider for TestHardware {
 }
 
 fn test_resource() -> semantic::Resource {
+    test_resource_with_id("resource-1")
+}
+
+fn test_resource_with_id(id: &str) -> semantic::Resource {
     semantic::Resource {
         identity: semantic::Identity {
-            id: "resource-1".to_string(),
+            id: id.to_string(),
             generation: 1,
         },
         provider: semantic::Identity {
@@ -180,7 +185,7 @@ fn test_resource() -> semantic::Resource {
 fn semantic_lease_adapter() -> KernelServiceAdapter {
     let resource = test_resource();
     let hardware = Arc::new(TestHardware {
-        resource: resource.clone(),
+        resources: vec![resource.clone()],
     });
     let daemon = Arc::new(KernelDaemon::new(
         hardware.clone(),
@@ -198,6 +203,15 @@ fn authority_context(request_id: &str) -> core_v1::AuthorityCallContext {
         contract: Some(to_semantic_proto_contract_revision(
             &semantic::ContractRevision::current(),
         )),
+        request_id: request_id.to_string(),
+        idempotency_key: request_id.to_string(),
+    }
+}
+
+fn scoped_authority_context(namespace: &str, request_id: &str) -> AuthorityCallContext {
+    AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::new(namespace).unwrap(),
         request_id: request_id.to_string(),
         idempotency_key: request_id.to_string(),
     }
@@ -353,14 +367,19 @@ impl InstalledPluginResolver for TestWorkerResolver {
 }
 
 fn semantic_worker_adapter() -> KernelServiceAdapter {
-    let resource = test_resource();
+    semantic_worker_adapter_with_resources(vec![test_resource()])
+}
+
+fn semantic_worker_adapter_with_resources(
+    resources: Vec<semantic::Resource>,
+) -> KernelServiceAdapter {
     let hardware = Arc::new(TestHardware {
-        resource: resource.clone(),
+        resources: resources.clone(),
     });
     let daemon = Arc::new(KernelDaemon::new(
         hardware.clone(),
         hardware,
-        Arc::new(InMemoryResourceManager::new("node", vec![resource])),
+        Arc::new(InMemoryResourceManager::new("node", resources)),
         Arc::new(FakeSandbox),
         "node",
         7,
@@ -534,6 +553,337 @@ fn authority_rejects_requests_without_peer_credentials() {
         .unwrap_err();
 
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
+}
+
+#[test]
+fn core_v1_defaults_scope_and_core_v2_requires_a_valid_explicit_namespace() {
+    use core_v1::{
+        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+    };
+    use core_v2::{
+        kernel_authority_service_server::KernelAuthorityService as KernelAuthorityV2Service,
+        AcquireSemanticLeaseRequest as AcquireV2LeaseRequest,
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let adapter = semantic_lease_adapter();
+    let default_lease = runtime
+        .block_on(KernelAuthorityService::acquire_lease(
+            &adapter,
+            authority_request(AcquireSemanticLeaseRequest {
+                context: Some(authority_context("v1-default")),
+                holder: Some(semantic_v1::Identity {
+                    id: "worker-v1".to_string(),
+                    generation: 1,
+                }),
+                query: Some(semantic_v1::ResourceQuery {
+                    resource_class: "accelerator".to_string(),
+                    count: 1,
+                    required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                        id: "accelerator.compute".to_string(),
+                        minimum_revision: 1,
+                        required_properties: Default::default(),
+                    }],
+                    minimum_capacity: Default::default(),
+                }),
+                ttl: Some(prost_types::Duration {
+                    seconds: 30,
+                    nanos: 0,
+                }),
+            }),
+        ))
+        .unwrap()
+        .into_inner();
+    let default_object = ObjectRef {
+        namespace: NamespaceId::default(),
+        identity: semantic::Identity {
+            id: default_lease.identity.unwrap().id,
+            generation: 1,
+        },
+    };
+    assert!(adapter.leases.lock().unwrap().contains_key(&default_object));
+
+    let v2_adapter = semantic_lease_adapter();
+    let request = |namespace: &str| {
+        authority_request(AcquireV2LeaseRequest {
+            context: Some(core_v2::AuthorityCallContext {
+                namespace: namespace.to_string(),
+                contract: Some(to_semantic_proto_contract_revision(
+                    &semantic::ContractRevision::current(),
+                )),
+                request_id: "v2-scope".to_string(),
+                idempotency_key: "v2-scope".to_string(),
+            }),
+            holder: Some(semantic_v1::Identity {
+                id: "worker-v2".to_string(),
+                generation: 1,
+            }),
+            query: Some(semantic_v1::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: Default::default(),
+                }],
+                minimum_capacity: Default::default(),
+            }),
+            ttl: Some(prost_types::Duration {
+                seconds: 30,
+                nanos: 0,
+            }),
+        })
+    };
+    let missing = runtime
+        .block_on(KernelAuthorityV2Service::acquire_lease(
+            &v2_adapter,
+            request(""),
+        ))
+        .unwrap_err();
+    assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        missing
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("NAMESPACE_REQUIRED")
+    );
+    let invalid = runtime
+        .block_on(KernelAuthorityV2Service::acquire_lease(
+            &v2_adapter,
+            request("not/a-namespace"),
+        ))
+        .unwrap_err();
+    assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        invalid
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("NAMESPACE_INVALID")
+    );
+    let v2_lease = runtime
+        .block_on(KernelAuthorityV2Service::acquire_lease(
+            &v2_adapter,
+            request("tenant-a"),
+        ))
+        .unwrap()
+        .into_inner();
+    let identity = v2_lease.identity.unwrap();
+    assert!(v2_adapter.leases.lock().unwrap().contains_key(&ObjectRef {
+        namespace: NamespaceId::new("tenant-a").unwrap(),
+        identity: semantic::Identity {
+            id: identity.id,
+            generation: identity.generation,
+        },
+    }));
+}
+
+#[test]
+fn namespace_scopes_identical_worker_lease_operation_endpoint_grant_and_events() {
+    let adapter = semantic_worker_adapter_with_resources(vec![
+        test_resource_with_id("resource-a"),
+        test_resource_with_id("resource-b"),
+    ]);
+    let authority = adapter.authority();
+    let namespace_a = scoped_authority_context("namespace-a", "lease-x");
+    let namespace_b = scoped_authority_context("namespace-b", "lease-x");
+    let principal_a = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let principal_b = principal_from_peer_cred(&PeerCred {
+        pid: 4243,
+        uid: 2000,
+        gid: 2000,
+    });
+    let worker_identity = semantic::Identity {
+        id: "worker-x".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let lease_a = authority
+        .acquire_lease(
+            &namespace_a,
+            &principal_a,
+            worker_identity.clone(),
+            query.clone(),
+            u64::MAX,
+        )
+        .unwrap();
+    let lease_b = authority
+        .acquire_lease(
+            &namespace_b,
+            &principal_b,
+            worker_identity.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(lease_a.identity, lease_b.identity);
+    assert_ne!(lease_a.fence_token, lease_b.fence_token);
+
+    let worker = |lease: &semantic::Lease, principal: &semantic::Principal| semantic::Worker {
+        identity: worker_identity.clone(),
+        principal: principal.identity.clone(),
+        provider: semantic::Identity {
+            id: "provider-x".to_string(),
+            generation: 1,
+        },
+        lease: lease.identity.clone(),
+        state: semantic::WorkerState::Registered,
+        execution_ref: "opaque-execution-reference".to_string(),
+        limits: BTreeMap::new(),
+    };
+    authority
+        .start_worker(&namespace_a, &principal_a, worker(&lease_a, &principal_a))
+        .unwrap();
+    authority
+        .start_worker(&namespace_b, &principal_b, worker(&lease_b, &principal_b))
+        .unwrap();
+
+    let endpoint = |principal: &semantic::Principal| semantic::Endpoint {
+        identity: semantic::Identity {
+            id: "endpoint-x".to_string(),
+            generation: 1,
+        },
+        provider: semantic::Identity {
+            id: "provider-x".to_string(),
+            generation: 1,
+        },
+        owner: worker_identity.clone(),
+        transport: "transport.uds".to_string(),
+        schema_id: "schema.v1".to_string(),
+        capabilities: Vec::new(),
+        public_attributes: BTreeMap::from([("owner".to_string(), principal.identity.id.clone())]),
+    };
+    let endpoint_a = authority
+        .publish_endpoint(&namespace_a, &principal_a, endpoint(&principal_a))
+        .unwrap();
+    let endpoint_b = authority
+        .publish_endpoint(&namespace_b, &principal_b, endpoint(&principal_b))
+        .unwrap();
+    assert_eq!(endpoint_a.identity, endpoint_b.identity);
+
+    let grant = |endpoint: &semantic::Endpoint, lease: &semantic::Lease| semantic::EndpointGrant {
+        identity: semantic::Identity {
+            id: "grant-x".to_string(),
+            generation: 1,
+        },
+        endpoint: endpoint.identity.clone(),
+        grantee: worker_identity.clone(),
+        lease: lease.identity.clone(),
+        fence_token: lease.fence_token,
+        expires_at_unix_ms: u64::MAX,
+    };
+    authority
+        .authorize_endpoint(&namespace_a, &principal_a, grant(&endpoint_a, &lease_a))
+        .unwrap();
+    authority
+        .authorize_endpoint(&namespace_b, &principal_b, grant(&endpoint_b, &lease_b))
+        .unwrap();
+
+    let operation = |principal: &semantic::Principal| semantic::Operation {
+        identity: semantic::Identity {
+            id: "operation-x".to_string(),
+            generation: 1,
+        },
+        owner: principal.identity.clone(),
+        executor: semantic::Identity {
+            id: "provider-x".to_string(),
+            generation: 1,
+        },
+        kind: "ai.train".to_string(),
+        state: semantic::OperationState::Created,
+        deadline_unix_ms: None,
+        parent: None,
+        metadata: BTreeMap::new(),
+    };
+    authority
+        .create_operation(&namespace_a, &principal_a, operation(&principal_a))
+        .unwrap();
+    authority
+        .create_operation(&namespace_b, &principal_b, operation(&principal_b))
+        .unwrap();
+
+    let worker_object_a = namespace_a.object_ref(worker_identity.clone());
+    let worker_object_b = namespace_b.object_ref(worker_identity.clone());
+    let workers = authority.runtime.workers.lock().unwrap();
+    assert_eq!(workers.len(), 2);
+    assert_ne!(workers[&worker_object_a], workers[&worker_object_b]);
+    drop(workers);
+    assert_eq!(authority.runtime.leases.lock().unwrap().len(), 2);
+    assert_eq!(authority.runtime.endpoints.lock().unwrap().len(), 2);
+    assert_eq!(authority.runtime.endpoint_grants.lock().unwrap().len(), 2);
+    assert!(authority
+        .runtime
+        .semantic_operations
+        .lock()
+        .unwrap()
+        .contains_key(&namespace_a.object_ref(semantic::Identity {
+            id: "operation-x".to_string(),
+            generation: 1,
+        })));
+    assert!(authority
+        .runtime
+        .semantic_operations
+        .lock()
+        .unwrap()
+        .contains_key(&namespace_b.object_ref(semantic::Identity {
+            id: "operation-x".to_string(),
+            generation: 1,
+        })));
+
+    let events_a = authority
+        .events_after(
+            &namespace_a,
+            &principal_a,
+            &semantic::EventCursor {
+                source: authority.semantic_event_source_for(&namespace_a.namespace),
+                sequence: 0,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    let events_b = authority
+        .events_after(
+            &namespace_b,
+            &principal_b,
+            &semantic::EventCursor {
+                source: authority.semantic_event_source_for(&namespace_b.namespace),
+                sequence: 0,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    assert_ne!(events_a.source, events_b.source);
+    assert!(events_a
+        .events
+        .iter()
+        .all(|event| event.source == events_a.source));
+    assert!(events_b
+        .events
+        .iter()
+        .all(|event| event.source == events_b.source));
+
+    let denied = authority
+        .release_lease(
+            &namespace_b,
+            &principal_a,
+            &lease_b.identity,
+            lease_b.fence_token,
+        )
+        .unwrap_err();
+    assert_eq!(denied.reason_code, "NAMESPACE_AUTHORITY_DENIED");
 }
 
 #[test]
@@ -1152,8 +1502,13 @@ fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
         .unwrap();
 
     let (outbound, mut inbound) = mpsc::channel(1);
+    let control_context = crate::convert::authority_call_context_from_proto(Some(
+        &authority_context("control-connect"),
+    ))
+    .unwrap();
     let (connection_id, welcome) = adapter
         .register_semantic_worker_control(
+            &control_context,
             &core_v1::WorkerControlHello {
                 worker: worker.identity.clone(),
                 lease: lease.identity.clone(),
@@ -1168,6 +1523,10 @@ fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
         let adapter = adapter.clone();
         let worker = worker.clone();
         let lease = lease.clone();
+        let context = crate::convert::authority_call_context_from_proto(Some(&authority_context(
+            "control-ack",
+        )))
+        .unwrap();
         thread::spawn(move || {
             let frame = inbound
                 .blocking_recv()
@@ -1178,13 +1537,16 @@ fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
                 panic!("expected WorkerControlShutdown frame");
             };
             adapter
-                .accept_semantic_shutdown_ack(&core_v1::WorkerControlShutdownAck {
-                    worker: worker.identity.clone(),
-                    lease: lease.identity.clone(),
-                    fence_token: lease.fence_token,
-                    shutdown_id: shutdown.shutdown_id,
-                    drained: true,
-                })
+                .accept_semantic_shutdown_ack(
+                    &context,
+                    &core_v1::WorkerControlShutdownAck {
+                        worker: worker.identity.clone(),
+                        lease: lease.identity.clone(),
+                        fence_token: lease.fence_token,
+                        shutdown_id: shutdown.shutdown_id,
+                        drained: true,
+                    },
+                )
                 .unwrap();
         })
     };
@@ -1500,4 +1862,114 @@ fn release_lease_fails_closed_when_journal_write_fails() {
         .lease(&lease.identity.as_ref().unwrap().id)
         .unwrap();
     assert_eq!(still_held.state, cy_kernel_api::LeaseState::Releasing);
+}
+
+#[test]
+fn local_authority_owns_semantic_lease_transitions_without_tonic() {
+    let adapter = semantic_lease_adapter();
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "direct-authority".to_string(),
+        idempotency_key: "direct-authority".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            semantic::Identity {
+                id: "direct-worker".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            u64::MAX,
+        )
+        .expect("direct authority acquire should succeed");
+
+    assert_eq!(lease.state, semantic::LeaseState::Active);
+    assert_eq!(lease.holder.id, "direct-worker");
+    assert_eq!(
+        adapter.daemon.lease(&lease.identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Active
+    );
+}
+
+#[test]
+fn owned_startup_failure_keeps_resource_unavailable_when_release_cannot_complete() {
+    use core_v1::{
+        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+    };
+
+    #[derive(Default)]
+    struct TerminalReleaseJournal;
+
+    impl RuntimeJournalSink for TerminalReleaseJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if record.event == RuntimeJournalEvent::LeaseReleased {
+                return Err(ProviderError::new(
+                    "failing-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "startup cleanup terminal record cannot be persisted",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    let adapter = semantic_lease_adapter().with_runtime_journal(Arc::new(TerminalReleaseJournal));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let request = |request_id: &str| AcquireSemanticLeaseRequest {
+        context: Some(authority_context(request_id)),
+        holder: Some(semantic_v1::Identity {
+            id: format!("worker-{request_id}"),
+            generation: 1,
+        }),
+        query: Some(semantic_v1::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count: 1,
+            required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                id: "accelerator.compute".to_string(),
+                minimum_revision: 1,
+                required_properties: Default::default(),
+            }],
+            minimum_capacity: Default::default(),
+        }),
+        ttl: Some(prost_types::Duration {
+            seconds: 30,
+            nanos: 0,
+        }),
+    };
+    let lease = runtime
+        .block_on(adapter.acquire_lease(authority_request(request("startup-failure"))))
+        .unwrap()
+        .into_inner();
+    let internal = adapter
+        .daemon
+        .lease(&lease.identity.as_ref().unwrap().id)
+        .unwrap();
+
+    let failure = adapter.release_owned_lease(true, &internal).unwrap_err();
+    assert_eq!(failure.reason_code, "JOURNAL_WRITE_FAILED");
+    assert_eq!(
+        adapter.daemon.lease(&internal.name).unwrap().state,
+        cy_kernel_api::LeaseState::Failed,
+        "failed startup cleanup must retain the allocation"
+    );
+    assert!(runtime
+        .block_on(adapter.acquire_lease(authority_request(request("replacement"))))
+        .is_err());
 }

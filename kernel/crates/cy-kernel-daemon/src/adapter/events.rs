@@ -3,13 +3,13 @@
 use std::sync::atomic::Ordering;
 
 use cy_kernel_api::{
-    semantic, CleanupReport, ProviderError, RuntimeJournalEvent, RuntimeJournalRecord,
+    semantic, CleanupReport, NamespaceId, ProviderError, RuntimeJournalEvent, RuntimeJournalRecord,
 };
 use cy_proto::core_v1;
 
 use crate::{
     adapter::{KernelServiceAdapter, OPERATION_EVENT_HISTORY_CAPACITY},
-    convert::{now_timestamp, now_unix_ms, runtime_event_kind},
+    convert::{now_timestamp, runtime_event_kind},
 };
 
 impl KernelServiceAdapter {
@@ -38,6 +38,23 @@ impl KernelServiceAdapter {
         reason_code: impl Into<String>,
         summary: impl Into<String>,
     ) {
+        self.publish_runtime_event_in(
+            &NamespaceId::default(),
+            event_type,
+            target_resource_name,
+            reason_code,
+            summary,
+        );
+    }
+
+    pub(crate) fn publish_runtime_event_in(
+        &self,
+        namespace: &NamespaceId,
+        event_type: core_v1::RuntimeEventType,
+        target_resource_name: impl Into<String>,
+        reason_code: impl Into<String>,
+        summary: impl Into<String>,
+    ) {
         let target_resource_name = target_resource_name.into();
         let reason_code = reason_code.into();
         let summary = summary.into();
@@ -54,7 +71,8 @@ impl KernelServiceAdapter {
                 observed_at: Some(now_timestamp()),
             }),
         });
-        self.publish_semantic_event(
+        self.authority.publish_semantic_event_in(
+            namespace,
             semantic::Identity {
                 id: target_resource_name,
                 generation: 1,
@@ -82,13 +100,12 @@ impl KernelServiceAdapter {
         let _ = self.operation_event_sender.send(event);
     }
 
+    #[cfg(test)]
     pub(crate) fn semantic_event_source(&self) -> semantic::Identity {
-        semantic::Identity {
-            id: format!("kernel/{}", self.daemon.node_id),
-            generation: self.daemon.node_epoch,
-        }
+        self.authority.semantic_event_source()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_semantic_event(
         &self,
         subject: semantic::Identity,
@@ -96,70 +113,8 @@ impl KernelServiceAdapter {
         schema_id: impl Into<String>,
         body: impl Into<Vec<u8>>,
     ) {
-        let event = semantic::Event {
-            sequence: self
-                .next_semantic_event_sequence
-                .fetch_add(1, Ordering::Relaxed),
-            source: self.semantic_event_source(),
-            subject,
-            kind: kind.into(),
-            observed_at_unix_ms: now_unix_ms(),
-            schema_id: schema_id.into(),
-            body: body.into(),
-        };
-        if event.validate().is_err() {
-            return;
-        }
-        let mut history = self
-            .semantic_events
-            .lock()
-            .expect("semantic event history lock poisoned");
-        if history.len() == OPERATION_EVENT_HISTORY_CAPACITY {
-            history.pop_front();
-        }
-        history.push_back(event);
-    }
-
-    pub(crate) fn semantic_events_after(
-        &self,
-        cursor: &semantic::EventCursor,
-        limit: usize,
-    ) -> semantic::EventPage {
-        let source = self.semantic_event_source();
-        let history = self
-            .semantic_events
-            .lock()
-            .expect("semantic event history lock poisoned");
-        let oldest = history.front().map_or(0, |event| event.sequence);
-        let latest = history.back().map_or(0, |event| event.sequence);
-        let status = cursor.status_against(&source, oldest);
-        if status != semantic::ReplayStatus::Current {
-            return semantic::EventPage {
-                source,
-                status,
-                events: Vec::new(),
-                oldest_available_sequence: oldest,
-                latest_available_sequence: latest,
-                next_sequence: cursor.sequence,
-            };
-        }
-        let events = history
-            .iter()
-            .filter(|event| event.sequence > cursor.sequence)
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-        let next_sequence = events
-            .last()
-            .map_or(cursor.sequence, |event| event.sequence);
-        semantic::EventPage {
-            source,
-            status,
-            events,
-            oldest_available_sequence: oldest,
-            latest_available_sequence: latest,
-            next_sequence,
-        }
+        self.authority
+            .publish_semantic_event(subject, kind, schema_id, body);
     }
 
     /// Persists a runtime lifecycle record to the durable journal.

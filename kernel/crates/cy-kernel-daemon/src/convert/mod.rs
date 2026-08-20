@@ -10,17 +10,23 @@ pub(crate) mod resource;
 pub(crate) mod worker;
 
 pub(crate) use common::{
-    authority_lease_name, expires_after, now_timestamp, now_unix_ms, proto_duration,
-    provider_status, semantic_contract_revision_from_proto, semantic_identity_from_proto,
-    semantic_identity_key, semantic_status, timestamp_from_unix_ms, to_proto_duration,
-    to_semantic_proto_contract_revision, to_semantic_proto_identity, unix_ms_from_timestamp,
-    validate_authority_context,
+    authority_call_context_from_proto, authority_call_context_from_v2_proto, expires_after,
+    now_timestamp, now_unix_ms, proto_duration, provider_status,
+    semantic_contract_revision_from_proto, semantic_identity_from_proto, semantic_status,
+    timestamp_from_unix_ms, to_proto_duration, to_semantic_proto_contract_revision,
+    to_semantic_proto_identity, unix_ms_from_timestamp, validate_authority_context,
 };
+// The legacy v1 lease-name helper exists solely for unit tests.
+#[cfg(test)]
+pub(crate) use common::authority_lease_name;
 pub(crate) use event::{
     operation_event_matches, runtime_event_kind, semantic_event_cursor_from_proto,
     semantic_operation_event_kind, to_semantic_proto_event_page,
 };
-pub(crate) use lease::{cgroup_limits, legacy_holder, to_proto_lease, to_semantic_proto_lease};
+pub(crate) use lease::{
+    cgroup_limits, legacy_holder, to_proto_lease, to_semantic_proto_contract_lease,
+    to_semantic_proto_lease,
+};
 pub(crate) use operation::{
     semantic_endpoint_from_proto, semantic_endpoint_grant_from_proto,
     semantic_operation_from_proto, to_semantic_proto_endpoint, to_semantic_proto_endpoint_grant,

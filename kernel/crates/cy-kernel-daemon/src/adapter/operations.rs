@@ -1,13 +1,10 @@
 //! KernelServiceAdapter Operation 状态辅助函数与语义操作追踪。
 
-use cy_kernel_api::{semantic, ProviderError};
+use cy_kernel_api::ProviderError;
 use cy_proto::core_v1;
 use tonic::Status;
 
-use crate::{
-    adapter::KernelServiceAdapter,
-    convert::{now_timestamp, semantic_identity_key, semantic_operation_event_kind},
-};
+use crate::{adapter::KernelServiceAdapter, convert::now_timestamp};
 
 impl KernelServiceAdapter {
     pub(crate) fn operation_name(&self, prefix: &str, id: &str) -> String {
@@ -74,26 +71,6 @@ impl KernelServiceAdapter {
             updated_at: Some(timestamp),
             outcome: None,
         })
-    }
-
-    pub(crate) fn remember_semantic_operation(
-        &self,
-        operation: semantic::Operation,
-    ) -> semantic::Operation {
-        self.semantic_operations
-            .lock()
-            .expect("semantic operation lock poisoned")
-            .insert(
-                semantic_identity_key(&operation.identity),
-                operation.clone(),
-            );
-        self.publish_semantic_event(
-            operation.identity.clone(),
-            semantic_operation_event_kind(operation.state),
-            "cyrene.operation.v1",
-            Vec::new(),
-        );
-        operation
     }
 
     pub(crate) fn operation_failure(

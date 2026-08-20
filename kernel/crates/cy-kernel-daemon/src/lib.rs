@@ -12,6 +12,7 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod adapter;
+pub mod authority;
 pub(crate) mod convert;
 pub(crate) mod daemon;
 pub mod peer_cred;
@@ -24,6 +25,7 @@ pub mod watchdog;
 mod tests;
 
 pub use adapter::KernelServiceAdapter;
+pub use authority::LocalKernelAuthority;
 pub use daemon::KernelDaemon;
 pub use session::WorkerHeartbeatConfig;
 pub use watchdog::{InstanceActor, InstanceActorState, InstanceHealthVerdict};

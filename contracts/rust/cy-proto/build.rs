@@ -5,12 +5,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir = manifest_dir.join("../../proto");
     let core_proto = proto_dir.join("cyrene/core/v1/cyrene_core.proto");
     let authority_proto = proto_dir.join("cyrene/core/v1/kernel_authority.proto");
+    let authority_v2_proto = proto_dir.join("cyrene/core/v2/kernel_authority.proto");
     let hardware_adapter_proto = proto_dir.join("cyrene/hardware/v1/hardware_adapter.proto");
     let sandbox_adapter_proto = proto_dir.join("cyrene/sandbox/v1/sandbox_adapter.proto");
     let semantic_contract_proto = proto_dir.join("cyrene/semantic/v1/kernel_contract.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
     println!("cargo:rerun-if-changed={}", authority_proto.display());
+    println!("cargo:rerun-if-changed={}", authority_v2_proto.display());
     println!(
         "cargo:rerun-if-changed={}",
         proto_dir.join("cyrene/core/v1").display()
@@ -34,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 core_proto,
                 authority_proto,
+                authority_v2_proto,
                 hardware_adapter_proto,
                 sandbox_adapter_proto,
                 semantic_contract_proto,

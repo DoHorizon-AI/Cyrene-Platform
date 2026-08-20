@@ -26,6 +26,10 @@ pub mod cyrene {
         pub mod v1 {
             tonic::include_proto!("cyrene.core.v1");
         }
+
+        pub mod v2 {
+            tonic::include_proto!("cyrene.core.v2");
+        }
     }
 
     pub mod hardware {
@@ -49,6 +53,8 @@ pub mod cyrene {
 
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
 pub use cyrene::core::v1 as core_v1;
+/// Core v2 authority projection with explicit namespace scope.
+pub use cyrene::core::v2 as core_v2;
 /// Versioned local protocol between the Kernel and external hardware adapters.
 pub use cyrene::hardware::v1 as hardware_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peer_cred::{inject_authority_principal, PeerCredAccept},
         KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig,
     };
-    use cy_proto::core_v1;
+    use cy_proto::{core_v1, core_v2};
     use cy_resource_manager::InMemoryResourceManager;
     use cy_sandbox_client::UdsSandboxAdapterClient;
     use runtime_journal::FileRuntimeJournal;
@@ -91,6 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authority_server = Server::builder()
         .add_service(
             core_v1::kernel_authority_service_server::KernelAuthorityServiceServer::with_interceptor(
+                adapter.clone(),
+                inject_authority_principal,
+            ),
+        )
+        .add_service(
+            core_v2::kernel_authority_service_server::KernelAuthorityServiceServer::with_interceptor(
                 adapter.clone(),
                 inject_authority_principal,
             ),

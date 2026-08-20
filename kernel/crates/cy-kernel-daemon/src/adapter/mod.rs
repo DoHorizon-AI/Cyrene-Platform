@@ -5,7 +5,8 @@ pub(crate) mod operations;
 pub(crate) mod worker;
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
+    ops::Deref,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -15,15 +16,17 @@ use std::{
 };
 
 use cy_kernel_api::{
-    semantic, InstalledPluginResolver, NoopRuntimeJournal, ResourceLease, RuntimeJournalSink,
+    InstalledPluginResolver, NoopRuntimeJournal, ProviderError, ResourceLease, RuntimeJournalEvent,
+    RuntimeJournalSink,
 };
-use cy_proto::core_v1;
+use cy_proto::{core_v1, core_v2};
 use tokio::sync::broadcast;
 use tonic::Status;
 
 use crate::{
+    authority::{AuthorityRuntime, LocalKernelAuthority},
     daemon::KernelDaemon,
-    session::{ManagedProcess, WorkerHeartbeatConfig},
+    session::WorkerHeartbeatConfig,
 };
 
 pub(crate) const OPERATION_EVENT_HISTORY_CAPACITY: usize = 256;
@@ -32,55 +35,39 @@ pub(crate) const OPERATION_EVENT_SUBSCRIBER_CAPACITY: usize = 64;
 /// Core v1 KernelService 到真实资源管理器与 SandboxBackend 的最小服务适配层。
 #[derive(Clone)]
 pub struct KernelServiceAdapter {
-    pub(crate) daemon: Arc<KernelDaemon>,
-    pub(crate) resolver: Arc<dyn InstalledPluginResolver>,
-    pub(crate) instances: Arc<Mutex<HashMap<String, ManagedProcess>>>,
+    pub(crate) authority: Arc<LocalKernelAuthority>,
     pub(crate) operations: Arc<Mutex<HashMap<String, core_v1::Operation>>>,
     pub(crate) operation_events: Arc<Mutex<VecDeque<core_v1::OperationEvent>>>,
     pub(crate) operation_event_sender: broadcast::Sender<core_v1::OperationEvent>,
-    pub(crate) semantic_operations: Arc<Mutex<BTreeMap<String, semantic::Operation>>>,
-    pub(crate) semantic_events: Arc<Mutex<VecDeque<semantic::Event>>>,
-    pub(crate) endpoints: Arc<Mutex<BTreeMap<String, semantic::Endpoint>>>,
-    pub(crate) endpoint_grants: Arc<Mutex<BTreeMap<String, semantic::EndpointGrant>>>,
     pub(crate) next_event_sequence: Arc<AtomicU64>,
-    pub(crate) next_semantic_event_sequence: Arc<AtomicU64>,
     pub(crate) adapter_available: Arc<AtomicBool>,
     pub(crate) adapter_poll_interval: Duration,
-    pub(crate) heartbeat: WorkerHeartbeatConfig,
-    pub(crate) next_control_connection: Arc<AtomicU64>,
-    pub(crate) runtime_journal: Arc<dyn RuntimeJournalSink>,
 }
 
 impl KernelServiceAdapter {
     pub fn new(daemon: Arc<KernelDaemon>, resolver: Arc<dyn InstalledPluginResolver>) -> Self {
         let (operation_event_sender, _) = broadcast::channel(OPERATION_EVENT_HISTORY_CAPACITY);
         Self {
-            daemon,
-            resolver,
-            instances: Arc::new(Mutex::new(HashMap::new())),
+            authority: Arc::new(LocalKernelAuthority::new(
+                daemon,
+                resolver,
+                Arc::new(NoopRuntimeJournal),
+            )),
             operations: Arc::new(Mutex::new(HashMap::new())),
             operation_events: Arc::new(Mutex::new(VecDeque::with_capacity(
                 OPERATION_EVENT_HISTORY_CAPACITY,
             ))),
             operation_event_sender,
-            semantic_operations: Arc::new(Mutex::new(BTreeMap::new())),
-            semantic_events: Arc::new(Mutex::new(VecDeque::with_capacity(
-                OPERATION_EVENT_HISTORY_CAPACITY,
-            ))),
-            endpoints: Arc::new(Mutex::new(BTreeMap::new())),
-            endpoint_grants: Arc::new(Mutex::new(BTreeMap::new())),
             next_event_sequence: Arc::new(AtomicU64::new(1)),
-            next_semantic_event_sequence: Arc::new(AtomicU64::new(1)),
             adapter_available: Arc::new(AtomicBool::new(true)),
             adapter_poll_interval: Duration::from_secs(5),
-            heartbeat: WorkerHeartbeatConfig::default(),
-            next_control_connection: Arc::new(AtomicU64::new(1)),
-            runtime_journal: Arc::new(NoopRuntimeJournal),
         }
     }
 
     pub fn with_worker_heartbeat(mut self, heartbeat: WorkerHeartbeatConfig) -> Self {
-        self.heartbeat = heartbeat;
+        Arc::get_mut(&mut self.authority)
+            .expect("authority cannot be reconfigured after adapter cloning")
+            .set_worker_heartbeat(heartbeat);
         self
     }
 
@@ -90,8 +77,14 @@ impl KernelServiceAdapter {
     }
 
     pub fn with_runtime_journal(mut self, runtime_journal: Arc<dyn RuntimeJournalSink>) -> Self {
-        self.runtime_journal = runtime_journal;
+        Arc::get_mut(&mut self.authority)
+            .expect("authority cannot be reconfigured after adapter cloning")
+            .set_runtime_journal(runtime_journal);
         self
+    }
+
+    pub fn authority(&self) -> Arc<LocalKernelAuthority> {
+        Arc::clone(&self.authority)
     }
 
     pub fn server(&self) -> core_v1::kernel_service_server::KernelServiceServer<Self> {
@@ -105,6 +98,14 @@ impl KernelServiceAdapter {
         &self,
     ) -> core_v1::kernel_authority_service_server::KernelAuthorityServiceServer<Self> {
         core_v1::kernel_authority_service_server::KernelAuthorityServiceServer::new(self.clone())
+    }
+
+    /// Core v2 authority projection shares the authenticated authority UDS
+    /// listener but requires a namespace in every stateful request.
+    pub fn authority_v2_server(
+        &self,
+    ) -> core_v2::kernel_authority_service_server::KernelAuthorityServiceServer<Self> {
+        core_v2::kernel_authority_service_server::KernelAuthorityServiceServer::new(self.clone())
     }
 
     pub fn lifecycle_server(
@@ -177,15 +178,46 @@ impl KernelServiceAdapter {
         Ok(())
     }
 
-    pub(crate) fn release_owned_lease(&self, owned_lease: bool, lease: &ResourceLease) {
-        if owned_lease {
-            if self
-                .daemon
-                .begin_release(&lease.name, lease.fence_token)
-                .is_ok()
-            {
-                let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
-            }
+    pub(crate) fn release_owned_lease(
+        &self,
+        owned_lease: bool,
+        lease: &ResourceLease,
+    ) -> Result<(), ProviderError> {
+        if !owned_lease {
+            return Ok(());
         }
+        let lease_ref = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        self.record_runtime(
+            RuntimeJournalEvent::LeaseReleaseStarted,
+            None,
+            Some(&lease_ref),
+            "LEASE_RELEASE_STARTED",
+        )?;
+        let releasing = self.daemon.begin_release(&lease.name, lease.fence_token)?;
+        if let Err(error) = self.record_runtime(
+            RuntimeJournalEvent::LeaseReleased,
+            None,
+            Some(&lease_ref),
+            "LEASE_RELEASED",
+        ) {
+            let _ = self.daemon.fail_release(&releasing.name, lease.fence_token);
+            return Err(error);
+        }
+        if let Err(error) = self.daemon.complete_release(&lease.name, lease.fence_token) {
+            let _ = self.daemon.fail_release(&releasing.name, lease.fence_token);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+impl Deref for KernelServiceAdapter {
+    type Target = AuthorityRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.authority.runtime
     }
 }
