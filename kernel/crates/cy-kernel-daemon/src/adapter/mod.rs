@@ -468,6 +468,23 @@ impl KernelServiceAdapter {
         match outcome {
             Ok(cleaned) => {
                 if let Some(instance_name) = cleaned {
+                    // The Worker that held the released Lease no longer has
+                    // authority: remove its Endpoint/Grant metadata before the
+                    // instance record disappears.
+                    let worker_identity = self
+                        .instances
+                        .lock()
+                        .expect("instance lock poisoned")
+                        .get(&instance_name)
+                        .and_then(|process| {
+                            process
+                                .semantic_worker
+                                .as_ref()
+                                .map(|worker| worker.identity.clone())
+                        });
+                    if let Some(identity) = worker_identity {
+                        self.authority.purge_endpoint_authority(&identity);
+                    }
                     self.instances
                         .lock()
                         .expect("instance lock poisoned")

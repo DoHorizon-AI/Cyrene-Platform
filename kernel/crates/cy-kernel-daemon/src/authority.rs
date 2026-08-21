@@ -447,6 +447,47 @@ impl LocalKernelAuthority {
         Ok(worker)
     }
 
+    /// Removes the authority metadata for a Worker that no longer holds valid
+    /// authority: its published Endpoints are deleted, and every EndpointGrant
+    /// that references one of those Endpoints or names the Worker as grantee is
+    /// dropped. Callers invoke this whenever the Worker's Lease is revoked,
+    /// released, or expired, or the Worker is lost/replaced, so stale
+    /// Endpoint/Grant state cannot outlive the authority it depends on. The
+    /// removed Endpoint identities are returned so callers can emit the
+    /// corresponding revocation reconcile actions.
+    pub(crate) fn purge_endpoint_authority(
+        &self,
+        worker_identity: &semantic::Identity,
+    ) -> Vec<semantic::Identity> {
+        let endpoint_identities = {
+            let mut endpoints = self
+                .runtime
+                .endpoints
+                .lock()
+                .expect("endpoint lock poisoned");
+            let endpoint_keys = endpoints
+                .iter()
+                .filter(|(_, endpoint)| endpoint.owner == *worker_identity)
+                .map(|(key, endpoint)| (key.clone(), endpoint.identity.clone()))
+                .collect::<Vec<_>>();
+            for (key, _) in &endpoint_keys {
+                endpoints.remove(key);
+            }
+            endpoint_keys
+                .iter()
+                .map(|(_, identity)| identity.clone())
+                .collect::<Vec<_>>()
+        };
+        self.runtime
+            .endpoint_grants
+            .lock()
+            .expect("endpoint grant lock poisoned")
+            .retain(|_, grant| {
+                !endpoint_identities.contains(&grant.endpoint) && grant.grantee != *worker_identity
+            });
+        endpoint_identities
+    }
+
     /// Commits the authority side of an abnormal Worker disappearance. The
     /// caller must already have classified its evidence (heartbeat timeout,
     /// Provider reality, or runtime absence); a transport disconnect alone is
@@ -579,34 +620,7 @@ impl LocalKernelAuthority {
                 .map(ProviderReconcileAction::MarkOperationLost),
         );
 
-        let revoked_endpoints = {
-            let mut endpoints = self
-                .runtime
-                .endpoints
-                .lock()
-                .expect("endpoint lock poisoned");
-            let endpoint_keys = endpoints
-                .iter()
-                .filter(|(_, endpoint)| endpoint.owner == worker.identity)
-                .map(|(key, endpoint)| (key.clone(), endpoint.identity.clone()))
-                .collect::<Vec<_>>();
-            for (key, _) in &endpoint_keys {
-                endpoints.remove(key);
-            }
-            let endpoint_identities = endpoint_keys
-                .iter()
-                .map(|(_, identity)| identity.clone())
-                .collect::<Vec<_>>();
-            self.runtime
-                .endpoint_grants
-                .lock()
-                .expect("endpoint grant lock poisoned")
-                .retain(|_, grant| {
-                    !endpoint_identities.contains(&grant.endpoint)
-                        && grant.grantee != worker.identity
-                });
-            endpoint_identities
-        };
+        let revoked_endpoints = self.purge_endpoint_authority(&worker.identity);
         actions.extend(
             revoked_endpoints
                 .iter()
@@ -1071,6 +1085,9 @@ impl KernelAuthority for LocalKernelAuthority {
                 .daemon
                 .complete_release(&lease.name, fence_token)
                 .map_err(Self::provider_rejection)?;
+            // The stopped Worker no longer holds an active Lease; its Endpoints
+            // and Grants lose authority and must not remain in Kernel state.
+            self.purge_endpoint_authority(worker_identity);
         } else {
             let _ = self
                 .runtime
@@ -2570,6 +2587,9 @@ impl LocalKernelAuthority {
             .daemon
             .complete_release(&current.name, fence_token)
             .map_err(Self::provider_rejection)?;
+        // The Worker that held the released Lease no longer has authority: its
+        // published Endpoints and dependent Grants must not outlive the Lease.
+        self.purge_endpoint_authority(&current.holder);
         Ok(Self::semantic_lease(&object, &released))
     }
 }
