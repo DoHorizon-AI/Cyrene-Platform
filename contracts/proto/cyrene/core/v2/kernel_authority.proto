@@ -36,7 +36,7 @@ service KernelAuthorityService {
       returns (cyrene.semantic.v1.EndpointGrant);
   rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
   rpc SubscribeEvents(SubscribeEventsRequest)
-      returns (cyrene.semantic.v1.EventPage);
+      returns (stream cyrene.semantic.v1.Event);
 }
 
 // Namespace is mandatory for every stateful Core v2 authority request. It is

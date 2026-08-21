@@ -310,12 +310,31 @@ async fn execute_authority_command(
             .revoke_endpoint(Request::new(request))
             .await
             .map(|_| kernel_authority_command_result::Outcome::Revoked(true)),
-        kernel_authority_command::Request::SubscribeEvents(request) => client
-            .subscribe_events(Request::new(request))
+        kernel_authority_command::Request::SubscribeEvents(request) => {
+            let mut stream = client
+                .subscribe_events(Request::new(request))
+                .await?
+                .into_inner();
+            let mut events = Vec::new();
+            while let Ok(Some(Ok(event))) = tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                tokio_stream::StreamExt::next(&mut stream),
+            )
             .await
-            .map(|response| {
-                kernel_authority_command_result::Outcome::EventPage(response.into_inner())
-            }),
+            {
+                events.push(event);
+            }
+            Ok(kernel_authority_command_result::Outcome::EventPage(
+                cy_proto::semantic_v1::EventPage {
+                    source: None,
+                    status: cy_proto::semantic_v1::ReplayStatus::Current as i32,
+                    events,
+                    oldest_available_sequence: 0,
+                    latest_available_sequence: 0,
+                    next_sequence: 0,
+                },
+            ))
+        }
     }?;
     Ok(KernelAuthorityCommandResult {
         outcome: Some(outcome),

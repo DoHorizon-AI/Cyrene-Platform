@@ -49,6 +49,7 @@ pub struct AuthorityRuntime {
     pub(crate) next_control_connection: Arc<AtomicU64>,
     pub(crate) runtime_journal: Arc<dyn RuntimeJournalSink>,
     pub(crate) event_store: Arc<dyn DurableEventStore>,
+    pub(crate) event_notifier: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -221,6 +222,7 @@ impl LocalKernelAuthority {
                 next_control_connection: Arc::new(AtomicU64::new(1)),
                 runtime_journal,
                 event_store: Arc::new(NoopRuntimeJournal),
+                event_notifier: Arc::new(tokio::sync::Notify::new()),
             }),
         }
     }
@@ -2559,6 +2561,7 @@ impl LocalKernelAuthority {
             .is_err()
         {
             history.next_sequence = None;
+            self.runtime.event_notifier.notify_waiters();
             return;
         }
         history.next_sequence = sequence.checked_add(1);
@@ -2566,6 +2569,7 @@ impl LocalKernelAuthority {
             history.events.pop_front();
         }
         history.events.push_back(event);
+        self.runtime.event_notifier.notify_waiters();
     }
 
     fn events_after_inner(

@@ -44,6 +44,19 @@ pub(crate) fn semantic_event_cursor_from_proto(
     Ok(cursor)
 }
 
+pub(crate) fn to_semantic_proto_event(event: &semantic::Event) -> semantic_v1::Event {
+    semantic_v1::Event {
+        sequence: event.sequence,
+        source: Some(to_semantic_proto_identity(&event.source)),
+        subject: Some(to_semantic_proto_identity(&event.subject)),
+        kind: event.kind.clone(),
+        observed_at: Some(timestamp_from_unix_ms(event.observed_at_unix_ms)),
+        schema_id: event.schema_id.clone(),
+        body: event.body.clone(),
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn to_semantic_proto_event_page(page: &semantic::EventPage) -> semantic_v1::EventPage {
     semantic_v1::EventPage {
         source: Some(to_semantic_proto_identity(&page.source)),
@@ -52,19 +65,7 @@ pub(crate) fn to_semantic_proto_event_page(page: &semantic::EventPage) -> semant
             semantic::ReplayStatus::Gap => semantic_v1::ReplayStatus::Gap,
             semantic::ReplayStatus::SourceChanged => semantic_v1::ReplayStatus::SourceChanged,
         } as i32,
-        events: page
-            .events
-            .iter()
-            .map(|event| semantic_v1::Event {
-                sequence: event.sequence,
-                source: Some(to_semantic_proto_identity(&event.source)),
-                subject: Some(to_semantic_proto_identity(&event.subject)),
-                kind: event.kind.clone(),
-                observed_at: Some(timestamp_from_unix_ms(event.observed_at_unix_ms)),
-                schema_id: event.schema_id.clone(),
-                body: event.body.clone(),
-            })
-            .collect(),
+        events: page.events.iter().map(to_semantic_proto_event).collect(),
         oldest_available_sequence: page.oldest_available_sequence,
         latest_available_sequence: page.latest_available_sequence,
         next_sequence: page.next_sequence,

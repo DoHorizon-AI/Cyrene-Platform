@@ -1800,7 +1800,9 @@ mod tests {
             .publish_endpoint(&context("ep-c"), &principal, endpoint_n.clone())
             .unwrap();
 
-        let snapshot_n = authority_n.snapshot(&context("snap-c"), &principal).unwrap();
+        let snapshot_n = authority_n
+            .snapshot(&context("snap-c"), &principal)
+            .unwrap();
         assert_eq!(snapshot_n.workers.len(), 1);
         assert_eq!(snapshot_n.leases.len(), 1);
         assert_eq!(snapshot_n.endpoints.len(), 1);
@@ -1816,8 +1818,14 @@ mod tests {
         // 3. Restart in Epoch N+1 and Recover
         // ==========================================
         let epoch_n_plus_one = journal.begin_epoch("node-golden-c").unwrap();
-        assert!(epoch_n_plus_one.node_epoch > epoch_n.node_epoch, "Node epoch advanced");
-        assert!(epoch_n_plus_one.next_fence_token > fence_n, "Next fence token strictly advanced");
+        assert!(
+            epoch_n_plus_one.node_epoch > epoch_n.node_epoch,
+            "Node epoch advanced"
+        );
+        assert!(
+            epoch_n_plus_one.next_fence_token > fence_n,
+            "Next fence token strictly advanced"
+        );
 
         // Verify recovery classification:
         // Add a foreign process evidence to sandbox observations to verify foreign is NOT killed
@@ -1826,20 +1834,38 @@ mod tests {
             pid: 9999,
             start_time_ticks: 88888,
         };
-        sandbox.observed.lock().unwrap().push(foreign_evidence.clone());
+        sandbox
+            .observed
+            .lock()
+            .unwrap()
+            .push(foreign_evidence.clone());
 
         let candidates = FileRuntimeJournal::classify_recovery(
             &epoch_n_plus_one,
             &sandbox.observed.lock().unwrap(),
         );
-        let stale_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Stale);
-        let foreign_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Foreign);
-        assert!(stale_cand.is_some(), "Exact leftover evidence classified as Stale");
-        assert!(foreign_cand.is_some(), "Foreign process classified as Foreign");
+        let stale_cand = candidates
+            .iter()
+            .find(|c| c.classification == RecoveryClassification::Stale);
+        let foreign_cand = candidates
+            .iter()
+            .find(|c| c.classification == RecoveryClassification::Foreign);
+        assert!(
+            stale_cand.is_some(),
+            "Exact leftover evidence classified as Stale"
+        );
+        assert!(
+            foreign_cand.is_some(),
+            "Foreign process classified as Foreign"
+        );
 
         // Stale process is reaped with exact evidence
         let exact_stale_evidence = stale_cand.unwrap().observed.clone().unwrap();
-        sandbox.observed.lock().unwrap().retain(|e| e != &foreign_evidence); // remove foreign before startup gate
+        sandbox
+            .observed
+            .lock()
+            .unwrap()
+            .retain(|e| e != &foreign_evidence); // remove foreign before startup gate
         journal
             .recover_before_listeners("node-golden-c", &epoch_n_plus_one, &sandbox)
             .unwrap();
@@ -1878,10 +1904,21 @@ mod tests {
         let authority_n_plus_one = adapter_n_plus_one.authority();
 
         // Verify old authority is NOT silently adopted
-        let fresh_snapshot = authority_n_plus_one.snapshot(&context("fresh-snap"), &principal).unwrap();
-        assert!(fresh_snapshot.workers.is_empty(), "Old worker must NOT be silently adopted");
-        assert!(fresh_snapshot.endpoints.is_empty(), "Old endpoint must NOT be silently adopted");
-        assert!(fresh_snapshot.leases.is_empty(), "Old lease must NOT be silently adopted");
+        let fresh_snapshot = authority_n_plus_one
+            .snapshot(&context("fresh-snap"), &principal)
+            .unwrap();
+        assert!(
+            fresh_snapshot.workers.is_empty(),
+            "Old worker must NOT be silently adopted"
+        );
+        assert!(
+            fresh_snapshot.endpoints.is_empty(),
+            "Old endpoint must NOT be silently adopted"
+        );
+        assert!(
+            fresh_snapshot.leases.is_empty(),
+            "Old lease must NOT be silently adopted"
+        );
 
         // Verify old cursor gets SOURCE_CHANGED
         let source_changed = authority_n_plus_one
@@ -1908,7 +1945,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(replacement_lease.state, semantic::LeaseState::Active);
-        assert!(replacement_lease.fence_token > fence_n, "Replacement fence must be strictly newer than pre-crash fence");
+        assert!(
+            replacement_lease.fence_token > fence_n,
+            "Replacement fence must be strictly newer than pre-crash fence"
+        );
         assert!(replacement_lease.fence_token >= epoch_n_plus_one.next_fence_token);
     }
 
@@ -1956,7 +1996,10 @@ mod tests {
         // 2. Kernel restarts in epoch 2
         let epoch_2 = journal.begin_epoch("node-golden-d").unwrap();
         assert_eq!(epoch_2.runtime_processes.len(), 1);
-        assert_eq!(epoch_2.runtime_processes[0].instance_name, "worker-pid-reuse");
+        assert_eq!(
+            epoch_2.runtime_processes[0].instance_name,
+            "worker-pid-reuse"
+        );
 
         // 3. Observed in sandbox: an OS process with matching PID 4040, BUT ticks = 99_999 (PID reused!)
         let reused_pid_evidence = RuntimeProcessEvidence {
@@ -1968,12 +2011,23 @@ mod tests {
         // 4. Verify classification:
         // - Live reused process is classified as Foreign (NOT Stale!)
         // - Stale journal record is classified as Unknown
-        let candidates = FileRuntimeJournal::classify_recovery(&epoch_2, &[reused_pid_evidence.clone()]);
+        let candidates =
+            FileRuntimeJournal::classify_recovery(&epoch_2, &[reused_pid_evidence.clone()]);
         assert_eq!(candidates.len(), 2);
-        let foreign_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Foreign);
-        let unknown_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Unknown);
-        assert!(foreign_cand.is_some(), "Reused PID with mismatched start ticks must be classified as Foreign");
-        assert!(unknown_cand.is_some(), "Old record without exact live match must be classified as Unknown");
+        let foreign_cand = candidates
+            .iter()
+            .find(|c| c.classification == RecoveryClassification::Foreign);
+        let unknown_cand = candidates
+            .iter()
+            .find(|c| c.classification == RecoveryClassification::Unknown);
+        assert!(
+            foreign_cand.is_some(),
+            "Reused PID with mismatched start ticks must be classified as Foreign"
+        );
+        assert!(
+            unknown_cand.is_some(),
+            "Old record without exact live match must be classified as Unknown"
+        );
 
         // 5. Test recovery execution:
         #[derive(Default)]
@@ -1990,10 +2044,18 @@ mod tests {
                     enforcement: Vec::new(),
                 }
             }
-            fn launch(&self, _plan: &LaunchPlan, _binding: &DeviceBinding) -> Result<ProcessHandle, ProviderError> {
+            fn launch(
+                &self,
+                _plan: &LaunchPlan,
+                _binding: &DeviceBinding,
+            ) -> Result<ProcessHandle, ProviderError> {
                 Err(ProviderError::new("mock", "UNUSED", "unused"))
             }
-            fn stop(&self, _handle: &ProcessHandle, _request: &StopRequest) -> Result<CleanupReport, ProviderError> {
+            fn stop(
+                &self,
+                _handle: &ProcessHandle,
+                _request: &StopRequest,
+            ) -> Result<CleanupReport, ProviderError> {
                 Err(ProviderError::new("mock", "UNUSED", "unused"))
             }
         }
@@ -2002,10 +2064,15 @@ mod tests {
             fn backend_id(&self) -> &str {
                 "mock-pid-reuse"
             }
-            fn discover_recovery_processes(&self) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+            fn discover_recovery_processes(
+                &self,
+            ) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
                 Ok(self.observed.clone())
             }
-            fn recover_stale_process(&self, evidence: &RuntimeProcessEvidence) -> Result<CleanupReport, ProviderError> {
+            fn recover_stale_process(
+                &self,
+                evidence: &RuntimeProcessEvidence,
+            ) -> Result<CleanupReport, ProviderError> {
                 self.reaped.lock().unwrap().push(evidence.clone());
                 Ok(CleanupReport {
                     complete: true,
@@ -2024,11 +2091,18 @@ mod tests {
 
         // Recovery MUST fail closed and MUST NOT reap the foreign reused PID process!
         let recovery_result = journal.recover_before_listeners("node-golden-d", &epoch_2, &sandbox);
-        assert!(recovery_result.is_err(), "Recovery must fail closed on foreign/unmatched process");
+        assert!(
+            recovery_result.is_err(),
+            "Recovery must fail closed on foreign/unmatched process"
+        );
         let error = recovery_result.unwrap_err();
         assert!(
-            matches!(error.reason_code.as_str(), "RECOVERY_FOREIGN_PROCESS" | "RECOVERY_UNKNOWN_PROCESS"),
-            "Error code must indicate unverified runtime state: {}", error.reason_code
+            matches!(
+                error.reason_code.as_str(),
+                "RECOVERY_FOREIGN_PROCESS" | "RECOVERY_UNKNOWN_PROCESS"
+            ),
+            "Error code must indicate unverified runtime state: {}",
+            error.reason_code
         );
 
         // Verification: The foreign process was NEVER reaped!
@@ -2038,4 +2112,3 @@ mod tests {
         );
     }
 }
-

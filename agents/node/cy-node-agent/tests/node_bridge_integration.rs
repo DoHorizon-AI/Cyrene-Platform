@@ -252,10 +252,18 @@ impl KernelAuthorityService for MockKernelAuthorityService {
         Ok(Response::new(()))
     }
 
+    type SubscribeEventsStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<cy_proto::semantic_v1::Event, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
     async fn subscribe_events(
         &self,
         _request: Request<cy_proto::core_v1::SubscribeEventsRequest>,
-    ) -> Result<Response<cy_proto::semantic_v1::EventPage>, Status> {
+    ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
 }

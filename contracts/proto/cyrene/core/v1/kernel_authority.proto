@@ -37,7 +37,7 @@ service KernelAuthorityService {
       returns (cyrene.semantic.v1.EndpointGrant);
   rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
   rpc SubscribeEvents(SubscribeEventsRequest)
-      returns (cyrene.semantic.v1.EventPage);
+      returns (stream cyrene.semantic.v1.Event);
 }
 
 // Dedicated Worker liveness/drain channel. It is served only on the Worker

@@ -311,9 +311,11 @@ dependencies = [
  "cy-resource-manager",
  "nix",
  "prost-types",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower",
  "uuid",
 ]
 

@@ -30,3 +30,7 @@ tonic = "0.11"
 # working on non-Unix platforms where the Accept wrapper is cfg(unix)-gated.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["socket"] }
+
+[dev-dependencies]
+tower = "0.4"
+tempfile = "3.8"

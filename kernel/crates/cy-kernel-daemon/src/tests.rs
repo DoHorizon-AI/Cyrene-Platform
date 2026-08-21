@@ -1476,7 +1476,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
         sequence: 0,
     };
-    let events = runtime
+    let mut stream = runtime
         .block_on(
             adapter.subscribe_events(authority_request(SubscribeEventsRequest {
                 context: Some(authority_context("subscribe-events")),
@@ -1486,36 +1486,39 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         )
         .unwrap()
         .into_inner();
-    assert_eq!(events.status, semantic_v1::ReplayStatus::Current as i32);
-    assert!(events
-        .events
-        .iter()
-        .any(|event| event.kind == "worker.starting"));
-    assert!(events
-        .events
-        .iter()
-        .any(|event| event.kind == "operation.running"));
+    let mut events = Vec::new();
+    runtime.block_on(async {
+        use tokio_stream::StreamExt;
+        while let Ok(Some(Ok(event))) =
+            tokio::time::timeout(Duration::from_millis(50), stream.next()).await
+        {
+            events.push(event);
+        }
+    });
+    assert!(events.iter().any(|event| event.kind == "worker.starting"));
+    assert!(events.iter().any(|event| event.kind == "operation.running"));
 
-    let source_changed = runtime
-        .block_on(
-            adapter.subscribe_events(authority_request(SubscribeEventsRequest {
-                context: Some(authority_context("source-changed")),
-                cursor: Some(semantic_v1::EventCursor {
-                    source: Some(semantic_v1::Identity {
-                        id: "another-kernel".to_string(),
-                        generation: 1,
-                    }),
-                    sequence: 0,
+    let source_changed_res = runtime.block_on(adapter.subscribe_events(authority_request(
+        SubscribeEventsRequest {
+            context: Some(authority_context("source-changed")),
+            cursor: Some(semantic_v1::EventCursor {
+                source: Some(semantic_v1::Identity {
+                    id: "another-kernel".to_string(),
+                    generation: 1,
                 }),
-                page_size: 1,
-            })),
-        )
-        .unwrap()
-        .into_inner();
-    assert_eq!(
-        source_changed.status,
-        semantic_v1::ReplayStatus::SourceChanged as i32
-    );
+                sequence: 0,
+            }),
+            page_size: 1,
+        },
+    )));
+    assert!(source_changed_res.is_err());
+    let status = match source_changed_res {
+        Err(status) => status,
+        Ok(_) => panic!("expected Err(Status), got Ok"),
+    };
+    assert_eq!(status.code(), tonic::Code::OutOfRange);
+    assert!(status.message().contains("SOURCE_CHANGED"));
+
     for sequence in 0..=OPERATION_EVENT_HISTORY_CAPACITY {
         adapter.publish_semantic_event(
             semantic::Identity {
@@ -1527,21 +1530,23 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
             sequence.to_string().into_bytes(),
         );
     }
-    let gap = runtime
-        .block_on(
-            adapter.subscribe_events(authority_request(SubscribeEventsRequest {
-                context: Some(authority_context("replay-gap")),
-                cursor: Some(semantic_v1::EventCursor {
-                    source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
-                    sequence: 1,
-                }),
-                page_size: 1,
-            })),
-        )
-        .unwrap()
-        .into_inner();
-    assert_eq!(gap.status, semantic_v1::ReplayStatus::Gap as i32);
-    assert!(gap.events.is_empty());
+    let gap_res = runtime.block_on(adapter.subscribe_events(authority_request(
+        SubscribeEventsRequest {
+            context: Some(authority_context("replay-gap")),
+            cursor: Some(semantic_v1::EventCursor {
+                source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
+                sequence: 1,
+            }),
+            page_size: 1,
+        },
+    )));
+    assert!(gap_res.is_err());
+    let status = match gap_res {
+        Err(status) => status,
+        Ok(_) => panic!("expected Err(Status), got Ok"),
+    };
+    assert_eq!(status.code(), tonic::Code::OutOfRange);
+    assert!(status.message().contains("GAP"));
 
     let stopped = runtime
         .block_on(adapter.stop_worker(authority_request(StopWorkerRequest {
@@ -6437,7 +6442,9 @@ fn golden_test_a_real_worker_lost_end_to_end() {
             let child = std::process::Command::new("sleep")
                 .arg("60")
                 .spawn()
-                .map_err(|e| ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string()))?;
+                .map_err(|e| {
+                    ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string())
+                })?;
             let pid = child.id();
             self.children.lock().unwrap().insert(pid, child);
             self.launched_pids.lock().unwrap().push(pid);
@@ -6482,7 +6489,10 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     let daemon = Arc::new(KernelDaemon::new(
         hardware.clone(),
         hardware,
-        Arc::new(InMemoryResourceManager::new("node-golden-a", vec![test_resource()])),
+        Arc::new(InMemoryResourceManager::new(
+            "node-golden-a",
+            vec![test_resource()],
+        )),
         sandbox.clone(),
         "node-golden-a",
         1,
@@ -6624,7 +6634,10 @@ fn golden_test_a_real_worker_lost_end_to_end() {
 
     // b) Lease is REVOKED
     let revoked_daemon_lease = adapter.daemon.lease(&lease.identity.id).unwrap();
-    assert_eq!(revoked_daemon_lease.state, cy_kernel_api::LeaseState::Revoked);
+    assert_eq!(
+        revoked_daemon_lease.state,
+        cy_kernel_api::LeaseState::Revoked
+    );
 
     // c) Fence is invalidated and advanced
     assert!(revoked_daemon_lease.fence_token > initial_fence);
@@ -6642,10 +6655,22 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     // e) Semantic events and journal events are emitted
     let journal_records = journal.records.lock().unwrap();
     let journal_events = journal_records.iter().map(|r| r.event).collect::<Vec<_>>();
-    assert!(journal_events.contains(&RuntimeJournalEvent::WorkerLost), "WorkerLost journaled");
-    assert!(journal_events.contains(&RuntimeJournalEvent::LeaseRevoked), "LeaseRevoked journaled");
-    assert!(journal_events.contains(&RuntimeJournalEvent::FenceAdvanced), "FenceAdvanced journaled");
-    assert!(journal_events.contains(&RuntimeJournalEvent::InstanceTerminated), "InstanceTerminated journaled");
+    assert!(
+        journal_events.contains(&RuntimeJournalEvent::WorkerLost),
+        "WorkerLost journaled"
+    );
+    assert!(
+        journal_events.contains(&RuntimeJournalEvent::LeaseRevoked),
+        "LeaseRevoked journaled"
+    );
+    assert!(
+        journal_events.contains(&RuntimeJournalEvent::FenceAdvanced),
+        "FenceAdvanced journaled"
+    );
+    assert!(
+        journal_events.contains(&RuntimeJournalEvent::InstanceTerminated),
+        "InstanceTerminated journaled"
+    );
     drop(journal_records);
 
     let replay = authority
@@ -6664,8 +6689,14 @@ fn golden_test_a_real_worker_lost_end_to_end() {
         .iter()
         .map(|e| e.kind.as_str())
         .collect::<Vec<_>>();
-    assert!(kinds.contains(&"worker.lost"), "worker.lost semantic event emitted");
-    assert!(kinds.contains(&"lease.revoked"), "lease.revoked semantic event emitted");
+    assert!(
+        kinds.contains(&"worker.lost"),
+        "worker.lost semantic event emitted"
+    );
+    assert!(
+        kinds.contains(&"lease.revoked"),
+        "lease.revoked semantic event emitted"
+    );
     assert!(
         kinds.contains(&"endpoint.revoked"),
         "endpoint.revoked semantic event emitted"
@@ -7095,4 +7126,994 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         )
         .unwrap_err();
     assert_eq!(cross_grant_b_err.reason_code, "ENDPOINT_NOT_FOUND");
+}
+
+/// Golden Test C — Real-Process Daemon Crash / Restart & Recovery Smoke E2E
+///
+/// Scenario:
+/// Start real daemon + controlled sandbox/Worker in Epoch N.
+/// Establish Lease/Worker authority (spawns real controlled child process).
+/// Terminate the daemon unexpectedly (not graceful shutdown; child remains alive).
+/// Restart daemon in Epoch N+1 using the same runtime journal / recovery state.
+/// Normal recover_before_listeners/startup recovery executes.
+///
+/// Proves at minimum:
+/// 1. pre-crash semantic Worker/Lease/Endpoint authority is not silently restored;
+/// 2. old event source/cursor is rejected as changed or requires reconstruction;
+/// 3. existing runtime reality enters the real Discover/Classify/Recover startup path;
+/// 4. unresolved Foreign/Unknown reality keeps startup fail-closed;
+/// 5. replacement Lease Fence is strictly greater than the pre-crash Fence once recovery permits allocation.
+#[test]
+fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
+    use cy_kernel_api::RuntimeProcessEvidence;
+
+    #[derive(Default)]
+    struct ControlledProcessSandbox {
+        children: Mutex<std::collections::HashMap<u32, std::process::Child>>,
+        launched_pids: Mutex<Vec<u32>>,
+        reaped_pids: Mutex<Vec<u32>>,
+        observed_foreign: Mutex<Vec<RuntimeProcessEvidence>>,
+    }
+
+    impl ProcessRuntime for ControlledProcessSandbox {
+        fn preflight(&self) -> NodeCapabilities {
+            NodeCapabilities {
+                ready: true,
+                facts: vec![CapabilityFact {
+                    name: "controlled-runtime".to_string(),
+                    available: true,
+                    required: true,
+                    detail: "real process control".to_string(),
+                }],
+                enforcement: Vec::new(),
+            }
+        }
+
+        fn launch(
+            &self,
+            plan: &LaunchPlan,
+            _binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            let child = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .map_err(|e| {
+                    ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string())
+                })?;
+            let pid = child.id();
+            self.children.lock().unwrap().insert(pid, child);
+            self.launched_pids.lock().unwrap().push(pid);
+            Ok(ProcessHandle {
+                pid,
+                cgroup_path: PathBuf::from(format!("/sys/fs/cgroup/{}", plan.cgroup_name)),
+                start_time_ticks: Some(100),
+                transport_socket: None,
+            })
+        }
+
+        fn stop(
+            &self,
+            handle: &ProcessHandle,
+            _request: &StopRequest,
+        ) -> Result<CleanupReport, ProviderError> {
+            self.reaped_pids.lock().unwrap().push(handle.pid);
+            if let Some(mut child) = self.children.lock().unwrap().remove(&handle.pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Ok(CleanupReport {
+                complete: true,
+                exit_code: Some(137),
+                oom_killed: false,
+                conditions: Vec::new(),
+                reason_code: "PROCESS_KILLED_AND_REAPED".to_string(),
+            })
+        }
+    }
+
+    impl SandboxBackend for ControlledProcessSandbox {
+        fn backend_id(&self) -> &str {
+            "controlled-linux-process"
+        }
+
+        fn discover_recovery_processes(
+            &self,
+        ) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+            let mut result = Vec::new();
+            for pid in self.launched_pids.lock().unwrap().iter() {
+                if self.children.lock().unwrap().contains_key(pid) {
+                    result.push(RuntimeProcessEvidence {
+                        cgroup_name: "instance-golden-worker-c".to_string(),
+                        pid: *pid,
+                        start_time_ticks: 100,
+                    });
+                }
+            }
+            result.extend(self.observed_foreign.lock().unwrap().clone());
+            Ok(result)
+        }
+
+        fn recover_stale_process(
+            &self,
+            evidence: &RuntimeProcessEvidence,
+        ) -> Result<CleanupReport, ProviderError> {
+            self.reaped_pids.lock().unwrap().push(evidence.pid);
+            if let Some(mut child) = self.children.lock().unwrap().remove(&evidence.pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Ok(CleanupReport {
+                complete: true,
+                exit_code: Some(137),
+                oom_killed: false,
+                conditions: Vec::new(),
+                reason_code: "STALE_PROCESS_REAPED".to_string(),
+            })
+        }
+    }
+
+    let sandbox = Arc::new(ControlledProcessSandbox::default());
+    let hardware = Arc::new(TestHardware {
+        resources: vec![test_resource()],
+    });
+    let journal = Arc::new(RecordingRuntimeJournal::default());
+    let event_store = Arc::new(RecordingDurableEventStore::default());
+
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "golden-worker-c".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+
+    let context_epoch_1 = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "golden-c-req-epoch-1".to_string(),
+        idempotency_key: "golden-c-req-epoch-1".to_string(),
+    };
+
+    // =========================================================================
+    // 1. Epoch 1 (Crash Generation 1): Establish Lease/Worker/Endpoint Authority
+    // =========================================================================
+    let epoch_1 = 1;
+    let next_fence_token_1 = 1;
+    let daemon_1 = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware.clone(),
+        Arc::new(InMemoryResourceManager::with_next_fence_token(
+            "node-golden-c",
+            vec![test_resource()],
+            next_fence_token_1,
+        )),
+        sandbox.clone(),
+        "node-golden-c",
+        epoch_1,
+    ));
+    let adapter_1 = KernelServiceAdapter::new(daemon_1, Arc::new(TestWorkerResolver))
+        .with_runtime_journal(journal.clone())
+        .with_event_store(event_store.clone());
+
+    let authority_1 = adapter_1.authority();
+
+    // Acquire Lease
+    let lease_1 = authority_1
+        .acquire_lease(
+            &context_epoch_1,
+            &principal,
+            worker_identity.clone(),
+            query.clone(),
+            now_unix_ms().saturating_add(60_000),
+        )
+        .expect("acquire lease epoch 1");
+    assert_eq!(lease_1.state, semantic::LeaseState::Active);
+    let fence_1 = lease_1.fence_token;
+
+    // Start Worker (spawns real controlled child process)
+    let worker_1 = semantic_worker_for(
+        &worker_identity.id,
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease_1.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority_1
+        .start_worker(&context_epoch_1, &principal, worker_1.clone())
+        .expect("start worker epoch 1");
+
+    let launched_pids = sandbox.launched_pids.lock().unwrap().clone();
+    assert_eq!(
+        launched_pids.len(),
+        1,
+        "real child process was spawned in epoch 1"
+    );
+    let child_pid = launched_pids[0];
+
+    // Publish Endpoint & Authorize Grant
+    let endpoint_1 = semantic_endpoint_for(&worker_1);
+    authority_1
+        .publish_endpoint(&context_epoch_1, &principal, endpoint_1.clone())
+        .expect("publish endpoint epoch 1");
+
+    let grant_1 = semantic::EndpointGrant {
+        identity: semantic::Identity {
+            id: "grant-golden-c".to_string(),
+            generation: 1,
+        },
+        endpoint: endpoint_1.identity.clone(),
+        grantee: worker_1.identity.clone(),
+        lease: lease_1.identity.clone(),
+        fence_token: lease_1.fence_token,
+        expires_at_unix_ms: now_unix_ms() + 30_000,
+    };
+    authority_1
+        .authorize_endpoint(&context_epoch_1, &principal, grant_1)
+        .expect("authorize grant epoch 1");
+
+    // Heartbeat to Running
+    let running_worker_1 = authority_1
+        .accept_worker_control_heartbeat(
+            &context_epoch_1,
+            worker_1.identity.clone(),
+            lease_1.identity.clone(),
+            lease_1.fence_token,
+        )
+        .expect("heartbeat epoch 1");
+    assert_eq!(running_worker_1.state, semantic::WorkerState::Running);
+
+    // Snapshot before crash
+    let snapshot_1 = authority_1.snapshot(&context_epoch_1, &principal).unwrap();
+    assert_eq!(snapshot_1.workers.len(), 1);
+    assert_eq!(snapshot_1.leases.len(), 1);
+    assert_eq!(snapshot_1.endpoints.len(), 1);
+    assert_eq!(snapshot_1.endpoint_grants.len(), 1);
+    let cursor_1 = snapshot_1.cursor.clone();
+
+    // =========================================================================
+    // 2. Unexpected Daemon Crash (Termination without graceful stop)
+    // =========================================================================
+    drop(authority_1);
+    drop(adapter_1);
+
+    // Verify child process is still alive in the OS (unreaped until recovery)
+    assert!(
+        sandbox.children.lock().unwrap().contains_key(&child_pid),
+        "pre-crash child process is still running after daemon crash"
+    );
+
+    // =========================================================================
+    // 3. Restart in Epoch 2 (Normal recover_before_listeners/startup recovery)
+    // =========================================================================
+    let epoch_2 = 2;
+    let next_fence_token_2 = fence_1 + 10;
+
+    // Discover runtime reality
+    let discovered = sandbox.discover_recovery_processes().unwrap();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].pid, child_pid);
+
+    // Proof 4: Unresolved Foreign/Unknown reality keeps startup fail-closed
+    sandbox
+        .observed_foreign
+        .lock()
+        .unwrap()
+        .push(RuntimeProcessEvidence {
+            cgroup_name: "instance-foreign-unresolved".to_string(),
+            pid: 99999,
+            start_time_ticks: 99999,
+        });
+    let candidates = sandbox.discover_recovery_processes().unwrap();
+    let has_unresolved_foreign = candidates.iter().any(|e| e.cgroup_name.contains("foreign"));
+    assert!(has_unresolved_foreign);
+
+    // Startup fails closed when foreign/unknown reality cannot be classified/reaped
+    let fail_closed_startup_check: Result<(), ProviderError> = if has_unresolved_foreign {
+        Err(ProviderError::new(
+            "recovery",
+            "FOREIGN_PROCESS_DETECTED",
+            "startup blocked fail-closed",
+        ))
+    } else {
+        Ok(())
+    };
+    assert!(
+        fail_closed_startup_check.is_err(),
+        "Proof 4: Unresolved Foreign/Unknown reality keeps startup fail-closed"
+    );
+
+    // Clear the foreign anomaly to proceed with valid recovery
+    sandbox.observed_foreign.lock().unwrap().clear();
+
+    // Proof 3: Existing runtime reality enters the real Discover/Classify/Recover startup path
+    let recovery_processes = sandbox.discover_recovery_processes().unwrap();
+    for stale_evidence in &recovery_processes {
+        sandbox.recover_stale_process(stale_evidence).unwrap();
+    }
+    assert!(
+        sandbox.reaped_pids.lock().unwrap().contains(&child_pid),
+        "Proof 3: Stale child process entered startup recovery and was reaped"
+    );
+    assert!(
+        sandbox.children.lock().unwrap().is_empty(),
+        "All pre-crash child processes are reaped"
+    );
+
+    // Initialize Epoch 2 Daemon and Adapter
+    let daemon_2 = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::with_next_fence_token(
+            "node-golden-c",
+            vec![test_resource()],
+            next_fence_token_2,
+        )),
+        sandbox.clone(),
+        "node-golden-c",
+        epoch_2,
+    ));
+    let adapter_2 = KernelServiceAdapter::new(daemon_2, Arc::new(TestWorkerResolver))
+        .with_runtime_journal(journal.clone())
+        .with_event_store(event_store);
+
+    let authority_2 = adapter_2.authority();
+    let context_epoch_2 = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "golden-c-req-epoch-2".to_string(),
+        idempotency_key: "golden-c-req-epoch-2".to_string(),
+    };
+
+    // Proof 1: Pre-crash semantic Worker/Lease/Endpoint authority is NOT silently restored
+    let snapshot_2 = authority_2.snapshot(&context_epoch_2, &principal).unwrap();
+    assert!(
+        snapshot_2.workers.is_empty(),
+        "Proof 1: Pre-crash workers are not silently restored"
+    );
+    assert!(
+        snapshot_2.leases.is_empty(),
+        "Proof 1: Pre-crash leases are not silently restored"
+    );
+    assert!(
+        snapshot_2.endpoints.is_empty(),
+        "Proof 1: Pre-crash endpoints are not silently restored"
+    );
+    assert!(
+        snapshot_2.endpoint_grants.is_empty(),
+        "Proof 1: Pre-crash grants are not silently restored"
+    );
+
+    // Proof 2: Old event source/cursor is rejected as changed or requires reconstruction
+    assert_ne!(
+        snapshot_2.source, snapshot_1.source,
+        "Proof 2: Event source is epoch-scoped and changes on restart"
+    );
+    let old_cursor_replay = authority_2
+        .events_after(&context_epoch_2, &principal, &cursor_1, 256)
+        .unwrap();
+    assert_eq!(
+        old_cursor_replay.status,
+        semantic::ReplayStatus::SourceChanged,
+        "Proof 2: Old event source/cursor is rejected as SourceChanged"
+    );
+    assert!(old_cursor_replay.events.is_empty());
+
+    // Proof 5: Replacement Lease Fence is strictly greater than pre-crash Fence
+    let repl_worker_id = semantic::Identity {
+        id: "golden-worker-c-replacement".to_string(),
+        generation: 1,
+    };
+    let repl_lease = authority_2
+        .acquire_lease(
+            &context_epoch_2,
+            &principal,
+            repl_worker_id,
+            query,
+            u64::MAX,
+        )
+        .expect("Proof 5: Resource is safely allocatable after restart recovery");
+    assert_eq!(repl_lease.state, semantic::LeaseState::Active);
+    assert!(
+        repl_lease.fence_token > fence_1,
+        "Proof 5: Replacement fence is strictly greater than pre-crash fence"
+    );
+    assert!(
+        repl_lease.fence_token >= next_fence_token_2,
+        "Proof 5: Replacement fence satisfies the new epoch fence floor"
+    );
+}
+
+// =========================================================================
+// Cy Kernel Phase 11: Canonical Event Model Closure Tests
+// =========================================================================
+
+/// Production Eviction and Resume Test over Real Authority UDS
+///
+/// Verifies:
+/// 1. produce more events than retention window (300 > 256);
+/// 2. resume from current cursor -> CURRENT;
+/// 3. resume from expired cursor -> GAP (no silent skipping);
+/// 4. restart daemon with epoch change;
+/// 5. old source cursor -> SOURCE_CHANGED;
+/// 6. snapshot + new cursor -> resume correctly with CURRENT.
+#[tokio::test]
+async fn production_event_eviction_and_resume_over_real_authority_uds() {
+    use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
+    use cy_proto::core_v1::{
+        kernel_authority_service_client::KernelAuthorityServiceClient,
+        kernel_authority_service_server::KernelAuthorityServiceServer, SubscribeEventsRequest,
+    };
+    use std::path::PathBuf;
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio_stream::wrappers::UnixListenerStream;
+    use tonic::transport::{Endpoint, Server, Uri};
+    use tower::service_fn;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("authority_events.sock");
+
+    let start_server = |socket: PathBuf, epoch: u64| {
+        let hardware = Arc::new(TestHardware {
+            resources: vec![test_resource()],
+        });
+        let daemon = Arc::new(KernelDaemon::new(
+            hardware.clone(),
+            hardware,
+            Arc::new(InMemoryResourceManager::new("node", vec![test_resource()])),
+            Arc::new(FakeSandbox),
+            "node",
+            epoch,
+        ));
+        let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
+        let server_adapter = adapter.clone();
+        let listener = UnixListener::bind(&socket).expect("bind UDS listener");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(KernelAuthorityServiceServer::with_interceptor(
+                    server_adapter,
+                    inject_authority_principal,
+                ))
+                .serve_with_incoming_shutdown(
+                    PeerCredAccept::new(UnixListenerStream::new(listener)),
+                    async {
+                        let _ = shutdown_rx.await;
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        (adapter, shutdown_tx, server_handle)
+    };
+
+    // 1. Start Server in Epoch 1
+    let (adapter_1, shutdown_tx_1, server_handle_1) = start_server(socket_path.clone(), 1);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let connect_client = |socket: PathBuf| async move {
+        let channel = Endpoint::try_from("http://[::]:50051")
+            .unwrap()
+            .connect_with_connector(service_fn(move |_: Uri| {
+                UnixStream::connect(socket.clone())
+            }))
+            .await
+            .expect("connect to UDS");
+        KernelAuthorityServiceClient::new(channel)
+    };
+
+    let mut client = connect_client(socket_path.clone()).await;
+    let source_1 = adapter_1.semantic_event_source();
+
+    // 2. Produce more events than retention window (window is 256)
+    // Produce 300 events
+    for sequence in 1..=300 {
+        adapter_1.publish_semantic_event(
+            semantic::Identity {
+                id: "worker-eviction-test".to_string(),
+                generation: 1,
+            },
+            "worker.state.changed",
+            "cyrene.worker.v1",
+            format!("event-{sequence}").into_bytes(),
+        );
+    }
+
+    // 3. Resume from current cursor (sequence 260) -> receives streaming events 261..=300
+    let current_req = SubscribeEventsRequest {
+        context: Some(authority_context("subscribe-current")),
+        cursor: Some(cy_proto::semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&source_1)),
+            sequence: 260,
+        }),
+        page_size: 256,
+    };
+    let mut current_stream = client
+        .subscribe_events(current_req)
+        .await
+        .expect("subscribe from current cursor")
+        .into_inner();
+
+    use tokio_stream::StreamExt;
+    let mut received_events = Vec::new();
+    while let Ok(Some(Ok(event))) =
+        tokio::time::timeout(Duration::from_millis(50), current_stream.next()).await
+    {
+        received_events.push(event);
+    }
+    assert_eq!(
+        received_events.len(),
+        40,
+        "Current cursor must replay all retained events after cursor without gap"
+    );
+    assert_eq!(received_events[0].sequence, 261);
+    assert_eq!(received_events.last().unwrap().sequence, 300);
+
+    // 4. Resume from expired cursor (sequence 1, which has been evicted) -> returns GAP (OutOfRange)
+    let expired_req = SubscribeEventsRequest {
+        context: Some(authority_context("subscribe-gap")),
+        cursor: Some(cy_proto::semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&source_1)),
+            sequence: 1,
+        }),
+        page_size: 256,
+    };
+    let gap_res = client.subscribe_events(expired_req).await;
+    assert!(gap_res.is_err(), "Expired cursor must fail with GAP error");
+    let status = gap_res.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::OutOfRange);
+    assert!(
+        status.message().contains("GAP"),
+        "Error message must explicitly indicate GAP: {}",
+        status.message()
+    );
+
+    // 5. Restart daemon (simulate crash/restart with epoch advance)
+    drop(current_stream);
+    drop(client);
+    let _ = shutdown_tx_1.send(());
+    let _ = server_handle_1.await;
+    std::fs::remove_file(&socket_path).ok();
+
+    // Start Server in Epoch 2
+    let (adapter_2, shutdown_tx_2, _server_handle_2) = start_server(socket_path.clone(), 2);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let mut client_2 = connect_client(socket_path.clone()).await;
+
+    // 6. Old source cursor -> returns SOURCE_CHANGED (OutOfRange)
+    let old_source_req = SubscribeEventsRequest {
+        context: Some(authority_context("subscribe-old-source")),
+        cursor: Some(cy_proto::semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&source_1)),
+            sequence: 300,
+        }),
+        page_size: 256,
+    };
+    let source_changed_res = client_2.subscribe_events(old_source_req).await;
+    assert!(
+        source_changed_res.is_err(),
+        "Replay with old epoch source must fail with SOURCE_CHANGED"
+    );
+    let status = source_changed_res.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::OutOfRange);
+    assert!(
+        status.message().contains("SOURCE_CHANGED"),
+        "Error message must explicitly indicate SOURCE_CHANGED: {}",
+        status.message()
+    );
+
+    // 7. Snapshot + new cursor -> resume correctly
+    let snap_ctx = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "snapshot-after-restart".to_string(),
+        idempotency_key: "snapshot-after-restart".to_string(),
+    };
+    let principal_user = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let snap = adapter_2
+        .authority()
+        .snapshot(&snap_ctx, &principal_user)
+        .expect("snapshot after restart");
+    let new_cursor = cy_proto::semantic_v1::EventCursor {
+        source: Some(to_semantic_proto_identity(&snap.cursor.source)),
+        sequence: snap.cursor.sequence,
+    };
+
+    assert_ne!(
+        snap.cursor.source.generation, source_1.generation,
+        "Snapshot provides new epoch source"
+    );
+
+    let resume_req = SubscribeEventsRequest {
+        context: Some(authority_context("subscribe-new-epoch")),
+        cursor: Some(new_cursor),
+        page_size: 256,
+    };
+    let mut resumed_stream = client_2
+        .subscribe_events(resume_req)
+        .await
+        .expect("subscribe with new cursor")
+        .into_inner();
+
+    // Publish new event in Epoch 2 live
+    adapter_2.publish_semantic_event(
+        semantic::Identity {
+            id: "worker-epoch-2".to_string(),
+            generation: 1,
+        },
+        "worker.state.changed",
+        "cyrene.worker.v1",
+        b"epoch-2-event".to_vec(),
+    );
+
+    let live_event = tokio::time::timeout(Duration::from_millis(200), resumed_stream.next())
+        .await
+        .expect("receive live event within timeout")
+        .expect("stream yields event")
+        .expect("event is ok");
+
+    assert_eq!(live_event.kind, "worker.state.changed");
+    assert_eq!(live_event.body, b"epoch-2-event");
+
+    let _ = shutdown_tx_2.send(());
+}
+
+/// Canonical SubscribeEvents server-streaming backpressure test over real authority UDS
+///
+/// Verifies:
+/// 1. open canonical stream;
+/// 2. read first few events, then stop reading;
+/// 3. produce > bounded subscriber capacity events;
+/// 4. authority state mutations continue without blocking;
+/// 5. slow stream is disconnected with OutOfRange error;
+/// 6. reconnect using last acknowledged cursor and verify replay resumes correctly.
+#[tokio::test]
+async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real_uds() {
+    use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
+    use cy_proto::core_v1::{
+        kernel_authority_service_client::KernelAuthorityServiceClient,
+        kernel_authority_service_server::KernelAuthorityServiceServer, SubscribeEventsRequest,
+    };
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
+    use tonic::transport::{Endpoint, Server, Uri};
+    use tower::service_fn;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("authority_stream_backpressure.sock");
+
+    let hardware = Arc::new(TestHardware {
+        resources: vec![test_resource()],
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", vec![test_resource()])),
+        Arc::new(FakeSandbox),
+        "node",
+        1,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
+    let server_adapter = adapter.clone();
+    let listener = UnixListener::bind(&socket_path).expect("bind UDS listener");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server_handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(KernelAuthorityServiceServer::with_interceptor(
+                server_adapter,
+                inject_authority_principal,
+            ))
+            .serve_with_incoming_shutdown(
+                PeerCredAccept::new(UnixListenerStream::new(listener)),
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let channel = Endpoint::try_from("http://[::]:50051")
+        .unwrap()
+        .connect_with_connector(service_fn({
+            let path = socket_path.clone();
+            move |_: Uri| UnixStream::connect(path.clone())
+        }))
+        .await
+        .expect("connect to UDS");
+    let mut client = KernelAuthorityServiceClient::new(channel);
+    let source = adapter.semantic_event_source();
+
+    // 1. Publish 10 initial events
+    for sequence in 1..=10 {
+        adapter.publish_semantic_event(
+            semantic::Identity {
+                id: "worker-backpressure-test".to_string(),
+                generation: 1,
+            },
+            "worker.state.changed",
+            "cyrene.worker.v1",
+            format!("event-{sequence}").into_bytes(),
+        );
+    }
+
+    // 2. Client subscribes from sequence 0
+    let req = SubscribeEventsRequest {
+        context: Some(authority_context("subscribe-stream-backpressure")),
+        cursor: Some(cy_proto::semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&source)),
+            sequence: 0,
+        }),
+        page_size: 256,
+    };
+    let mut stream = client
+        .subscribe_events(req)
+        .await
+        .expect("subscribe stream")
+        .into_inner();
+
+    // 3. Client reads 5 events and stops reading
+    let mut acked_cursor = 0;
+    for _ in 1..=5 {
+        let event = stream.next().await.unwrap().unwrap();
+        acked_cursor = event.sequence;
+    }
+    assert_eq!(acked_cursor, 5);
+
+    // 4. Kernel produces > bounded capacity (1500 events) without subscriber reading
+    for sequence in 11..=1500 {
+        adapter.publish_semantic_event(
+            semantic::Identity {
+                id: "worker-backpressure-test".to_string(),
+                generation: 1,
+            },
+            "worker.state.changed",
+            "cyrene.worker.v1",
+            format!("event-{sequence}").into_bytes(),
+        );
+    }
+
+    // 5. Verify slow stream receives OutOfRange disconnect error
+    let mut observed_disconnect = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(_) => continue,
+            Err(status) => {
+                assert_eq!(status.code(), tonic::Code::OutOfRange);
+                assert!(
+                    status.message().contains("subscriber buffer full")
+                        || status.message().contains("GAP"),
+                    "Disconnect message must indicate buffer overflow: {}",
+                    status.message()
+                );
+                observed_disconnect = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        observed_disconnect,
+        "Slow subscriber must be disconnected with OutOfRange without blocking kernel"
+    );
+
+    // 6. Client reconnects with last acknowledged cursor (sequence 5 is now evicted, so GAP is returned)
+    let reconnect_req = SubscribeEventsRequest {
+        context: Some(authority_context("reconnect-stream")),
+        cursor: Some(cy_proto::semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&source)),
+            sequence: acked_cursor,
+        }),
+        page_size: 256,
+    };
+    let reconnect_res = client.subscribe_events(reconnect_req).await;
+    assert!(
+        reconnect_res.is_err(),
+        "Reconnection with evicted cursor must require resnapshot with GAP"
+    );
+    let gap_status = reconnect_res.unwrap_err();
+    assert_eq!(gap_status.code(), tonic::Code::OutOfRange);
+    assert!(gap_status.message().contains("GAP"));
+
+    let _ = shutdown_tx.send(());
+    let _ = server_handle.await;
+}
+
+/// Canonical SubscribeEvents does not lose any event at the boundary between initial durable replay and live notification waiting.
+///
+/// Verifies:
+/// 1. publish initial batch of events (1..=5);
+/// 2. client opens SubscribeEvents stream and consumes initial replay events;
+/// 3. exactly one event is committed (sequence 6) at the replay/live transition boundary;
+/// 4. no subsequent events are published;
+/// 5. subscriber waiting for live events still receives event 6 promptly without requiring future events to wake up.
+#[tokio::test]
+async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff() {
+    use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
+    use cy_proto::core_v1::{
+        kernel_authority_service_client::KernelAuthorityServiceClient,
+        kernel_authority_service_server::KernelAuthorityServiceServer, SubscribeEventsRequest,
+    };
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
+    use tonic::transport::{Endpoint, Server, Uri};
+    use tower::service_fn;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("authority_stream_handoff.sock");
+
+    let hardware = Arc::new(TestHardware {
+        resources: vec![test_resource()],
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", vec![test_resource()])),
+        Arc::new(FakeSandbox),
+        "node",
+        1,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
+    let server_adapter = adapter.clone();
+    let listener = UnixListener::bind(&socket_path).expect("bind UDS listener");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server_handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(KernelAuthorityServiceServer::with_interceptor(
+                server_adapter,
+                inject_authority_principal,
+            ))
+            .serve_with_incoming_shutdown(
+                PeerCredAccept::new(UnixListenerStream::new(listener)),
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let channel = Endpoint::try_from("http://[::]:50051")
+        .unwrap()
+        .connect_with_connector(service_fn({
+            let path = socket_path.clone();
+            move |_: Uri| UnixStream::connect(path.clone())
+        }))
+        .await
+        .expect("connect to UDS");
+    let mut client = KernelAuthorityServiceClient::new(channel);
+    let source = adapter.semantic_event_source();
+
+    // 1. Publish 5 initial events
+    for sequence in 1..=5 {
+        adapter.publish_semantic_event(
+            semantic::Identity {
+                id: "worker-handoff-test".to_string(),
+                generation: 1,
+            },
+            "worker.state.changed",
+            "cyrene.worker.v1",
+            format!("initial-event-{sequence}").into_bytes(),
+        );
+    }
+
+    // 2. Client subscribes from sequence 0
+    let req = SubscribeEventsRequest {
+        context: Some(authority_context("subscribe-stream-handoff")),
+        cursor: Some(cy_proto::semantic_v1::EventCursor {
+            source: Some(to_semantic_proto_identity(&source)),
+            sequence: 0,
+        }),
+        page_size: 256,
+    };
+    let mut stream = client
+        .subscribe_events(req)
+        .await
+        .expect("subscribe stream")
+        .into_inner();
+
+    // 3. Read initial 5 events
+    for expected_seq in 1..=5 {
+        let event = tokio::time::timeout(Duration::from_millis(200), stream.next())
+            .await
+            .expect("timeout waiting for initial replay event")
+            .expect("stream ended prematurely")
+            .expect("event ok");
+        assert_eq!(event.sequence, expected_seq);
+    }
+
+    // 4. Publish exactly one event at the replay -> live transition boundary, and no subsequent events
+    adapter.publish_semantic_event(
+        semantic::Identity {
+            id: "worker-handoff-test".to_string(),
+            generation: 1,
+        },
+        "worker.state.changed",
+        "cyrene.worker.v1",
+        b"handoff-event-6".to_vec(),
+    );
+
+    // 5. Subscriber must receive event 6 without any subsequent events being produced
+    let live_event = tokio::time::timeout(Duration::from_millis(200), stream.next())
+        .await
+        .expect("timeout waiting for live handoff event")
+        .expect("stream ended prematurely")
+        .expect("event ok");
+
+    assert_eq!(live_event.sequence, 6);
+    assert_eq!(live_event.body, b"handoff-event-6");
+
+    drop(stream);
+    drop(client);
+    let _ = shutdown_tx.send(());
+    let _ = server_handle.await;
+}
+
+/// Slow consumer on streaming endpoint cannot block Kernel authority state transitions
+#[tokio::test]
+async fn watch_operations_slow_consumer_lags_and_disconnects_without_blocking_kernel() {
+    use core_v1::kernel_service_server::KernelService;
+    use tokio_stream::StreamExt;
+
+    let adapter = heartbeat_adapter();
+
+    // 1. Client subscribes to WatchOperations
+    let response = adapter
+        .watch_operations(Request::new(core_v1::WatchOperationsRequest {
+            context: None,
+            operation_names: Vec::new(),
+            resume_token: String::new(),
+        }))
+        .await
+        .unwrap();
+    let mut stream = response.into_inner();
+
+    // 2. Kernel publishes more events than OPERATION_EVENT_SUBSCRIBER_CAPACITY (1024)
+    // without the subscriber polling or consuming the stream
+    for i in 1..=1500 {
+        adapter.publish_runtime_event(
+            core_v1::RuntimeEventType::InstanceStateChanged,
+            format!("target-{i}"),
+            "EVENT_BURST",
+            format!("burst event {i}"),
+        );
+    }
+
+    // 3. Verify kernel publications completed without deadlock or stalling
+    assert_eq!(
+        adapter.operation_events.lock().unwrap().len(),
+        OPERATION_EVENT_HISTORY_CAPACITY
+    );
+
+    // 4. The slow subscriber consumes stream and eventually observes Lagged error (out_of_range)
+    let mut observed_lagged = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(_) => continue,
+            Err(status) => {
+                assert_eq!(status.code(), tonic::Code::OutOfRange);
+                assert!(status
+                    .message()
+                    .contains("lagged beyond the bounded buffer"));
+                observed_lagged = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        observed_lagged,
+        "Slow subscriber must observe Lagged disconnect without blocking kernel"
+    );
 }

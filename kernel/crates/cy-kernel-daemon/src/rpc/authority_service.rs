@@ -13,8 +13,7 @@ use crate::{
         semantic_identity_from_proto, semantic_operation_from_proto, semantic_query_from_proto,
         semantic_status, semantic_worker_from_proto, to_semantic_proto_contract_lease,
         to_semantic_proto_contract_revision, to_semantic_proto_endpoint,
-        to_semantic_proto_endpoint_grant, to_semantic_proto_event_page,
-        to_semantic_proto_operation, to_semantic_proto_worker,
+        to_semantic_proto_endpoint_grant, to_semantic_proto_operation, to_semantic_proto_worker,
     },
     peer_cred::principal_from_request,
 };
@@ -299,27 +298,122 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         Ok(Response::new(()))
     }
 
+    type SubscribeEventsStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<semantic_v1::Event, Status>> + Send + 'static>,
+    >;
+
     async fn subscribe_events(
         &self,
         request: Request<core_v1::SubscribeEventsRequest>,
-    ) -> Result<Response<semantic_v1::EventPage>, Status> {
+    ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
         let principal = principal_from_request(&request)?;
         let request = request.into_inner();
         let context = authority_call_context_from_proto(request.context.as_ref())?;
-        let cursor = semantic_event_cursor_from_proto(request.cursor)?;
-        let limit = usize::try_from(request.page_size).unwrap_or(usize::MAX);
-        if limit == 0 || limit > OPERATION_EVENT_HISTORY_CAPACITY {
-            return Err(semantic_status(
-                tonic::Code::InvalidArgument,
-                "EVENT_PAGE_LIMIT_INVALID",
-                "event page_size must be in 1..=256",
-            ));
-        }
-        let page = self
+        let initial_cursor = semantic_event_cursor_from_proto(request.cursor)?;
+        let limit = match usize::try_from(request.page_size) {
+            Ok(size) if (1..=OPERATION_EVENT_HISTORY_CAPACITY).contains(&size) => size,
+            _ => OPERATION_EVENT_HISTORY_CAPACITY,
+        };
+
+        let initial_page = self
             .authority()
-            .events_after(&context, &principal, &cursor, limit)
+            .events_after(&context, &principal, &initial_cursor, limit)
             .map_err(authority_status)?;
-        debug_assert!(page.validate().is_ok());
-        Ok(Response::new(to_semantic_proto_event_page(&page)))
+
+        match initial_page.status {
+            semantic::ReplayStatus::SourceChanged => {
+                return Err(semantic_status(
+                    tonic::Code::OutOfRange,
+                    "SOURCE_CHANGED",
+                    "SOURCE_CHANGED: event source epoch changed, resnapshot required",
+                ));
+            }
+            semantic::ReplayStatus::Gap => {
+                return Err(semantic_status(
+                    tonic::Code::OutOfRange,
+                    "GAP",
+                    "GAP: cursor is older than retention window, resnapshot required",
+                ));
+            }
+            semantic::ReplayStatus::Current => {}
+        }
+
+        let authority = self.authority();
+        let notifier = authority.runtime.event_notifier.clone();
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel(crate::adapter::OPERATION_EVENT_SUBSCRIBER_CAPACITY);
+
+        tokio::spawn(async move {
+            let mut cursor = initial_cursor;
+            for event in initial_page.events {
+                cursor.sequence = event.sequence;
+                let proto_event = crate::convert::to_semantic_proto_event(&event);
+                if sender.try_send(Ok(proto_event)).is_err() {
+                    let _ = sender
+                        .send(Err(Status::out_of_range(
+                            "subscriber buffer full, slow consumer disconnected",
+                        )))
+                        .await;
+                    return;
+                }
+            }
+
+            loop {
+                let notified = notifier.notified();
+                match authority.events_after(&context, &principal, &cursor, limit) {
+                    Ok(page) => match page.status {
+                        semantic::ReplayStatus::SourceChanged => {
+                            let _ = sender
+                                .send(Err(Status::out_of_range(
+                                    "SOURCE_CHANGED: event source epoch changed, resnapshot required",
+                                )))
+                                .await;
+                            return;
+                        }
+                        semantic::ReplayStatus::Gap => {
+                            let _ = sender
+                                .send(Err(Status::out_of_range(
+                                    "GAP: cursor is older than retention window, resnapshot required",
+                                )))
+                                .await;
+                            return;
+                        }
+                        semantic::ReplayStatus::Current => {
+                            let had_events = !page.events.is_empty();
+                            for event in page.events {
+                                cursor.sequence = event.sequence;
+                                let proto_event = crate::convert::to_semantic_proto_event(&event);
+                                if sender.try_send(Ok(proto_event)).is_err() {
+                                    let _ = sender
+                                        .send(Err(Status::out_of_range(
+                                            "subscriber buffer full, slow consumer disconnected",
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
+                            if had_events {
+                                continue;
+                            }
+                        }
+                    },
+                    Err(rejection) => {
+                        let _ = sender.send(Err(authority_status(rejection))).await;
+                        return;
+                    }
+                }
+
+                tokio::select! {
+                    _ = notified => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+                    _ = sender.closed() => {
+                        return;
+                    }
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        Ok(Response::new(Box::pin(stream)))
     }
 }
