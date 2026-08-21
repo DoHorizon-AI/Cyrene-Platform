@@ -43,10 +43,21 @@
 //! Failure may be logged without invalidating semantic correctness. Only
 //! genuine telemetry belongs here: `InstanceCleanupFailed` (the outcome is
 //! already durably observable as a `FAILED` Lease with the allocation still
-//! held), `WatchdogReaped` (the Lease is already durably `RELEASED`), and
-//! semantic/runtime event projections (state transitions carry their own
-//! journal boundary in `record_runtime`). Do NOT classify correctness-critical
-//! evidence as telemetry.
+//! held), `WatchdogReaped` (the Lease is already durably `RELEASED`), and the
+//! derived/diagnostic event kinds (`provider.registered`,
+//! `provider.inventory.observed`, `provider.reconciled`,
+//! `worker.state.changed`, `worker.watchdog.triggered`, `worker.oom.killed`,
+//! `worker.cleanup.completed`, `kernel.reconciled`, `kernel.observation`).
+//!
+//! Normative lifecycle semantic events are NOT Class C. The Frozen Contract
+//! defines Event as an ordered, replayable, at-least-once semantic fact with
+//! Snapshot + Stream recovery semantics. `worker.starting` / `worker.running` /
+//! `worker.stopped` / `worker.failed` / `worker.lost`, `lease.revoked`,
+//! `endpoint.revoked`, and `operation.*` transitions must never be silently
+//! dropped while the stream continues as if contiguous. On `append_event`
+//! failure `publish_semantic_event_in` degrades the stream (`next_sequence =
+//! None`) so no later event advances: subscribers detect the stall and
+//! resnapshot, preserving no-silent-gap semantics.
 //!
 //! A write failure that is neither Class A/B fail-closed nor proven Class C is
 //! a Phase 7 closure violation and must be fixed, not logged.

@@ -904,18 +904,47 @@ impl KernelAuthority for LocalKernelAuthority {
         let evidence = match actor.recovery_evidence() {
             Ok(evidence) => evidence,
             Err(error) => {
-                let _ = actor.stop(&cy_kernel_api::StopRequest {
+                // The physical process was already spawned; it must be reaped
+                // synchronously. If it cannot be reaped, leave durable cleanup
+                // evidence so restart recovery can classify the incomplete
+                // launch instead of losing an untracked execution domain.
+                let stop_report = actor.stop(&cy_kernel_api::StopRequest {
                     grace_period: std::time::Duration::ZERO,
                     immediate: true,
                 });
+                if let Ok(report) = &stop_report {
+                    if !report.complete {
+                        let _ = self.record_runtime(
+                            RuntimeJournalEvent::InstanceCleanupFailed,
+                            Some(&worker.identity.id),
+                            Some(&lease),
+                            &report.reason_code,
+                        );
+                    }
+                }
                 return Err(Self::provider_rejection(error));
             }
         };
         if let Err(error) = self.record_runtime_launch(&worker.identity.id, &lease, evidence) {
-            let _ = actor.stop(&cy_kernel_api::StopRequest {
+            // Class B outcome: InstanceLaunched is persisted AFTER the physical
+            // spawn, so the launched process must be reaped synchronously
+            // before the failure is returned. If it cannot be reaped, durable
+            // cleanup evidence keeps restart recovery able to classify the
+            // incomplete launch.
+            let stop_report = actor.stop(&cy_kernel_api::StopRequest {
                 grace_period: std::time::Duration::ZERO,
                 immediate: true,
             });
+            if let Ok(report) = &stop_report {
+                if !report.complete {
+                    let _ = self.record_runtime(
+                        RuntimeJournalEvent::InstanceCleanupFailed,
+                        Some(&worker.identity.id),
+                        Some(&lease),
+                        &report.reason_code,
+                    );
+                }
+            }
             return Err(error);
         }
         worker.state = semantic::WorkerState::Starting;
@@ -2288,10 +2317,13 @@ impl LocalKernelAuthority {
         // durable store accepts them. State transitions carry their own journal
         // boundary; this prevents an in-memory replay cursor from claiming an
         // event that disappears across a restart.
-        // Class C: semantic event projections are observability, not
-        // correctness evidence. State transitions carry their own journal
-        // boundary (record_runtime), so a dropped projection never corrupts
-        // authority state; it only loses telemetry.
+        // Normative lifecycle facts (worker/lease/endpoint/operation) are
+        // ordered, replayable, at-least-once semantic events per the Contract.
+        // A failed durable append must NOT be silently dropped while later
+        // events continue as if contiguous: that would make an already
+        // subscribed client miss the fact with no way to detect the gap.
+        // Degrade the stream instead: no further events are emitted for this
+        // namespace until the durable store recovers and clients resnapshot.
         if self
             .runtime
             .event_store
@@ -2301,6 +2333,7 @@ impl LocalKernelAuthority {
             })
             .is_err()
         {
+            history.next_sequence = None;
             return;
         }
         history.next_sequence = sequence.checked_add(1);

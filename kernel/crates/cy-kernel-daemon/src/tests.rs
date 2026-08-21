@@ -4671,16 +4671,24 @@ fn worker_launch_journal_failure_fails_closed_and_keeps_lease_held() {
 // evidence. When the durable event store rejects an append the projection is
 // dropped without corrupting authority state or panicking.
 #[test]
-fn semantic_event_append_failure_is_class_c_telemetry() {
-    #[derive(Default)]
-    struct FailAppendEventStore;
-    impl DurableEventStore for FailAppendEventStore {
+fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+    struct FailOnceEventStore {
+        fail_next: AtomicBool,
+        append_count: AtomicUsize,
+    }
+    impl DurableEventStore for FailOnceEventStore {
         fn append_event(&self, _record: DurableEventRecord) -> Result<(), ProviderError> {
-            Err(ProviderError::new(
-                "test",
-                "EVENT_APPEND_FAILED",
-                "injected event append failure",
-            ))
+            self.append_count.fetch_add(1, AtomicOrdering::SeqCst);
+            if self.fail_next.swap(false, AtomicOrdering::SeqCst) {
+                return Err(ProviderError::new(
+                    "test",
+                    "EVENT_APPEND_FAILED",
+                    "injected event append failure",
+                ));
+            }
+            Ok(())
         }
 
         fn events_for_source(
@@ -4692,8 +4700,12 @@ fn semantic_event_append_failure_is_class_c_telemetry() {
         }
     }
 
+    let store = Arc::new(FailOnceEventStore {
+        fail_next: AtomicBool::new(true),
+        append_count: AtomicUsize::new(0),
+    });
     let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
-        .with_event_store(Arc::new(FailAppendEventStore));
+        .with_event_store(store.clone());
     let authority = adapter.authority();
     let context = scoped_authority_context("ns-event-fail", "event-append-fail");
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
@@ -4722,8 +4734,8 @@ fn semantic_event_append_failure_is_class_c_telemetry() {
         .unwrap();
     assert_eq!(lease.state, semantic::LeaseState::Active);
 
-    // Authority state transitions succeed even though their semantic
-    // projections are dropped by the failing store.
+    // The first normative event (worker.starting) append fails: the stream must
+    // degrade rather than silently lose the fact.
     authority
         .start_worker(
             &context,
@@ -4744,11 +4756,27 @@ fn semantic_event_append_failure_is_class_c_telemetry() {
         .unwrap();
     assert!(
         !authority.runtime.instances.lock().unwrap().is_empty(),
-        "the Worker must be visible even when observability fails"
+        "authority state must be intact despite the failed event append"
     );
 
-    // The dropped projection is observability-only: the worker.starting event
-    // is absent from the public event stream, yet authority state is intact.
+    // The store has since RECOVERED, but the stream must NOT continue as if
+    // contiguous: an already-subscribed client must never silently miss the
+    // failed fact while later events advance. The second publish is suppressed
+    // by the degraded stream, so the store never sees another append attempt.
+    authority.publish_semantic_event_in(
+        &context.namespace,
+        worker_identity.clone(),
+        "worker.running",
+        "cyrene.worker.v1",
+        Vec::new(),
+    );
+    assert_eq!(
+        store.append_count.load(AtomicOrdering::SeqCst),
+        1,
+        "a degraded stream must not attempt further durable appends"
+    );
+
+    // No event is replayable: the stream halted, not continued with a gap.
     let page = authority
         .events_after(
             &context,
@@ -4762,6 +4790,159 @@ fn semantic_event_append_failure_is_class_c_telemetry() {
         .unwrap();
     assert!(
         page.events.is_empty(),
-        "a Class C projection must be dropped, never replayed from authority"
+        "the stream must halt after a lost fact, never resume as if contiguous"
     );
+}
+
+#[test]
+fn worker_launch_persistence_failure_reaps_physical_process() {
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    #[derive(Default)]
+    struct LaunchFailingJournal {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for LaunchFailingJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if record.event == RuntimeJournalEvent::InstanceLaunched {
+                return Err(ProviderError::new(
+                    "failing-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected worker launch write failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    /// Records whether the physical sandbox process was launched and stopped,
+    /// so the test can prove the spawned domain is synchronously reaped.
+    #[derive(Clone, Default)]
+    struct RecordingSandbox {
+        launched: Arc<AtomicBool>,
+        stopped: Arc<AtomicBool>,
+    }
+    impl ProcessRuntime for RecordingSandbox {
+        fn preflight(&self) -> NodeCapabilities {
+            NodeCapabilities {
+                ready: true,
+                facts: Vec::new(),
+                enforcement: Vec::new(),
+            }
+        }
+
+        fn launch(
+            &self,
+            _plan: &LaunchPlan,
+            _binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            self.launched.store(true, AtomicOrdering::SeqCst);
+            Ok(ProcessHandle {
+                pid: 1,
+                cgroup_path: PathBuf::from("/test"),
+                start_time_ticks: Some(1),
+                transport_socket: None,
+            })
+        }
+
+        fn stop(
+            &self,
+            _handle: &ProcessHandle,
+            _request: &StopRequest,
+        ) -> Result<CleanupReport, ProviderError> {
+            self.stopped.store(true, AtomicOrdering::SeqCst);
+            Ok(CleanupReport {
+                complete: true,
+                exit_code: Some(0),
+                oom_killed: false,
+                conditions: Vec::new(),
+                reason_code: "TEST_STOP".to_string(),
+            })
+        }
+    }
+    impl SandboxBackend for RecordingSandbox {
+        fn backend_id(&self) -> &str {
+            "recording-test"
+        }
+    }
+
+    let sandbox = Arc::new(RecordingSandbox::default());
+    let hardware = Arc::new(TestHardware {
+        resources: vec![test_resource()],
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", vec![test_resource()])),
+        sandbox.clone(),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver))
+        .with_runtime_journal(Arc::new(LaunchFailingJournal::default()));
+    let authority = adapter.authority();
+    let context = scoped_authority_context("ns-reap", "launch-reap");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "worker-reap".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+
+    // InstanceLaunched cannot be persisted after the physical spawn.
+    let launch = authority.start_worker(
+        &context,
+        &principal,
+        semantic::Worker {
+            identity: worker_identity.clone(),
+            principal: principal.identity.clone(),
+            provider: semantic::Identity {
+                id: "provider-reap".to_string(),
+                generation: 1,
+            },
+            lease: lease.identity.clone(),
+            state: semantic::WorkerState::Registered,
+            execution_ref: "opaque-execution-reference".to_string(),
+            limits: BTreeMap::new(),
+        },
+    );
+    assert!(
+        launch.is_err(),
+        "launch must fail closed when InstanceLaunched cannot be persisted"
+    );
+    // The physical domain WAS spawned...
+    assert!(
+        sandbox.launched.load(AtomicOrdering::SeqCst),
+        "the sandbox must have physically launched the process"
+    );
+    // ...and it was synchronously reaped before the failure was returned, so no
+    // untracked physical execution domain remains alive.
+    assert!(
+        sandbox.stopped.load(AtomicOrdering::SeqCst),
+        "the launched physical process must be reaped before returning the failure"
+    );
+    assert!(
+        authority.runtime.instances.lock().unwrap().is_empty(),
+        "no semantic Worker may be visible without its durable launch evidence"
+    );
+    assert_eq!(lease.state, semantic::LeaseState::Active);
 }
