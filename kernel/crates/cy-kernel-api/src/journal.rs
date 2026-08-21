@@ -28,6 +28,11 @@ pub enum RuntimeJournalEvent {
     LeaseReleased,
     LeaseRevoked,
     FenceAdvanced,
+    /// Durable pre-launch intent, persisted BEFORE the physical spawn. Recovery
+    /// classifies a lease that has this record but no `InstanceLaunched` as
+    /// "launch intended, outcome unknown" and must not treat the resource as
+    /// reusable without discovering/reaping the domain.
+    InstanceLaunching,
     InstanceLaunched,
     InstanceTerminated,
     InstanceCleanupFailed,

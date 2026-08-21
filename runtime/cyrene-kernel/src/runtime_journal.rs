@@ -534,6 +534,7 @@ fn event_name(event: RuntimeJournalEvent) -> &'static str {
         RuntimeJournalEvent::LeaseReleased => "LEASE_RELEASED",
         RuntimeJournalEvent::LeaseRevoked => "LEASE_REVOKED",
         RuntimeJournalEvent::FenceAdvanced => "FENCE_ADVANCED",
+        RuntimeJournalEvent::InstanceLaunching => "INSTANCE_LAUNCHING",
         RuntimeJournalEvent::InstanceLaunched => "INSTANCE_LAUNCHED",
         RuntimeJournalEvent::InstanceTerminated => "INSTANCE_TERMINATED",
         RuntimeJournalEvent::InstanceCleanupFailed => "INSTANCE_CLEANUP_FAILED",

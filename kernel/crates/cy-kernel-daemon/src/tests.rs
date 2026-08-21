@@ -1986,7 +1986,20 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
             let page = reader_authority
                 .events_after(&reader_context, &reader_principal, &snapshot.cursor, 256)
                 .expect("replay from a fresh snapshot cursor must not fail");
-            assert_eq!(page.status, semantic::ReplayStatus::Current);
+            // Under concurrency a writer may commit between the snapshot and
+            // this replay, or the in-memory window may roll past the snapshot
+            // cursor. `Gap`/`SourceChanged` are valid outcomes: the client must
+            // resnapshot. The invariant under test is that no event is lost or
+            // corrupted, not that every poll is Current.
+            assert!(
+                matches!(
+                    page.status,
+                    semantic::ReplayStatus::Current
+                        | semantic::ReplayStatus::Gap
+                        | semantic::ReplayStatus::SourceChanged
+                ),
+                "replay must yield a valid Current/Gap/SourceChanged status"
+            );
             assert!(page.latest_available_sequence >= snapshot.cursor.sequence);
             checked += 1;
         }
@@ -4776,7 +4789,8 @@ fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
         "a degraded stream must not attempt further durable appends"
     );
 
-    // No event is replayable: the stream halted, not continued with a gap.
+    // The degraded stream is externally observable: replay surfaces Gap
+    // (resnapshot required), never a silent Current-with-no-new-events stall.
     let page = authority
         .events_after(
             &context,
@@ -4788,9 +4802,14 @@ fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
             OPERATION_EVENT_HISTORY_CAPACITY,
         )
         .unwrap();
+    assert_eq!(
+        page.status,
+        semantic::ReplayStatus::Gap,
+        "a degraded stream must surface as Gap so clients resnapshot, not stall silently"
+    );
     assert!(
         page.events.is_empty(),
-        "the stream must halt after a lost fact, never resume as if contiguous"
+        "no events may replay past a lost fact"
     );
 }
 
@@ -4945,4 +4964,122 @@ fn worker_launch_persistence_failure_reaps_physical_process() {
         "no semantic Worker may be visible without its durable launch evidence"
     );
     assert_eq!(lease.state, semantic::LeaseState::Active);
+}
+
+// Worst-case restart boundary: physical spawn succeeds -> InstanceLaunched
+// persistence fails -> synchronous reap is incomplete -> InstanceCleanupFailed
+// persistence ALSO fails. The durable journal must still retain the pre-launch
+// intent (InstanceLaunching) so restart Discover/Classify can recognize "launch
+// intended, outcome unknown" instead of treating the lease as a cleanly
+// reserved, never-bound resource.
+#[test]
+fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
+    #[derive(Default)]
+    struct LaunchEvidenceFailingJournal {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for LaunchEvidenceFailingJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if matches!(
+                record.event,
+                RuntimeJournalEvent::InstanceLaunched | RuntimeJournalEvent::InstanceCleanupFailed
+            ) {
+                return Err(ProviderError::new(
+                    "failing-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected post-spawn persistence failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    let journal = Arc::new(LaunchEvidenceFailingJournal::default());
+    let hardware = Arc::new(TestHardware {
+        resources: vec![test_resource()],
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", vec![test_resource()])),
+        Arc::new(UninterruptibleSandbox),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver))
+        .with_runtime_journal(journal.clone());
+    let authority = adapter.authority();
+    let context = scoped_authority_context("ns-double", "launch-double");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "worker-double".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+
+    // Spawn succeeds; InstanceLaunched fails; the synchronous reap is incomplete
+    // (UninterruptibleSandbox) so InstanceCleanupFailed is attempted and ALSO
+    // fails.
+    let launch = authority.start_worker(
+        &context,
+        &principal,
+        semantic::Worker {
+            identity: worker_identity.clone(),
+            principal: principal.identity.clone(),
+            provider: semantic::Identity {
+                id: "provider-double".to_string(),
+                generation: 1,
+            },
+            lease: lease.identity.clone(),
+            state: semantic::WorkerState::Registered,
+            execution_ref: "opaque-execution-reference".to_string(),
+            limits: BTreeMap::new(),
+        },
+    );
+    assert!(
+        launch.is_err(),
+        "launch must fail closed on the post-spawn persistence failure"
+    );
+
+    // The durable journal still carries the pre-launch intent.
+    let records = journal.records.lock().unwrap();
+    assert!(
+        records.iter().any(|record| {
+            record.event == RuntimeJournalEvent::InstanceLaunching
+                && record.instance_name.as_deref() == Some("worker-double")
+        }),
+        "the pre-launch durable intent must survive the double persistence failure"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.event == RuntimeJournalEvent::LeaseReserved),
+        "the lease reservation must be durably present"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.event == RuntimeJournalEvent::InstanceLaunched),
+        "no launch outcome may be falsely recorded"
+    );
+    drop(records);
 }

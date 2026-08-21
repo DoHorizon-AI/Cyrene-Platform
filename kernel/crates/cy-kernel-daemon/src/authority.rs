@@ -900,6 +900,17 @@ impl KernelAuthority for LocalKernelAuthority {
             binding,
             self.runtime.heartbeat.timeout,
         );
+        // Class B durable intent: persist the launch intent BEFORE the physical
+        // spawn. If this record cannot be persisted, the spawn must not begin,
+        // so a launch whose post-spawn outcome records are all lost (including
+        // a crash after a double persistence failure) is still classifiable by
+        // restart recovery as "intent present, outcome unknown".
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceLaunching,
+            Some(&worker.identity.id),
+            Some(&lease),
+            "WORKER_LAUNCHING",
+        )?;
         actor.start().map_err(Self::provider_rejection)?;
         let evidence = match actor.recovery_evidence() {
             Ok(evidence) => evidence,
@@ -2355,6 +2366,28 @@ impl LocalKernelAuthority {
             return Ok(semantic::EventPage {
                 source,
                 status: semantic::ReplayStatus::SourceChanged,
+                events: Vec::new(),
+                oldest_available_sequence: oldest,
+                latest_available_sequence: latest,
+                next_sequence: cursor.sequence,
+            });
+        }
+        // A degraded stream is externally observable: once a durable append was
+        // lost, an already-subscribed client must be told to resnapshot (Gap)
+        // rather than silently receive an empty, apparently-contiguous stream
+        // while its cursor goes stale.
+        if self
+            .runtime
+            .semantic_events
+            .lock()
+            .expect("semantic event history lock poisoned")
+            .get(namespace)
+            .is_some_and(|history| history.next_sequence.is_none())
+        {
+            let (oldest, latest) = self.in_memory_event_range(namespace);
+            return Ok(semantic::EventPage {
+                source,
+                status: semantic::ReplayStatus::Gap,
                 events: Vec::new(),
                 oldest_available_sequence: oldest,
                 latest_available_sequence: latest,
