@@ -3,13 +3,13 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use cy_kernel_api::{
-    CleanupReport, DeviceBinding, LaunchPlan, ProcessHandle, ProviderError, SandboxBackend,
-    StopRequest,
+    CleanupReport, DeviceBinding, LaunchPlan, ProcessHandle, ProviderError, RuntimeProcessEvidence,
+    SandboxBackend, StopRequest,
 };
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
@@ -40,10 +40,16 @@ pub enum InstanceHealthVerdict {
 pub enum WorkerTransportCommand {
     Request(WorkerTransportRequest),
     Cancel {
-        request_id: String,
+        cancel_request_id: String,
+        target_request_id: String,
         generation: u64,
         fence_token: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCancelAck {
+    pub target_request_id: String,
 }
 
 #[derive(Debug)]
@@ -67,6 +73,7 @@ pub struct WorkerTransportDispatcher {
     generation: u64,
     fence_token: u64,
     pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
+    pending_cancellations: Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>,
 }
 
 impl WorkerTransportDispatcher {
@@ -84,6 +91,27 @@ impl WorkerTransportDispatcher {
         };
         reply.send(response).is_ok()
     }
+
+    pub fn dispatch_cancel_ack(&self, cancel_request_id: &str, target_request_id: &str) -> bool {
+        let mut pending = self
+            .pending_cancellations
+            .lock()
+            .expect("pending cancellation lock poisoned");
+        let Some((target, _)) = pending.get(cancel_request_id) else {
+            return false;
+        };
+        if target != target_request_id {
+            return false;
+        }
+        let (_, reply) = pending
+            .remove(cancel_request_id)
+            .expect("pending cancellation existed");
+        reply
+            .send(WorkerCancelAck {
+                target_request_id: target_request_id.to_string(),
+            })
+            .is_ok()
+    }
 }
 
 /// Actor representing one running instance managed by the Kernel.
@@ -100,6 +128,7 @@ pub struct InstanceActor {
     consecutive_timeouts: u32,
     transport_tx: Option<mpsc::Sender<WorkerTransportCommand>>,
     pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
+    pending_cancellations: Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>,
 }
 
 impl InstanceActor {
@@ -125,6 +154,7 @@ impl InstanceActor {
             consecutive_timeouts: 0,
             transport_tx: None,
             pending_requests: Arc::new(AsyncMutex::new(HashMap::new())),
+            pending_cancellations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -191,6 +221,7 @@ impl InstanceActor {
             generation: self.generation,
             fence_token: self.fence_token,
             pending_requests: self.pending_requests.clone(),
+            pending_cancellations: self.pending_cancellations.clone(),
         }
     }
 
@@ -304,7 +335,8 @@ impl InstanceActor {
                 let cancel_send = tokio::time::timeout(
                     Duration::from_millis(100),
                     tx.send(WorkerTransportCommand::Cancel {
-                        request_id: req_id.clone(),
+                        cancel_request_id: format!("cancel-{req_id}"),
+                        target_request_id: req_id.clone(),
                         generation: self.generation,
                         fence_token: self.fence_token,
                     }),
@@ -325,6 +357,52 @@ impl InstanceActor {
                 ))
             }
         }
+    }
+
+    /// Delivers one correlated cancellation request. Its reply is only a
+    /// receipt; authority still waits for the executor's terminal report.
+    pub fn request_cancel(
+        &mut self,
+        target_request_id: String,
+    ) -> Result<oneshot::Receiver<WorkerCancelAck>, ProviderError> {
+        let tx = self.transport_tx.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                "instance-watchdog",
+                "TRANSPORT_UNAVAILABLE",
+                "instance transport channel not attached",
+            )
+        })?;
+        let cancel_request_id = format!("cancel-{}", uuid::Uuid::new_v4());
+        let (reply, receiver) = oneshot::channel();
+        self.pending_cancellations
+            .lock()
+            .expect("pending cancellation lock poisoned")
+            .insert(
+                cancel_request_id.clone(),
+                (target_request_id.clone(), reply),
+            );
+        if let Err(error) = tx.try_send(WorkerTransportCommand::Cancel {
+            cancel_request_id: cancel_request_id.clone(),
+            target_request_id,
+            generation: self.generation,
+            fence_token: self.fence_token,
+        }) {
+            self.pending_cancellations
+                .lock()
+                .expect("pending cancellation lock poisoned")
+                .remove(&cancel_request_id);
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "CANCEL_DELIVERY_FAILED",
+                &format!("worker cancellation channel is unavailable or saturated: {error}"),
+            ));
+        }
+        Ok(receiver)
+    }
+
+    pub fn cancel(&mut self, target_request_id: String) -> Result<(), ProviderError> {
+        self.request_cancel(target_request_id)
+            .map(|receiver| drop(receiver))
     }
 
     /// Launch the process inside the privileged sandbox.
@@ -373,6 +451,21 @@ impl InstanceActor {
                 Err(err_clone)
             }
         }
+    }
+
+    /// Returns the post-launch identity that must be durably journaled before
+    /// the worker becomes visible outside this Kernel process.
+    pub fn recovery_evidence(&self) -> Result<RuntimeProcessEvidence, ProviderError> {
+        self.process
+            .handle()
+            .ok_or_else(|| {
+                ProviderError::new(
+                    "instance-watchdog",
+                    "RECOVERY_EVIDENCE_UNAVAILABLE",
+                    "worker process has not started",
+                )
+            })?
+            .recovery_evidence()
     }
     /// Validate that the caller's fence token matches the active instance lease fence token.
     /// Rejects stale requests per ADR-HARDWARE-ADAPTER-BOUNDARY and Kernel Semantic Contract v1.
@@ -505,7 +598,7 @@ impl InstanceActor {
                 Ok(ProcessHandle {
                     pid: 99999,
                     cgroup_path: PathBuf::from("/dev/null"),
-                    start_time_ticks: None,
+                    start_time_ticks: Some(1),
                     transport_socket: self.transport_socket.clone(),
                 })
             }

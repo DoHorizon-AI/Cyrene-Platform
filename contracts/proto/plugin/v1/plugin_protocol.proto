@@ -32,6 +32,7 @@ message Envelope {
     HealthCheck health_check = 14;
     HealthStatus health_status = 15;
     Shutdown shutdown = 16;
+    CancelAck cancel_ack = 17;
 
     // Extension Points Payload RPC
     Invoke invoke = 20;
@@ -66,6 +67,12 @@ message Configure {
 message Cancel {
   string target_request_id = 1;
   string reason = 2;
+}
+
+// Receipt only: it proves the executor accepted the cancellation request. The
+// host must wait for the authoritative Operation terminal report separately.
+message CancelAck {
+  string target_request_id = 1;
 }
 
 message HealthCheck {}

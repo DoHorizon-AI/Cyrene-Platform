@@ -7,9 +7,11 @@ use std::{
 };
 
 use cy_kernel_api::{
-    semantic, AuthorityCallContext, CgroupLimits, InstalledPluginResolver, KernelAuthority,
-    LeaseState, NamespaceId, ObjectRef, ProviderError, ResourceLease, ResourceRequest,
-    RuntimeJournalEvent, RuntimeJournalRecord, RuntimeJournalSink,
+    semantic, AuthorityCallContext, AuthoritySnapshot, CgroupLimits, DurableEventRecord,
+    DurableEventStore, InstalledPluginResolver, KernelAuthority, KernelProviderAuthority,
+    LeaseState, NamespaceId, NoopRuntimeJournal, ObjectRef, ProviderError, ProviderReconcileAction,
+    ProviderReconcileResult, ResourceLease, ResourceRequest, RuntimeJournalEvent,
+    RuntimeJournalRecord, RuntimeJournalSink, RuntimeProcessEvidence,
 };
 use cy_proto::core_v1;
 
@@ -18,7 +20,7 @@ use crate::{
     convert::{inject_heartbeat_environment, now_timestamp, semantic_operation_event_kind},
     daemon::KernelDaemon,
     session::{ManagedProcess, WorkerHeartbeatConfig},
-    watchdog::InstanceActor,
+    watchdog::{InstanceActor, WorkerCancelAck},
 };
 
 /// Canonical state is owned by the local Kernel authority rather than by a
@@ -37,16 +39,38 @@ pub struct AuthorityRuntime {
     pub(crate) semantic_events: Arc<Mutex<BTreeMap<NamespaceId, NamespaceEventHistory>>>,
     pub(crate) endpoints: Arc<Mutex<BTreeMap<ObjectRef, semantic::Endpoint>>>,
     pub(crate) endpoint_grants: Arc<Mutex<BTreeMap<ObjectRef, semantic::EndpointGrant>>>,
+    /// Provider records are keyed by namespace and logical ID, never by the
+    /// transport socket or session-generation-bearing Identity.
+    pub(crate) providers: Arc<Mutex<BTreeMap<(NamespaceId, String), ProviderRecord>>>,
     /// First mutation binds a namespace to its authenticated Principal. This
     /// minimal local policy prevents an unrelated UDS peer from controlling it.
     pub(crate) namespace_owners: Arc<Mutex<BTreeMap<NamespaceId, semantic::Identity>>>,
     pub(crate) heartbeat: WorkerHeartbeatConfig,
     pub(crate) next_control_connection: Arc<AtomicU64>,
     pub(crate) runtime_journal: Arc<dyn RuntimeJournalSink>,
+    pub(crate) event_store: Arc<dyn DurableEventStore>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProviderRecord {
+    pub(crate) provider: semantic::Provider,
+    pub(crate) principal: semantic::Principal,
+    inventory_scope: ProviderInventoryScope,
+    pub(crate) inventory: Option<semantic::ProviderSnapshot>,
+    pub(crate) reconciled_snapshot_generation: Option<u64>,
+    pub(crate) pending_stale_workers: Vec<(semantic::Identity, u64)>,
+}
+
+/// Hardware observations describe resources only. This stays internal so the
+/// external Provider projection continues to carry the full contract shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderInventoryScope {
+    Full,
+    ResourceFactsOnly,
 }
 
 pub(crate) struct NamespaceEventHistory {
-    next_sequence: u64,
+    next_sequence: Option<u64>,
     events: VecDeque<semantic::Event>,
 }
 
@@ -58,6 +82,123 @@ pub struct LocalKernelAuthority {
 }
 
 impl LocalKernelAuthority {
+    fn schedule_cancellation_deadline(
+        &self,
+        context: AuthorityCallContext,
+        operation: semantic::Identity,
+        receipt: tokio::sync::oneshot::Receiver<WorkerCancelAck>,
+    ) {
+        let authority = self.clone();
+        let ack_timeout = self.runtime.heartbeat.shutdown_ack_timeout;
+        let completion_timeout = self.runtime.heartbeat.graceful_stop;
+        std::thread::spawn(move || {
+            if receipt.blocking_recv().is_err() {
+                authority.mark_cancelling_operation_lost(&context, &operation);
+                return;
+            }
+            // A receipt only proves delivery. The executor must still report a
+            // terminal Operation state before the bounded completion deadline.
+            std::thread::sleep(completion_timeout.max(ack_timeout));
+            authority.mark_cancelling_operation_lost(&context, &operation);
+        });
+    }
+
+    fn mark_cancelling_operation_lost(
+        &self,
+        context: &AuthorityCallContext,
+        identity: &semantic::Identity,
+    ) -> semantic::Operation {
+        let operation = {
+            let mut operations = self
+                .runtime
+                .semantic_operations
+                .lock()
+                .expect("semantic operation lock poisoned");
+            let operation = operations
+                .get_mut(&context.object_ref(identity.clone()))
+                .expect("operation was checked before cancellation delivery");
+            if operation.state == semantic::OperationState::Cancelling {
+                operation.state = semantic::OperationState::Lost;
+            }
+            operation.clone()
+        };
+        if operation.state == semantic::OperationState::Lost {
+            self.publish_semantic_event_in(
+                &context.namespace,
+                operation.identity.clone(),
+                "operation.lost",
+                "cyrene.operation.v1",
+                Vec::new(),
+            );
+        }
+        operation
+    }
+
+    pub(crate) fn confirm_stale_worker_termination(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+        provider: &semantic::Identity,
+        snapshot_generation: u64,
+        worker: &semantic::Identity,
+        terminated: bool,
+    ) -> Result<(), semantic::Rejection> {
+        self.validate_context(context)?;
+        let key = (context.namespace.clone(), provider.id.clone());
+        let mut providers = self
+            .runtime
+            .providers
+            .lock()
+            .expect("provider state lock poisoned");
+        let record = providers.get_mut(&key).ok_or_else(|| {
+            Self::rejection(
+                "PROVIDER_NOT_FOUND",
+                "provider has not registered this session",
+            )
+        })?;
+        if record.provider.identity != *provider {
+            return Err(Self::rejection(
+                "STALE_GENERATION",
+                "termination result targets a stale provider session",
+            ));
+        }
+        if record.principal != *principal {
+            return Err(Self::rejection(
+                "AUTHORITY_DENIED",
+                "termination result caller does not own the registered Provider session",
+            ));
+        }
+        let Some(position) =
+            record
+                .pending_stale_workers
+                .iter()
+                .position(|(candidate, generation)| {
+                    candidate == worker && *generation == snapshot_generation
+                })
+        else {
+            return Err(Self::rejection(
+                "RECONCILIATION_RESULT_UNKNOWN",
+                "termination result does not match a pending stale Worker action",
+            ));
+        };
+        if !terminated {
+            return Ok(());
+        }
+        if record.inventory.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .workers
+                .iter()
+                .any(|observed| observed.identity == *worker)
+        }) {
+            return Err(Self::rejection(
+                "PROVIDER_REALITY_STALE",
+                "a successful termination result requires a later complete snapshot without the Worker",
+            ));
+        }
+        record.pending_stale_workers.remove(position);
+        Ok(())
+    }
+
     pub(crate) fn new(
         daemon: Arc<KernelDaemon>,
         resolver: Arc<dyn InstalledPluginResolver>,
@@ -74,10 +215,12 @@ impl LocalKernelAuthority {
                 semantic_events: Arc::new(Mutex::new(BTreeMap::new())),
                 endpoints: Arc::new(Mutex::new(BTreeMap::new())),
                 endpoint_grants: Arc::new(Mutex::new(BTreeMap::new())),
+                providers: Arc::new(Mutex::new(BTreeMap::new())),
                 namespace_owners: Arc::new(Mutex::new(BTreeMap::new())),
                 heartbeat: WorkerHeartbeatConfig::default(),
                 next_control_connection: Arc::new(AtomicU64::new(1)),
                 runtime_journal,
+                event_store: Arc::new(NoopRuntimeJournal),
             }),
         }
     }
@@ -92,6 +235,126 @@ impl LocalKernelAuthority {
         Arc::get_mut(&mut self.runtime)
             .expect("authority cannot be reconfigured after it is shared")
             .runtime_journal = runtime_journal;
+    }
+
+    pub(crate) fn set_event_store(&mut self, event_store: Arc<dyn DurableEventStore>) {
+        Arc::get_mut(&mut self.runtime)
+            .expect("authority cannot be reconfigured after it is shared")
+            .event_store = event_store;
+    }
+
+    /// Returns a source-scoped authority snapshot. Clients use this after a
+    /// replay gap or source change before resuming from the returned cursor.
+    pub fn snapshot(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+    ) -> Result<AuthoritySnapshot, semantic::Rejection> {
+        self.validate_context(context)?;
+        self.require_namespace_owner(context, principal)?;
+        // Capture the event consistency boundary BEFORE reading authority
+        // state. A transition publishes its durable event only after mutating
+        // state, so reading state after the cursor guarantees the snapshot is a
+        // superset of every event already counted in `cursor`. This makes
+        // `Snapshot @ C + events_after(C)` reconstruct current state without
+        // losing a transition that publishes between the state read and the
+        // cursor read (the single-mutex hole that previously let a Worker or
+        // Operation vanish from both the snapshot and the incremental replay).
+        let source = self.semantic_event_source_for(&context.namespace);
+        let cursor = semantic::EventCursor {
+            source: source.clone(),
+            sequence: self
+                .event_history_for(&context.namespace, &source)?
+                .last()
+                .map_or(0, |event| event.sequence),
+        };
+        let providers = self
+            .runtime
+            .providers
+            .lock()
+            .expect("provider state lock poisoned")
+            .iter()
+            .filter(|((namespace, _), _)| namespace == &context.namespace)
+            .map(|(_, record)| record.provider.clone())
+            .collect::<Vec<_>>();
+        let worker_names = self
+            .runtime
+            .workers
+            .lock()
+            .expect("worker scope lock poisoned")
+            .iter()
+            .filter(|(object, _)| object.namespace == context.namespace)
+            .map(|(_, instance_name)| instance_name.clone())
+            .collect::<Vec<_>>();
+        let instances = self
+            .runtime
+            .instances
+            .lock()
+            .expect("instance lock poisoned");
+        let workers = worker_names
+            .iter()
+            .filter_map(|instance_name| {
+                instances
+                    .get(instance_name)
+                    .and_then(|process| process.semantic_worker.clone())
+            })
+            .collect::<Vec<_>>();
+        drop(instances);
+        let lease_objects = self
+            .runtime
+            .leases
+            .lock()
+            .expect("lease scope lock poisoned")
+            .iter()
+            .filter(|(object, _)| object.namespace == context.namespace)
+            .map(|(object, name)| (object.clone(), name.clone()))
+            .collect::<Vec<_>>();
+        let mut leases = Vec::with_capacity(lease_objects.len());
+        for (object, name) in lease_objects {
+            let lease = self
+                .runtime
+                .daemon
+                .lease(&name)
+                .map_err(Self::provider_rejection)?;
+            leases.push(Self::semantic_lease(&object, &lease));
+        }
+        let operations = self
+            .runtime
+            .semantic_operations
+            .lock()
+            .expect("semantic operation lock poisoned")
+            .iter()
+            .filter(|(object, _)| object.namespace == context.namespace)
+            .map(|(_, operation)| operation.clone())
+            .collect::<Vec<_>>();
+        let endpoints = self
+            .runtime
+            .endpoints
+            .lock()
+            .expect("endpoint lock poisoned")
+            .iter()
+            .filter(|(object, _)| object.namespace == context.namespace)
+            .map(|(_, endpoint)| endpoint.clone())
+            .collect::<Vec<_>>();
+        let endpoint_grants = self
+            .runtime
+            .endpoint_grants
+            .lock()
+            .expect("endpoint grant lock poisoned")
+            .iter()
+            .filter(|(object, _)| object.namespace == context.namespace)
+            .map(|(_, grant)| grant.clone())
+            .collect::<Vec<_>>();
+        Ok(AuthoritySnapshot {
+            source,
+            cursor,
+            providers,
+            workers,
+            leases,
+            operations,
+            endpoints,
+            endpoint_grants,
+        })
     }
 
     pub(crate) fn verify_worker_control(
@@ -182,6 +445,254 @@ impl LocalKernelAuthority {
             Vec::new(),
         );
         Ok(worker)
+    }
+
+    /// Commits the authority side of an abnormal Worker disappearance. The
+    /// caller must already have classified its evidence (heartbeat timeout,
+    /// Provider reality, or runtime absence); a transport disconnect alone is
+    /// intentionally insufficient to reach this transition.
+    pub(crate) fn mark_worker_lost(
+        &self,
+        context: &AuthorityCallContext,
+        worker_identity: &semantic::Identity,
+        reason_code: &str,
+    ) -> Result<Vec<ProviderReconcileAction>, semantic::Rejection> {
+        self.validate_context(context)?;
+        let worker_name = self.worker_instance_name(context, worker_identity)?;
+        let worker = self
+            .runtime
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&worker_name)
+            .and_then(|process| process.semantic_worker.clone())
+            .ok_or_else(|| {
+                Self::rejection("WORKER_NOT_FOUND", "worker is not managed by this Kernel")
+            })?;
+        if worker.identity != *worker_identity {
+            return Err(Self::rejection(
+                "STALE_GENERATION",
+                "worker identity generation is stale",
+            ));
+        }
+        if worker.state == semantic::WorkerState::Lost {
+            return Ok(vec![ProviderReconcileAction::Noop]);
+        }
+        if !worker.state.can_transition_to(semantic::WorkerState::Lost) {
+            return Ok(vec![ProviderReconcileAction::Noop]);
+        }
+
+        let lease = self.lease_for(context, &worker.lease)?;
+        if lease.holder != worker.identity {
+            return Err(Self::rejection(
+                "FENCE_MISMATCH",
+                "worker no longer owns the referenced lease",
+            ));
+        }
+        // This record is the durable intent boundary. Once it succeeds, every
+        // following error still leaves authority fail-closed rather than active.
+        self.record_runtime(
+            RuntimeJournalEvent::WorkerLost,
+            Some(&worker_name),
+            Some(&lease),
+            reason_code,
+        )?;
+        let revocation_required = matches!(lease.state, LeaseState::Active | LeaseState::Releasing);
+        let revoked = if revocation_required {
+            self.runtime
+                .daemon
+                .revoke(&lease.name, lease.fence_token)
+                .map_err(Self::provider_rejection)?
+        } else {
+            lease.clone()
+        };
+
+        let cleanup = {
+            let mut instances = self
+                .runtime
+                .instances
+                .lock()
+                .expect("instance lock poisoned");
+            let process = instances.get_mut(&worker_name).ok_or_else(|| {
+                Self::rejection("WORKER_NOT_FOUND", "worker is not managed by this Kernel")
+            })?;
+            match process.semantic_worker.as_mut() {
+                Some(semantic_worker) => semantic_worker.state = semantic::WorkerState::Lost,
+                None => {
+                    return Err(Self::rejection(
+                        "WORKER_COMPATIBILITY_ONLY",
+                        "legacy plugin process is not a semantic Worker",
+                    ));
+                }
+            }
+            process.watchdog_triggered = true;
+            process.control = None;
+            process.semantic_control = None;
+            process.pending_shutdown = None;
+            process
+                .actor
+                .stop(&cy_kernel_api::StopRequest {
+                    grace_period: std::time::Duration::ZERO,
+                    immediate: true,
+                })
+                .map(Clone::clone)
+                .ok()
+        };
+
+        let mut actions = vec![ProviderReconcileAction::MarkWorkerLost(
+            worker.identity.clone(),
+        )];
+        if revocation_required {
+            actions.push(ProviderReconcileAction::RevokeLease(worker.lease.clone()));
+        }
+        let lost_operations = {
+            let mut operations = self
+                .runtime
+                .semantic_operations
+                .lock()
+                .expect("semantic operation lock poisoned");
+            operations
+                .values_mut()
+                .filter_map(|operation| {
+                    let targets_worker = operation.executor == worker.identity
+                        || operation
+                            .metadata
+                            .get("worker.id")
+                            .is_some_and(|id| id == &worker.identity.id);
+                    if targets_worker
+                        && operation
+                            .state
+                            .can_transition_to(semantic::OperationState::Lost)
+                    {
+                        operation.state = semantic::OperationState::Lost;
+                        Some(operation.identity.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        actions.extend(
+            lost_operations
+                .iter()
+                .cloned()
+                .map(ProviderReconcileAction::MarkOperationLost),
+        );
+
+        let revoked_endpoints = {
+            let mut endpoints = self
+                .runtime
+                .endpoints
+                .lock()
+                .expect("endpoint lock poisoned");
+            let endpoint_keys = endpoints
+                .iter()
+                .filter(|(_, endpoint)| endpoint.owner == worker.identity)
+                .map(|(key, endpoint)| (key.clone(), endpoint.identity.clone()))
+                .collect::<Vec<_>>();
+            for (key, _) in &endpoint_keys {
+                endpoints.remove(key);
+            }
+            let endpoint_identities = endpoint_keys
+                .iter()
+                .map(|(_, identity)| identity.clone())
+                .collect::<Vec<_>>();
+            self.runtime
+                .endpoint_grants
+                .lock()
+                .expect("endpoint grant lock poisoned")
+                .retain(|_, grant| {
+                    !endpoint_identities.contains(&grant.endpoint)
+                        && grant.grantee != worker.identity
+                });
+            endpoint_identities
+        };
+        actions.extend(
+            revoked_endpoints
+                .iter()
+                .cloned()
+                .map(ProviderReconcileAction::RevokeEndpoint),
+        );
+
+        // No visible state is published before both the revoke and its new
+        // fence are journaled. If either write fails, the in-memory state is
+        // already fail-closed and physical resources remain allocated.
+        if revocation_required {
+            self.record_runtime(
+                RuntimeJournalEvent::LeaseRevoked,
+                Some(&worker_name),
+                Some(&revoked),
+                reason_code,
+            )?;
+            self.record_runtime(
+                RuntimeJournalEvent::FenceAdvanced,
+                Some(&worker_name),
+                Some(&revoked),
+                reason_code,
+            )?;
+            if cleanup.as_ref().is_some_and(|report| report.complete) {
+                self.record_runtime(
+                    RuntimeJournalEvent::InstanceTerminated,
+                    Some(&worker.identity.id),
+                    Some(&revoked),
+                    &cleanup
+                        .as_ref()
+                        .expect("cleanup completion was checked")
+                        .reason_code,
+                )?;
+                self.runtime
+                    .daemon
+                    .complete_revocation(&revoked.name, revoked.fence_token)
+                    .map_err(Self::provider_rejection)?;
+            }
+        }
+        for operation in &lost_operations {
+            self.record_runtime(
+                RuntimeJournalEvent::OperationLost,
+                Some(&worker_name),
+                Some(&revoked),
+                reason_code,
+            )?;
+            self.publish_semantic_event_in(
+                &context.namespace,
+                operation.clone(),
+                "operation.lost",
+                "cyrene.operation.v1",
+                Vec::new(),
+            );
+        }
+        for endpoint in &revoked_endpoints {
+            self.record_runtime(
+                RuntimeJournalEvent::EndpointRevoked,
+                Some(&worker_name),
+                Some(&revoked),
+                reason_code,
+            )?;
+            self.publish_semantic_event_in(
+                &context.namespace,
+                endpoint.clone(),
+                "endpoint.revoked",
+                "cyrene.endpoint.v1",
+                Vec::new(),
+            );
+        }
+        self.publish_semantic_event_in(
+            &context.namespace,
+            worker.identity.clone(),
+            "worker.lost",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+        if revocation_required {
+            self.publish_semantic_event_in(
+                &context.namespace,
+                worker.lease.clone(),
+                "lease.revoked",
+                "cyrene.lease.v1",
+                Vec::new(),
+            );
+        }
+        Ok(actions)
     }
 }
 
@@ -376,6 +887,23 @@ impl KernelAuthority for LocalKernelAuthority {
             self.runtime.heartbeat.timeout,
         );
         actor.start().map_err(Self::provider_rejection)?;
+        let evidence = match actor.recovery_evidence() {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let _ = actor.stop(&cy_kernel_api::StopRequest {
+                    grace_period: std::time::Duration::ZERO,
+                    immediate: true,
+                });
+                return Err(Self::provider_rejection(error));
+            }
+        };
+        if let Err(error) = self.record_runtime_launch(&worker.identity.id, &lease, evidence) {
+            let _ = actor.stop(&cy_kernel_api::StopRequest {
+                grace_period: std::time::Duration::ZERO,
+                immediate: true,
+            });
+            return Err(error);
+        }
         worker.state = semantic::WorkerState::Starting;
         let lease_ref = core_v1::ResourceLeaseRef {
             lease_name: lease.name.clone(),
@@ -399,6 +927,7 @@ impl KernelAuthority for LocalKernelAuthority {
                     health: None,
                     restart_count: 0,
                     watchdog_triggered: false,
+                    transport_disconnected: false,
                     control: None,
                     semantic_control: None,
                     pending_shutdown: None,
@@ -409,12 +938,6 @@ impl KernelAuthority for LocalKernelAuthority {
             .lock()
             .expect("worker scope lock poisoned")
             .insert(worker_object, instance_name);
-        let _ = self.record_runtime(
-            RuntimeJournalEvent::InstanceLaunched,
-            Some(&worker.identity.id),
-            Some(&lease),
-            "WORKER_LAUNCHED",
-        );
         self.publish_semantic_event_in(
             &context.namespace,
             worker.identity.clone(),
@@ -533,6 +1056,12 @@ impl KernelAuthority for LocalKernelAuthority {
         };
         if report.complete {
             self.record_runtime(
+                RuntimeJournalEvent::InstanceTerminated,
+                Some(&worker_identity.id),
+                Some(&releasing),
+                &report.reason_code,
+            )?;
+            self.record_runtime(
                 RuntimeJournalEvent::LeaseReleased,
                 Some(&worker_identity.id),
                 Some(&releasing),
@@ -542,16 +1071,6 @@ impl KernelAuthority for LocalKernelAuthority {
                 .daemon
                 .complete_release(&lease.name, fence_token)
                 .map_err(Self::provider_rejection)?;
-            self.runtime
-                .instances
-                .lock()
-                .expect("instance lock poisoned")
-                .remove(&worker_name);
-            self.runtime
-                .workers
-                .lock()
-                .expect("worker scope lock poisoned")
-                .remove(&context.object_ref(worker_identity.clone()));
         } else {
             let _ = self
                 .runtime
@@ -779,11 +1298,14 @@ impl KernelAuthority for LocalKernelAuthority {
             .get(&key)
             .cloned()
             .ok_or_else(|| Self::rejection("OPERATION_NOT_FOUND", "operation is unknown"))?;
-        let mut cancelled = current.clone();
-        if !matches!(
+        if matches!(
             current.state,
             semantic::OperationState::Cancelling | semantic::OperationState::Cancelled
         ) {
+            return Ok(current);
+        }
+        let mut cancelling = current.clone();
+        {
             if !current
                 .state
                 .can_transition_to(semantic::OperationState::Cancelling)
@@ -793,18 +1315,43 @@ impl KernelAuthority for LocalKernelAuthority {
                     "operation cannot be cancelled from its current state",
                 ));
             }
-            cancelled.state = semantic::OperationState::Cancelling;
-            operations.insert(key, cancelled.clone());
+            cancelling.state = semantic::OperationState::Cancelling;
+            operations.insert(key, cancelling.clone());
         }
         drop(operations);
         self.publish_semantic_event_in(
             &context.namespace,
-            cancelled.identity.clone(),
-            semantic_operation_event_kind(cancelled.state),
+            cancelling.identity.clone(),
+            semantic_operation_event_kind(cancelling.state),
             "cyrene.operation.v1",
             Vec::new(),
         );
-        Ok(cancelled)
+        let executor = self
+            .runtime
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .iter_mut()
+            .find(|(_, process)| {
+                process
+                    .semantic_worker
+                    .as_ref()
+                    .is_some_and(|worker| cancelling.executor == worker.identity)
+            })
+            .map(|(_, process)| process.actor.request_cancel(cancelling.identity.id.clone()));
+        match executor {
+            Some(Ok(receipt)) => {
+                self.schedule_cancellation_deadline(
+                    context.clone(),
+                    cancelling.identity.clone(),
+                    receipt,
+                );
+                Ok(cancelling)
+            }
+            Some(Err(_)) | None => {
+                Ok(self.mark_cancelling_operation_lost(context, &cancelling.identity))
+            }
+        }
     }
 
     fn publish_endpoint(
@@ -1040,7 +1587,434 @@ impl KernelAuthority for LocalKernelAuthority {
                 "event page_size must be in 1..=256",
             ));
         }
-        Ok(self.events_after_inner(&context.namespace, cursor, limit))
+        self.events_after_inner(&context.namespace, cursor, limit)
+    }
+}
+
+impl LocalKernelAuthority {
+    pub(crate) fn register_resource_facts_provider(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+        provider: semantic::Provider,
+    ) -> Result<semantic::Provider, semantic::Rejection> {
+        let registered =
+            KernelProviderAuthority::register_provider(self, context, principal, provider)?;
+        let key = (context.namespace.clone(), registered.identity.id.clone());
+        let mut providers = self
+            .runtime
+            .providers
+            .lock()
+            .expect("provider state lock poisoned");
+        let record = providers
+            .get_mut(&key)
+            .expect("registered provider must remain present");
+        record.inventory_scope = ProviderInventoryScope::ResourceFactsOnly;
+        Ok(registered)
+    }
+}
+
+impl KernelProviderAuthority for LocalKernelAuthority {
+    fn register_provider(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+        provider: semantic::Provider,
+    ) -> Result<semantic::Provider, semantic::Rejection> {
+        self.validate_context(context)?;
+        if provider.identity.generation == 0 {
+            return Err(Self::rejection(
+                "GENERATION_INVALID",
+                "provider session generation must be non-zero",
+            ));
+        }
+        provider
+            .validate()
+            .map_err(|error| Self::rejection(error.reason_code, error.message))?;
+
+        let key = (context.namespace.clone(), provider.identity.id.clone());
+        let registered = {
+            let mut providers = self
+                .runtime
+                .providers
+                .lock()
+                .expect("provider state lock poisoned");
+            match providers.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(ProviderRecord {
+                        provider: provider.clone(),
+                        principal: principal.clone(),
+                        inventory_scope: ProviderInventoryScope::Full,
+                        inventory: None,
+                        reconciled_snapshot_generation: None,
+                        pending_stale_workers: Vec::new(),
+                    });
+                    provider.clone()
+                }
+                Entry::Occupied(mut entry) => {
+                    let current = entry.get();
+                    if current.principal != *principal {
+                        return Err(Self::rejection(
+                            "AUTHORITY_DENIED",
+                            "Provider session belongs to another authenticated Principal",
+                        ));
+                    }
+                    if provider.identity.generation < current.provider.identity.generation {
+                        return Err(Self::rejection(
+                            "STALE_GENERATION",
+                            "provider session generation is stale",
+                        ));
+                    }
+                    if provider.identity.generation == current.provider.identity.generation {
+                        if current.provider == provider {
+                            return Ok(current.provider.clone());
+                        }
+                        if current.provider.state != semantic::ProviderState::Unavailable
+                            && provider.state == semantic::ProviderState::Unavailable
+                            && current.provider.capabilities == provider.capabilities
+                        {
+                            entry.insert(ProviderRecord {
+                                provider: provider.clone(),
+                                principal: principal.clone(),
+                                inventory_scope: ProviderInventoryScope::Full,
+                                // A disconnected transport invalidates only
+                                // its session-bound evidence. The logical
+                                // Provider identity remains unchanged until a
+                                // later registration establishes a new session.
+                                inventory: None,
+                                reconciled_snapshot_generation: None,
+                                pending_stale_workers: Vec::new(),
+                            });
+                            provider.clone()
+                        } else {
+                            return Err(Self::rejection(
+                                "STALE_GENERATION",
+                                "provider session generation cannot change its facts or recover",
+                            ));
+                        }
+                    } else {
+                        entry.insert(ProviderRecord {
+                            provider: provider.clone(),
+                            principal: principal.clone(),
+                            inventory_scope: ProviderInventoryScope::Full,
+                            // A reconnect invalidates evidence tied to the old
+                            // transport session, not resource or snapshot numbers.
+                            inventory: None,
+                            reconciled_snapshot_generation: None,
+                            pending_stale_workers: Vec::new(),
+                        });
+                        provider.clone()
+                    }
+                }
+            }
+        };
+        self.publish_semantic_event_in(
+            &context.namespace,
+            registered.identity.clone(),
+            "provider.registered",
+            "cyrene.provider.v1",
+            Vec::new(),
+        );
+        Ok(registered)
+    }
+
+    fn publish_inventory(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+        snapshot: semantic::ProviderSnapshot,
+    ) -> Result<semantic::ProviderSnapshot, semantic::Rejection> {
+        self.validate_context(context)?;
+        snapshot
+            .validate()
+            .map_err(|error| Self::rejection(error.reason_code, error.message))?;
+
+        let key = (context.namespace.clone(), snapshot.provider.id.clone());
+        {
+            let mut providers = self
+                .runtime
+                .providers
+                .lock()
+                .expect("provider state lock poisoned");
+            let record = providers.get_mut(&key).ok_or_else(|| {
+                Self::rejection(
+                    "PROVIDER_NOT_FOUND",
+                    "provider has not registered this session",
+                )
+            })?;
+            if record.principal != *principal {
+                return Err(Self::rejection(
+                    "AUTHORITY_DENIED",
+                    "Provider inventory caller does not own the registered session",
+                ));
+            }
+            if record.provider.identity != snapshot.provider {
+                return Err(Self::rejection(
+                    "STALE_GENERATION",
+                    "inventory belongs to a stale provider session",
+                ));
+            }
+            if record
+                .inventory
+                .as_ref()
+                .is_some_and(|current| snapshot.snapshot_generation <= current.snapshot_generation)
+            {
+                return Err(Self::rejection(
+                    "STALE_GENERATION",
+                    "inventory snapshot generation must advance",
+                ));
+            }
+            record.inventory = Some(snapshot.clone());
+            record.reconciled_snapshot_generation = None;
+        }
+        self.publish_semantic_event_in(
+            &context.namespace,
+            snapshot.provider.clone(),
+            "provider.inventory.observed",
+            "cyrene.provider.v1",
+            Vec::new(),
+        );
+        Ok(snapshot)
+    }
+
+    fn reconcile_provider(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+        provider: &semantic::Identity,
+    ) -> Result<ProviderReconcileResult, semantic::Rejection> {
+        self.validate_context(context)?;
+        let key = (context.namespace.clone(), provider.id.clone());
+        let (provider, snapshot_generation, snapshot, already_reconciled, resource_facts_only) = {
+            let mut providers = self
+                .runtime
+                .providers
+                .lock()
+                .expect("provider state lock poisoned");
+            let record = providers.get_mut(&key).ok_or_else(|| {
+                Self::rejection(
+                    "PROVIDER_NOT_FOUND",
+                    "provider is unknown in this namespace",
+                )
+            })?;
+            if record.principal != *principal {
+                return Err(Self::rejection(
+                    "AUTHORITY_DENIED",
+                    "Provider reconciliation caller does not own the registered session",
+                ));
+            }
+            if record.provider.identity != *provider {
+                return Err(Self::rejection(
+                    "STALE_GENERATION",
+                    "reconciliation targets a stale provider session",
+                ));
+            }
+            let inventory_expired = record
+                .inventory
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.expires_at_unix_ms <= Self::now_unix_ms());
+            if inventory_expired {
+                record.inventory = None;
+                record.reconciled_snapshot_generation = None;
+            }
+            let snapshot_generation = record
+                .inventory
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.snapshot_generation);
+            if record.inventory.is_none()
+                && record.provider.state != semantic::ProviderState::Unavailable
+                && !inventory_expired
+            {
+                return Err(Self::rejection(
+                    "PROVIDER_INVENTORY_MISSING",
+                    "provider has no current inventory",
+                ));
+            }
+            (
+                record.provider.identity.clone(),
+                snapshot_generation,
+                record.inventory.clone(),
+                record.reconciled_snapshot_generation == Some(snapshot_generation)
+                    && record.pending_stale_workers.is_empty(),
+                record.inventory_scope == ProviderInventoryScope::ResourceFactsOnly,
+            )
+        };
+        if already_reconciled {
+            return Ok(ProviderReconcileResult {
+                provider,
+                snapshot_generation,
+                actions: vec![ProviderReconcileAction::Noop],
+            });
+        }
+
+        if resource_facts_only {
+            let mut actions = snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .resources
+                        .iter()
+                        .map(|resource| {
+                            ProviderReconcileAction::RefreshResource(resource.identity.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if actions.is_empty() {
+                actions.push(ProviderReconcileAction::Noop);
+            }
+            self.runtime
+                .providers
+                .lock()
+                .expect("provider state lock poisoned")
+                .get_mut(&key)
+                .expect("provider was checked above")
+                .reconciled_snapshot_generation = Some(snapshot_generation);
+            self.publish_semantic_event_in(
+                &context.namespace,
+                provider.clone(),
+                "provider.reconciled",
+                "cyrene.provider.v1",
+                Vec::new(),
+            );
+            return Ok(ProviderReconcileResult {
+                provider,
+                snapshot_generation,
+                actions,
+            });
+        }
+
+        let mut actions = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .resources
+                    .iter()
+                    .map(|resource| {
+                        ProviderReconcileAction::RefreshResource(resource.identity.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let observed_workers = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .workers
+                    .iter()
+                    .map(|worker| worker.identity.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let recorded_worker_names = self
+            .runtime
+            .workers
+            .lock()
+            .expect("worker scope lock poisoned")
+            .iter()
+            .filter(|(object, _)| object.namespace == context.namespace)
+            .map(|(_, instance_name)| instance_name.clone())
+            .collect::<Vec<_>>();
+        let recorded_workers = self
+            .runtime
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .iter()
+            .filter(|(instance_name, _)| recorded_worker_names.contains(instance_name))
+            .filter_map(|(_, process)| process.semantic_worker.clone())
+            .filter(|worker| {
+                worker.provider.id == provider.id
+                    && !matches!(
+                        worker.state,
+                        semantic::WorkerState::Stopped
+                            | semantic::WorkerState::Failed
+                            | semantic::WorkerState::Lost
+                    )
+            })
+            .collect::<Vec<_>>();
+        for worker in recorded_workers {
+            let missing_from_provider = !observed_workers.contains(&worker.identity);
+            let lease_is_valid = self.lease_for(context, &worker.lease).is_ok_and(|lease| {
+                lease.state == LeaseState::Active && lease.holder == worker.identity
+            });
+            if missing_from_provider || !lease_is_valid {
+                actions.extend(self.mark_worker_lost(
+                    context,
+                    &worker.identity,
+                    if missing_from_provider && snapshot.is_some() {
+                        "WORKER_MISSING_FROM_PROVIDER"
+                    } else if missing_from_provider {
+                        "PROVIDER_UNAVAILABLE"
+                    } else {
+                        "WORKER_LEASE_INVALID"
+                    },
+                )?);
+            }
+        }
+        let mut stale_workers = Vec::new();
+        for observed in observed_workers {
+            if !self
+                .runtime
+                .workers
+                .lock()
+                .expect("worker scope lock poisoned")
+                .contains_key(&context.object_ref(observed.clone()))
+            {
+                stale_workers.push(observed);
+            }
+        }
+        {
+            let mut providers = self
+                .runtime
+                .providers
+                .lock()
+                .expect("provider state lock poisoned");
+            let record = providers.get_mut(&key).expect("provider was checked above");
+            for worker in stale_workers {
+                if !record
+                    .pending_stale_workers
+                    .iter()
+                    .any(|(candidate, _)| candidate == &worker)
+                {
+                    record
+                        .pending_stale_workers
+                        .push((worker, snapshot_generation));
+                }
+            }
+            actions.extend(
+                record.pending_stale_workers.iter().map(|(worker, _)| {
+                    ProviderReconcileAction::TerminateStaleWorker(worker.clone())
+                }),
+            );
+        }
+        if actions.is_empty() {
+            actions.push(ProviderReconcileAction::Noop);
+        }
+        let converged = !actions
+            .iter()
+            .any(|action| matches!(action, ProviderReconcileAction::TerminateStaleWorker(_)));
+        if converged {
+            self.runtime
+                .providers
+                .lock()
+                .expect("provider state lock poisoned")
+                .get_mut(&key)
+                .expect("provider was checked above")
+                .reconciled_snapshot_generation = Some(snapshot_generation);
+        }
+        self.publish_semantic_event_in(
+            &context.namespace,
+            provider.clone(),
+            "provider.reconciled",
+            "cyrene.provider.v1",
+            Vec::new(),
+        );
+        Ok(ProviderReconcileResult {
+            provider,
+            snapshot_generation,
+            actions,
+        })
     }
 }
 
@@ -1244,6 +2218,27 @@ impl LocalKernelAuthority {
         schema_id: impl Into<String>,
         body: impl Into<Vec<u8>>,
     ) {
+        let source = self.semantic_event_source_for(namespace);
+        let history_exists = self
+            .runtime
+            .semantic_events
+            .lock()
+            .expect("semantic event history lock poisoned")
+            .contains_key(namespace);
+        let seeded_next_sequence = if history_exists {
+            None
+        } else {
+            match self.event_history_for(namespace, &source) {
+                Ok(events) => Some(
+                    events
+                        .last()
+                        .map_or(Some(1), |event| event.sequence.checked_add(1)),
+                ),
+                // A source cannot safely publish a new sequence when its
+                // durable history is unavailable or malformed.
+                Err(_) => return,
+            }
+        };
         let mut histories = self
             .runtime
             .semantic_events
@@ -1252,12 +2247,15 @@ impl LocalKernelAuthority {
         let history = histories
             .entry(namespace.clone())
             .or_insert_with(|| NamespaceEventHistory {
-                next_sequence: 1,
+                next_sequence: seeded_next_sequence.unwrap_or(Some(1)),
                 events: VecDeque::with_capacity(OPERATION_EVENT_HISTORY_CAPACITY),
             });
+        let Some(sequence) = history.next_sequence else {
+            return;
+        };
         let event = semantic::Event {
-            sequence: history.next_sequence,
-            source: self.semantic_event_source_for(namespace),
+            sequence,
+            source,
             subject,
             kind: kind.into(),
             observed_at_unix_ms: Self::now_unix_ms(),
@@ -1267,7 +2265,22 @@ impl LocalKernelAuthority {
         if event.validate().is_err() {
             return;
         }
-        history.next_sequence = history.next_sequence.saturating_add(1);
+        // Events are externally visible only after the composition-selected
+        // durable store accepts them. State transitions carry their own journal
+        // boundary; this prevents an in-memory replay cursor from claiming an
+        // event that disappears across a restart.
+        if self
+            .runtime
+            .event_store
+            .append_event(DurableEventRecord {
+                namespace: namespace.as_str().to_string(),
+                event: event.clone(),
+            })
+            .is_err()
+        {
+            return;
+        }
+        history.next_sequence = sequence.checked_add(1);
         if history.events.len() == OPERATION_EVENT_HISTORY_CAPACITY {
             history.events.pop_front();
         }
@@ -1279,34 +2292,35 @@ impl LocalKernelAuthority {
         namespace: &NamespaceId,
         cursor: &semantic::EventCursor,
         limit: usize,
-    ) -> semantic::EventPage {
+    ) -> Result<semantic::EventPage, semantic::Rejection> {
         let source = self.semantic_event_source_for(namespace);
-        let histories = self
-            .runtime
-            .semantic_events
-            .lock()
-            .expect("semantic event history lock poisoned");
-        let history = histories.get(namespace);
-        let oldest = history
-            .and_then(|history| history.events.front())
-            .map_or(0, |event| event.sequence);
-        let latest = history
-            .and_then(|history| history.events.back())
-            .map_or(0, |event| event.sequence);
+        if cursor.source != source {
+            let (oldest, latest) = self.in_memory_event_range(namespace);
+            return Ok(semantic::EventPage {
+                source,
+                status: semantic::ReplayStatus::SourceChanged,
+                events: Vec::new(),
+                oldest_available_sequence: oldest,
+                latest_available_sequence: latest,
+                next_sequence: cursor.sequence,
+            });
+        }
+        let history = self.event_history_for(namespace, &source)?;
+        let oldest = history.first().map_or(0, |event| event.sequence);
+        let latest = history.last().map_or(0, |event| event.sequence);
         let status = cursor.status_against(&source, oldest);
         if status != semantic::ReplayStatus::Current {
-            return semantic::EventPage {
+            return Ok(semantic::EventPage {
                 source,
                 status,
                 events: Vec::new(),
                 oldest_available_sequence: oldest,
                 latest_available_sequence: latest,
                 next_sequence: cursor.sequence,
-            };
+            });
         }
         let events = history
-            .into_iter()
-            .flat_map(|history| history.events.iter())
+            .iter()
             .filter(|event| event.sequence > cursor.sequence)
             .take(limit)
             .cloned()
@@ -1314,14 +2328,73 @@ impl LocalKernelAuthority {
         let next_sequence = events
             .last()
             .map_or(cursor.sequence, |event| event.sequence);
-        semantic::EventPage {
+        Ok(semantic::EventPage {
             source,
             status,
             events,
             oldest_available_sequence: oldest,
             latest_available_sequence: latest,
             next_sequence,
+        })
+    }
+
+    fn event_history_for(
+        &self,
+        namespace: &NamespaceId,
+        source: &semantic::Identity,
+    ) -> Result<Vec<semantic::Event>, semantic::Rejection> {
+        let durable = self
+            .runtime
+            .event_store
+            .events_for_source(source, namespace.as_str())
+            .map_err(Self::provider_rejection)?;
+        if let Some(records) = durable {
+            let mut previous_sequence = None;
+            let mut events = Vec::with_capacity(records.len());
+            for record in records {
+                if record.namespace != namespace.as_str()
+                    || record.event.source != *source
+                    || record.event.validate().is_err()
+                    || previous_sequence.is_some_and(|previous| record.event.sequence <= previous)
+                {
+                    return Err(Self::rejection(
+                        "EVENT_STORE_INVALID",
+                        "durable event history did not match the requested ordered source",
+                    ));
+                }
+                previous_sequence = Some(record.event.sequence);
+                events.push(record.event);
+            }
+            return Ok(events);
         }
+        let histories = self
+            .runtime
+            .semantic_events
+            .lock()
+            .expect("semantic event history lock poisoned");
+        Ok(histories
+            .get(namespace)
+            .into_iter()
+            .flat_map(|history| history.events.iter())
+            .cloned()
+            .collect())
+    }
+
+    fn in_memory_event_range(&self, namespace: &NamespaceId) -> (u64, u64) {
+        let histories = self
+            .runtime
+            .semantic_events
+            .lock()
+            .expect("semantic event history lock poisoned");
+        let history = histories.get(namespace);
+        (
+            history
+                .and_then(|history| history.events.front())
+                .map_or(0, |event| event.sequence),
+            history
+                .and_then(|history| history.events.back())
+                .map_or(0, |event| event.sequence),
+        )
     }
 
     fn record_runtime(
@@ -1341,6 +2414,28 @@ impl LocalKernelAuthority {
                 lease_name: lease.map(|lease| lease.name.clone()),
                 fence_token: lease.map(|lease| lease.fence_token),
                 reason_code: reason_code.to_string(),
+                runtime_evidence: None,
+            })
+            .map_err(Self::provider_rejection)
+    }
+
+    fn record_runtime_launch(
+        &self,
+        instance_name: &str,
+        lease: &ResourceLease,
+        evidence: RuntimeProcessEvidence,
+    ) -> Result<(), semantic::Rejection> {
+        self.runtime
+            .runtime_journal
+            .append(RuntimeJournalRecord {
+                event: RuntimeJournalEvent::InstanceLaunched,
+                node_id: self.runtime.daemon.node_id.clone(),
+                node_epoch: self.runtime.daemon.node_epoch,
+                instance_name: Some(instance_name.to_string()),
+                lease_name: Some(lease.name.clone()),
+                fence_token: Some(lease.fence_token),
+                reason_code: "WORKER_LAUNCHED".to_string(),
+                runtime_evidence: Some(evidence),
             })
             .map_err(Self::provider_rejection)
     }
@@ -1397,7 +2492,7 @@ impl LocalKernelAuthority {
             .daemon
             .begin_release(&current.name, fence_token)
             .map_err(Self::provider_rejection)?;
-        let worker_id = {
+        let (worker_id, journal_instance_name) = {
             let mut instances = self
                 .runtime
                 .instances
@@ -1444,11 +2539,26 @@ impl LocalKernelAuthority {
                 if let Some(worker) = process.semantic_worker.as_mut() {
                     worker.state = semantic::WorkerState::Stopped;
                 }
-                Some(worker_id.clone())
+                (
+                    Some(worker_id.clone()),
+                    process
+                        .semantic_worker
+                        .as_ref()
+                        .map(|worker| worker.identity.id.clone())
+                        .unwrap_or_else(|| worker_id.clone()),
+                )
             } else {
-                None
+                (None, String::new())
             }
         };
+        if worker_id.is_some() {
+            self.record_runtime(
+                RuntimeJournalEvent::InstanceTerminated,
+                Some(&journal_instance_name),
+                Some(&releasing),
+                "CLEANUP_COMPLETE",
+            )?;
+        }
         self.record_runtime(
             RuntimeJournalEvent::LeaseReleased,
             worker_id.as_deref(),
@@ -1460,18 +2570,6 @@ impl LocalKernelAuthority {
             .daemon
             .complete_release(&current.name, fence_token)
             .map_err(Self::provider_rejection)?;
-        if let Some(worker_id) = worker_id {
-            self.runtime
-                .instances
-                .lock()
-                .expect("instance lock poisoned")
-                .remove(&worker_id);
-            self.runtime
-                .workers
-                .lock()
-                .expect("worker scope lock poisoned")
-                .retain(|_, instance_name| instance_name != &worker_id);
-        }
         Ok(Self::semantic_lease(&object, &released))
     }
 }

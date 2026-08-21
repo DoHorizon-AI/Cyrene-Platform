@@ -5,7 +5,7 @@ pub(crate) mod operations;
 pub(crate) mod worker;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     ops::Deref,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -15,9 +15,11 @@ use std::{
     time::Duration,
 };
 
+use cy_adapter_client::HardwareAdapterObservation;
 use cy_kernel_api::{
-    InstalledPluginResolver, NoopRuntimeJournal, ProviderError, ResourceLease, RuntimeJournalEvent,
-    RuntimeJournalSink,
+    semantic, AuthorityCallContext, DurableEventStore, InstalledPluginResolver,
+    KernelProviderAuthority, NamespaceId, NoopRuntimeJournal, ProviderError, ResourceLease,
+    RuntimeJournalEvent, RuntimeJournalSink,
 };
 use cy_proto::{core_v1, core_v2};
 use tokio::sync::broadcast;
@@ -32,6 +34,35 @@ use crate::{
 pub(crate) const OPERATION_EVENT_HISTORY_CAPACITY: usize = 256;
 pub(crate) const OPERATION_EVENT_SUBSCRIBER_CAPACITY: usize = 64;
 
+#[derive(Debug)]
+struct HardwareProviderTracker {
+    session_generation: u64,
+    last_snapshot_generation: Option<u64>,
+    state: Option<semantic::ProviderState>,
+}
+
+impl HardwareProviderTracker {
+    fn new(kernel_epoch: u64) -> Self {
+        Self {
+            session_generation: kernel_epoch.max(1),
+            last_snapshot_generation: None,
+            state: None,
+        }
+    }
+
+    fn advance_session(&mut self) -> Result<(), ProviderError> {
+        self.session_generation = self.session_generation.checked_add(1).ok_or_else(|| {
+            ProviderError::new(
+                "kernel-hardware-provider",
+                "PROVIDER_SESSION_GENERATION_EXHAUSTED",
+                "hardware provider session generation cannot advance",
+            )
+        })?;
+        self.last_snapshot_generation = None;
+        Ok(())
+    }
+}
+
 /// Core v1 KernelService 到真实资源管理器与 SandboxBackend 的最小服务适配层。
 #[derive(Clone)]
 pub struct KernelServiceAdapter {
@@ -42,6 +73,7 @@ pub struct KernelServiceAdapter {
     pub(crate) next_event_sequence: Arc<AtomicU64>,
     pub(crate) adapter_available: Arc<AtomicBool>,
     pub(crate) adapter_poll_interval: Duration,
+    hardware_providers: Arc<Mutex<BTreeMap<String, HardwareProviderTracker>>>,
 }
 
 impl KernelServiceAdapter {
@@ -61,6 +93,7 @@ impl KernelServiceAdapter {
             next_event_sequence: Arc::new(AtomicU64::new(1)),
             adapter_available: Arc::new(AtomicBool::new(true)),
             adapter_poll_interval: Duration::from_secs(5),
+            hardware_providers: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -80,6 +113,13 @@ impl KernelServiceAdapter {
         Arc::get_mut(&mut self.authority)
             .expect("authority cannot be reconfigured after adapter cloning")
             .set_runtime_journal(runtime_journal);
+        self
+    }
+
+    pub fn with_event_store(mut self, event_store: Arc<dyn DurableEventStore>) -> Self {
+        Arc::get_mut(&mut self.authority)
+            .expect("authority cannot be reconfigured after adapter cloning")
+            .set_event_store(event_store);
         self
     }
 
@@ -122,6 +162,17 @@ impl KernelServiceAdapter {
         core_v1::worker_control_service_server::WorkerControlServiceServer::new(self.clone())
     }
 
+    /// Provider lifecycle/reconciliation is exposed only on its authenticated
+    /// UDS listener, never on the client authority or Worker sockets.
+    pub fn provider_server(
+        &self,
+    ) -> cy_proto::provider_v1::kernel_provider_service_server::KernelProviderServiceServer<Self>
+    {
+        cy_proto::provider_v1::kernel_provider_service_server::KernelProviderServiceServer::new(
+            self.clone(),
+        )
+    }
+
     /// Starts the bounded watchdog loop. A missing heartbeat executes the same
     /// SIGTERM -> cgroup.kill cleanup path as an explicit termination.
     pub fn start_watchdog(&self) -> thread::JoinHandle<()> {
@@ -140,7 +191,7 @@ impl KernelServiceAdapter {
         let adapter = self.clone();
         thread::spawn(move || loop {
             thread::sleep(adapter.adapter_poll_interval);
-            let result = adapter.daemon.refresh_inventory_facts();
+            let result = adapter.sync_hardware_provider_facts();
             let ready = result.is_ok();
             let previous = adapter.adapter_available.swap(ready, Ordering::Relaxed);
             match (previous, ready) {
@@ -162,6 +213,196 @@ impl KernelServiceAdapter {
                 _ => {}
             }
         })
+    }
+
+    /// Registers, publishes, and reconciles one resource-only Provider for
+    /// every configured hardware adapter. Allocation still consumes the
+    /// registry aggregate; these Provider snapshots never inherit its
+    /// generation.
+    pub fn sync_hardware_provider_facts(&self) -> Result<(), ProviderError> {
+        let Some(observations) = self.daemon.hardware_adapter_observations() else {
+            return self.daemon.refresh_inventory_facts().map(|_| ());
+        };
+        let has_unavailable_adapter = observations.values().any(Result::is_err);
+        for (adapter_id, observation) in &observations {
+            match observation {
+                Ok(observation) => self.publish_hardware_provider(adapter_id, observation)?,
+                Err(error) => self.publish_unavailable_hardware_provider(adapter_id, error)?,
+            }
+        }
+        if let Err(error) = self
+            .daemon
+            .refresh_hardware_inventory_observations(&observations)
+        {
+            if !has_unavailable_adapter {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_hardware_provider(
+        &self,
+        adapter_id: &str,
+        observation: &HardwareAdapterObservation,
+    ) -> Result<(), ProviderError> {
+        let state = if observation.snapshot.capabilities.ready {
+            semantic::ProviderState::Ready
+        } else {
+            semantic::ProviderState::Degraded
+        };
+        let (identity, publish_snapshot) = {
+            let mut providers = self
+                .hardware_providers
+                .lock()
+                .expect("hardware provider tracker lock poisoned");
+            let tracker = providers
+                .entry(adapter_id.to_string())
+                .or_insert_with(|| HardwareProviderTracker::new(self.daemon.node_epoch));
+            let snapshot_regressed = tracker
+                .last_snapshot_generation
+                .is_some_and(|generation| observation.snapshot.generation < generation);
+            let state_requires_new_session =
+                matches!(tracker.state, Some(semantic::ProviderState::Unavailable))
+                    || matches!(
+                        tracker.state,
+                        Some(previous)
+                            if previous != semantic::ProviderState::Unavailable && previous != state
+                    );
+            if snapshot_regressed || state_requires_new_session {
+                tracker.advance_session()?;
+            }
+            let publish_snapshot = tracker.last_snapshot_generation.map_or(true, |generation| {
+                observation.snapshot.generation > generation
+            });
+            if publish_snapshot {
+                tracker.last_snapshot_generation = Some(observation.snapshot.generation);
+            }
+            tracker.state = Some(state);
+            (
+                semantic::Identity {
+                    id: adapter_id.to_string(),
+                    generation: tracker.session_generation,
+                },
+                publish_snapshot,
+            )
+        };
+        let provider = semantic::Provider {
+            identity: identity.clone(),
+            state,
+            capabilities: Vec::new(),
+        };
+        let context = self.hardware_provider_context(adapter_id, &identity);
+        let principal = self.hardware_provider_principal();
+        self.authority
+            .register_resource_facts_provider(&context, &principal, provider)
+            .map_err(Self::hardware_provider_error)?;
+        if publish_snapshot {
+            let snapshot = self.hardware_provider_snapshot(identity.clone(), observation);
+            self.authority
+                .publish_inventory(&context, &principal, snapshot)
+                .map_err(Self::hardware_provider_error)?;
+        }
+        self.authority
+            .reconcile_provider(&context, &principal, &identity)
+            .map_err(Self::hardware_provider_error)?;
+        Ok(())
+    }
+
+    fn publish_unavailable_hardware_provider(
+        &self,
+        adapter_id: &str,
+        _error: &ProviderError,
+    ) -> Result<(), ProviderError> {
+        let identity = {
+            let mut providers = self
+                .hardware_providers
+                .lock()
+                .expect("hardware provider tracker lock poisoned");
+            let tracker = providers
+                .entry(adapter_id.to_string())
+                .or_insert_with(|| HardwareProviderTracker::new(self.daemon.node_epoch));
+            tracker.state = Some(semantic::ProviderState::Unavailable);
+            semantic::Identity {
+                id: adapter_id.to_string(),
+                generation: tracker.session_generation,
+            }
+        };
+        let context = self.hardware_provider_context(adapter_id, &identity);
+        let principal = self.hardware_provider_principal();
+        self.authority
+            .register_resource_facts_provider(
+                &context,
+                &principal,
+                semantic::Provider {
+                    identity: identity.clone(),
+                    state: semantic::ProviderState::Unavailable,
+                    capabilities: Vec::new(),
+                },
+            )
+            .map_err(Self::hardware_provider_error)?;
+        self.authority
+            .reconcile_provider(&context, &principal, &identity)
+            .map_err(Self::hardware_provider_error)?;
+        Ok(())
+    }
+
+    fn hardware_provider_snapshot(
+        &self,
+        provider: semantic::Identity,
+        observation: &HardwareAdapterObservation,
+    ) -> semantic::ProviderSnapshot {
+        let max_ttl_ms = self
+            .adapter_poll_interval
+            .as_millis()
+            .saturating_mul(2)
+            .clamp(1, u64::MAX as u128) as u64;
+        let mut resources = observation.snapshot.resources.clone();
+        for resource in &mut resources {
+            resource.provider = provider.clone();
+        }
+        semantic::ProviderSnapshot {
+            provider,
+            snapshot_generation: observation.snapshot.generation,
+            resources,
+            workers: Vec::new(),
+            endpoints: Vec::new(),
+            sampled_at_unix_ms: observation.sampled_at_unix_ms,
+            expires_at_unix_ms: observation
+                .expires_at_unix_ms
+                .min(observation.sampled_at_unix_ms.saturating_add(max_ttl_ms)),
+        }
+    }
+
+    fn hardware_provider_context(
+        &self,
+        adapter_id: &str,
+        provider: &semantic::Identity,
+    ) -> AuthorityCallContext {
+        let request_id = format!("hardware-provider-{adapter_id}-{}", provider.generation);
+        AuthorityCallContext {
+            contract: semantic::ContractRevision::current(),
+            namespace: NamespaceId::default(),
+            request_id: request_id.clone(),
+            idempotency_key: request_id,
+        }
+    }
+
+    fn hardware_provider_principal(&self) -> semantic::Principal {
+        semantic::Principal {
+            identity: semantic::Identity {
+                id: "kernel-hardware".to_string(),
+                generation: self.daemon.node_epoch.max(1),
+            },
+        }
+    }
+
+    fn hardware_provider_error(error: semantic::Rejection) -> ProviderError {
+        ProviderError::new(
+            "kernel-hardware-provider",
+            &error.reason_code,
+            &error.message,
+        )
     }
 
     pub(crate) fn validate_node(&self, node: Option<&core_v1::NodeRef>) -> Result<(), Status> {

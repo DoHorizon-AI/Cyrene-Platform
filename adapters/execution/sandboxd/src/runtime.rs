@@ -25,7 +25,7 @@ use std::os::fd::OwnedFd;
 use cy_kernel_api::{
     CgroupLimits, CgroupTelemetry, CleanupReport, DeviceBinding, EnforcementMode,
     EnforcementReport, LaunchPlan, NodeCapabilities, ProcessCondition, ProcessHandle,
-    ProcessRuntime, ProviderError, SandboxBackend, StopRequest,
+    ProcessRuntime, ProviderError, RuntimeProcessEvidence, SandboxBackend, StopRequest,
 };
 
 #[cfg(target_os = "linux")]
@@ -223,9 +223,10 @@ impl CgroupV2Runtime {
         }
     }
 
-    /// Creates and validates the dedicated root, enables available controllers
-    /// on its parent, then kills only direct CYRENE instance cgroups underneath.
-    /// This must run once during the daemon composition-root startup.
+    /// Creates and validates the dedicated root and enables available
+    /// controllers on its parent. Restart cleanup is intentionally deferred to
+    /// the Kernel's journal-backed recovery pass; sandboxd never guesses that a
+    /// direct child belongs to a previous Kernel process.
     pub fn initialize_owned_root(&self) -> Result<OwnedCgroupCleanupReport, ProviderError> {
         self.validate_owned_root()?;
         fs::create_dir_all(&self.config.root).map_err(|error| {
@@ -237,20 +238,8 @@ impl CgroupV2Runtime {
         })?;
         if !self.config.dev_mode {
             self.enable_parent_controllers()?;
-            self.cleanup_owned_instances()
-        } else {
-            // Clean up any stale dev instance directories
-            if let Ok(entries) = fs::read_dir(&self.config.root) {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if is_owned_instance_name(name) {
-                            let _ = fs::remove_dir_all(entry.path());
-                        }
-                    }
-                }
-            }
-            Ok(OwnedCgroupCleanupReport::default())
         }
+        Ok(OwnedCgroupCleanupReport::default())
     }
 
     /// Validates a direct instance group name and resolves it beneath the owned root.
@@ -263,6 +252,135 @@ impl CgroupV2Runtime {
             ));
         }
         Ok(self.config.root.join(name))
+    }
+
+    fn recovery_process_ids(&self, cgroup_path: &Path) -> Result<Vec<u32>, ProviderError> {
+        let contents = fs::read_to_string(cgroup_path.join("cgroup.procs")).map_err(|error| {
+            ProviderError::new(
+                "linux-cgroup-v2",
+                "RECOVERY_DISCOVERY_FAILED",
+                &error.to_string(),
+            )
+        })?;
+        contents
+            .split_whitespace()
+            .map(|pid| {
+                pid.parse::<u32>().map_err(|_| {
+                    ProviderError::new(
+                        "linux-cgroup-v2",
+                        "RECOVERY_DISCOVERY_INVALID",
+                        "cgroup.procs contains an invalid PID",
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn discover_recovery_processes_inner(
+        &self,
+    ) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+        let entries = fs::read_dir(&self.config.root).map_err(|error| {
+            ProviderError::new(
+                "linux-cgroup-v2",
+                "RECOVERY_DISCOVERY_FAILED",
+                &error.to_string(),
+            )
+        })?;
+        let mut processes = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProviderError::new(
+                    "linux-cgroup-v2",
+                    "RECOVERY_DISCOVERY_FAILED",
+                    &error.to_string(),
+                )
+            })?;
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    ProviderError::new(
+                        "linux-cgroup-v2",
+                        "RECOVERY_DISCOVERY_FAILED",
+                        &error.to_string(),
+                    )
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            let cgroup_name = entry.file_name().into_string().map_err(|_| {
+                ProviderError::new(
+                    "linux-cgroup-v2",
+                    "RECOVERY_DISCOVERY_INVALID",
+                    "sandbox cgroup name is not UTF-8",
+                )
+            })?;
+            for pid in self.recovery_process_ids(&entry.path())? {
+                let start_time_ticks = proc_start_time(pid).ok_or_else(|| {
+                    ProviderError::new(
+                        "linux-cgroup-v2",
+                        "RECOVERY_EVIDENCE_UNAVAILABLE",
+                        "live sandbox process has no readable start time",
+                    )
+                })?;
+                processes.push(RuntimeProcessEvidence {
+                    cgroup_name: cgroup_name.clone(),
+                    pid,
+                    start_time_ticks,
+                });
+            }
+        }
+        Ok(processes)
+    }
+
+    fn recover_stale_process_inner(
+        &self,
+        evidence: &RuntimeProcessEvidence,
+    ) -> Result<CleanupReport, ProviderError> {
+        let cgroup_path = self.cgroup_path(&evidence.cgroup_name)?;
+        let pids = self.recovery_process_ids(&cgroup_path)?;
+        if !pids.contains(&evidence.pid)
+            || proc_start_time(evidence.pid) != Some(evidence.start_time_ticks)
+        {
+            return Err(ProviderError::new(
+                "linux-cgroup-v2",
+                "RECOVERY_EVIDENCE_MISMATCH",
+                "persisted process evidence no longer matches the sandbox runtime",
+            ));
+        }
+        let before_oom = read_oom_kill_count(&cgroup_path);
+        self.kill_cgroup(&cgroup_path)?;
+        let exit_code = self
+            .children
+            .lock()
+            .map(|children| children.contains_key(&evidence.pid))
+            .unwrap_or(false)
+            .then(|| self.wait_child(evidence.pid, Duration::from_secs(10)))
+            .flatten();
+        let complete = wait_until_empty(&cgroup_path, Duration::from_secs(10));
+        let oom_killed = read_oom_kill_count(&cgroup_path) > before_oom;
+        if complete {
+            let _ = fs::remove_dir(&cgroup_path);
+        }
+        Ok(CleanupReport {
+            complete,
+            exit_code,
+            oom_killed,
+            conditions: if complete {
+                Vec::new()
+            } else {
+                vec![ProcessCondition {
+                    reason_code: "CGROUP_NOT_EMPTY".to_string(),
+                    summary: "stale sandbox cgroup remained after bounded recovery cleanup"
+                        .to_string(),
+                }]
+            },
+            reason_code: if complete {
+                "RECOVERY_CLEANUP_COMPLETE".to_string()
+            } else {
+                "RECOVERY_CLEANUP_INCOMPLETE".to_string()
+            },
+        })
     }
 
     /// Reads the cgroup v2 physical counters used by the supervisor and
@@ -412,6 +530,8 @@ impl CgroupV2Runtime {
         })
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn cleanup_owned_instances(
         &self,
     ) -> Result<OwnedCgroupCleanupReport, ProviderError> {
@@ -934,6 +1054,17 @@ impl ProcessRuntime for CgroupV2Runtime {
 impl SandboxBackend for CgroupV2Runtime {
     fn backend_id(&self) -> &str {
         "native-cgroup-v2"
+    }
+
+    fn discover_recovery_processes(&self) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+        self.discover_recovery_processes_inner()
+    }
+
+    fn recover_stale_process(
+        &self,
+        evidence: &RuntimeProcessEvidence,
+    ) -> Result<CleanupReport, ProviderError> {
+        self.recover_stale_process_inner(evidence)
     }
 }
 

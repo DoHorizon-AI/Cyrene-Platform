@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use cy_kernel_api::{
     semantic, CleanupReport, NamespaceId, ProviderError, RuntimeJournalEvent, RuntimeJournalRecord,
+    RuntimeProcessEvidence,
 };
 use cy_proto::core_v1;
 
@@ -138,6 +139,27 @@ impl KernelServiceAdapter {
             lease_name: lease.map(|lease| lease.lease_name.clone()),
             fence_token: lease.map(|lease| lease.fence_token),
             reason_code: reason_code.to_string(),
+            runtime_evidence: None,
+        })
+    }
+
+    /// Records post-launch local runtime identity before exposing a process to
+    /// callers, workers, or semantic event subscribers.
+    pub(crate) fn record_runtime_launch(
+        &self,
+        instance_name: &str,
+        lease: &core_v1::ResourceLeaseRef,
+        evidence: RuntimeProcessEvidence,
+    ) -> Result<(), ProviderError> {
+        self.runtime_journal.append(RuntimeJournalRecord {
+            event: RuntimeJournalEvent::InstanceLaunched,
+            node_id: self.daemon.node_id.clone(),
+            node_epoch: self.daemon.node_epoch,
+            instance_name: Some(instance_name.to_string()),
+            lease_name: Some(lease.lease_name.clone()),
+            fence_token: Some(lease.fence_token),
+            reason_code: "WORKER_LAUNCHED".to_string(),
+            runtime_evidence: Some(evidence),
         })
     }
 

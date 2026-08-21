@@ -9,7 +9,7 @@ use crate::{
     inventory::{HealthReport, InventorySnapshot},
     launch::LaunchPlan,
     lease::{ResourceLease, ResourceRequest},
-    runtime::{CgroupTelemetry, CleanupReport, ProcessHandle, StopRequest},
+    runtime::{CgroupTelemetry, CleanupReport, ProcessHandle, RuntimeProcessEvidence, StopRequest},
 };
 
 /// 端口 Trait 1：宿主机全量硬件清单探测器
@@ -83,6 +83,17 @@ pub trait ResourceLeaseManager: Send + Sync {
         lease_name: &str,
         fence_token: u64,
     ) -> Result<ResourceLease, ProviderError>;
+    /// Forcefully removes a lease's authority when its holder can no longer be
+    /// trusted. Revoke is distinct from owner-initiated release: it advances
+    /// the fence and retains the physical allocation until cleanup is proven.
+    fn revoke(&self, lease_name: &str, fence_token: u64) -> Result<ResourceLease, ProviderError>;
+    /// Makes a revoked allocation reusable only after the runtime has
+    /// confirmed that the old holder cannot retain physical access.
+    fn complete_revocation(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError>;
 }
 
 /// 端口 Trait 4：沙箱进程运行时生命周期管理
@@ -115,6 +126,29 @@ pub trait ProcessRuntime: Send + Sync {
 pub trait SandboxBackend: ProcessRuntime {
     /// 沙箱后端 ID（如 "cgroupv2-linux"）
     fn backend_id(&self) -> &str;
+
+    /// Lists direct sandbox-owned processes for restart recovery. The default
+    /// denies recovery rather than guessing what another runtime owns.
+    fn discover_recovery_processes(&self) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+        Err(ProviderError::new(
+            "sandbox-backend",
+            "RECOVERY_UNAVAILABLE",
+            "this sandbox backend cannot verify restart recovery evidence",
+        ))
+    }
+
+    /// Terminates only a process whose current sandbox facts exactly match the
+    /// persisted local evidence. Implementations must reject every mismatch.
+    fn recover_stale_process(
+        &self,
+        _evidence: &RuntimeProcessEvidence,
+    ) -> Result<CleanupReport, ProviderError> {
+        Err(ProviderError::new(
+            "sandbox-backend",
+            "RECOVERY_UNAVAILABLE",
+            "this sandbox backend cannot safely recover a stale process",
+        ))
+    }
 }
 
 /// 端口 Trait 6：设备访问权限与隔离映射器

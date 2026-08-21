@@ -128,6 +128,7 @@ impl KernelServiceAdapter {
             connection_id,
             outbound,
         });
+        process.transport_disconnected = false;
         Ok((
             connection_id,
             core_v1::WorkerWelcome {
@@ -159,6 +160,7 @@ impl KernelServiceAdapter {
                 .is_some_and(|control| control.connection_id == connection_id)
         {
             process.control = None;
+            process.transport_disconnected = true;
         }
     }
 
@@ -198,6 +200,7 @@ impl KernelServiceAdapter {
             connection_id,
             outbound,
         });
+        process.transport_disconnected = false;
         Ok((connection_id, worker))
     }
 
@@ -221,6 +224,7 @@ impl KernelServiceAdapter {
                 .is_some_and(|control| control.connection_id == connection_id)
         {
             process.semantic_control = None;
+            process.transport_disconnected = true;
         }
     }
 
@@ -473,6 +477,42 @@ impl KernelServiceAdapter {
                 .collect::<Vec<_>>()
         };
         for name in overdue {
+            let semantic_worker = self
+                .instances
+                .lock()
+                .expect("instance lock poisoned")
+                .get(&name)
+                .and_then(|process| process.semantic_worker.clone());
+            if let Some(worker) = semantic_worker {
+                let namespace = self
+                    .workers
+                    .lock()
+                    .expect("worker scope lock poisoned")
+                    .iter()
+                    .find(|(_, instance_name)| *instance_name == &name)
+                    .map(|(worker, _)| worker.namespace.clone())
+                    .unwrap_or_default();
+                self.publish_runtime_event_in(
+                    &namespace,
+                    core_v1::RuntimeEventType::WatchdogTriggered,
+                    &name,
+                    "HEARTBEAT_TIMEOUT",
+                    "worker missed its mandatory heartbeat deadline",
+                );
+                let context = AuthorityCallContext {
+                    contract: semantic::ContractRevision::current(),
+                    namespace,
+                    request_id: format!("watchdog-lost-{}", worker.identity.id),
+                    idempotency_key: format!("watchdog-lost-{}", worker.identity.id),
+                };
+                if let Err(error) =
+                    self.authority
+                        .mark_worker_lost(&context, &worker.identity, "HEARTBEAT_TIMEOUT")
+                {
+                    eprintln!("worker lost authority transition failed: {error:?}");
+                }
+                continue;
+            }
             let is_semantic_worker = self
                 .instances
                 .lock()
@@ -499,13 +539,20 @@ impl KernelServiceAdapter {
                 "HEARTBEAT_TIMEOUT",
                 "worker missed its mandatory heartbeat deadline",
             );
-            let lease = {
+            let (lease, journal_instance_name) = {
                 let mut instances = self.instances.lock().expect("instance lock poisoned");
                 let Some(process) = instances.get_mut(&name) else {
                     continue;
                 };
                 process.watchdog_triggered = true;
-                process.lease.clone()
+                (
+                    process.lease.clone(),
+                    process
+                        .semantic_worker
+                        .as_ref()
+                        .map(|worker| worker.identity.id.clone())
+                        .unwrap_or_else(|| name.clone()),
+                )
             };
             let release_started = if let Some(lease) = lease.as_ref() {
                 if let Err(error) = self.record_runtime(
@@ -541,6 +588,18 @@ impl KernelServiceAdapter {
                 self.publish_cleanup_events(&name, report);
                 if report.complete {
                     if let Some(lease) = lease.as_ref() {
+                        if let Err(error) = self.record_runtime(
+                            RuntimeJournalEvent::InstanceTerminated,
+                            Some(&journal_instance_name),
+                            Some(lease),
+                            &report.reason_code,
+                        ) {
+                            eprintln!("runtime journal InstanceTerminated write failed: {error}");
+                            let _ = self
+                                .daemon
+                                .fail_release(&lease.lease_name, lease.fence_token);
+                            continue;
+                        }
                         let released = release_started
                             && self
                                 .record_runtime(
@@ -557,7 +616,7 @@ impl KernelServiceAdapter {
                         if released {
                             if let Err(error) = self.record_runtime(
                                 RuntimeJournalEvent::WatchdogReaped,
-                                Some(&name),
+                                Some(&journal_instance_name),
                                 Some(lease),
                                 "HEARTBEAT_TIMEOUT_REAPED",
                             ) {

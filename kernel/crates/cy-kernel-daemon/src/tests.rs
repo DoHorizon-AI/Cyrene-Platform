@@ -5,18 +5,23 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
 
+use cy_adapter_client::{HardwareAdapter, UdsHardwareAdapterRegistry};
 use cy_kernel_api::{
     semantic, AuthorityCallContext, CapabilityFact, CgroupLimits, CleanupReport, DeviceBinding,
-    EnforcementMode, FailingRuntimeJournal, HostInventoryProvider, InstalledPluginResolver,
-    InventorySnapshot, KernelAuthority, LaunchPlan, NamespaceId, NodeCapabilities, ObjectRef,
-    ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError, ResolvedLaunchPlan,
-    ResourceProvider, RuntimeJournalEvent, RuntimeJournalRecord, RuntimeJournalSink,
-    SandboxBackend, StopRequest, VerifiedInstallation,
+    DurableEventRecord, DurableEventStore, EnforcementMode, FailingRuntimeJournal,
+    HostInventoryProvider, InstalledPluginResolver, InventorySnapshot, KernelAuthority,
+    KernelProviderAuthority, LaunchPlan, NamespaceId, NodeCapabilities, ObjectRef,
+    ProcessCondition, ProcessHandle, ProcessRuntime, ProviderError, ProviderReconcileAction,
+    ResolvedLaunchPlan, ResourceProvider, RuntimeJournalEvent, RuntimeJournalRecord,
+    RuntimeJournalSink, SandboxBackend, StopRequest, VerifiedInstallation,
 };
 use cy_proto::{core_v1, core_v2, semantic_v1};
 use cy_resource_manager::InMemoryResourceManager;
@@ -27,13 +32,13 @@ use tonic::Request;
 use crate::{
     adapter::{KernelServiceAdapter, OPERATION_EVENT_HISTORY_CAPACITY},
     convert::{
-        merge_bindings, resource_request, to_plugin_instance, to_semantic_proto_contract_revision,
-        to_semantic_proto_identity, unix_ms_from_timestamp,
+        merge_bindings, now_unix_ms, resource_request, to_plugin_instance,
+        to_semantic_proto_contract_revision, to_semantic_proto_identity, unix_ms_from_timestamp,
     },
     daemon::KernelDaemon,
     peer_cred::{principal_from_peer_cred, PeerCred},
     session::{ManagedProcess, WorkerHeartbeatConfig},
-    watchdog::InstanceActor,
+    watchdog::{InstanceActor, WorkerTransportCommand},
 };
 
 const AUTHORITY_TEST_PEER: PeerCred = PeerCred {
@@ -147,6 +152,113 @@ impl ResourceProvider for TestHardware {
     }
 }
 
+impl HardwareAdapter for TestHardware {}
+
+#[derive(Debug)]
+struct SnapshotHardware {
+    generation: u64,
+    resources: Vec<semantic::Resource>,
+}
+
+impl HostInventoryProvider for SnapshotHardware {
+    fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+        Ok(InventorySnapshot {
+            generation: self.generation,
+            resources: self.resources.clone(),
+            capabilities: NodeCapabilities {
+                ready: true,
+                facts: Vec::new(),
+                enforcement: Vec::new(),
+            },
+        })
+    }
+}
+
+impl ResourceProvider for SnapshotHardware {
+    fn adapter_id(&self) -> &str {
+        "snapshot-hardware"
+    }
+
+    fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError> {
+        Ok(self.resources.clone())
+    }
+
+    fn create_binding(
+        &self,
+        _resource: &semantic::Resource,
+    ) -> Result<DeviceBinding, ProviderError> {
+        Err(ProviderError::new(
+            "snapshot-hardware",
+            "UNUSED",
+            "bindings are not exercised by this observation test",
+        ))
+    }
+
+    fn read_health(
+        &self,
+        _resource_id: &str,
+    ) -> Result<cy_kernel_api::HealthReport, ProviderError> {
+        Err(ProviderError::new(
+            "snapshot-hardware",
+            "UNUSED",
+            "health is not exercised by this observation test",
+        ))
+    }
+}
+
+impl HardwareAdapter for SnapshotHardware {}
+
+#[derive(Debug)]
+struct FailingHardware;
+
+impl HostInventoryProvider for FailingHardware {
+    fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+        Err(ProviderError::new(
+            "failing-hardware",
+            "ADAPTER_UNAVAILABLE",
+            "adapter is unavailable",
+        ))
+    }
+}
+
+impl ResourceProvider for FailingHardware {
+    fn adapter_id(&self) -> &str {
+        "failing-hardware"
+    }
+
+    fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError> {
+        Err(ProviderError::new(
+            "failing-hardware",
+            "ADAPTER_UNAVAILABLE",
+            "adapter is unavailable",
+        ))
+    }
+
+    fn create_binding(
+        &self,
+        _resource: &semantic::Resource,
+    ) -> Result<DeviceBinding, ProviderError> {
+        Err(ProviderError::new(
+            "failing-hardware",
+            "ADAPTER_UNAVAILABLE",
+            "adapter is unavailable",
+        ))
+    }
+
+    fn read_health(
+        &self,
+        _resource_id: &str,
+    ) -> Result<cy_kernel_api::HealthReport, ProviderError> {
+        Err(ProviderError::new(
+            "failing-hardware",
+            "ADAPTER_UNAVAILABLE",
+            "adapter is unavailable",
+        ))
+    }
+}
+
+impl HardwareAdapter for FailingHardware {}
+
 fn test_resource() -> semantic::Resource {
     test_resource_with_id("resource-1")
 }
@@ -182,7 +294,90 @@ fn test_resource_with_id(id: &str) -> semantic::Resource {
     }
 }
 
+fn semantic_provider(
+    id: &str,
+    generation: u64,
+    state: semantic::ProviderState,
+) -> semantic::Provider {
+    semantic::Provider {
+        identity: semantic::Identity {
+            id: id.to_string(),
+            generation,
+        },
+        state,
+        capabilities: vec![semantic::Capability {
+            id: "accelerator.compute".to_string(),
+            revision: 1,
+            properties: BTreeMap::new(),
+        }],
+    }
+}
+
+fn provider_snapshot(
+    provider: &semantic::Provider,
+    snapshot_generation: u64,
+    resources: Vec<semantic::Resource>,
+    workers: Vec<semantic::Worker>,
+) -> semantic::ProviderSnapshot {
+    semantic::ProviderSnapshot {
+        provider: provider.identity.clone(),
+        snapshot_generation,
+        resources,
+        workers,
+        endpoints: Vec::new(),
+        sampled_at_unix_ms: now_unix_ms(),
+        expires_at_unix_ms: future_expiry(),
+    }
+}
+
+fn semantic_worker_for(
+    id: &str,
+    provider: semantic::Identity,
+    lease: semantic::Identity,
+    state: semantic::WorkerState,
+) -> semantic::Worker {
+    semantic::Worker {
+        identity: semantic::Identity {
+            id: id.to_string(),
+            generation: 1,
+        },
+        principal: principal_from_peer_cred(&AUTHORITY_TEST_PEER).identity,
+        provider,
+        lease,
+        state,
+        execution_ref: "test-execution-reference".to_string(),
+        limits: BTreeMap::new(),
+    }
+}
+
+fn semantic_endpoint_for(worker: &semantic::Worker) -> semantic::Endpoint {
+    semantic::Endpoint {
+        identity: semantic::Identity {
+            id: format!("endpoint-{}", worker.identity.id),
+            generation: 1,
+        },
+        provider: worker.provider.clone(),
+        owner: worker.identity.clone(),
+        transport: "transport.uds".to_string(),
+        schema_id: "schema.v1".to_string(),
+        capabilities: Vec::new(),
+        public_attributes: BTreeMap::new(),
+    }
+}
+
+fn future_expiry() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000
+}
+
 fn semantic_lease_adapter() -> KernelServiceAdapter {
+    semantic_lease_adapter_at_epoch(7)
+}
+
+fn semantic_lease_adapter_at_epoch(node_epoch: u64) -> KernelServiceAdapter {
     let resource = test_resource();
     let hardware = Arc::new(TestHardware {
         resources: vec![resource.clone()],
@@ -193,7 +388,7 @@ fn semantic_lease_adapter() -> KernelServiceAdapter {
         Arc::new(InMemoryResourceManager::new("node", vec![resource])),
         Arc::new(FakeSandbox),
         "node",
-        7,
+        node_epoch,
     ));
     KernelServiceAdapter::new(daemon, Arc::new(UnusedResolver))
 }
@@ -242,7 +437,7 @@ impl ProcessRuntime for FakeSandbox {
         Ok(ProcessHandle {
             pid: 1,
             cgroup_path: PathBuf::from("/test"),
-            start_time_ticks: None,
+            start_time_ticks: Some(1),
             transport_socket: None,
         })
     }
@@ -293,6 +488,7 @@ fn managed_test_process(
         health: None,
         restart_count: 0,
         watchdog_triggered: false,
+        transport_disconnected: false,
         control: None,
         semantic_control: None,
         pending_shutdown: None,
@@ -308,6 +504,42 @@ impl RuntimeJournalSink for RecordingRuntimeJournal {
     fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
         self.records.lock().unwrap().push(record);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingDurableEventStore {
+    records: Mutex<Vec<DurableEventRecord>>,
+    fail_reads: AtomicBool,
+}
+
+impl DurableEventStore for RecordingDurableEventStore {
+    fn append_event(&self, record: DurableEventRecord) -> Result<(), ProviderError> {
+        self.records.lock().unwrap().push(record);
+        Ok(())
+    }
+
+    fn events_for_source(
+        &self,
+        source: &semantic::Identity,
+        namespace: &str,
+    ) -> Result<Option<Vec<DurableEventRecord>>, ProviderError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(ProviderError::new(
+                "test-event-store",
+                "EVENT_READ_FAILED",
+                "injected durable event read failure",
+            ));
+        }
+        Ok(Some(
+            self.records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| record.namespace == namespace && record.event.source == *source)
+                .cloned()
+                .collect(),
+        ))
     }
 }
 
@@ -385,6 +617,22 @@ fn semantic_worker_adapter_with_resources(
         7,
     ));
     KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver))
+}
+
+fn hardware_provider_adapter(
+    adapters: Vec<(String, Arc<dyn HardwareAdapter>)>,
+) -> KernelServiceAdapter {
+    let registry = Arc::new(UdsHardwareAdapterRegistry::from_adapters(adapters).unwrap());
+    let mut daemon = KernelDaemon::new(
+        registry.clone(),
+        registry.clone(),
+        Arc::new(InMemoryResourceManager::new("node", Vec::new())),
+        Arc::new(FakeSandbox),
+        "node",
+        9,
+    );
+    daemon.hardware_adapters = Some(registry);
+    KernelServiceAdapter::new(Arc::new(daemon), Arc::new(UnusedResolver))
 }
 
 fn heartbeat_adapter() -> KernelServiceAdapter {
@@ -1210,7 +1458,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
             })),
         )
         .unwrap();
-    let cancelling = runtime
+    let cancelled = runtime
         .block_on(
             adapter.cancel_operation(authority_request(CancelSemanticOperationRequest {
                 context: Some(authority_context("cancel-operation")),
@@ -1222,10 +1470,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         )
         .unwrap()
         .into_inner();
-    assert_eq!(
-        cancelling.state,
-        semantic_v1::OperationState::Cancelling as i32
-    );
+    assert_eq!(cancelled.state, semantic_v1::OperationState::Lost as i32);
 
     let cursor = semantic_v1::EventCursor {
         source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
@@ -1312,6 +1557,481 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .unwrap()
         .into_inner();
     assert_eq!(stopped.state, semantic_v1::OperationState::Succeeded as i32);
+}
+
+#[test]
+fn durable_event_replay_is_not_limited_by_the_memory_window() {
+    let store = Arc::new(RecordingDurableEventStore::default());
+    let authority = semantic_lease_adapter().with_event_store(store).authority();
+    let source = authority.semantic_event_source();
+    for sequence in 1..=(OPERATION_EVENT_HISTORY_CAPACITY + 44) {
+        authority.publish_semantic_event(
+            semantic::Identity {
+                id: format!("worker-{sequence}"),
+                generation: 1,
+            },
+            "worker.observed",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+    }
+    let context = scoped_authority_context("default", "durable-replay");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let first = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source: source.clone(),
+                sequence: 0,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    assert_eq!(first.status, semantic::ReplayStatus::Current);
+    assert_eq!(first.oldest_available_sequence, 1);
+    assert_eq!(first.latest_available_sequence, 300);
+    assert_eq!(first.events.len(), OPERATION_EVENT_HISTORY_CAPACITY);
+    assert_eq!(first.events[0].sequence, 1);
+    assert_eq!(first.events.last().unwrap().sequence, 256);
+
+    let second = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source,
+                sequence: first.next_sequence,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    assert_eq!(
+        second
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (257..=300).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        authority
+            .snapshot(&context, &principal)
+            .unwrap()
+            .cursor
+            .sequence,
+        300
+    );
+}
+
+#[test]
+fn durable_retention_gap_requires_snapshot_before_resume() {
+    let store = Arc::new(RecordingDurableEventStore::default());
+    let authority = semantic_lease_adapter()
+        .with_event_store(store.clone())
+        .authority();
+    let source = authority.semantic_event_source();
+    for sequence in 1..=10 {
+        authority.publish_semantic_event(
+            semantic::Identity {
+                id: format!("worker-{sequence}"),
+                generation: 1,
+            },
+            "worker.observed",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+    }
+    store
+        .records
+        .lock()
+        .unwrap()
+        .retain(|record| record.event.sequence >= 5);
+    let context = scoped_authority_context("default", "durable-gap");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let gap = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source: source.clone(),
+                sequence: 1,
+            },
+            1,
+        )
+        .unwrap();
+    assert_eq!(gap.status, semantic::ReplayStatus::Gap);
+    assert!(gap.events.is_empty());
+    assert_eq!(gap.oldest_available_sequence, 5);
+
+    let snapshot = authority.snapshot(&context, &principal).unwrap();
+    assert_eq!(snapshot.cursor.sequence, 10);
+    let resumed = authority
+        .events_after(&context, &principal, &snapshot.cursor, 1)
+        .unwrap();
+    assert_eq!(resumed.status, semantic::ReplayStatus::Current);
+    assert!(resumed.events.is_empty());
+}
+
+#[test]
+fn durable_event_read_failure_never_falls_back_to_memory_history() {
+    let store = Arc::new(RecordingDurableEventStore::default());
+    store.fail_reads.store(true, Ordering::SeqCst);
+    let authority = semantic_lease_adapter().with_event_store(store).authority();
+    let context = scoped_authority_context("default", "durable-read-failure");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let cursor = semantic::EventCursor {
+        source: authority.semantic_event_source(),
+        sequence: 0,
+    };
+    assert_eq!(
+        authority
+            .events_after(&context, &principal, &cursor, 1)
+            .unwrap_err()
+            .reason_code,
+        "EVENT_READ_FAILED"
+    );
+    assert_eq!(
+        authority
+            .snapshot(&context, &principal)
+            .unwrap_err()
+            .reason_code,
+        "EVENT_READ_FAILED"
+    );
+}
+
+#[test]
+fn recreated_authority_continues_sequence_for_the_same_source() {
+    let store = Arc::new(RecordingDurableEventStore::default());
+    let first = semantic_lease_adapter()
+        .with_event_store(store.clone())
+        .authority();
+    let source = first.semantic_event_source();
+    for sequence in 1..=3 {
+        first.publish_semantic_event(
+            semantic::Identity {
+                id: format!("worker-{sequence}"),
+                generation: 1,
+            },
+            "worker.observed",
+            "cyrene.worker.v1",
+            Vec::new(),
+        );
+    }
+
+    let recreated = semantic_lease_adapter().with_event_store(store).authority();
+    recreated.publish_semantic_event(
+        semantic::Identity {
+            id: "worker-4".to_string(),
+            generation: 1,
+        },
+        "worker.observed",
+        "cyrene.worker.v1",
+        Vec::new(),
+    );
+    let context = scoped_authority_context("default", "recreated-source");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let replay = recreated
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source,
+                sequence: 0,
+            },
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        replay
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+    );
+}
+
+#[test]
+fn cursor_from_an_older_epoch_returns_source_changed() {
+    let store = Arc::new(RecordingDurableEventStore::default());
+    let first = semantic_lease_adapter_at_epoch(7)
+        .with_event_store(store.clone())
+        .authority();
+    first.publish_semantic_event(
+        semantic::Identity {
+            id: "worker-old".to_string(),
+            generation: 1,
+        },
+        "worker.observed",
+        "cyrene.worker.v1",
+        Vec::new(),
+    );
+    let old_cursor = semantic::EventCursor {
+        source: first.semantic_event_source(),
+        sequence: 1,
+    };
+    let restarted = semantic_lease_adapter_at_epoch(8)
+        .with_event_store(store)
+        .authority();
+    let context = scoped_authority_context("default", "changed-source");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let page = restarted
+        .events_after(&context, &principal, &old_cursor, 1)
+        .unwrap();
+    assert_eq!(page.status, semantic::ReplayStatus::SourceChanged);
+    assert!(page.events.is_empty());
+    let snapshot = restarted.snapshot(&context, &principal).unwrap();
+    assert_eq!(snapshot.source.generation, 8);
+    assert_eq!(snapshot.cursor.sequence, 0);
+}
+
+/// Item 3: the snapshot cursor and the durable event ordering are the SAME
+/// consistency boundary. A snapshot taken at cursor C, followed by
+/// `events_after(C)`, must reconstruct the live authority state: the set of
+/// operation identities in the snapshot equals the set of `operation.created`
+/// subjects in the durable history at or before C, the cursor equals the
+/// latest durable sequence, and replay from C is empty/Current when nothing
+/// changed after the snapshot.
+#[test]
+fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
+    let store = Arc::new(RecordingDurableEventStore::default());
+    let authority = semantic_lease_adapter().with_event_store(store).authority();
+    let context = scoped_authority_context("default", "audit-boundary");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+
+    let worker_identity = semantic::Identity {
+        id: "audit-worker".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    let operation = semantic::Operation {
+        identity: semantic::Identity {
+            id: "operation-audit".to_string(),
+            generation: 1,
+        },
+        owner: principal.identity.clone(),
+        executor: semantic::Identity {
+            id: "provider-x".to_string(),
+            generation: 1,
+        },
+        kind: "ai.train".to_string(),
+        state: semantic::OperationState::Created,
+        deadline_unix_ms: None,
+        parent: None,
+        metadata: BTreeMap::new(),
+    };
+    authority
+        .create_operation(&context, &principal, operation.clone())
+        .unwrap();
+    authority
+        .report_operation(
+            &context,
+            &principal,
+            semantic::Operation {
+                state: semantic::OperationState::Running,
+                ..operation.clone()
+            },
+        )
+        .unwrap();
+    authority
+        .report_operation(
+            &context,
+            &principal,
+            semantic::Operation {
+                state: semantic::OperationState::Succeeded,
+                ..operation.clone()
+            },
+        )
+        .unwrap();
+
+    let snapshot = authority.snapshot(&context, &principal).unwrap();
+    assert!(snapshot.cursor.sequence > 0);
+
+    // (a) The snapshot cursor equals the latest durable sequence.
+    let full = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source: snapshot.source.clone(),
+                sequence: 0,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    assert_eq!(full.status, semantic::ReplayStatus::Current);
+    assert_eq!(snapshot.cursor.sequence, full.latest_available_sequence);
+    // The durable replay is contiguous 1..=latest, the exact ordering the
+    // snapshot cursor is derived from.
+    let sequences: Vec<u64> = full.events.iter().map(|event| event.sequence).collect();
+    assert_eq!(
+        sequences,
+        (1..=snapshot.cursor.sequence).collect::<Vec<_>>()
+    );
+
+    // (b) Replay from the snapshot cursor is empty and Current: nothing
+    // changed after the snapshot, so Snapshot @ C is already complete and
+    // events_after(C) contributes no further (and no lost) transition.
+    let after = authority
+        .events_after(&context, &principal, &snapshot.cursor, 256)
+        .unwrap();
+    assert_eq!(after.status, semantic::ReplayStatus::Current);
+    assert!(after.events.is_empty());
+
+    // (c) The snapshot's operation set is identical to the set of operations
+    // whose `operation.created` event is in the durable history at or before C.
+    let mut created: Vec<String> = full
+        .events
+        .iter()
+        .filter(|event| event.kind == "operation.created")
+        .map(|event| event.subject.id.clone())
+        .collect();
+    created.sort();
+    let mut snapshot_operations: Vec<String> = snapshot
+        .operations
+        .iter()
+        .map(|operation| operation.identity.id.clone())
+        .collect();
+    snapshot_operations.sort();
+    assert_eq!(created, snapshot_operations);
+}
+
+/// Item 4: a snapshot must stay consistent with the incremental replay while
+/// transitions mutate authority state concurrently. The reader constantly
+/// takes a snapshot and replays from its cursor; because the snapshot now
+/// captures the event cursor BEFORE reading state, every transition published
+/// during the read is either already reflected in the snapshot or returned by
+/// the replay — never lost from both. The same-source replay from a fresh
+/// snapshot cursor can only be Current, and the latest available sequence can
+/// never fall behind the snapshot cursor.
+#[test]
+fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let store = Arc::new(RecordingDurableEventStore::default());
+    let authority = Arc::new(semantic_lease_adapter().with_event_store(store).authority());
+    let context = scoped_authority_context("default", "concurrent-snapshot");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+
+    let writers = 4;
+    let per_writer = 40;
+    let total = writers * per_writer;
+    let running = Arc::new(AtomicBool::new(true));
+
+    let mut handles = Vec::new();
+    for writer in 0..writers {
+        let authority = authority.clone();
+        let context = context.clone();
+        let principal = principal.clone();
+        let running = running.clone();
+        handles.push(thread::spawn(move || {
+            for index in 0..per_writer {
+                let operation = semantic::Operation {
+                    identity: semantic::Identity {
+                        id: format!("op-{writer}-{index}"),
+                        generation: 1,
+                    },
+                    owner: principal.identity.clone(),
+                    executor: semantic::Identity {
+                        id: "provider-x".to_string(),
+                        generation: 1,
+                    },
+                    kind: "ai.train".to_string(),
+                    state: semantic::OperationState::Created,
+                    deadline_unix_ms: None,
+                    parent: None,
+                    metadata: BTreeMap::new(),
+                };
+                // A transition publishes its durable event only after mutating
+                // state; the reordered snapshot must never lose it.
+                let _ = authority.create_operation(&context, &principal, operation);
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    let reader_authority = authority.clone();
+    let reader_context = context.clone();
+    let reader_principal = principal.clone();
+    let reader_running = running.clone();
+    let reader = thread::spawn(move || {
+        let mut checked = 0;
+        while reader_running.load(Ordering::SeqCst) {
+            let snapshot = match reader_authority.snapshot(&reader_context, &reader_principal) {
+                Ok(snapshot) => snapshot,
+                Err(_) => continue,
+            };
+            let page = reader_authority
+                .events_after(&reader_context, &reader_principal, &snapshot.cursor, 256)
+                .expect("replay from a fresh snapshot cursor must not fail");
+            assert_eq!(page.status, semantic::ReplayStatus::Current);
+            assert!(page.latest_available_sequence >= snapshot.cursor.sequence);
+            checked += 1;
+        }
+        checked
+    });
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    running.store(false, Ordering::SeqCst);
+    let checked = reader.join().unwrap();
+    assert!(checked > 0);
+
+    // Quiescent audit: every created operation is present in both the durable
+    // event log and the snapshot. Nothing was lost between the state read and
+    // the cursor read under concurrency.
+    let snapshot = authority.snapshot(&context, &principal).unwrap();
+    let full = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source: snapshot.source.clone(),
+                sequence: 0,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    assert_eq!(full.status, semantic::ReplayStatus::Current);
+    let mut created: Vec<String> = full
+        .events
+        .iter()
+        .filter(|event| event.kind == "operation.created")
+        .map(|event| event.subject.id.clone())
+        .collect();
+    created.sort();
+    let mut in_snapshot: Vec<String> = snapshot
+        .operations
+        .iter()
+        .map(|operation| operation.identity.id.clone())
+        .collect();
+    in_snapshot.sort();
+    assert_eq!(created, in_snapshot);
+    assert_eq!(snapshot.cursor.sequence, full.latest_available_sequence);
+    assert_eq!(snapshot.cursor.sequence, total as u64);
 }
 
 #[test]
@@ -1903,6 +2623,651 @@ fn local_authority_owns_semantic_lease_transitions_without_tonic() {
         adapter.daemon.lease(&lease.identity.id).unwrap().state,
         cy_kernel_api::LeaseState::Active
     );
+}
+
+#[test]
+fn provider_lifecycle_separates_session_snapshot_and_resource_generations() {
+    let adapter = semantic_lease_adapter();
+    let authority = adapter.authority();
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let context = scoped_authority_context("default", "provider-lifecycle");
+    let provider_v1 = semantic_provider("test-provider", 1, semantic::ProviderState::Ready);
+    authority
+        .register_provider(&context, &principal, provider_v1.clone())
+        .unwrap();
+
+    let mut resource = test_resource();
+    resource.identity.generation = 37;
+    resource.provider = provider_v1.identity.clone();
+    let snapshot_v4 = provider_snapshot(&provider_v1, 4, vec![resource.clone()], Vec::new());
+    authority
+        .publish_inventory(&context, &principal, snapshot_v4.clone())
+        .unwrap();
+    let first = authority
+        .reconcile_provider(&context, &principal, &provider_v1.identity)
+        .unwrap();
+    assert_eq!(first.snapshot_generation, 4);
+    assert_eq!(
+        first.actions,
+        vec![ProviderReconcileAction::RefreshResource(
+            resource.identity.clone()
+        )]
+    );
+    assert_eq!(
+        authority
+            .reconcile_provider(&context, &principal, &provider_v1.identity)
+            .unwrap()
+            .actions,
+        vec![ProviderReconcileAction::Noop]
+    );
+
+    let provider_v2 = semantic_provider("test-provider", 2, semantic::ProviderState::Ready);
+    authority
+        .register_provider(&context, &principal, provider_v2.clone())
+        .unwrap();
+    assert_eq!(
+        authority
+            .publish_inventory(&context, &principal, snapshot_v4)
+            .unwrap_err()
+            .reason_code,
+        "STALE_GENERATION"
+    );
+    let snapshot_v1_after_reconnect = provider_snapshot(
+        &provider_v2,
+        1,
+        vec![semantic::Resource {
+            provider: provider_v2.identity.clone(),
+            ..resource.clone()
+        }],
+        Vec::new(),
+    );
+    authority
+        .publish_inventory(&context, &principal, snapshot_v1_after_reconnect)
+        .unwrap();
+
+    let records = authority.runtime.providers.lock().unwrap();
+    let record = records
+        .get(&(NamespaceId::default(), "test-provider".to_string()))
+        .unwrap();
+    assert_eq!(record.provider.identity.generation, 2);
+    assert_eq!(record.inventory.as_ref().unwrap().snapshot_generation, 1);
+    assert_eq!(
+        record.inventory.as_ref().unwrap().resources[0]
+            .identity
+            .generation,
+        37
+    );
+}
+
+#[test]
+fn hardware_adapters_publish_separate_resource_only_provider_snapshots() {
+    let mut resource_a = test_resource_with_id("resource-a");
+    resource_a.identity.generation = 17;
+    let mut resource_b = test_resource_with_id("resource-b");
+    resource_b.identity.generation = 29;
+    let adapter = hardware_provider_adapter(vec![
+        (
+            "adapter-a".to_string(),
+            Arc::new(SnapshotHardware {
+                generation: 41,
+                resources: vec![resource_a.clone()],
+            }) as Arc<dyn HardwareAdapter>,
+        ),
+        (
+            "adapter-b".to_string(),
+            Arc::new(SnapshotHardware {
+                generation: 58,
+                resources: vec![resource_b.clone()],
+            }) as Arc<dyn HardwareAdapter>,
+        ),
+    ])
+    .with_adapter_poll_interval(Duration::from_secs(3));
+
+    adapter.sync_hardware_provider_facts().unwrap();
+    let authority = adapter.authority();
+    let records = authority.runtime.providers.lock().unwrap();
+    for (adapter_id, resource, snapshot_generation) in
+        [("adapter-a", resource_a, 41), ("adapter-b", resource_b, 58)]
+    {
+        let record = records
+            .get(&(NamespaceId::default(), adapter_id.to_string()))
+            .unwrap();
+        assert_eq!(record.provider.identity.generation, 9);
+        assert_eq!(record.provider.state, semantic::ProviderState::Ready);
+        let snapshot = record.inventory.as_ref().unwrap();
+        assert_eq!(snapshot.snapshot_generation, snapshot_generation);
+        assert_eq!(snapshot.resources.len(), 1);
+        assert_eq!(
+            snapshot.resources[0].identity.generation,
+            resource.identity.generation
+        );
+        assert_eq!(snapshot.resources[0].provider, record.provider.identity);
+        assert!(snapshot.workers.is_empty());
+        assert!(snapshot.endpoints.is_empty());
+        assert!(snapshot.expires_at_unix_ms > snapshot.sampled_at_unix_ms);
+        assert!(snapshot.expires_at_unix_ms - snapshot.sampled_at_unix_ms <= 6_000);
+    }
+    drop(records);
+    assert_eq!(
+        adapter.daemon.resources.inventory().generation,
+        1,
+        "the allocation ledger retains its independent aggregate generation"
+    );
+
+    adapter.sync_hardware_provider_facts().unwrap();
+}
+
+#[test]
+fn unavailable_hardware_adapter_does_not_hide_other_provider_facts() {
+    let adapter = hardware_provider_adapter(vec![
+        (
+            "adapter-good".to_string(),
+            Arc::new(TestHardware {
+                resources: vec![test_resource_with_id("resource-good")],
+            }) as Arc<dyn HardwareAdapter>,
+        ),
+        (
+            "adapter-failed".to_string(),
+            Arc::new(FailingHardware) as Arc<dyn HardwareAdapter>,
+        ),
+    ]);
+
+    adapter.sync_hardware_provider_facts().unwrap();
+    let authority = adapter.authority();
+    let records = authority.runtime.providers.lock().unwrap();
+    let available = records
+        .get(&(NamespaceId::default(), "adapter-good".to_string()))
+        .unwrap();
+    assert_eq!(available.provider.state, semantic::ProviderState::Ready);
+    assert!(available.inventory.is_some());
+    let unavailable = records
+        .get(&(NamespaceId::default(), "adapter-failed".to_string()))
+        .unwrap();
+    assert_eq!(
+        unavailable.provider.state,
+        semantic::ProviderState::Unavailable
+    );
+    assert!(unavailable.inventory.is_none());
+}
+
+#[test]
+fn resource_facts_reconciliation_never_owns_workers_or_leases() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let context = scoped_authority_context("default", "resource-facts-only");
+    let provider = semantic_provider("test-provider", 7, semantic::ProviderState::Ready);
+    authority
+        .register_resource_facts_provider(&context, &principal, provider.clone())
+        .unwrap();
+    let worker_identity = semantic::Identity {
+        id: "hardware-worker".to_string(),
+        generation: 1,
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            future_expiry(),
+        )
+        .unwrap();
+    let worker = semantic_worker_for(
+        &worker_identity.id,
+        provider.identity.clone(),
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+    let mut resource = test_resource();
+    resource.provider = provider.identity.clone();
+    authority
+        .publish_inventory(
+            &context,
+            &principal,
+            provider_snapshot(&provider, 1, vec![resource.clone()], Vec::new()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        authority
+            .reconcile_provider(&context, &principal, &provider.identity)
+            .unwrap()
+            .actions,
+        vec![ProviderReconcileAction::RefreshResource(resource.identity)]
+    );
+    assert_eq!(
+        adapter.daemon.lease(&lease.identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Active
+    );
+    assert_ne!(
+        adapter.instances.lock().unwrap()[&worker.identity.id]
+            .semantic_worker
+            .as_ref()
+            .unwrap()
+            .state,
+        semantic::WorkerState::Lost
+    );
+}
+
+#[test]
+fn provider_unavailability_is_scoped_to_its_logical_identity() {
+    let adapter = semantic_lease_adapter();
+    let authority = adapter.authority();
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let context = scoped_authority_context("default", "provider-isolation");
+    let provider_a = semantic_provider("provider-a", 1, semantic::ProviderState::Ready);
+    let provider_b = semantic_provider("provider-b", 1, semantic::ProviderState::Ready);
+    authority
+        .register_provider(&context, &principal, provider_a.clone())
+        .unwrap();
+    authority
+        .register_provider(&context, &principal, provider_b.clone())
+        .unwrap();
+
+    let provider_a_lost = semantic_provider("provider-a", 1, semantic::ProviderState::Unavailable);
+    authority
+        .register_provider(&context, &principal, provider_a_lost.clone())
+        .unwrap();
+    assert_eq!(
+        authority
+            .register_provider(&context, &principal, provider_a)
+            .unwrap_err()
+            .reason_code,
+        "STALE_GENERATION"
+    );
+    let records = authority.runtime.providers.lock().unwrap();
+    assert_eq!(
+        records
+            .get(&(NamespaceId::default(), "provider-a".to_string()))
+            .unwrap()
+            .provider
+            .state,
+        semantic::ProviderState::Unavailable
+    );
+    assert_eq!(
+        records
+            .get(&(NamespaceId::default(), "provider-b".to_string()))
+            .unwrap()
+            .provider
+            .state,
+        semantic::ProviderState::Ready
+    );
+}
+
+#[test]
+fn missing_worker_reconcile_revokes_authority_and_fences_old_worker() {
+    let adapter = semantic_worker_adapter()
+        .with_runtime_journal(Arc::new(RecordingRuntimeJournal::default()));
+    let authority = adapter.authority();
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let context = scoped_authority_context("default", "worker-a-lease");
+    let worker_a = semantic::Identity {
+        id: "worker-a".to_string(),
+        generation: 1,
+    };
+    let lease_a = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_a.clone(),
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            future_expiry(),
+        )
+        .unwrap();
+    let provider = semantic_provider("test-provider", 1, semantic::ProviderState::Ready);
+    authority
+        .register_provider(&context, &principal, provider.clone())
+        .unwrap();
+    let worker = semantic_worker_for(
+        "worker-a",
+        provider.identity.clone(),
+        lease_a.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+    authority
+        .heartbeat_worker(
+            &context,
+            &principal,
+            &worker.identity,
+            &lease_a.identity,
+            lease_a.fence_token,
+        )
+        .unwrap();
+    let (cancel_sender, mut cancel_receiver) = mpsc::channel(1);
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .get_mut("worker-a")
+        .unwrap()
+        .actor
+        .attach_transport_channel(cancel_sender);
+    let cancellable_operation = semantic::Operation {
+        identity: semantic::Identity {
+            id: "operation-cancel-worker-a".to_string(),
+            generation: 1,
+        },
+        owner: principal.identity.clone(),
+        executor: worker.identity.clone(),
+        kind: "worker.invoke".to_string(),
+        state: semantic::OperationState::Created,
+        deadline_unix_ms: None,
+        parent: None,
+        metadata: BTreeMap::new(),
+    };
+    authority
+        .create_operation(&context, &principal, cancellable_operation.clone())
+        .unwrap();
+    authority
+        .report_operation(
+            &context,
+            &principal,
+            semantic::Operation {
+                state: semantic::OperationState::Running,
+                ..cancellable_operation.clone()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        authority
+            .cancel_operation(&context, &principal, &cancellable_operation.identity)
+            .unwrap()
+            .state,
+        semantic::OperationState::Cancelling
+    );
+    match cancel_receiver.try_recv().unwrap() {
+        WorkerTransportCommand::Cancel {
+            cancel_request_id,
+            target_request_id,
+            generation,
+            fence_token,
+        } => {
+            assert!(cancel_request_id.starts_with("cancel-"));
+            assert_eq!(target_request_id, cancellable_operation.identity.id);
+            assert_eq!(generation, 1);
+            assert_eq!(fence_token, lease_a.fence_token);
+        }
+        WorkerTransportCommand::Request(_) => panic!("cancellation must reach the worker executor"),
+    }
+    assert_eq!(
+        authority
+            .report_operation(
+                &context,
+                &principal,
+                semantic::Operation {
+                    state: semantic::OperationState::Cancelled,
+                    ..cancellable_operation.clone()
+                },
+            )
+            .unwrap()
+            .state,
+        semantic::OperationState::Cancelled
+    );
+    let operation = semantic::Operation {
+        identity: semantic::Identity {
+            id: "operation-worker-a".to_string(),
+            generation: 1,
+        },
+        owner: principal.identity.clone(),
+        executor: worker.identity.clone(),
+        kind: "worker.invoke".to_string(),
+        state: semantic::OperationState::Created,
+        deadline_unix_ms: None,
+        parent: None,
+        metadata: BTreeMap::new(),
+    };
+    authority
+        .create_operation(&context, &principal, operation.clone())
+        .unwrap();
+    authority
+        .report_operation(
+            &context,
+            &principal,
+            semantic::Operation {
+                state: semantic::OperationState::Running,
+                ..operation.clone()
+            },
+        )
+        .unwrap();
+    let endpoint = semantic_endpoint_for(&worker);
+    authority
+        .publish_endpoint(&context, &principal, endpoint.clone())
+        .unwrap();
+
+    let mut resource = test_resource();
+    resource.provider = provider.identity.clone();
+    let stale_worker = semantic_worker_for(
+        "worker-stale",
+        provider.identity.clone(),
+        semantic::Identity {
+            id: "lease-stale".to_string(),
+            generation: 1,
+        },
+        semantic::WorkerState::Running,
+    );
+    authority
+        .publish_inventory(
+            &context,
+            &principal,
+            provider_snapshot(
+                &provider,
+                1,
+                vec![resource.clone()],
+                vec![
+                    semantic::Worker {
+                        state: semantic::WorkerState::Running,
+                        ..worker.clone()
+                    },
+                    stale_worker.clone(),
+                ],
+            ),
+        )
+        .unwrap();
+    let initial_reconciliation = authority
+        .reconcile_provider(&context, &principal, &provider.identity)
+        .unwrap();
+    assert!(initial_reconciliation.actions.contains(
+        &ProviderReconcileAction::TerminateStaleWorker(stale_worker.identity.clone())
+    ));
+
+    authority
+        .publish_inventory(
+            &context,
+            &principal,
+            provider_snapshot(&provider, 2, vec![resource], Vec::new()),
+        )
+        .unwrap();
+    authority
+        .confirm_stale_worker_termination(
+            &context,
+            &principal,
+            &provider.identity,
+            1,
+            &stale_worker.identity,
+            true,
+        )
+        .unwrap();
+    let reconciliation = authority
+        .reconcile_provider(&context, &principal, &provider.identity)
+        .unwrap();
+    assert!(reconciliation
+        .actions
+        .contains(&ProviderReconcileAction::MarkWorkerLost(
+            worker.identity.clone()
+        )));
+    assert!(reconciliation
+        .actions
+        .contains(&ProviderReconcileAction::RevokeLease(
+            lease_a.identity.clone()
+        )));
+    assert!(reconciliation
+        .actions
+        .contains(&ProviderReconcileAction::MarkOperationLost(
+            operation.identity.clone()
+        )));
+    assert!(reconciliation
+        .actions
+        .contains(&ProviderReconcileAction::RevokeEndpoint(
+            endpoint.identity.clone()
+        )));
+    assert_eq!(
+        adapter.instances.lock().unwrap()["worker-a"]
+            .semantic_worker
+            .as_ref()
+            .unwrap()
+            .state,
+        semantic::WorkerState::Lost
+    );
+    let revoked = adapter.daemon.lease(&lease_a.identity.id).unwrap();
+    assert_eq!(revoked.state, cy_kernel_api::LeaseState::Revoked);
+    assert!(revoked.fence_token > lease_a.fence_token);
+    assert_eq!(
+        authority.runtime.semantic_operations.lock().unwrap()
+            [&context.object_ref(operation.identity.clone())]
+            .state,
+        semantic::OperationState::Lost
+    );
+    assert!(!authority
+        .runtime
+        .endpoints
+        .lock()
+        .unwrap()
+        .contains_key(&context.object_ref(endpoint.identity.clone())));
+
+    assert_eq!(
+        authority
+            .heartbeat_worker(
+                &context,
+                &principal,
+                &worker.identity,
+                &lease_a.identity,
+                lease_a.fence_token,
+            )
+            .unwrap_err()
+            .reason_code,
+        "FENCE_MISMATCH"
+    );
+    assert_eq!(
+        authority
+            .renew_lease(
+                &context,
+                &principal,
+                &lease_a.identity,
+                lease_a.fence_token,
+                future_expiry() + 60_000,
+            )
+            .unwrap_err()
+            .reason_code,
+        "STALE_FENCE_TOKEN"
+    );
+    assert!(authority
+        .publish_endpoint(&context, &principal, endpoint)
+        .is_err());
+    assert!(authority
+        .verify_worker_control(
+            &context,
+            &worker.identity,
+            &lease_a.identity,
+            lease_a.fence_token,
+        )
+        .is_err());
+
+    let lease_b = authority
+        .acquire_lease(
+            &scoped_authority_context("default", "worker-b-lease"),
+            &principal,
+            semantic::Identity {
+                id: "worker-b".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            future_expiry(),
+        )
+        .unwrap();
+    assert!(lease_b.fence_token > lease_a.fence_token);
+    assert_eq!(
+        authority
+            .reconcile_provider(&context, &principal, &provider.identity)
+            .unwrap()
+            .actions,
+        vec![ProviderReconcileAction::Noop]
+    );
+    let events = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source: authority.semantic_event_source(),
+                sequence: 0,
+            },
+            256,
+        )
+        .unwrap();
+    assert!(events
+        .events
+        .iter()
+        .any(|event| event.kind == "worker.lost"));
+    assert!(events
+        .events
+        .iter()
+        .any(|event| event.kind == "lease.revoked"));
+    assert!(events
+        .events
+        .iter()
+        .any(|event| event.kind == "operation.lost"));
+    assert!(events
+        .events
+        .iter()
+        .any(|event| event.kind == "endpoint.revoked"));
+    let snapshot = authority.snapshot(&context, &principal).unwrap();
+    assert_eq!(snapshot.source, authority.semantic_event_source());
+    assert_eq!(snapshot.cursor.sequence, events.latest_available_sequence);
+    assert_eq!(snapshot.workers[0].state, semantic::WorkerState::Lost);
+    assert_eq!(snapshot.leases[0].state, semantic::LeaseState::Revoked);
+    assert_eq!(
+        snapshot
+            .operations
+            .iter()
+            .find(|current| current.identity == operation.identity)
+            .unwrap()
+            .state,
+        semantic::OperationState::Lost
+    );
+    assert!(snapshot.endpoints.is_empty());
 }
 
 #[test]

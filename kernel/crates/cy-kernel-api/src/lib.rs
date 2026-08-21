@@ -30,16 +30,16 @@ pub use cy_kernel_contract as semantic;
 
 // 扁平导出各子模块中的核心类型与 Trait，保持 100% 向后兼容
 pub use authority::{
-    AuthorityCallContext, KernelAuthority, KernelProviderAuthority, NamespaceId, ObjectRef,
-    DEFAULT_NAMESPACE,
+    AuthorityCallContext, AuthoritySnapshot, KernelAuthority, KernelProviderAuthority, NamespaceId,
+    ObjectRef, ProviderReconcileAction, ProviderReconcileResult, DEFAULT_NAMESPACE,
 };
 pub use binding::DeviceBinding;
 pub use capability::{CapabilityFact, EnforcementMode, EnforcementReport, NodeCapabilities};
 pub use error::ProviderError;
 pub use inventory::{DeviceNode, HealthReport, InventorySnapshot};
 pub use journal::{
-    FailingRuntimeJournal, NoopRuntimeJournal, RuntimeJournalEvent, RuntimeJournalRecord,
-    RuntimeJournalSink,
+    DurableEventRecord, DurableEventStore, FailingRuntimeJournal, NoopRuntimeJournal,
+    RuntimeJournalEvent, RuntimeJournalRecord, RuntimeJournalSink,
 };
 pub use launch::{InstalledPluginResolver, LaunchPlan, ResolvedLaunchPlan, VerifiedInstallation};
 pub use lease::{CgroupLimits, LeaseState, ResourceAllocation, ResourceLease, ResourceRequest};
@@ -47,4 +47,7 @@ pub use ports::{
     DeviceMapper, HostInventoryProvider, NodeIdentityProvider, ProcessRuntime,
     ResourceLeaseManager, ResourceProvider, SandboxBackend, TelemetryProvider,
 };
-pub use runtime::{CgroupTelemetry, CleanupReport, ProcessCondition, ProcessHandle, StopRequest};
+pub use runtime::{
+    CgroupTelemetry, CleanupReport, ProcessCondition, ProcessHandle, RuntimeProcessEvidence,
+    StopRequest,
+};

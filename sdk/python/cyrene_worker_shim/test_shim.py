@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from cyrene_worker import (
-    Cancel, CyreneWorker, Envelope, Hello, HealthCheck, Shutdown, Invoke,
+    Cancel, CancelAck, CyreneWorker, Envelope, Hello, HealthCheck, Shutdown, Invoke,
     run_worker_stream, write_frame, read_frame
 )
 
@@ -50,7 +50,7 @@ def main():
     e4 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
     write_frame(e4.encode(), inp)
 
-    # 5. Cancel (no response frame)
+    # 5. Cancel is acknowledged separately from the eventual Operation result.
     e5 = Envelope(request_id='cancel-1', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Cancel(target_request_id='req-3', reason='deadline'))
     write_frame(e5.encode(), inp)
 
@@ -101,9 +101,17 @@ def main():
     f4 = read_frame(out)
     assert f4 is not None
     r4 = Envelope.decode(f4)
-    assert r4.request_id == 'req-4'
-    assert r4.payload_tag == 15
-    assert r4.payload.message == 'Shutdown ACK'
+    assert r4.request_id == 'cancel-1'
+    assert r4.payload_tag == 17
+    assert isinstance(r4.payload, CancelAck)
+    assert r4.payload.target_request_id == 'req-3'
+
+    f5 = read_frame(out)
+    assert f5 is not None
+    r5 = Envelope.decode(f5)
+    assert r5.request_id == 'req-4'
+    assert r5.payload_tag == 15
+    assert r5.payload.message == 'Shutdown ACK'
 
     print('Python Protobuf Envelope Codec, Lifecycle Loop & Fence Rotation VERIFIED!')
 

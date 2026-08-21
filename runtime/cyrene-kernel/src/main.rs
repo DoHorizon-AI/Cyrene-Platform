@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peer_cred::{inject_authority_principal, PeerCredAccept},
         KernelDaemon, KernelServiceAdapter, WorkerHeartbeatConfig,
     };
-    use cy_proto::{core_v1, core_v2};
+    use cy_proto::{core_v1, core_v2, provider_v1};
     use cy_resource_manager::InMemoryResourceManager;
     use cy_sandbox_client::UdsSandboxAdapterClient;
     use runtime_journal::FileRuntimeJournal;
@@ -38,9 +38,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Worker left by an older sandboxd process.
     let journal = Arc::new(FileRuntimeJournal::open(&args.runtime_journal)?);
     let recovery = journal.begin_epoch(&args.node_id)?;
+    if !recovery.runtime_processes.is_empty() {
+        eprintln!(
+            "recovery discovered {} unclosed runtime record(s); they remain fenced and require provider reconciliation",
+            recovery.runtime_processes.len()
+        );
+    }
     let sandbox = Arc::new(UdsSandboxAdapterClient::from_endpoint(
         args.sandbox_adapter,
     )?);
+    // Do not bind any public or worker listener until sandboxd has classified
+    // every leftover process against the local journal and reaped only exact,
+    // stale Kernel evidence. Unknown and foreign state fail startup closed.
+    journal
+        .recover_before_listeners(&args.node_id, &recovery, sandbox.as_ref())
+        .map_err(|error| std::io::Error::other(format!("restart recovery failed: {error}")))?;
 
     let resources = Arc::new(InMemoryResourceManager::with_next_fence_token(
         &args.node_id,
@@ -54,18 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.node_id,
         recovery.node_epoch,
     )?);
-    if !daemon.preflight_ready() {
+    if !daemon.sandbox_preflight_ready() {
         return Err(std::io::Error::other(
-            "required hardware or sandbox adapter preflight did not meet Kernel capabilities",
+            "sandbox adapter preflight did not meet Kernel capabilities",
         )
         .into());
     }
-    // Bootstrap initial hardware facts into the resource manager ledger at startup
-    daemon.refresh_inventory_facts().map_err(|e| {
-        std::io::Error::other(format!(
-            "failed to populate initial hardware inventory: {e}"
-        ))
-    })?;
     let heartbeat = WorkerHeartbeatConfig {
         socket_path: args.worker_control_socket.clone(),
         interval: args.heartbeat_interval,
@@ -82,12 +88,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_worker_heartbeat(heartbeat)
     .with_adapter_poll_interval(args.adapter_poll_interval)
-    .with_runtime_journal(journal);
+    .with_runtime_journal(journal.clone())
+    .with_event_store(journal);
+    // The Adapter owns the hardware Provider lifecycle. Sync before accepting
+    // listeners so every configured adapter has a resource-only Provider view.
+    adapter.sync_hardware_provider_facts().map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to synchronize hardware provider facts: {error}"
+        ))
+    })?;
     let _watchdog = adapter.start_watchdog();
     let _adapter_monitor = adapter.start_adapter_monitor();
 
     let authority_listener = bind_socket(&args.socket)?;
     let worker_control_listener = bind_socket(&args.worker_control_socket)?;
+    let provider_listener = bind_socket(&args.provider_socket)?;
     let authority_server = Server::builder()
         .add_service(
             core_v1::kernel_authority_service_server::KernelAuthorityServiceServer::with_interceptor(
@@ -112,7 +127,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(adapter.worker_control_server())
         .add_service(adapter.lifecycle_server())
         .serve_with_incoming(UnixListenerStream::new(worker_control_listener));
-    tokio::try_join!(authority_server, worker_control_server)?;
+    let provider_server = Server::builder()
+        .add_service(
+            provider_v1::kernel_provider_service_server::KernelProviderServiceServer::with_interceptor(
+                adapter.clone(),
+                inject_authority_principal,
+            ),
+        )
+        .serve_with_incoming(PeerCredAccept::new(UnixListenerStream::new(
+            provider_listener,
+        )));
+    tokio::try_join!(authority_server, worker_control_server, provider_server)?;
     Ok(())
 }
 
@@ -122,6 +147,7 @@ struct Args {
     node_id: String,
     socket: std::path::PathBuf,
     worker_control_socket: std::path::PathBuf,
+    provider_socket: std::path::PathBuf,
     hardware_adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
     sandbox_adapter: cy_sandbox_client::SandboxAdapterEndpoint,
     installations_root: std::path::PathBuf,
@@ -142,6 +168,7 @@ impl Args {
         let mut node_id = env::var("CYRENE_NODE_ID").unwrap_or_else(|_| "cyrene-node".to_string());
         let mut socket = PathBuf::from("/run/cyrene/kernel.sock");
         let mut worker_control_socket = PathBuf::from("/run/cyrene/worker.sock");
+        let mut provider_socket = PathBuf::from("/run/cyrene/provider.sock");
         let mut hardware_adapters = Vec::new();
         let mut sandbox_adapter = None;
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
@@ -169,6 +196,7 @@ impl Args {
                 "--node-id" => node_id = value()?,
                 "--socket" => socket = PathBuf::from(value()?),
                 "--worker-control-socket" => worker_control_socket = PathBuf::from(value()?),
+                "--provider-socket" => provider_socket = PathBuf::from(value()?),
                 "--hardware-adapter" => hardware_adapters.push(parse_hardware_adapter(&value()?)?),
                 "--hardware-adapter-peer-uid" => {
                     let (adapter_id, uid) = parse_adapter_identity_value(&value()?)?;
@@ -203,7 +231,7 @@ impl Args {
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -230,13 +258,16 @@ impl Args {
         }
         if !socket.is_absolute()
             || !worker_control_socket.is_absolute()
+            || !provider_socket.is_absolute()
             || socket == worker_control_socket
+            || socket == provider_socket
+            || worker_control_socket == provider_socket
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "authority and Worker-control socket paths must be distinct absolute paths",
+                "authority, Worker-control, and Provider socket paths must be distinct and absolute",
             )
-            .into());
+                .into());
         }
         for endpoint in &mut hardware_adapters {
             if let Some(credentials) = adapter_peer_credentials.remove(&endpoint.adapter_id) {
@@ -271,6 +302,7 @@ impl Args {
             node_id,
             socket,
             worker_control_socket,
+            provider_socket,
             hardware_adapters,
             sandbox_adapter,
             installations_root,

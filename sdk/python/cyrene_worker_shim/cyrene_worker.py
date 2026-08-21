@@ -339,6 +339,32 @@ class Cancel:
         return inst
 
 
+@dataclasses.dataclass
+class CancelAck:
+    target_request_id: str = ""
+
+    def encode(self) -> bytes:
+        return encode_string_field(1, self.target_request_id)
+
+    @classmethod
+    def decode(cls, data: bytes) -> CancelAck:
+        inst = cls()
+        offset = 0
+        while offset < len(data):
+            tag, offset = decode_varint(data, offset)
+            field_num, wire_type = tag >> 3, tag & 7
+            if field_num == 1 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.target_request_id = data[offset:offset + length].decode("utf-8", "replace")
+                offset += length
+            elif wire_type == 0:
+                _, offset = decode_varint(data, offset)
+            elif wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                offset += length
+        return inst
+
+
 class Invoke:
     extension_point: str = ""
     method: str = ""
@@ -517,6 +543,8 @@ class Envelope:
                 out.extend(encode_len_delimited(15, self.payload.encode()))
             elif isinstance(self.payload, Shutdown):
                 out.extend(encode_len_delimited(16, self.payload.encode()))
+            elif isinstance(self.payload, CancelAck):
+                out.extend(encode_len_delimited(17, self.payload.encode()))
             elif isinstance(self.payload, Invoke):
                 out.extend(encode_len_delimited(20, self.payload.encode()))
             elif isinstance(self.payload, InvokeResult):
@@ -589,6 +617,11 @@ class Envelope:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = 16
                 inst.payload = Shutdown.decode(data[offset:offset + length])
+                offset += length
+            elif field_num == 17 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_tag = 17
+                inst.payload = CancelAck.decode(data[offset:offset + length])
                 offset += length
             elif field_num == 20 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
@@ -764,7 +797,7 @@ def run_worker_stream(
                 elif req_env.payload_tag == 13:  # Cancel
                     cancel = req_env.payload if isinstance(req_env.payload, Cancel) else Cancel()
                     worker.on_cancel(cancel.target_request_id, cancel.reason)
-                    continue
+                    resp_payload = CancelAck(target_request_id=cancel.target_request_id)
                 elif req_env.payload_tag == 20:  # Invoke
                     inv = req_env.payload if isinstance(req_env.payload, Invoke) else Invoke()
                     ok, res_bytes = worker.on_invoke(inv.capability, inv.action, inv.payload)

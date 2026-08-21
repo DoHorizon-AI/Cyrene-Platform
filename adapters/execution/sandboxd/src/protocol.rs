@@ -9,7 +9,8 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use cy_kernel_api::{
     CgroupLimits, CgroupTelemetry, CleanupReport, DeviceBinding, DeviceNode, EnforcementMode,
-    LaunchPlan, NodeCapabilities, ProcessHandle, ProviderError, SandboxBackend, StopRequest,
+    LaunchPlan, NodeCapabilities, ProcessHandle, ProviderError, RuntimeProcessEvidence,
+    SandboxBackend, StopRequest,
 };
 use cy_proto::sandbox_v1;
 
@@ -43,6 +44,22 @@ pub fn handle_request(
             telemetry_request(runtime, request).map(|telemetry| {
                 sandbox_v1::sandbox_response::Body::Telemetry(telemetry_to_proto(telemetry))
             })
+        }
+        Some(sandbox_v1::sandbox_request::Body::DiscoverRecovery(_)) => {
+            runtime.discover_recovery_processes().map(|processes| {
+                sandbox_v1::sandbox_response::Body::RecoveryProcesses(
+                    sandbox_v1::SandboxRecoveryProcesses {
+                        processes: processes
+                            .into_iter()
+                            .map(recovery_evidence_to_proto)
+                            .collect(),
+                    },
+                )
+            })
+        }
+        Some(sandbox_v1::sandbox_request::Body::RecoverStale(request)) => {
+            recover_stale_request(runtime, request)
+                .map(|report| sandbox_v1::sandbox_response::Body::Cleanup(cleanup_to_proto(report)))
         }
         None => Err(ProviderError::new(
             adapter_id,
@@ -133,6 +150,20 @@ fn telemetry_request(
         )
     })?;
     runtime.telemetry(&handle_from_proto(handle)?)
+}
+
+fn recover_stale_request(
+    runtime: &dyn SandboxBackend,
+    request: sandbox_v1::SandboxRecoverStaleRequest,
+) -> Result<CleanupReport, ProviderError> {
+    let evidence = request.evidence.ok_or_else(|| {
+        ProviderError::new(
+            "sandboxd",
+            "SANDBOX_RECOVERY_EVIDENCE_REQUIRED",
+            "stale recovery requires persisted process evidence",
+        )
+    })?;
+    runtime.recover_stale_process(&recovery_evidence_from_proto(evidence)?)
 }
 
 fn error_response(
@@ -239,6 +270,31 @@ fn handle_from_proto(
     })
 }
 
+fn recovery_evidence_to_proto(value: RuntimeProcessEvidence) -> sandbox_v1::SandboxRuntimeEvidence {
+    sandbox_v1::SandboxRuntimeEvidence {
+        cgroup_name: value.cgroup_name,
+        pid: value.pid,
+        start_time_ticks: value.start_time_ticks,
+    }
+}
+
+fn recovery_evidence_from_proto(
+    value: sandbox_v1::SandboxRuntimeEvidence,
+) -> Result<RuntimeProcessEvidence, ProviderError> {
+    if value.cgroup_name.is_empty() || value.pid == 0 || value.start_time_ticks == 0 {
+        return Err(ProviderError::new(
+            "sandboxd",
+            "SANDBOX_RECOVERY_EVIDENCE_INVALID",
+            "recovery evidence requires cgroup name, non-zero PID, and start time",
+        ));
+    }
+    Ok(RuntimeProcessEvidence {
+        cgroup_name: value.cgroup_name,
+        pid: value.pid,
+        start_time_ticks: value.start_time_ticks,
+    })
+}
+
 fn cleanup_to_proto(value: CleanupReport) -> sandbox_v1::SandboxCleanupReport {
     sandbox_v1::SandboxCleanupReport {
         complete: value.complete,
@@ -297,6 +353,7 @@ mod tests {
 
     struct RecordingBackend {
         launched: Mutex<bool>,
+        recovered: Mutex<Vec<RuntimeProcessEvidence>>,
     }
 
     impl ProcessRuntime for RecordingBackend {
@@ -351,12 +408,37 @@ mod tests {
         fn backend_id(&self) -> &str {
             "test"
         }
+
+        fn discover_recovery_processes(
+            &self,
+        ) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+            Ok(vec![RuntimeProcessEvidence {
+                cgroup_name: "instance-worker".to_string(),
+                pid: 42,
+                start_time_ticks: 7,
+            }])
+        }
+
+        fn recover_stale_process(
+            &self,
+            evidence: &RuntimeProcessEvidence,
+        ) -> Result<CleanupReport, ProviderError> {
+            self.recovered.lock().unwrap().push(evidence.clone());
+            Ok(CleanupReport {
+                complete: true,
+                exit_code: None,
+                oom_killed: false,
+                conditions: Vec::new(),
+                reason_code: "RECOVERY_CLEANUP_COMPLETE".to_string(),
+            })
+        }
     }
 
     #[test]
     fn protocol_launch_forwards_only_complete_request() {
         let backend = RecordingBackend {
             launched: Mutex::new(false),
+            recovered: Mutex::new(Vec::new()),
         };
         let response = handle_request(
             &backend,
@@ -394,5 +476,48 @@ mod tests {
             response.body,
             Some(sandbox_v1::sandbox_response::Body::Process(_))
         ));
+    }
+
+    #[test]
+    fn protocol_recovery_is_local_and_forwards_exact_evidence() {
+        let backend = RecordingBackend {
+            launched: Mutex::new(false),
+            recovered: Mutex::new(Vec::new()),
+        };
+        let discovery = handle_request(
+            &backend,
+            "sandboxd",
+            sandbox_v1::SandboxRequest {
+                protocol_version: PROTOCOL_VERSION,
+                body: Some(sandbox_v1::sandbox_request::Body::DiscoverRecovery(
+                    sandbox_v1::SandboxDiscoverRecoveryRequest {},
+                )),
+            },
+        );
+        assert!(matches!(
+            discovery.body,
+            Some(sandbox_v1::sandbox_response::Body::RecoveryProcesses(_))
+        ));
+        let recovery = handle_request(
+            &backend,
+            "sandboxd",
+            sandbox_v1::SandboxRequest {
+                protocol_version: PROTOCOL_VERSION,
+                body: Some(sandbox_v1::sandbox_request::Body::RecoverStale(
+                    sandbox_v1::SandboxRecoverStaleRequest {
+                        evidence: Some(sandbox_v1::SandboxRuntimeEvidence {
+                            cgroup_name: "instance-worker".to_string(),
+                            pid: 42,
+                            start_time_ticks: 7,
+                        }),
+                    },
+                )),
+            },
+        );
+        assert!(matches!(
+            recovery.body,
+            Some(sandbox_v1::sandbox_response::Body::Cleanup(_))
+        ));
+        assert_eq!(backend.recovered.lock().unwrap().len(), 1);
     }
 }

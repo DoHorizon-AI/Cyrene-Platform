@@ -18,7 +18,7 @@ use cy_adapter_client::PeerCredentialExpectation;
 use cy_kernel_api::{
     CapabilityFact, CgroupLimits, CgroupTelemetry, CleanupReport, DeviceBinding, EnforcementMode,
     EnforcementReport, LaunchPlan, NodeCapabilities, ProcessCondition, ProcessHandle,
-    ProcessRuntime, ProviderError, SandboxBackend, StopRequest,
+    ProcessRuntime, ProviderError, RuntimeProcessEvidence, SandboxBackend, StopRequest,
 };
 use cy_proto::sandbox_v1;
 use prost::Message;
@@ -217,6 +217,64 @@ impl SandboxBackend for UdsSandboxAdapterClient {
     fn backend_id(&self) -> &str {
         "uds-sandbox-adapter"
     }
+
+    fn discover_recovery_processes(&self) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+        let response = self.call(sandbox_v1::sandbox_request::Body::DiscoverRecovery(
+            sandbox_v1::SandboxDiscoverRecoveryRequest {},
+        ))?;
+        match response.body {
+            Some(sandbox_v1::sandbox_response::Body::RecoveryProcesses(processes)) => processes
+                .processes
+                .into_iter()
+                .map(recovery_evidence_from_proto)
+                .collect(),
+            _ => Err(self.protocol_response("recovery process evidence")),
+        }
+    }
+
+    fn recover_stale_process(
+        &self,
+        evidence: &RuntimeProcessEvidence,
+    ) -> Result<CleanupReport, ProviderError> {
+        let response = self.call(sandbox_v1::sandbox_request::Body::RecoverStale(
+            sandbox_v1::SandboxRecoverStaleRequest {
+                evidence: Some(recovery_evidence_to_proto(evidence)),
+            },
+        ))?;
+        match response.body {
+            Some(sandbox_v1::sandbox_response::Body::Cleanup(report)) => {
+                Ok(cleanup_from_proto(report))
+            }
+            _ => Err(self.protocol_response("a recovery cleanup report")),
+        }
+    }
+}
+
+fn recovery_evidence_to_proto(
+    value: &RuntimeProcessEvidence,
+) -> sandbox_v1::SandboxRuntimeEvidence {
+    sandbox_v1::SandboxRuntimeEvidence {
+        cgroup_name: value.cgroup_name.clone(),
+        pid: value.pid,
+        start_time_ticks: value.start_time_ticks,
+    }
+}
+
+fn recovery_evidence_from_proto(
+    value: sandbox_v1::SandboxRuntimeEvidence,
+) -> Result<RuntimeProcessEvidence, ProviderError> {
+    if value.cgroup_name.is_empty() || value.pid == 0 || value.start_time_ticks == 0 {
+        return Err(ProviderError::new(
+            "sandbox-adapter-client",
+            "SANDBOX_RECOVERY_EVIDENCE_INVALID",
+            "recovery evidence requires cgroup name, non-zero PID, and start time",
+        ));
+    }
+    Ok(RuntimeProcessEvidence {
+        cgroup_name: value.cgroup_name,
+        pid: value.pid,
+        start_time_ticks: value.start_time_ticks,
+    })
 }
 
 fn unavailable_capabilities(error: ProviderError) -> NodeCapabilities {

@@ -147,11 +147,12 @@ async fn attach_transport(actor_arc: Arc<AsyncMutex<InstanceActor>>) -> Result<(
                     }
                 }
                 WorkerTransportCommand::Cancel {
-                    request_id,
+                    cancel_request_id,
+                    target_request_id,
                     generation,
                     fence_token,
                 } => Envelope {
-                    request_id: format!("cancel-{request_id}"),
+                    request_id: cancel_request_id,
                     trace_id: String::new(),
                     plugin_id: writer_plugin_id.clone(),
                     protocol_version: CURRENT_PROTOCOL_VERSION,
@@ -160,7 +161,7 @@ async fn attach_transport(actor_arc: Arc<AsyncMutex<InstanceActor>>) -> Result<(
                     generation,
                     fence_token,
                     payload: Some(Payload::Cancel(Cancel {
-                        target_request_id: request_id,
+                        target_request_id,
                         reason: "invoke deadline exceeded".to_string(),
                     })),
                 },
@@ -196,6 +197,18 @@ async fn attach_transport(actor_arc: Arc<AsyncMutex<InstanceActor>>) -> Result<(
                     ));
                 }
                 last_sequence = envelope.sequence_number;
+                if let Some(Payload::CancelAck(ack)) = envelope.payload.as_ref() {
+                    if !dispatcher.dispatch_cancel_ack(&envelope.request_id, &ack.target_request_id)
+                    {
+                        return Err(WorkerTransportError::Protocol(
+                            cy_plugin_protocol::ProtocolError::FramingError(
+                                "worker cancellation acknowledgement is unknown or mismatched"
+                                    .to_string(),
+                            ),
+                        ));
+                    }
+                    continue;
+                }
                 let _ = dispatcher
                     .dispatch(WorkerTransportResponse {
                         request_id: envelope.request_id.clone(),

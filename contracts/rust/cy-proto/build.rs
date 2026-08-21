@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hardware_adapter_proto = proto_dir.join("cyrene/hardware/v1/hardware_adapter.proto");
     let sandbox_adapter_proto = proto_dir.join("cyrene/sandbox/v1/sandbox_adapter.proto");
     let semantic_contract_proto = proto_dir.join("cyrene/semantic/v1/kernel_contract.proto");
+    let provider_proto = proto_dir.join("cyrene/provider/v1/kernel_provider.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
     println!("cargo:rerun-if-changed={}", authority_proto.display());
@@ -26,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rerun-if-changed={}",
         semantic_contract_proto.display()
     );
+    println!("cargo:rerun-if-changed={}", provider_proto.display());
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
 
     tonic_build::configure()
@@ -40,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hardware_adapter_proto,
                 sandbox_adapter_proto,
                 semantic_contract_proto,
+                provider_proto,
             ],
             &[proto_dir],
         )?;

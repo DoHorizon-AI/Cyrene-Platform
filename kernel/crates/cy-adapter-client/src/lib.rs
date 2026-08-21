@@ -17,7 +17,8 @@ pub(crate) mod transport;
 mod tests;
 
 pub use client::{
-    HardwareAdapter, HardwareAdapterEndpoint, HostAdapterClient, UdsHardwareAdapterClient,
+    HardwareAdapter, HardwareAdapterEndpoint, HardwareAdapterObservation, HostAdapterClient,
+    UdsHardwareAdapterClient,
 };
 pub use convert::resource_from_proto;
 pub use credential::PeerCredentialExpectation;

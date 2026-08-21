@@ -6,6 +6,7 @@ pub(crate) mod common;
 pub(crate) mod event;
 pub(crate) mod lease;
 pub(crate) mod operation;
+pub(crate) mod provider;
 pub(crate) mod resource;
 pub(crate) mod worker;
 
@@ -31,6 +32,11 @@ pub(crate) use operation::{
     semantic_endpoint_from_proto, semantic_endpoint_grant_from_proto,
     semantic_operation_from_proto, to_semantic_proto_endpoint, to_semantic_proto_endpoint_grant,
     to_semantic_proto_operation,
+};
+pub(crate) use provider::{
+    provider_call_context_from_proto, semantic_provider_from_proto,
+    semantic_provider_snapshot_from_proto, to_semantic_proto_provider,
+    to_semantic_proto_provider_snapshot,
 };
 pub(crate) use resource::{
     merge_bindings, resource_request, semantic_query_from_proto, to_proto_enforcement,

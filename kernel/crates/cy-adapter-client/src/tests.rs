@@ -108,6 +108,8 @@ impl ResourceProvider for FakeAdapter {
     }
 }
 
+impl HardwareAdapter for FakeAdapter {}
+
 #[test]
 fn frames_round_trip() {
     let mut wire = Vec::new();

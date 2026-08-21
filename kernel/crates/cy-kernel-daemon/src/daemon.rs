@@ -1,8 +1,10 @@
 //! 节点内核守护进程核心结构与组合根实现。
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use cy_adapter_client::{HardwareAdapterEndpoint, UdsHardwareAdapterRegistry};
+use cy_adapter_client::{
+    HardwareAdapterEndpoint, HardwareAdapterObservation, UdsHardwareAdapterRegistry,
+};
 use cy_kernel_api::{
     DeviceBinding, HostInventoryProvider, InventorySnapshot, ProviderError, ResourceLease,
     ResourceLeaseManager, ResourceProvider, ResourceRequest, SandboxBackend,
@@ -19,6 +21,9 @@ pub struct KernelDaemon {
     pub(crate) inventory_provider: Arc<dyn HostInventoryProvider>,
     /// 进程外通用资源 Provider
     pub(crate) resource_provider: Arc<dyn ResourceProvider>,
+    /// Configured hardware adapters remain separately observable for Provider
+    /// lifecycle projection; allocation still consumes their aggregate view.
+    pub(crate) hardware_adapters: Option<Arc<UdsHardwareAdapterRegistry>>,
     /// 硬件资源租约管理器
     pub(crate) resources: Arc<dyn ResourceLeaseManager>,
     /// 沙箱隔离后端
@@ -42,6 +47,7 @@ impl KernelDaemon {
         Self {
             inventory_provider,
             resource_provider,
+            hardware_adapters: None,
             resources,
             sandbox,
             node_id: node_id.into(),
@@ -61,22 +67,55 @@ impl KernelDaemon {
         node_epoch: u64,
     ) -> Result<Self, ProviderError> {
         let adapters = Arc::new(UdsHardwareAdapterRegistry::from_endpoints(endpoints)?);
-        Ok(Self::new(
+        let hardware_adapters = Arc::clone(&adapters);
+        let mut daemon = Self::new(
             adapters.clone(),
             adapters,
             resources,
             sandbox,
             node_id,
             node_epoch,
-        ))
+        );
+        daemon.hardware_adapters = Some(hardware_adapters);
+        Ok(daemon)
     }
 
     /// 检查节点基础沙箱环境是否已就绪
     pub fn preflight_ready(&self) -> bool {
-        self.sandbox.preflight().ready
+        self.sandbox_preflight_ready()
             && self
                 .inventory()
                 .is_ok_and(|snapshot| snapshot.capabilities.ready)
+    }
+
+    /// Runtime admission is independent from hardware fact availability so the
+    /// Kernel can project an unavailable hardware Provider instead of hiding
+    /// all of its other local authority state at process startup.
+    pub fn sandbox_preflight_ready(&self) -> bool {
+        self.sandbox.preflight().ready
+    }
+
+    pub(crate) fn hardware_adapter_observations(
+        &self,
+    ) -> Option<BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>>> {
+        self.hardware_adapters
+            .as_ref()
+            .map(|adapters| adapters.adapter_observations())
+    }
+
+    pub(crate) fn refresh_hardware_inventory_observations(
+        &self,
+        observations: &BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>>,
+    ) -> Result<(), ProviderError> {
+        let adapters = self.hardware_adapters.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                "kernel-daemon",
+                "HARDWARE_ADAPTERS_NOT_CONFIGURED",
+                "per-adapter hardware observations are unavailable",
+            )
+        })?;
+        self.resources
+            .refresh_inventory(adapters.aggregate_observations(observations)?)
     }
 
     /// 获取最新的硬件清单快照
@@ -99,7 +138,11 @@ impl KernelDaemon {
     /// The lease holder remains the planned Worker identity, not a
     /// caller-supplied Principal.
     pub fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
-        let snapshot = self.inventory()?;
+        // Allocation consumes the last durably observed inventory ledger. It
+        // must not probe and mutate facts inline, because that would race the
+        // caller's snapshot generation between validation and reservation.
+        // The startup/monitor observation paths refresh this ledger separately.
+        let snapshot = self.resources.inventory();
         if !snapshot.capabilities.ready {
             return Err(ProviderError::new(
                 "kernel-daemon",
@@ -107,7 +150,6 @@ impl KernelDaemon {
                 "required hardware adapter capability is not ready",
             ));
         }
-        self.resources.refresh_inventory(snapshot)?;
         self.resources.reserve(request)
     }
 
@@ -136,6 +178,24 @@ impl KernelDaemon {
         fence_token: u64,
     ) -> Result<ResourceLease, ProviderError> {
         self.resources.fail_release(lease_name, fence_token)
+    }
+
+    /// Revokes authority without pretending the holder performed a normal
+    /// release. Physical resources stay held until `complete_revocation`.
+    pub fn revoke(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        self.resources.revoke(lease_name, fence_token)
+    }
+
+    pub fn complete_revocation(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        self.resources.complete_revocation(lease_name, fence_token)
     }
 
     /// 读取租约当前快照，用于服务层的 fencing 校验与结果回报

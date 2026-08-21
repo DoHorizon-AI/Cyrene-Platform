@@ -45,6 +45,9 @@ pub(crate) struct ManagedProcess {
     pub(crate) health: Option<core_v1::HealthReport>,
     pub(crate) restart_count: u32,
     pub(crate) watchdog_triggered: bool,
+    /// A worker-control transport loss is evidence only. Reconciliation or the
+    /// watchdog must classify it before authority becomes LOST.
+    pub(crate) transport_disconnected: bool,
     pub(crate) control: Option<WorkerControlSession>,
     pub(crate) semantic_control: Option<SemanticWorkerControlSession>,
     pub(crate) pending_shutdown: Option<PendingWorkerShutdown>,

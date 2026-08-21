@@ -256,6 +256,14 @@ or state required to interpret the Event header.
 An empty current page preserves the input cursor. Gap/source change must never
 be silently converted into the oldest retained event.
 
+When the selected event store supplies durable history, it is canonical for
+same-source replay and the authority snapshot cursor; an in-memory event cache
+must not shorten that history. Durable read errors or corruption fail closed
+rather than falling back to cached events. After `GAP` or `SOURCE_CHANGED`, a
+client rebuilds from the existing authority snapshot and resumes with its
+returned cursor. Events from an earlier source generation are audit history and
+cannot rebuild active authority state for a new Kernel epoch.
+
 ## 10. Provider snapshot and reconciliation
 
 A ProviderSnapshot is complete, expiring and scoped to exactly one registered

@@ -444,6 +444,76 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         lease.state = LeaseState::Failed;
         Ok(lease.clone())
     }
+
+    fn revoke(&self, lease_name: &str, fence_token: u64) -> Result<ResourceLease, ProviderError> {
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now_unix_ms());
+        let next_fence_token = state.next_fence_token;
+        let revoked_fence = {
+            let lease = state.leases.get(lease_name).ok_or_else(|| {
+                ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name)
+            })?;
+            if lease.fence_token != fence_token {
+                return Err(ProviderError::new(
+                    "resource-manager",
+                    "STALE_FENCE_TOKEN",
+                    lease_name,
+                ));
+            }
+            if !matches!(lease.state, LeaseState::Active | LeaseState::Releasing) {
+                return Err(ProviderError::new(
+                    "resource-manager",
+                    "LEASE_NOT_ACTIVE",
+                    lease_name,
+                ));
+            }
+            next_fence_token.max(lease.fence_token.saturating_add(1))
+        };
+        state.next_fence_token = revoked_fence.saturating_add(1);
+        let lease = state
+            .leases
+            .get_mut(lease_name)
+            .expect("lease was checked above");
+        lease.fence_token = revoked_fence;
+        lease.state = LeaseState::Revoked;
+        Ok(lease.clone())
+    }
+
+    fn complete_revocation(
+        &self,
+        lease_name: &str,
+        fence_token: u64,
+    ) -> Result<ResourceLease, ProviderError> {
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        let allocations = {
+            let lease = state.leases.get(lease_name).ok_or_else(|| {
+                ProviderError::new("resource-manager", "LEASE_NOT_FOUND", lease_name)
+            })?;
+            if lease.fence_token != fence_token {
+                return Err(ProviderError::new(
+                    "resource-manager",
+                    "STALE_FENCE_TOKEN",
+                    lease_name,
+                ));
+            }
+            if lease.state != LeaseState::Revoked {
+                return Err(ProviderError::new(
+                    "resource-manager",
+                    "LEASE_NOT_REVOKED",
+                    lease_name,
+                ));
+            }
+            lease.allocations.clone()
+        };
+        for allocation in &allocations {
+            state.allocated.remove(&allocation.resource.id);
+        }
+        Ok(state
+            .leases
+            .get(lease_name)
+            .expect("lease was checked above")
+            .clone())
+    }
 }
 
 fn expire_due_leases(state: &mut State, now_unix_ms: u64) {
@@ -680,6 +750,31 @@ mod tests {
                 .reason_code,
             "INSUFFICIENT_RESOURCES"
         );
+    }
+
+    #[test]
+    fn revoke_advances_the_fence_and_waits_for_cleanup_confirmation() {
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+        let revoked = manager.revoke(&lease.name, lease.fence_token).unwrap();
+
+        assert_eq!(revoked.state, LeaseState::Revoked);
+        assert!(revoked.fence_token > lease.fence_token);
+        assert!(manager.is_allocated("resource-0"));
+        assert_eq!(
+            manager
+                .reserve(request("lease-2", 1))
+                .unwrap_err()
+                .reason_code,
+            "INSUFFICIENT_RESOURCES"
+        );
+
+        manager
+            .complete_revocation(&revoked.name, revoked.fence_token)
+            .unwrap();
+        assert!(!manager.is_allocated("resource-0"));
+        let replacement = manager.reserve(request("lease-2", 1)).unwrap();
+        assert!(replacement.fence_token > revoked.fence_token);
     }
 
     #[test]

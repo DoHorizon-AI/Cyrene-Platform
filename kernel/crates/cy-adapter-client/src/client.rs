@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use cy_kernel_api::{
@@ -45,6 +45,31 @@ pub struct HardwareAdapterEndpoint {
     pub peer_credentials: PeerCredentialExpectation,
 }
 
+/// One point-in-time observation from a single configured hardware adapter.
+/// The registry preserves this boundary so Kernel lifecycle code does not
+/// assign an aggregate inventory generation to an individual adapter.
+#[derive(Debug, Clone)]
+pub struct HardwareAdapterObservation {
+    pub snapshot: InventorySnapshot,
+    pub sampled_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+impl HardwareAdapterObservation {
+    fn from_local_inventory(snapshot: InventorySnapshot) -> Self {
+        let sampled_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        Self {
+            snapshot,
+            sampled_at_unix_ms: sampled_at_unix_ms.max(1),
+            expires_at_unix_ms: sampled_at_unix_ms.saturating_add(1_000).max(2),
+        }
+    }
+}
+
 impl HardwareAdapterEndpoint {
     pub fn new(adapter_id: impl Into<String>, socket_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -63,9 +88,15 @@ impl HardwareAdapterEndpoint {
 
 /// Common port implemented by any external hardware adapter client. It lets
 /// the Kernel aggregate several UDS Sidecars without learning their vendors.
-pub trait HardwareAdapter: HostInventoryProvider + ResourceProvider {}
-
-impl<T> HardwareAdapter for T where T: HostInventoryProvider + ResourceProvider {}
+pub trait HardwareAdapter: HostInventoryProvider + ResourceProvider {
+    /// UDS adapters override this to preserve their source timestamps. Test
+    /// adapters can rely on the bounded local observation default.
+    fn observe_inventory(&self) -> Result<HardwareAdapterObservation, ProviderError> {
+        Ok(HardwareAdapterObservation::from_local_inventory(
+            HostInventoryProvider::probe_inventory(self)?,
+        ))
+    }
+}
 
 impl UdsHardwareAdapterClient {
     pub fn new(adapter_id: impl Into<String>, socket_path: impl Into<PathBuf>) -> Self {
@@ -165,11 +196,27 @@ impl UdsHardwareAdapterClient {
             )),
         }
     }
-}
 
-impl HostInventoryProvider for UdsHardwareAdapterClient {
-    fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+    /// Returns the adapter's individual inventory generation and observation
+    /// window without passing through the Kernel aggregate registry.
+    pub fn observe_inventory(&self) -> Result<HardwareAdapterObservation, ProviderError> {
         let (adapter_id, inventory) = self.inventory_response()?;
+        let sampled_at = inventory.sampled_at.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                &adapter_id,
+                "ADAPTER_FACT_TIMESTAMP_MISSING",
+                "hardware inventory did not include sampled_at",
+            )
+        })?;
+        let expires_at = inventory.expires_at.as_ref().ok_or_else(|| {
+            ProviderError::new(
+                &adapter_id,
+                "ADAPTER_FACT_TIMESTAMP_MISSING",
+                "hardware inventory did not include expires_at",
+            )
+        })?;
+        let sampled_at_unix_ms = timestamp_to_unix_ms(&adapter_id, sampled_at, "sampled_at")?;
+        let expires_at_unix_ms = timestamp_to_unix_ms(&adapter_id, expires_at, "expires_at")?;
         let facts = inventory
             .facts
             .into_iter()
@@ -184,27 +231,43 @@ impl HostInventoryProvider for UdsHardwareAdapterClient {
             .iter()
             .filter(|fact| fact.required)
             .all(|fact| fact.available);
-        Ok(InventorySnapshot {
-            generation: inventory.generation,
-            resources: inventory
-                .resources
-                .into_iter()
-                .map(|resource| {
-                    let mut resource = resource_from_proto(resource)?;
-                    resource.provider.id = adapter_id.clone();
-                    Ok(resource)
-                })
-                .collect::<Result<Vec<_>, ProviderError>>()?,
-            capabilities: NodeCapabilities {
-                ready,
-                facts,
-                enforcement: inventory
-                    .enforcement
+        Ok(HardwareAdapterObservation {
+            snapshot: InventorySnapshot {
+                generation: inventory.generation,
+                resources: inventory
+                    .resources
                     .into_iter()
-                    .map(enforcement_from_proto)
-                    .collect(),
+                    .map(|resource| {
+                        let mut resource = resource_from_proto(resource)?;
+                        resource.provider.id = adapter_id.clone();
+                        Ok(resource)
+                    })
+                    .collect::<Result<Vec<_>, ProviderError>>()?,
+                capabilities: NodeCapabilities {
+                    ready,
+                    facts,
+                    enforcement: inventory
+                        .enforcement
+                        .into_iter()
+                        .map(enforcement_from_proto)
+                        .collect(),
+                },
             },
+            sampled_at_unix_ms,
+            expires_at_unix_ms,
         })
+    }
+}
+
+impl HostInventoryProvider for UdsHardwareAdapterClient {
+    fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+        Ok(self.observe_inventory()?.snapshot)
+    }
+}
+
+impl HardwareAdapter for UdsHardwareAdapterClient {
+    fn observe_inventory(&self) -> Result<HardwareAdapterObservation, ProviderError> {
+        UdsHardwareAdapterClient::observe_inventory(self)
     }
 }
 
@@ -305,4 +368,31 @@ pub(crate) fn safe_adapter_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn timestamp_to_unix_ms(
+    adapter_id: &str,
+    timestamp: &prost_types::Timestamp,
+    field: &str,
+) -> Result<u64, ProviderError> {
+    if timestamp.seconds < 0 || !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return Err(ProviderError::new(
+            adapter_id,
+            "ADAPTER_FACT_TIMESTAMP_INVALID",
+            &format!("{field} is outside the protobuf timestamp range"),
+        ));
+    }
+    let millis = u64::try_from(timestamp.seconds)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .and_then(|millis| millis.checked_add((timestamp.nanos as u64) / 1_000_000))
+        .filter(|millis| *millis > 0)
+        .ok_or_else(|| {
+            ProviderError::new(
+                adapter_id,
+                "ADAPTER_FACT_TIMESTAMP_INVALID",
+                &format!("{field} cannot be represented as a positive Unix millisecond time"),
+            )
+        })?;
+    Ok(millis)
 }

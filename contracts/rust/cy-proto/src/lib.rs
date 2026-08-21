@@ -49,6 +49,12 @@ pub mod cyrene {
             tonic::include_proto!("cyrene.semantic.v1");
         }
     }
+
+    pub mod provider {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.provider.v1");
+        }
+    }
 }
 
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
@@ -57,6 +63,8 @@ pub use cyrene::core::v1 as core_v1;
 pub use cyrene::core::v2 as core_v2;
 /// Versioned local protocol between the Kernel and external hardware adapters.
 pub use cyrene::hardware::v1 as hardware_v1;
+/// Dedicated local Provider lifecycle and reconciliation projection.
+pub use cyrene::provider::v1 as provider_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.
 pub use cyrene::sandbox::v1 as sandbox_v1;
 /// Transport projection of the Kernel Semantic Contract v1 nouns.

@@ -9,7 +9,8 @@ use cy_kernel_api::{
 };
 
 use crate::client::{
-    safe_adapter_id, HardwareAdapter, HardwareAdapterEndpoint, UdsHardwareAdapterClient,
+    safe_adapter_id, HardwareAdapter, HardwareAdapterEndpoint, HardwareAdapterObservation,
+    UdsHardwareAdapterClient,
 };
 
 /// Generic registry/aggregator for independent external hardware adapters.
@@ -87,7 +88,42 @@ impl UdsHardwareAdapterRegistry {
         })
     }
 
-    fn aggregate_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+    /// Collects each configured adapter independently. Callers that need
+    /// provider lifecycle facts use this directly rather than the aggregate
+    /// inventory generation retained for the resource ledger.
+    pub fn adapter_observations(
+        &self,
+    ) -> BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>> {
+        self.adapters
+            .iter()
+            .map(|(adapter_id, adapter)| {
+                let observation = adapter.observe_inventory().and_then(|mut observation| {
+                    if observation.snapshot.generation == 0 {
+                        return Err(ProviderError::new(
+                            "hardware-adapter-registry",
+                            "ADAPTER_GENERATION_INVALID",
+                            adapter_id,
+                        ));
+                    }
+                    // Registry configuration, not adapter-supplied data, is
+                    // the provenance authority used for binding routing.
+                    for resource in &mut observation.snapshot.resources {
+                        resource.provider.id = adapter_id.clone();
+                    }
+                    Ok(observation)
+                });
+                (adapter_id.clone(), observation)
+            })
+            .collect()
+    }
+
+    /// Builds the existing allocation ledger view from a coherent collection
+    /// of individual observations. A failed adapter still makes allocation
+    /// facts unavailable, but does not hide successful provider observations.
+    pub fn aggregate_observations(
+        &self,
+        observations: &BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>>,
+    ) -> Result<InventorySnapshot, ProviderError> {
         let mut resources = Vec::new();
         let mut facts = Vec::new();
         let mut enforcement = Vec::new();
@@ -95,22 +131,20 @@ impl UdsHardwareAdapterRegistry {
         let mut fingerprint_parts = Vec::new();
         let mut ready = true;
 
-        for (adapter_id, adapter) in &self.adapters {
-            let snapshot =
-                HostInventoryProvider::probe_inventory(adapter.as_ref()).map_err(|error| {
+        for adapter_id in self.adapters.keys() {
+            let snapshot = observations
+                .get(adapter_id)
+                .expect("observation is collected for every configured adapter")
+                .as_ref()
+                .map_err(|error| {
                     ProviderError::new(
                         "hardware-adapter-registry",
                         "ADAPTER_UNAVAILABLE",
                         &format!("{adapter_id}: {}", error.message),
                     )
-                })?;
-            if snapshot.generation == 0 {
-                return Err(ProviderError::new(
-                    "hardware-adapter-registry",
-                    "ADAPTER_GENERATION_INVALID",
-                    adapter_id,
-                ));
-            }
+                })?
+                .snapshot
+                .clone();
             ready &= snapshot.capabilities.ready;
             fingerprint_parts.push(format!("{adapter_id}:{snapshot:?}"));
             for mut resource in snapshot.resources {
@@ -163,6 +197,10 @@ impl UdsHardwareAdapterRegistry {
                 enforcement,
             },
         })
+    }
+
+    fn aggregate_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+        self.aggregate_observations(&self.adapter_observations())
     }
 
     fn adapter_for_resource(

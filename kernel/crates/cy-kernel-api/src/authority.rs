@@ -228,19 +228,69 @@ pub trait KernelAuthority: Send + Sync {
     ) -> Result<semantic::EventPage, semantic::Rejection>;
 }
 
-/// Provider lifecycle has its own semantic migration path and is deliberately
-/// not forced into the production authority implementation before its stable
-/// projection exists.
+/// Internal reconciliation decisions. These describe authority work without
+/// introducing another semantic domain noun or exposing provider transport
+/// details through the public contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderReconcileAction {
+    Noop,
+    RefreshResource(semantic::Identity),
+    MarkWorkerLost(semantic::Identity),
+    RevokeLease(semantic::Identity),
+    TerminateStaleWorker(semantic::Identity),
+    RestartWorker(semantic::Identity),
+    MarkOperationLost(semantic::Identity),
+    RevokeEndpoint(semantic::Identity),
+}
+
+/// Result of reconciling recorded authority with one Provider observation.
+/// Repeating a reconcile after all actions have converged returns `Noop`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderReconcileResult {
+    pub provider: semantic::Identity,
+    pub snapshot_generation: u64,
+    pub actions: Vec<ProviderReconcileAction>,
+}
+
+/// A point-in-time authority view used after cursor/source changes. It only
+/// carries existing semantic entities; provider transport and runtime details
+/// remain outside the Kernel contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritySnapshot {
+    pub source: semantic::Identity,
+    pub cursor: semantic::EventCursor,
+    pub providers: Vec<semantic::Provider>,
+    pub workers: Vec<semantic::Worker>,
+    pub leases: Vec<semantic::Lease>,
+    pub operations: Vec<semantic::Operation>,
+    pub endpoints: Vec<semantic::Endpoint>,
+    pub endpoint_grants: Vec<semantic::EndpointGrant>,
+}
+
+/// Provider lifecycle remains a distinct authority surface. Provider identity
+/// is logical identity plus session generation; an inventory snapshot and each
+/// Resource retain their own independent generations.
 pub trait KernelProviderAuthority: Send + Sync {
     fn register_provider(
         &self,
+        context: &AuthorityCallContext,
         principal: &semantic::Principal,
         provider: semantic::Provider,
     ) -> Result<semantic::Provider, semantic::Rejection>;
 
-    fn reconcile_provider(
+    /// Records a Provider observation only. It does not alter desired state or
+    /// carry out lifecycle repair; that belongs exclusively to reconciliation.
+    fn publish_inventory(
         &self,
+        context: &AuthorityCallContext,
         principal: &semantic::Principal,
         snapshot: semantic::ProviderSnapshot,
-    ) -> Result<(), semantic::Rejection>;
+    ) -> Result<semantic::ProviderSnapshot, semantic::Rejection>;
+
+    fn reconcile_provider(
+        &self,
+        context: &AuthorityCallContext,
+        principal: &semantic::Principal,
+        provider: &semantic::Identity,
+    ) -> Result<ProviderReconcileResult, semantic::Rejection>;
 }

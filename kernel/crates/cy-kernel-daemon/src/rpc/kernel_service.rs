@@ -372,6 +372,23 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             lease_name: lease.name,
             fence_token: lease.fence_token,
         };
+        let evidence = match actor.recovery_evidence() {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let _ = actor.stop(&cy_kernel_api::StopRequest {
+                    grace_period: Duration::ZERO,
+                    immediate: true,
+                });
+                return Err(provider_status(error));
+            }
+        };
+        if let Err(error) = self.record_runtime_launch(&instance_name, &lease_ref, evidence) {
+            let _ = actor.stop(&cy_kernel_api::StopRequest {
+                grace_period: Duration::ZERO,
+                immediate: true,
+            });
+            return Err(provider_status(error));
+        }
         self.instances
             .lock()
             .expect("instance lock poisoned")
@@ -389,19 +406,12 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     health: None,
                     restart_count: 0,
                     watchdog_triggered: false,
+                    transport_disconnected: false,
                     control: None,
                     semantic_control: None,
                     pending_shutdown: None,
                 },
             );
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::InstanceLaunched,
-            Some(&instance_name),
-            Some(&lease_ref),
-            "WORKER_LAUNCHED",
-        ) {
-            eprintln!("runtime journal InstanceLaunched write failed: {error}");
-        }
         self.publish_runtime_event(
             core_v1::RuntimeEventType::InstanceStateChanged,
             &instance_name,
@@ -495,6 +505,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 &error,
             )));
         }
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&request.process_name),
+            lease.as_ref(),
+            "TERMINATE_COMPLETE",
+        )
+        .map_err(provider_status)?;
         if let Some(lease) = lease.as_ref() {
             if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::LeaseReleased,
@@ -516,14 +533,6 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     .fail_release(&lease.lease_name, lease.fence_token);
                 return Err(provider_status(error));
             }
-        }
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::InstanceTerminated,
-            Some(&request.process_name),
-            lease.as_ref(),
-            "TERMINATE_COMPLETE",
-        ) {
-            eprintln!("runtime journal InstanceTerminated write failed: {error}");
         }
         self.instances
             .lock()
@@ -629,6 +638,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
             return Ok(Response::new(self.operation_failure(name, target, &error)));
         }
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&target),
+            lease.as_ref(),
+            "CANCEL_COMPLETE",
+        )
+        .map_err(provider_status)?;
         if let Some(lease) = lease.as_ref() {
             if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::LeaseReleased,
@@ -650,14 +666,6 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     .fail_release(&lease.lease_name, lease.fence_token);
                 return Err(provider_status(error));
             }
-        }
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::InstanceTerminated,
-            Some(&target),
-            lease.as_ref(),
-            "CANCEL_COMPLETE",
-        ) {
-            eprintln!("runtime journal InstanceTerminated write failed: {error}");
         }
         self.instances
             .lock()

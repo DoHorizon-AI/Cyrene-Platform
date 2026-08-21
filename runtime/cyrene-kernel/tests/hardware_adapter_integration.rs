@@ -231,9 +231,9 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
 
     // 7. Verify KernelCapabilities API reports the aggregated inventory
     let capabilities = daemon.get_kernel_capabilities()?;
-    assert_eq!(
-        capabilities.inventory_generation,
-        initial_snapshot.generation
+    assert!(
+        capabilities.inventory_generation >= initial_snapshot.generation,
+        "capabilities are a later observation and may advance the aggregate generation"
     );
     assert_eq!(
         capabilities.resources.len(),

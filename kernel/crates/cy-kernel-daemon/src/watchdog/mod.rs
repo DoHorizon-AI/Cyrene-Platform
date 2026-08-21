@@ -7,6 +7,7 @@
 mod instance_actor;
 
 pub use instance_actor::{
-    InstanceActor, InstanceActorState, InstanceHealthVerdict, WorkerTransportCommand,
-    WorkerTransportDispatcher, WorkerTransportRequest, WorkerTransportResponse,
+    InstanceActor, InstanceActorState, InstanceHealthVerdict, WorkerCancelAck,
+    WorkerTransportCommand, WorkerTransportDispatcher, WorkerTransportRequest,
+    WorkerTransportResponse,
 };

@@ -2,6 +2,8 @@
 
 use std::{path::PathBuf, time::Duration};
 
+use crate::ProviderError;
+
 /// 由 cgroup v2 直接读取的真实物理消耗量。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CgroupTelemetry {
@@ -30,6 +32,54 @@ pub struct ProcessHandle {
     pub start_time_ticks: Option<u64>,
     /// Opaque worker byte-stream endpoint returned by sandboxd.
     pub transport_socket: Option<PathBuf>,
+}
+
+/// Local-only evidence that identifies one sandbox process across a Kernel
+/// restart. It is deliberately not part of the semantic contract or Core API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeProcessEvidence {
+    pub cgroup_name: String,
+    pub pid: u32,
+    pub start_time_ticks: u64,
+}
+
+impl ProcessHandle {
+    /// Converts an in-process handle into the durable evidence accepted by the
+    /// privileged sandbox recovery path. Missing PID-reuse protection is never
+    /// acceptable for a restart cleanup request.
+    pub fn recovery_evidence(&self) -> Result<RuntimeProcessEvidence, ProviderError> {
+        let cgroup_name = self
+            .cgroup_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                ProviderError::new(
+                    "process-runtime",
+                    "RECOVERY_EVIDENCE_INVALID",
+                    "process cgroup path has no safe final component",
+                )
+            })?;
+        let start_time_ticks = self.start_time_ticks.ok_or_else(|| {
+            ProviderError::new(
+                "process-runtime",
+                "RECOVERY_EVIDENCE_UNAVAILABLE",
+                "process start time is required to defend against PID reuse",
+            )
+        })?;
+        if self.pid == 0 {
+            return Err(ProviderError::new(
+                "process-runtime",
+                "RECOVERY_EVIDENCE_INVALID",
+                "process PID must be non-zero",
+            ));
+        }
+        Ok(RuntimeProcessEvidence {
+            cgroup_name: cgroup_name.to_string(),
+            pid: self.pid,
+            start_time_ticks,
+        })
+    }
 }
 
 /// 进程运行状态与异常条件

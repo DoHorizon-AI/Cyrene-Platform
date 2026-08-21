@@ -14,8 +14,8 @@ pub use cy_plugin_protocol::{
     envelope::Payload,
     health_status,
     pb::{
-        self, Cancel, Configure, Envelope, HealthCheck, HealthStatus, Hello, HelloAck, Invoke,
-        InvokeResult, PluginErrorPayload, Shutdown,
+        self, Cancel, CancelAck, Configure, Envelope, HealthCheck, HealthStatus, Hello, HelloAck,
+        Invoke, InvokeResult, PluginErrorPayload, Shutdown,
     },
     plugin_error_payload, CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_MESSAGE_BYTES,
 };
@@ -216,7 +216,9 @@ pub fn run_worker_stream<R: Read, W: Write, T: CyreneWorker>(
                 },
                 Some(Payload::Cancel(cancel)) => {
                     worker.on_cancel(&cancel.target_request_id, &cancel.reason);
-                    continue;
+                    Payload::CancelAck(CancelAck {
+                        target_request_id: cancel.target_request_id,
+                    })
                 }
                 Some(Payload::Shutdown(shutdown)) => {
                     worker.on_shutdown(shutdown.grace_period_ms);

@@ -2,7 +2,10 @@
 
 use std::{collections::BTreeMap, fs, fs::File, path::PathBuf};
 
-use cy_kernel_api::{DeviceBinding, DeviceMapper, EnforcementMode, ProcessHandle, ProcessRuntime};
+use cy_kernel_api::{
+    DeviceBinding, DeviceMapper, EnforcementMode, ProcessHandle, ProcessRuntime,
+    RuntimeProcessEvidence, SandboxBackend,
+};
 
 #[cfg(target_os = "linux")]
 use crate::bpf::{
@@ -38,7 +41,7 @@ fn dev_mode_preflight_reports_ready_without_cgroups() {
 }
 
 #[test]
-fn dev_mode_initialization_cleans_stale_instance_dirs_and_rejects_duplicate() {
+fn initialization_preserves_unclassified_instance_dirs() {
     let root = std::env::temp_dir().join(format!("cyrene-cgroup-dev-clean-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let mut dev_cfg = config(root.clone());
@@ -52,8 +55,8 @@ fn dev_mode_initialization_cleans_stale_instance_dirs_and_rejects_duplicate() {
 
     runtime.initialize_owned_root().unwrap();
     assert!(
-        !stale_dir.exists(),
-        "stale instance dir must be cleaned on init"
+        stale_dir.exists(),
+        "sandboxd must not delete a cgroup before Kernel journal classification"
     );
 
     // First create succeeds
@@ -71,6 +74,46 @@ fn dev_mode_initialization_cleans_stale_instance_dirs_and_rejects_duplicate() {
 }
 
 #[test]
+fn recovery_rejects_foreign_or_mismatched_evidence_before_cleanup() {
+    let root = std::env::temp_dir().join(format!("cyrene-recovery-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("foreign")).unwrap();
+    let runtime = CgroupV2Runtime::new(config(root.clone()));
+    let start_time_ticks = crate::sys::proc_start_time(std::process::id()).unwrap();
+
+    let error = runtime
+        .recover_stale_process(&RuntimeProcessEvidence {
+            cgroup_name: "foreign".to_string(),
+            pid: std::process::id(),
+            start_time_ticks,
+        })
+        .unwrap_err();
+    assert_eq!(error.reason_code, "INVALID_CGROUP_NAME");
+    assert!(
+        root.join("foreign").exists(),
+        "foreign state must never be killed"
+    );
+
+    let stale = root.join("instance-stale");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("cgroup.procs"), std::process::id().to_string()).unwrap();
+    fs::write(stale.join("cgroup.kill"), "unchanged").unwrap();
+    let error = runtime
+        .recover_stale_process(&RuntimeProcessEvidence {
+            cgroup_name: "instance-stale".to_string(),
+            pid: std::process::id(),
+            start_time_ticks: start_time_ticks + 1,
+        })
+        .unwrap_err();
+    assert_eq!(error.reason_code, "RECOVERY_EVIDENCE_MISMATCH");
+    assert_eq!(
+        fs::read_to_string(stale.join("cgroup.kill")).unwrap(),
+        "unchanged"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn preflight_requires_cgroup_v2_and_cgroup_kill() {
     let root = std::env::temp_dir().join(format!("cyrene-cgroup-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -82,20 +125,16 @@ fn preflight_requires_cgroup_v2_and_cgroup_kill() {
 }
 
 #[test]
-fn owned_cleanup_never_selects_non_instance_children() {
+fn initialization_preserves_foreign_and_unclassified_children() {
     let root = std::env::temp_dir().join(format!("cyrene-cleanup-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("foreign")).unwrap();
     fs::create_dir_all(root.join("instance-stale")).unwrap();
     File::create(root.join("instance-stale/cgroup.procs")).unwrap();
     File::create(root.join("instance-stale/cgroup.kill")).unwrap();
-    // A normal directory cannot emulate cgroupfs: its virtual control
-    // files remain ordinary files, so removal must fail closed. The key
-    // invariant is that the unrelated sibling is never selected.
-    let error = CgroupV2Runtime::new(config(root.clone()))
-        .cleanup_owned_instances()
-        .unwrap_err();
-    assert_eq!(error.reason_code, "OWNED_CGROUP_CLEANUP_INCOMPLETE");
+    CgroupV2Runtime::new(config(root.clone()))
+        .initialize_owned_root()
+        .unwrap();
     assert!(root.join("foreign").exists());
     assert!(root.join("instance-stale").exists());
     let _ = fs::remove_dir_all(root);
