@@ -461,6 +461,12 @@ impl KernelServiceAdapter {
         }
     }
 
+    pub(crate) fn enforce_lease_expiry(&self) {
+        if let Err(error) = self.authority.enforce_lease_expiry() {
+            eprintln!("lease expiry enforcement failed: {error:?}");
+        }
+    }
+
     pub(crate) fn enforce_heartbeat_deadlines(&self) {
         let overdue = {
             let instances = self.instances.lock().expect("instance lock poisoned");

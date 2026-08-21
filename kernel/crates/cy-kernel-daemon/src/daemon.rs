@@ -203,6 +203,16 @@ impl KernelDaemon {
         self.resources.get_lease(lease_name)
     }
 
+    /// 列出当前所有跟踪的租约快照，用于权威主动过期与对齐扫描
+    pub fn leases(&self) -> Vec<ResourceLease> {
+        self.resources.leases()
+    }
+
+    /// 检查租约是否仍然持有底层物理资源分配
+    pub fn is_allocated(&self, lease_name: &str) -> bool {
+        self.resources.is_allocated(lease_name)
+    }
+
     /// Extend a live lease while retaining its exact resource allocation and
     /// fencing authority. The ledger performs the active-state, fence, and
     /// expiry monotonicity checks atomically.

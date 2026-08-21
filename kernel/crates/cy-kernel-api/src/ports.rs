@@ -94,6 +94,14 @@ pub trait ResourceLeaseManager: Send + Sync {
         lease_name: &str,
         fence_token: u64,
     ) -> Result<ResourceLease, ProviderError>;
+    /// Lists all tracked resource leases for authority and expiry reconciliation.
+    fn leases(&self) -> Vec<ResourceLease> {
+        Vec::new()
+    }
+    /// Returns true if physical allocations remain held for this lease.
+    fn is_allocated(&self, _lease_name: &str) -> bool {
+        false
+    }
 }
 
 /// 端口 Trait 4：沙箱进程运行时生命周期管理

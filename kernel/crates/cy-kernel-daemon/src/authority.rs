@@ -516,14 +516,16 @@ impl LocalKernelAuthority {
                 "worker identity generation is stale",
             ));
         }
-        if worker.state == semantic::WorkerState::Lost {
-            return Ok(vec![ProviderReconcileAction::Noop]);
-        }
-        if !worker.state.can_transition_to(semantic::WorkerState::Lost) {
-            return Ok(vec![ProviderReconcileAction::Noop]);
-        }
-
         let lease = self.lease_for(context, &worker.lease)?;
+        let is_allocated = self.runtime.daemon.is_allocated(&lease.name);
+        if worker.state == semantic::WorkerState::Lost && !is_allocated {
+            return Ok(vec![ProviderReconcileAction::Noop]);
+        }
+        if !worker.state.can_transition_to(semantic::WorkerState::Lost)
+            && worker.state != semantic::WorkerState::Lost
+        {
+            return Ok(vec![ProviderReconcileAction::Noop]);
+        }
         if lease.holder != worker.identity {
             return Err(Self::rejection(
                 "FENCE_MISMATCH",
@@ -538,7 +540,10 @@ impl LocalKernelAuthority {
             Some(&lease),
             reason_code,
         )?;
-        let revocation_required = matches!(lease.state, LeaseState::Active | LeaseState::Releasing);
+        let revocation_required = matches!(
+            lease.state,
+            LeaseState::Active | LeaseState::Releasing | LeaseState::Expired
+        );
         let revoked = if revocation_required {
             self.runtime
                 .daemon
@@ -583,7 +588,7 @@ impl LocalKernelAuthority {
         let mut actions = vec![ProviderReconcileAction::MarkWorkerLost(
             worker.identity.clone(),
         )];
-        if revocation_required {
+        if revocation_required || lease.state == LeaseState::Revoked {
             actions.push(ProviderReconcileAction::RevokeLease(worker.lease.clone()));
         }
         let lost_operations = {
@@ -631,7 +636,7 @@ impl LocalKernelAuthority {
         // No visible state is published before both the revoke and its new
         // fence are journaled. If either write fails, the in-memory state is
         // already fail-closed and physical resources remain allocated.
-        if revocation_required {
+        if revocation_required || lease.state == LeaseState::Revoked {
             self.record_runtime(
                 RuntimeJournalEvent::LeaseRevoked,
                 Some(&worker_name),
@@ -697,7 +702,7 @@ impl LocalKernelAuthority {
             "cyrene.worker.v1",
             Vec::new(),
         );
-        if revocation_required {
+        if revocation_required || lease.state == LeaseState::Revoked {
             self.publish_semantic_event_in(
                 &context.namespace,
                 worker.lease.clone(),
@@ -707,6 +712,201 @@ impl LocalKernelAuthority {
             );
         }
         Ok(actions)
+    }
+
+    /// Actively scans for expired leases and triggers authority revocation,
+    /// worker termination, endpoint invalidation, fence advancement, and
+    /// confirmed cleanup.
+    pub(crate) fn enforce_lease_expiry(
+        &self,
+    ) -> Result<Vec<ProviderReconcileAction>, semantic::Rejection> {
+        let now = Self::now_unix_ms();
+        let leases = self.runtime.daemon.leases();
+        let mut all_actions = Vec::new();
+        for lease in leases {
+            let is_expired = lease.expires_at_unix_ms.is_some_and(|exp| exp <= now);
+            let is_allocated = self.runtime.daemon.is_allocated(&lease.name);
+            let needs_active_expiry = (is_expired
+                && matches!(
+                    lease.state,
+                    LeaseState::Active | LeaseState::Releasing | LeaseState::Expired
+                ))
+                || (matches!(lease.state, LeaseState::Revoked) && is_allocated);
+            if !needs_active_expiry {
+                continue;
+            }
+
+            // Find semantic namespace and identity if tracked in self.runtime.leases
+            let lease_object = self
+                .runtime
+                .leases
+                .lock()
+                .expect("lease scope lock poisoned")
+                .iter()
+                .find(|(_, name)| *name == &lease.name)
+                .map(|(object, _)| object.clone());
+
+            let namespace = lease_object
+                .as_ref()
+                .map(|obj| obj.namespace.clone())
+                .unwrap_or_default();
+            let lease_semantic_id = lease_object
+                .as_ref()
+                .map(|obj| obj.identity.clone())
+                .unwrap_or_else(|| semantic::Identity {
+                    id: lease.name.clone(),
+                    generation: lease.generation,
+                });
+
+            // Check if there is an active semantic worker bound to this lease
+            let bound_worker = {
+                let instances = self
+                    .runtime
+                    .instances
+                    .lock()
+                    .expect("instance lock poisoned");
+                instances.values().find_map(|process| {
+                    if let Some(worker) = process.semantic_worker.as_ref() {
+                        if worker.lease == lease_semantic_id
+                            || worker.lease.id == lease_semantic_id.id
+                            || process
+                                .lease
+                                .as_ref()
+                                .is_some_and(|l| l.lease_name == lease.name)
+                        {
+                            return Some(worker.identity.clone());
+                        }
+                    }
+                    None
+                })
+            };
+
+            if let Some(worker_identity) = bound_worker {
+                let context = AuthorityCallContext {
+                    contract: semantic::ContractRevision::current(),
+                    namespace: namespace.clone(),
+                    request_id: format!("expiry-lost-{}", worker_identity.id),
+                    idempotency_key: format!("expiry-lost-{}", worker_identity.id),
+                };
+                match self.mark_worker_lost(&context, &worker_identity, "LEASE_EXPIRED") {
+                    Ok(actions) => all_actions.extend(actions),
+                    Err(error) => {
+                        eprintln!(
+                            "enforce_lease_expiry: mark_worker_lost failed for {worker_identity:?}: {error:?}"
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // If no semantic worker is bound, check if it's a legacy plugin instance
+            let is_legacy_instance = {
+                let instances = self
+                    .runtime
+                    .instances
+                    .lock()
+                    .expect("instance lock poisoned");
+                instances
+                    .iter()
+                    .find(|(_, process)| {
+                        process
+                            .lease
+                            .as_ref()
+                            .is_some_and(|l| l.lease_name == lease.name)
+                    })
+                    .map(|(name, _)| name.clone())
+            };
+
+            if let Some(instance_name) = is_legacy_instance {
+                let mut instances = self
+                    .runtime
+                    .instances
+                    .lock()
+                    .expect("instance lock poisoned");
+                if let Some(process) = instances.get_mut(&instance_name) {
+                    process.watchdog_triggered = true;
+                    let report = process
+                        .actor
+                        .stop(&cy_kernel_api::StopRequest {
+                            grace_period: std::time::Duration::ZERO,
+                            immediate: true,
+                        })
+                        .ok();
+                    let cleanup_complete = report.as_ref().is_some_and(|r| r.complete);
+                    drop(instances);
+                    let _ = self.record_runtime(
+                        RuntimeJournalEvent::LeaseRevoked,
+                        Some(&instance_name),
+                        Some(&lease),
+                        "LEASE_EXPIRED",
+                    );
+                    let revoked = if lease.state == LeaseState::Revoked {
+                        Ok(lease.clone())
+                    } else {
+                        self.runtime.daemon.revoke(&lease.name, lease.fence_token)
+                    };
+                    if let Ok(revoked) = revoked {
+                        let _ = self.record_runtime(
+                            RuntimeJournalEvent::FenceAdvanced,
+                            Some(&instance_name),
+                            Some(&revoked),
+                            "LEASE_EXPIRED",
+                        );
+                        if cleanup_complete {
+                            let _ = self.record_runtime(
+                                RuntimeJournalEvent::InstanceTerminated,
+                                Some(&instance_name),
+                                Some(&revoked),
+                                "LEASE_EXPIRED",
+                            );
+                            let _ = self
+                                .runtime
+                                .daemon
+                                .complete_revocation(&revoked.name, revoked.fence_token);
+                            self.runtime
+                                .instances
+                                .lock()
+                                .expect("instance lock poisoned")
+                                .remove(&instance_name);
+                        }
+                    }
+                }
+            } else {
+                // Standalone lease with no running process
+                let revoked = if lease.state == LeaseState::Revoked {
+                    Ok(lease.clone())
+                } else {
+                    self.runtime.daemon.revoke(&lease.name, lease.fence_token)
+                };
+                if let Ok(revoked) = revoked {
+                    let _ = self.record_runtime(
+                        RuntimeJournalEvent::LeaseRevoked,
+                        None,
+                        Some(&revoked),
+                        "LEASE_EXPIRED",
+                    );
+                    let _ = self.record_runtime(
+                        RuntimeJournalEvent::FenceAdvanced,
+                        None,
+                        Some(&revoked),
+                        "LEASE_EXPIRED",
+                    );
+                    let _ = self
+                        .runtime
+                        .daemon
+                        .complete_revocation(&revoked.name, revoked.fence_token);
+                    self.publish_semantic_event_in(
+                        &namespace,
+                        lease_semantic_id.clone(),
+                        "lease.revoked",
+                        "cyrene.lease.v1",
+                        Vec::new(),
+                    );
+                    all_actions.push(ProviderReconcileAction::RevokeLease(lease_semantic_id));
+                }
+            }
+        }
+        Ok(all_actions)
     }
 }
 
@@ -855,6 +1055,9 @@ impl KernelAuthority for LocalKernelAuthority {
         if lease.generation != worker.lease.generation
             || lease.holder != worker.identity
             || lease.state != LeaseState::Active
+            || lease
+                .expires_at_unix_ms
+                .is_some_and(|exp| exp <= Self::now_unix_ms())
         {
             return Err(Self::rejection(
                 "LEASE_NOT_ACTIVE",
@@ -1190,6 +1393,9 @@ impl KernelAuthority for LocalKernelAuthority {
             || lease.fence_token != fence_token
             || lease.holder != *worker_identity
             || lease.state != LeaseState::Active
+            || lease
+                .expires_at_unix_ms
+                .is_some_and(|exp| exp <= Self::now_unix_ms())
         {
             return Err(Self::rejection(
                 "FENCE_MISMATCH",
@@ -1447,6 +1653,9 @@ impl KernelAuthority for LocalKernelAuthority {
         if owner_lease.generation != owner.lease.generation
             || owner_lease.holder != owner.identity
             || owner_lease.state != LeaseState::Active
+            || owner_lease
+                .expires_at_unix_ms
+                .is_some_and(|exp| exp <= Self::now_unix_ms())
         {
             return Err(Self::rejection(
                 "LEASE_NOT_ACTIVE",
@@ -1545,7 +1754,12 @@ impl KernelAuthority for LocalKernelAuthority {
                 "endpoint grant lease fence token is stale",
             ));
         }
-        if lease.state != LeaseState::Active || lease.holder != grant.grantee {
+        if lease.state != LeaseState::Active
+            || lease.holder != grant.grantee
+            || lease
+                .expires_at_unix_ms
+                .is_some_and(|exp| exp <= Self::now_unix_ms())
+        {
             return Err(Self::rejection(
                 "LEASE_NOT_ACTIVE",
                 "endpoint grant grantee does not hold an active lease",

@@ -5445,3 +5445,942 @@ fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() 
     );
     drop(records);
 }
+
+#[test]
+fn lease_expiry_actively_revokes_worker_advances_fence_and_cleans_up() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-active-expiry".to_string(),
+        idempotency_key: "test-active-expiry".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            semantic::Identity {
+                id: "worker-expiring".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    let worker = semantic_worker_for(
+        "worker-expiring",
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+
+    let endpoint = semantic_endpoint_for(&worker);
+    authority
+        .publish_endpoint(&context, &principal, endpoint.clone())
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(40));
+
+    // Active lease expiry scan triggers worker revocation, fence advance, and cleanup
+    let actions = authority.enforce_lease_expiry().unwrap();
+    assert!(actions
+        .iter()
+        .any(|action| matches!(action, ProviderReconcileAction::MarkWorkerLost(id) if id == &worker.identity)));
+
+    // Verify worker is Lost
+    let instances = authority.runtime.instances.lock().unwrap();
+    let process = instances.get("worker-expiring");
+    assert!(process
+        .and_then(|p| p.semantic_worker.as_ref())
+        .is_some_and(|w| w.state == semantic::WorkerState::Lost));
+    drop(instances);
+
+    // Verify endpoint authority is purged
+    assert!(!authority
+        .runtime
+        .endpoints
+        .lock()
+        .unwrap()
+        .contains_key(&context.object_ref(endpoint.identity)));
+
+    // Verify lease is revoked and resource can be re-allocated after cleanup
+    assert_eq!(
+        adapter.daemon.lease(&lease.identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Revoked
+    );
+
+    // Replacement lease can now be acquired because cleanup succeeded
+    let context_repl = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-active-expiry-replacement".to_string(),
+        idempotency_key: "test-active-expiry-replacement".to_string(),
+    };
+    let new_lease = authority
+        .acquire_lease(
+            &context_repl,
+            &principal,
+            semantic::Identity {
+                id: "worker-replacement".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(new_lease.state, semantic::LeaseState::Active);
+    assert!(new_lease.fence_token > lease.fence_token);
+}
+
+#[test]
+fn renew_just_before_expiry_succeeds_and_extends_authority() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-renew-before-expiry".to_string(),
+        idempotency_key: "test-renew-before-expiry".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            semantic::Identity {
+                id: "worker-renew".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(200),
+        )
+        .unwrap();
+
+    let worker = semantic_worker_for(
+        "worker-renew",
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+
+    // Renew before expiry
+    let extended_expiry = now_unix_ms().saturating_add(60_000);
+    let renewed = authority
+        .renew_lease(
+            &context,
+            &principal,
+            &lease.identity,
+            lease.fence_token,
+            extended_expiry,
+        )
+        .unwrap();
+    assert_eq!(renewed.state, semantic::LeaseState::Active);
+    assert_eq!(renewed.fence_token, lease.fence_token);
+
+    // Sleep past the original 200ms deadline
+    thread::sleep(Duration::from_millis(220));
+
+    // Active lease expiry scan must NOT expire the renewed lease
+    authority.enforce_lease_expiry().unwrap();
+
+    // Heartbeat still succeeds on the renewed lease
+    let hb = authority
+        .heartbeat_worker(
+            &context,
+            &principal,
+            &worker.identity,
+            &lease.identity,
+            lease.fence_token,
+        )
+        .unwrap();
+    assert_eq!(hb.state, semantic::WorkerState::Running);
+}
+
+#[test]
+fn renew_racing_with_or_after_expiry_is_rejected_and_fails_closed() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-stale-renew".to_string(),
+        idempotency_key: "test-stale-renew".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            semantic::Identity {
+                id: "worker-stale-renew".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(40));
+
+    // Active expiry revokes the lease
+    authority.enforce_lease_expiry().unwrap();
+
+    // Renew with old fence token after expiry is rejected
+    let err = authority
+        .renew_lease(
+            &context,
+            &principal,
+            &lease.identity,
+            lease.fence_token,
+            now_unix_ms().saturating_add(60_000),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err.reason_code.as_str(),
+        "STALE_FENCE_TOKEN" | "LEASE_NOT_ACTIVE" | "LEASE_EXPIRY_REGRESSION"
+    ));
+}
+
+#[test]
+fn heartbeat_after_lease_expiry_is_rejected_and_fenced() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-stale-hb".to_string(),
+        idempotency_key: "test-stale-hb".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            semantic::Identity {
+                id: "worker-stale-hb".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    let worker = semantic_worker_for(
+        "worker-stale-hb",
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(40));
+
+    // Heartbeat after expiry is rejected
+    let err = authority
+        .heartbeat_worker(
+            &context,
+            &principal,
+            &worker.identity,
+            &lease.identity,
+            lease.fence_token,
+        )
+        .unwrap_err();
+    assert_eq!(err.reason_code, "FENCE_MISMATCH");
+
+    // Active expiry marks worker lost
+    authority.enforce_lease_expiry().unwrap();
+    let instances = authority.runtime.instances.lock().unwrap();
+    assert_eq!(
+        instances["worker-stale-hb"]
+            .semantic_worker
+            .as_ref()
+            .unwrap()
+            .state,
+        semantic::WorkerState::Lost
+    );
+}
+
+#[test]
+fn expiry_with_incomplete_cleanup_blocks_resource_reallocation() {
+    let (adapter, lease) = watchdog_instance_scenario(
+        Arc::new(UninterruptibleSandbox),
+        "worker.default.worker-incomplete-clean",
+    );
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-incomplete-clean".to_string(),
+        idempotency_key: "test-incomplete-clean".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+
+    // Expire the lease in the resource manager
+    let _ = authority.runtime.daemon.renew(
+        &lease.name,
+        lease.fence_token,
+        now_unix_ms().saturating_add(25),
+    );
+    thread::sleep(Duration::from_millis(40));
+
+    // Active expiry runs on the uncleaned instance
+    authority.enforce_lease_expiry().unwrap();
+
+    // Cleanup failed due to UninterruptibleSandbox -> complete_revocation must NOT have been called!
+    // Attempting to re-acquire the resource must fail closed (INSUFFICIENT_RESOURCES)
+    let reacquire = authority.acquire_lease(
+        &context,
+        &principal,
+        semantic::Identity {
+            id: "worker-new".to_string(),
+            generation: 1,
+        },
+        semantic::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count: 1,
+            required_capabilities: vec![semantic::CapabilityRequirement {
+                id: "accelerator.compute".to_string(),
+                minimum_revision: 1,
+                required_properties: BTreeMap::new(),
+            }],
+            minimum_capacity: BTreeMap::new(),
+        },
+        u64::MAX,
+    );
+    assert!(reacquire.is_err());
+    assert_eq!(reacquire.unwrap_err().reason_code, "INSUFFICIENT_RESOURCES");
+}
+
+#[test]
+fn expired_lease_cannot_publish_or_authorize_endpoints() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-endpoint-expiry".to_string(),
+        idempotency_key: "test-endpoint-expiry".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            semantic::Identity {
+                id: "worker-endpoint-expiry".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    let worker = semantic_worker_for(
+        "worker-endpoint-expiry",
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(40));
+
+    // Publish endpoint after expiry is rejected
+    let endpoint = semantic_endpoint_for(&worker);
+    let pub_err = authority
+        .publish_endpoint(&context, &principal, endpoint.clone())
+        .unwrap_err();
+    assert_eq!(pub_err.reason_code, "LEASE_NOT_ACTIVE");
+
+    // Authorize endpoint targeting expired grantee lease is rejected
+    let grant = semantic::EndpointGrant {
+        identity: semantic::Identity {
+            id: "grant-1".to_string(),
+            generation: 1,
+        },
+        endpoint: endpoint.identity.clone(),
+        grantee: worker.identity.clone(),
+        lease: lease.identity.clone(),
+        fence_token: lease.fence_token,
+        expires_at_unix_ms: now_unix_ms() + 10_000,
+    };
+    let auth_err = authority
+        .authorize_endpoint(&context, &principal, grant)
+        .unwrap_err();
+    assert!(matches!(
+        auth_err.reason_code.as_str(),
+        "ENDPOINT_NOT_FOUND" | "LEASE_NOT_ACTIVE"
+    ));
+}
+
+#[test]
+fn expired_lease_advances_fence_and_replacement_lease_gets_newer_fence() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context_a = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-fence-advance-a".to_string(),
+        idempotency_key: "test-fence-advance-a".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease_a = authority
+        .acquire_lease(
+            &context_a,
+            &principal,
+            semantic::Identity {
+                id: "worker-fence-a".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(40));
+    authority.enforce_lease_expiry().unwrap();
+
+    // Check that the revoked lease fence advanced
+    let revoked_a = adapter.daemon.lease(&lease_a.identity.id).unwrap();
+    assert!(revoked_a.fence_token > lease_a.fence_token);
+
+    // Replacement lease B gets an even newer fence token
+    let context_b = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-fence-advance-b".to_string(),
+        idempotency_key: "test-fence-advance-b".to_string(),
+    };
+    let lease_b = authority
+        .acquire_lease(
+            &context_b,
+            &principal,
+            semantic::Identity {
+                id: "worker-fence-b".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            u64::MAX,
+        )
+        .unwrap();
+
+    assert!(lease_b.fence_token > revoked_a.fence_token);
+    assert!(lease_b.fence_token > lease_a.fence_token);
+}
+
+#[test]
+fn active_expiry_of_standalone_lease_revokes_and_reclaims_resource() {
+    let adapter = semantic_worker_adapter();
+    let authority = adapter.authority();
+    let context_1 = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-standalone-expiry-1".to_string(),
+        idempotency_key: "test-standalone-expiry-1".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let lease = authority
+        .acquire_lease(
+            &context_1,
+            &principal,
+            semantic::Identity {
+                id: "holder-standalone".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(40));
+
+    let actions = authority.enforce_lease_expiry().unwrap();
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, ProviderReconcileAction::RevokeLease(id) if id == &lease.identity)));
+
+    // Standalone lease had no process -> cleanup is immediate, resource reusable
+    let context_2 = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-standalone-expiry-2".to_string(),
+        idempotency_key: "test-standalone-expiry-2".to_string(),
+    };
+    let new_lease = authority
+        .acquire_lease(
+            &context_2,
+            &principal,
+            semantic::Identity {
+                id: "holder-standalone-2".to_string(),
+                generation: 1,
+            },
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: BTreeMap::new(),
+                }],
+                minimum_capacity: BTreeMap::new(),
+            },
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(new_lease.state, semantic::LeaseState::Active);
+}
+
+#[test]
+fn expiry_durability_failure_fails_closed_and_retries_until_cleanup() {
+    #[derive(Default)]
+    struct SwitchableExpiryJournal {
+        should_fail: std::sync::atomic::AtomicBool,
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for SwitchableExpiryJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if self.should_fail.load(std::sync::atomic::Ordering::SeqCst)
+                && matches!(
+                    record.event,
+                    RuntimeJournalEvent::WorkerLost | RuntimeJournalEvent::LeaseRevoked
+                )
+            {
+                return Err(ProviderError::new(
+                    "switchable-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected active expiry write failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    let journal = Arc::new(SwitchableExpiryJournal::default());
+    let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
+        .with_runtime_journal(journal.clone());
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-expiry-durability-fail".to_string(),
+        idempotency_key: "test-expiry-durability-fail".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "worker-expiring-fail".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+
+    // 1. ACTIVE Lease + running Worker
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query.clone(),
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    let worker = semantic_worker_for(
+        &worker_identity.id,
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+
+    let endpoint = semantic_endpoint_for(&worker);
+    authority
+        .publish_endpoint(&context, &principal, endpoint.clone())
+        .unwrap();
+
+    // 2. TTL expires
+    thread::sleep(Duration::from_millis(40));
+
+    // 3. Inject failure in the first durability/revocation step after expiry detection
+    journal
+        .should_fail
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Watchdog / enforce_lease_expiry runs; first durability step fails
+    let actions = authority.enforce_lease_expiry().unwrap();
+    assert!(!actions
+        .iter()
+        .any(|a| matches!(a, ProviderReconcileAction::RevokeLease(_))));
+
+    // 4. Verify old authority remains rejected (fail-closed)
+    let hb_err = authority
+        .heartbeat_worker(&context, &principal, &worker_identity, &lease.identity, 1)
+        .unwrap_err();
+    assert_eq!(hb_err.reason_code, "FENCE_MISMATCH");
+
+    let renew_err = authority
+        .renew_lease(
+            &context,
+            &principal,
+            &lease.identity,
+            1,
+            now_unix_ms().saturating_add(10_000),
+        )
+        .unwrap_err();
+    assert_eq!(renew_err.reason_code, "LEASE_NOT_ACTIVE");
+
+    let pub_err = authority
+        .publish_endpoint(&context, &principal, endpoint.clone())
+        .unwrap_err();
+    assert_eq!(pub_err.reason_code, "LEASE_NOT_ACTIVE");
+
+    // 5. Verify Resource is NOT reusable (allocation held despite Expired state)
+    let context_realloc = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-realloc-blocked".to_string(),
+        idempotency_key: "test-realloc-blocked".to_string(),
+    };
+    let realloc_err = authority
+        .acquire_lease(
+            &context_realloc,
+            &principal,
+            semantic::Identity {
+                id: "other-worker".to_string(),
+                generation: 1,
+            },
+            query.clone(),
+            now_unix_ms().saturating_add(10_000),
+        )
+        .unwrap_err();
+    assert_eq!(realloc_err.reason_code, "INSUFFICIENT_RESOURCES");
+    assert_eq!(
+        adapter.daemon.lease(&lease.identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Expired
+    );
+
+    // 6. Verify watchdog/reconciliation retries rather than permanently ignoring the EXPIRED Lease
+    let retry_actions = authority.enforce_lease_expiry().unwrap();
+    assert!(!retry_actions
+        .iter()
+        .any(|a| matches!(a, ProviderReconcileAction::RevokeLease(_))));
+
+    // 7. Remove failure
+    journal
+        .should_fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // 8. Cleanup / revocation completes on next cycle
+    let final_actions = authority.enforce_lease_expiry().unwrap();
+    assert!(final_actions.iter().any(
+        |a| matches!(a, ProviderReconcileAction::MarkWorkerLost(id) if id == &worker.identity)
+    ));
+
+    // Verify lease is now Revoked in daemon
+    assert_eq!(
+        adapter.daemon.lease(&lease.identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Revoked
+    );
+
+    // 9. Resource becomes reusable
+    let repl_lease = authority
+        .acquire_lease(
+            &context_realloc,
+            &principal,
+            semantic::Identity {
+                id: "other-worker".to_string(),
+                generation: 1,
+            },
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(repl_lease.state, semantic::LeaseState::Active);
+}
+
+#[test]
+fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
+    #[derive(Default)]
+    struct PostRevokeFailingJournal {
+        fail_fence_advanced: std::sync::atomic::AtomicBool,
+        fail_instance_terminated: std::sync::atomic::AtomicBool,
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for PostRevokeFailingJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if self
+                .fail_fence_advanced
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && record.event == RuntimeJournalEvent::FenceAdvanced
+            {
+                return Err(ProviderError::new(
+                    "post-revoke-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected post-revoke FenceAdvanced write failure",
+                ));
+            }
+            if self
+                .fail_instance_terminated
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && record.event == RuntimeJournalEvent::InstanceTerminated
+            {
+                return Err(ProviderError::new(
+                    "post-revoke-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected post-revoke InstanceTerminated write failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    let journal = Arc::new(PostRevokeFailingJournal::default());
+    let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
+        .with_runtime_journal(journal.clone());
+    let authority = adapter.authority();
+    let context = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-post-revoke-fail".to_string(),
+        idempotency_key: "test-post-revoke-fail".to_string(),
+    };
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "worker-post-revoke-fail".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+
+    // 1. ACTIVE Lease + running Worker
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query.clone(),
+            now_unix_ms().saturating_add(25),
+        )
+        .unwrap();
+
+    let worker = semantic_worker_for(
+        &worker_identity.id,
+        semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
+        lease.identity.clone(),
+        semantic::WorkerState::Registered,
+    );
+    authority
+        .start_worker(&context, &principal, worker.clone())
+        .unwrap();
+
+    let endpoint = semantic_endpoint_for(&worker);
+    authority
+        .publish_endpoint(&context, &principal, endpoint.clone())
+        .unwrap();
+
+    // 2. TTL expires
+    thread::sleep(Duration::from_millis(40));
+
+    // 3. Inject failure in FenceAdvanced (AFTER daemon.revoke has already succeeded)
+    journal
+        .fail_fence_advanced
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Watchdog / enforce_lease_expiry runs:
+    // WorkerLost succeeds -> daemon.revoke succeeds (Lease is now Revoked) -> FenceAdvanced fails!
+    let _ = authority.enforce_lease_expiry();
+
+    // 4. Verify lease in daemon is indeed REVOKED and fence advanced
+    let revoked_lease = adapter.daemon.lease(&lease.identity.id).unwrap();
+    assert_eq!(revoked_lease.state, cy_kernel_api::LeaseState::Revoked);
+    assert!(revoked_lease.fence_token > lease.fence_token);
+
+    // 5. Verify physical allocation remains held (fail-closed) because complete_revocation was not reached
+    assert!(adapter.daemon.is_allocated(&lease.identity.id));
+    let context_realloc = AuthorityCallContext {
+        contract: semantic::ContractRevision::current(),
+        namespace: NamespaceId::default(),
+        request_id: "test-post-revoke-realloc".to_string(),
+        idempotency_key: "test-post-revoke-realloc".to_string(),
+    };
+    let realloc_err = authority
+        .acquire_lease(
+            &context_realloc,
+            &principal,
+            semantic::Identity {
+                id: "other-worker-post-revoke".to_string(),
+                generation: 1,
+            },
+            query.clone(),
+            now_unix_ms().saturating_add(10_000),
+        )
+        .unwrap_err();
+    assert_eq!(realloc_err.reason_code, "INSUFFICIENT_RESOURCES");
+
+    // 6. Verify authority operations remain rejected
+    let hb_err = authority
+        .heartbeat_worker(
+            &context,
+            &principal,
+            &worker_identity,
+            &lease.identity,
+            revoked_lease.fence_token,
+        )
+        .unwrap_err();
+    assert_eq!(hb_err.reason_code, "FENCE_MISMATCH");
+
+    // 7. Verify watchdog continues to discover the REVOKED lease on subsequent cycles (retries)
+    // Clear FenceAdvanced failure, but inject InstanceTerminated failure
+    journal
+        .fail_fence_advanced
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    journal
+        .fail_instance_terminated
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let _ = authority.enforce_lease_expiry();
+    // Allocation remains held because InstanceTerminated failed before complete_revocation
+    assert!(adapter.daemon.is_allocated(&lease.identity.id));
+
+    // 8. Clear all failures: next watchdog cycle finishes complete_revocation
+    journal
+        .fail_instance_terminated
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let final_actions = authority.enforce_lease_expiry().unwrap();
+    assert!(final_actions.iter().any(
+        |a| matches!(a, ProviderReconcileAction::MarkWorkerLost(id) if id == &worker.identity)
+    ));
+
+    // Allocation is released!
+    assert!(!adapter.daemon.is_allocated(&lease.identity.id));
+
+    // 9. Resource becomes reusable and replacement lease succeeds
+    let repl_lease = authority
+        .acquire_lease(
+            &context_realloc,
+            &principal,
+            semantic::Identity {
+                id: "other-worker-post-revoke".to_string(),
+                generation: 1,
+            },
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(repl_lease.state, semantic::LeaseState::Active);
+    assert!(repl_lease.fence_token > revoked_lease.fence_token);
+}

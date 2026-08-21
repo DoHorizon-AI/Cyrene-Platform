@@ -180,6 +180,7 @@ impl KernelServiceAdapter {
         thread::spawn(move || loop {
             thread::sleep(adapter.heartbeat.interval.min(Duration::from_secs(1)));
             adapter.enforce_heartbeat_deadlines();
+            adapter.enforce_lease_expiry();
         })
     }
 

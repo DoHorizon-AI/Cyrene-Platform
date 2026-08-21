@@ -445,6 +445,9 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         Ok(lease.clone())
     }
 
+    /// Forcefully removes a lease's authority when its holder can no longer be
+    /// trusted or when its TTL has expired. Revoke advances the fence token and
+    /// retains physical resource allocation until confirmed cleanup.
     fn revoke(&self, lease_name: &str, fence_token: u64) -> Result<ResourceLease, ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
         expire_due_leases(&mut state, now_unix_ms());
@@ -460,7 +463,10 @@ impl ResourceLeaseManager for InMemoryResourceManager {
                     lease_name,
                 ));
             }
-            if !matches!(lease.state, LeaseState::Active | LeaseState::Releasing) {
+            if !matches!(
+                lease.state,
+                LeaseState::Active | LeaseState::Releasing | LeaseState::Expired
+            ) {
                 return Err(ProviderError::new(
                     "resource-manager",
                     "LEASE_NOT_ACTIVE",
@@ -514,6 +520,22 @@ impl ResourceLeaseManager for InMemoryResourceManager {
             .expect("lease was checked above")
             .clone())
     }
+
+    fn leases(&self) -> Vec<ResourceLease> {
+        let mut state = self.state.lock().expect("resource state lock poisoned");
+        expire_due_leases(&mut state, now_unix_ms());
+        state.leases.values().cloned().collect()
+    }
+
+    fn is_allocated(&self, lease_name: &str) -> bool {
+        let state = self.state.lock().expect("resource state lock poisoned");
+        state.leases.get(lease_name).is_some_and(|lease| {
+            lease
+                .allocations
+                .iter()
+                .any(|a| state.allocated.contains(&a.resource.id))
+        })
+    }
 }
 
 fn expire_due_leases(state: &mut State, now_unix_ms: u64) {
@@ -529,20 +551,6 @@ fn expire_due_leases(state: &mut State, now_unix_ms: u64) {
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     for name in due {
-        let resources = state
-            .leases
-            .get(&name)
-            .map(|lease| {
-                lease
-                    .allocations
-                    .iter()
-                    .map(|allocation| allocation.resource.id.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for resource_id in resources {
-            state.allocated.remove(&resource_id);
-        }
         if let Some(lease) = state.leases.get_mut(&name) {
             lease.state = LeaseState::Expired;
         }
@@ -866,10 +874,24 @@ mod tests {
         let lease = manager.reserve(lease_request).unwrap();
         thread::sleep(std::time::Duration::from_millis(40));
 
+        // Clock expiry invalidates active lease state (Expired), but does not
+        // silently free physical allocation before confirmed cleanup.
         assert_eq!(
             manager.get_lease(&lease.name).unwrap().state,
             LeaseState::Expired
         );
+        assert!(manager.is_allocated("resource-0"));
+
+        // Revoking the expired lease advances the fence and transitions to Revoked.
+        let revoked = manager.revoke(&lease.name, lease.fence_token).unwrap();
+        assert!(revoked.fence_token > lease.fence_token);
+        assert_eq!(revoked.state, LeaseState::Revoked);
+        assert!(manager.is_allocated("resource-0"));
+
+        // Only after confirmed cleanup (complete_revocation) is the resource reusable.
+        manager
+            .complete_revocation(&revoked.name, revoked.fence_token)
+            .unwrap();
         assert!(!manager.is_allocated("resource-0"));
     }
 }
