@@ -4161,3 +4161,266 @@ fn revoked_grant_removed_from_authority_state() {
         "revoking a Grant must not remove the Endpoint it referenced"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: Legacy Lease Lifecycle Closure (watchdog e2e)
+//
+// A Lease bound to a running execution domain must reach RELEASED only after
+// ACTIVE -> RELEASING -> physical cleanup confirmed. The heartbeat-timeout
+// watchdog is a production Lease lifecycle path: these tests drive the real
+// `enforce_heartbeat_deadlines` scan and prove that an incomplete cleanup never
+// exposes RELEASED and never reallocates the resource, while a complete
+// cleanup releases the Lease and lets a replacement Lease advance the Fence.
+// ---------------------------------------------------------------------------
+
+/// Sandbox whose `stop()` reports an incomplete physical cleanup, simulating a
+/// worker that cannot be reaped after a heartbeat timeout.
+struct UninterruptibleSandbox;
+
+impl ProcessRuntime for UninterruptibleSandbox {
+    fn preflight(&self) -> NodeCapabilities {
+        NodeCapabilities {
+            ready: true,
+            facts: Vec::new(),
+            enforcement: Vec::new(),
+        }
+    }
+
+    fn launch(
+        &self,
+        _plan: &LaunchPlan,
+        _binding: &DeviceBinding,
+    ) -> Result<ProcessHandle, ProviderError> {
+        Ok(ProcessHandle {
+            pid: 1,
+            cgroup_path: PathBuf::from("/test"),
+            start_time_ticks: Some(1),
+            transport_socket: None,
+        })
+    }
+
+    fn stop(
+        &self,
+        _handle: &ProcessHandle,
+        _request: &StopRequest,
+    ) -> Result<CleanupReport, ProviderError> {
+        Ok(CleanupReport {
+            complete: false,
+            exit_code: None,
+            oom_killed: false,
+            conditions: vec![ProcessCondition {
+                reason_code: "REAP_TIMEOUT".to_string(),
+                summary: "instance could not be reaped".to_string(),
+            }],
+            reason_code: "PROCESS_UNINTERRUPTIBLE".to_string(),
+        })
+    }
+}
+
+impl SandboxBackend for UninterruptibleSandbox {
+    fn backend_id(&self) -> &str {
+        "uninterruptible-test"
+    }
+}
+
+/// Builds an adapter holding one unique resource, an ACTIVE Lease bound to a
+/// started execution domain, and an overdue heartbeat so the next watchdog
+/// scan treats `instance_name` as timed out.
+fn watchdog_instance_scenario(
+    runtime: Arc<dyn SandboxBackend>,
+    instance_name: &str,
+) -> (KernelServiceAdapter, cy_kernel_api::ResourceLease) {
+    use crate::watchdog::InstanceActorState;
+
+    let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
+        .with_worker_heartbeat(WorkerHeartbeatConfig {
+            socket_path: PathBuf::from("/run/cyrene/watchdog.sock"),
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_millis(50),
+            graceful_stop: Duration::from_millis(50),
+            shutdown_ack_timeout: Duration::from_millis(20),
+        });
+    let holder = semantic::Identity {
+        id: "watchdog-holder".to_string(),
+        generation: 1,
+    };
+    let requirements = core_v1::ResourceRequirements {
+        cpu: Some(core_v1::CpuRequirements {
+            request_millicores: 500,
+            limit_millicores: 750,
+        }),
+        memory: Some(core_v1::MemoryRequirements {
+            request_bytes: 1024,
+            limit_bytes: 2048,
+        }),
+        ephemeral_storage_limit_bytes: 0,
+        accelerators: vec![core_v1::AcceleratorRequirements {
+            count: 1,
+            ..Default::default()
+        }],
+    };
+    let request =
+        resource_request("watchdog-lease", 1, holder, None, &requirements).expect("request");
+    let lease = adapter
+        .daemon
+        .reserve(request)
+        .expect("unique resource is allocatable");
+
+    let mut actor = InstanceActor::new(
+        instance_name,
+        lease.name.clone(),
+        lease.fence_token,
+        runtime,
+        LaunchPlan {
+            instance_name: instance_name.to_string(),
+            executable: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cgroup_name: instance_name.to_string(),
+            limits: CgroupLimits::default(),
+            transport_socket: None,
+        },
+        DeviceBinding {
+            resource_id: lease.name.clone(),
+            nodes: Vec::new(),
+            environment: BTreeMap::new(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Soft,
+            adapter_id: "test".to_string(),
+            reason_code: "test".to_string(),
+        },
+        Duration::from_millis(10),
+    );
+    actor.start().expect("watchdog instance must start");
+    assert_eq!(actor.state(), InstanceActorState::Healthy);
+
+    let mut process = managed_test_process(
+        instance_name,
+        lease.fence_token,
+        Some(core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        }),
+    );
+    process.actor = actor;
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .insert(instance_name.to_string(), process);
+    // Make the instance overdue: last heartbeat is far older than the 10ms
+    // deadline configured on the actor.
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .get_mut(instance_name)
+        .unwrap()
+        .actor
+        .on_heartbeat_received(std::time::Instant::now() - Duration::from_secs(1));
+    (adapter, lease)
+}
+
+#[test]
+fn watchdog_incomplete_cleanup_never_releases_and_blocks_reacquire() {
+    let (adapter, lease) =
+        watchdog_instance_scenario(Arc::new(UninterruptibleSandbox), "watchdog-w1");
+    let old_fence = lease.fence_token;
+
+    adapter.enforce_heartbeat_deadlines();
+
+    // The Lease must never reach RELEASED: it fails closed instead.
+    let after = adapter.daemon.lease(&lease.name).unwrap();
+    assert_eq!(
+        after.state,
+        cy_kernel_api::LeaseState::Failed,
+        "incomplete cleanup must fail the Lease, never release it"
+    );
+    assert_ne!(
+        after.state,
+        cy_kernel_api::LeaseState::Released,
+        "RELEASED must never be visible for an incompletely cleaned domain"
+    );
+
+    // The still-held allocation must block reacquisition.
+    let holder = semantic::Identity {
+        id: "watchdog-holder-retry".to_string(),
+        generation: 1,
+    };
+    let requirements = core_v1::ResourceRequirements {
+        cpu: Some(core_v1::CpuRequirements {
+            request_millicores: 500,
+            limit_millicores: 750,
+        }),
+        memory: Some(core_v1::MemoryRequirements {
+            request_bytes: 1024,
+            limit_bytes: 2048,
+        }),
+        ephemeral_storage_limit_bytes: 0,
+        accelerators: vec![core_v1::AcceleratorRequirements {
+            count: 1,
+            ..Default::default()
+        }],
+    };
+    let request =
+        resource_request("watchdog-lease-retry", 1, holder, None, &requirements).expect("request");
+    let reacquire = adapter.daemon.reserve(request);
+    assert!(
+        reacquire.is_err(),
+        "the still-held FAILED lease must block reallocation with INSUFFICIENT_RESOURCES"
+    );
+    assert!(
+        old_fence > 0,
+        "the acquired lease must carry a non-zero Fence"
+    );
+}
+
+#[test]
+fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
+    let (adapter, lease) = watchdog_instance_scenario(Arc::new(FakeSandbox), "watchdog-w2");
+    let old_fence = lease.fence_token;
+
+    adapter.enforce_heartbeat_deadlines();
+
+    // Physical cleanup completed: the Lease is RELEASED.
+    let after = adapter.daemon.lease(&lease.name).unwrap();
+    assert_eq!(
+        after.state,
+        cy_kernel_api::LeaseState::Released,
+        "complete cleanup must release the Lease"
+    );
+
+    // The resource is allocatable again and a replacement Lease succeeds with
+    // a strictly higher Fence token (monotonic fencing).
+    let holder = semantic::Identity {
+        id: "watchdog-holder-replacement".to_string(),
+        generation: 1,
+    };
+    let requirements = core_v1::ResourceRequirements {
+        cpu: Some(core_v1::CpuRequirements {
+            request_millicores: 500,
+            limit_millicores: 750,
+        }),
+        memory: Some(core_v1::MemoryRequirements {
+            request_bytes: 1024,
+            limit_bytes: 2048,
+        }),
+        ephemeral_storage_limit_bytes: 0,
+        accelerators: vec![core_v1::AcceleratorRequirements {
+            count: 1,
+            ..Default::default()
+        }],
+    };
+    let request = resource_request("watchdog-lease-replacement", 1, holder, None, &requirements)
+        .expect("request");
+    let replacement = adapter
+        .daemon
+        .reserve(request)
+        .expect("replacement Lease must succeed after complete cleanup");
+    assert!(
+        replacement.fence_token > old_fence,
+        "replacement Fence ({}) must exceed the old Fence ({})",
+        replacement.fence_token,
+        old_fence
+    );
+}

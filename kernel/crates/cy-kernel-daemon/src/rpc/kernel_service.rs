@@ -491,10 +491,26 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 return Err(provider_status(error));
             }
         }
+        // A terminated Worker that held the released Lease no longer has
+        // authority: its Endpoint/Grant metadata must not outlive the Lease.
+        let worker_identity = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&request.process_name)
+            .and_then(|process| {
+                process
+                    .semantic_worker
+                    .as_ref()
+                    .map(|worker| worker.identity.clone())
+            });
         self.instances
             .lock()
             .expect("instance lock poisoned")
             .remove(&request.process_name);
+        if let Some(identity) = worker_identity {
+            self.authority.purge_endpoint_authority(&identity);
+        }
         Ok(Response::new(
             self.operation_success(operation_name, request.process_name),
         ))
@@ -624,10 +640,26 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 return Err(provider_status(error));
             }
         }
+        // A cancelled Worker that held the released Lease no longer has
+        // authority: its Endpoint/Grant metadata must not outlive the Lease.
+        let worker_identity = self
+            .instances
+            .lock()
+            .expect("instance lock poisoned")
+            .get(&target)
+            .and_then(|process| {
+                process
+                    .semantic_worker
+                    .as_ref()
+                    .map(|worker| worker.identity.clone())
+            });
         self.instances
             .lock()
             .expect("instance lock poisoned")
             .remove(&target);
+        if let Some(identity) = worker_identity {
+            self.authority.purge_endpoint_authority(&identity);
+        }
         Ok(Response::new(self.operation_cancelled(name, target)))
     }
 
