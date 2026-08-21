@@ -5083,3 +5083,365 @@ fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
     );
     drop(records);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 8: Canonical / Legacy Convergence parity
+//
+// Legacy RPCs must be compatibility projections over the shared semantic core
+// (the resource-manager ledger and the shared release helper), never an
+// independent Lease lifecycle. These tests prove legacy and canonical paths
+// reach identical semantic results for the same scenario.
+// ---------------------------------------------------------------------------
+
+// Lease release parity: on incomplete physical cleanup, the legacy `release_lease`
+// RPC and the canonical `authority.release_lease` fail closed identically —
+// the Lease is FAILED (never RELEASED) and the resource cannot be reacquired.
+#[test]
+fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() {
+    let resources = vec![test_resource(), test_resource_with_id("resource-2")];
+    let hardware = Arc::new(TestHardware {
+        resources: resources.clone(),
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", resources)),
+        Arc::new(UninterruptibleSandbox),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
+    let authority = adapter.authority();
+    // Distinct idempotency keys so the two acquires produce distinct Leases.
+    let context_canonical = scoped_authority_context("ns-parity", "parity-canonical");
+    let context_legacy = scoped_authority_context("ns-parity", "parity-legacy");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let bind_stuck = |adapter: &KernelServiceAdapter,
+                      worker_id: &str,
+                      daemon_lease: &cy_kernel_api::ResourceLease| {
+        let mut actor = InstanceActor::new(
+            worker_id,
+            daemon_lease.name.clone(),
+            daemon_lease.fence_token,
+            Arc::new(UninterruptibleSandbox),
+            LaunchPlan {
+                instance_name: worker_id.to_string(),
+                executable: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+                cgroup_name: worker_id.to_string(),
+                limits: CgroupLimits::default(),
+                transport_socket: None,
+            },
+            DeviceBinding {
+                resource_id: daemon_lease.name.clone(),
+                nodes: Vec::new(),
+                environment: BTreeMap::new(),
+                required_gids: Vec::new(),
+                enforcement: EnforcementMode::Soft,
+                adapter_id: "test".to_string(),
+                reason_code: "test".to_string(),
+            },
+            Duration::from_secs(30),
+        );
+        actor.start().expect("stuck instance must start");
+        let mut process = managed_test_process(
+            worker_id,
+            daemon_lease.fence_token,
+            Some(core_v1::ResourceLeaseRef {
+                lease_name: daemon_lease.name.clone(),
+                fence_token: daemon_lease.fence_token,
+            }),
+        );
+        process.actor = actor;
+        adapter
+            .instances
+            .lock()
+            .unwrap()
+            .insert(worker_id.to_string(), process);
+    };
+
+    // --- Canonical path ---
+    let canonical_worker = semantic::Identity {
+        id: "worker-canonical".to_string(),
+        generation: 1,
+    };
+    let canonical_lease = authority
+        .acquire_lease(
+            &context_canonical,
+            &principal,
+            canonical_worker.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    let canonical_daemon_name = authority
+        .runtime
+        .leases
+        .lock()
+        .unwrap()
+        .get(&context_canonical.object_ref(canonical_lease.identity.clone()))
+        .cloned()
+        .expect("canonical lease is registered");
+    bind_stuck(
+        &adapter,
+        "worker-canonical",
+        &adapter.daemon.lease(&canonical_daemon_name).unwrap(),
+    );
+    let canonical_error = authority
+        .release_lease(
+            &context_canonical,
+            &principal,
+            &canonical_lease.identity,
+            canonical_lease.fence_token,
+        )
+        .unwrap_err();
+    assert_eq!(
+        canonical_error.reason_code, "CLEANUP_INCOMPLETE",
+        "canonical release must fail closed on incomplete cleanup"
+    );
+    let canonical_after = adapter.daemon.lease(&canonical_daemon_name).unwrap();
+    assert_eq!(
+        canonical_after.state,
+        cy_kernel_api::LeaseState::Failed,
+        "canonical release must leave the Lease FAILED, never RELEASED"
+    );
+
+    // --- Legacy path ---
+    let legacy_worker = semantic::Identity {
+        id: "worker-legacy".to_string(),
+        generation: 1,
+    };
+    // Acquire through the legacy path (daemon.reserve) so the lease identity
+    // is the daemon lease name the legacy release RPC resolves by.
+    let legacy_requirements = core_v1::ResourceRequirements {
+        cpu: Some(core_v1::CpuRequirements {
+            request_millicores: 500,
+            limit_millicores: 750,
+        }),
+        memory: Some(core_v1::MemoryRequirements {
+            request_bytes: 1024,
+            limit_bytes: 2048,
+        }),
+        ephemeral_storage_limit_bytes: 0,
+        accelerators: vec![core_v1::AcceleratorRequirements {
+            count: 1,
+            ..Default::default()
+        }],
+    };
+    let legacy_request = resource_request(
+        "legacy-parity-lease",
+        1,
+        legacy_worker.clone(),
+        None,
+        &legacy_requirements,
+    )
+    .expect("legacy request");
+    let legacy_daemon_lease = adapter
+        .daemon
+        .reserve(legacy_request)
+        .expect("the second resource is allocatable");
+    bind_stuck(&adapter, "worker-legacy", &legacy_daemon_lease);
+    let legacy_error = runtime
+        .block_on(
+            <KernelServiceAdapter as core_v1::kernel_service_server::KernelService>::release_lease(
+                &adapter,
+                authority_request(core_v1::ReleaseLeaseRequest {
+                    mutation: None,
+                    lease: Some(semantic_v1::Identity {
+                        id: legacy_daemon_lease.name.clone(),
+                        generation: legacy_daemon_lease.generation,
+                    }),
+                    fence_token: legacy_daemon_lease.fence_token,
+                }),
+            ),
+        )
+        .unwrap_err();
+    assert_eq!(
+        legacy_error
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("CLEANUP_INCOMPLETE"),
+        "legacy release must fail closed on incomplete cleanup"
+    );
+    let legacy_after = adapter.daemon.lease(&legacy_daemon_lease.name).unwrap();
+    assert_eq!(
+        legacy_after.state,
+        cy_kernel_api::LeaseState::Failed,
+        "legacy release must leave the Lease FAILED, never RELEASED"
+    );
+
+    // Both paths leave the resource non-reacquirable (no silently reusable
+    // resource) and neither exposes RELEASED.
+    assert_ne!(canonical_after.state, cy_kernel_api::LeaseState::Released);
+    assert_ne!(legacy_after.state, cy_kernel_api::LeaseState::Released);
+    let retry = authority.acquire_lease(
+        &context_legacy,
+        &principal,
+        semantic::Identity {
+            id: "worker-parity-retry".to_string(),
+            generation: 1,
+        },
+        semantic::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count: 1,
+            required_capabilities: vec![semantic::CapabilityRequirement {
+                id: "accelerator.compute".to_string(),
+                minimum_revision: 1,
+                required_properties: BTreeMap::new(),
+            }],
+            minimum_capacity: BTreeMap::new(),
+        },
+        u64::MAX,
+    );
+    assert!(
+        retry.is_err(),
+        "both FAILED Leases must keep the resources non-reacquirable"
+    );
+}
+
+// Legacy launch_plugin convergence: like canonical start_worker it now persists
+// the Class B pre-launch intent before the physical spawn, so restart recovery
+// can classify intent-without-outcome identically.
+#[test]
+fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() {
+    use core_v1::kernel_service_server::KernelService;
+    #[derive(Default)]
+    struct IntentRecordingJournal {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for IntentRecordingJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    struct ParityResolver;
+    impl InstalledPluginResolver for ParityResolver {
+        fn resolve_launch_plan(
+            &self,
+            installation: &VerifiedInstallation,
+            instance_name: &str,
+        ) -> Result<ResolvedLaunchPlan, ProviderError> {
+            Ok(ResolvedLaunchPlan {
+                installation: installation.clone(),
+                plan: LaunchPlan {
+                    instance_name: instance_name.to_string(),
+                    executable: PathBuf::from("worker"),
+                    args: Vec::new(),
+                    environment: BTreeMap::new(),
+                    cgroup_name: format!("instance-{instance_name}"),
+                    limits: CgroupLimits::default(),
+                    transport_socket: None,
+                },
+            })
+        }
+
+        fn resolve_worker_launch_plan(
+            &self,
+            _worker: &semantic::Worker,
+        ) -> Result<ResolvedLaunchPlan, ProviderError> {
+            Err(ProviderError::new("test", "UNUSED", "not used here"))
+        }
+    }
+
+    let journal = Arc::new(IntentRecordingJournal::default());
+    let hardware = Arc::new(TestHardware {
+        resources: vec![test_resource()],
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", vec![test_resource()])),
+        Arc::new(FakeSandbox),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(ParityResolver))
+        .with_runtime_journal(journal.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let operation = runtime
+        .block_on(
+            adapter.launch_plugin(authority_request(core_v1::LaunchPluginRequest {
+                node: Some(core_v1::NodeRef {
+                    node_id: "node".to_string(),
+                    node_epoch: 7,
+                }),
+                plugin: Some(core_v1::InstalledPluginRef {
+                    installation_name: "plugin-parity".to_string(),
+                    plugin_id: "test".to_string(),
+                    version: "1".to_string(),
+                    component_id: "test".to_string(),
+                    manifest_digest: "sha256:test".to_string(),
+                    artifact_digest: "sha256:test".to_string(),
+                    verified_signature_identity: "test".to_string(),
+                }),
+                allocation: Some(core_v1::launch_plugin_request::Allocation::ResourceClaim(
+                    core_v1::ResourceRequirements {
+                        cpu: Some(core_v1::CpuRequirements {
+                            request_millicores: 500,
+                            limit_millicores: 750,
+                        }),
+                        memory: Some(core_v1::MemoryRequirements {
+                            request_bytes: 1024,
+                            limit_bytes: 2048,
+                        }),
+                        ephemeral_storage_limit_bytes: 0,
+                        accelerators: vec![core_v1::AcceleratorRequirements {
+                            count: 1,
+                            ..Default::default()
+                        }],
+                    },
+                )),
+                mutation: Some(core_v1::MutationContext {
+                    request: Some(core_v1::RequestContext {
+                        request_id: "parity-launch".to_string(),
+                        ..Default::default()
+                    }),
+                    idempotency_key: "parity-launch".to_string(),
+                    expected_generation: Some(1),
+                }),
+                ..Default::default()
+            })),
+        )
+        .unwrap()
+        .into_inner();
+    assert_eq!(operation.state, core_v1::OperationState::Running as i32);
+
+    let records = journal.records.lock().unwrap();
+    let intent = records
+        .iter()
+        .find(|record| record.event == RuntimeJournalEvent::InstanceLaunching);
+    assert!(
+        intent.is_some_and(|record| record.instance_name.as_deref() == Some("plugin-parity")),
+        "legacy launch_plugin must persist the pre-launch intent like canonical start_worker"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.event == RuntimeJournalEvent::InstanceLaunched),
+        "the launch outcome must also be durably recorded"
+    );
+    drop(records);
+}

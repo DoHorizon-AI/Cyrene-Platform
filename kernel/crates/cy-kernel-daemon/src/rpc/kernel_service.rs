@@ -318,6 +318,25 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             binding,
             self.heartbeat.timeout,
         );
+        let lease_ref = core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        };
+        // Class B durable intent (canonical parity with start_worker): persist
+        // BEFORE the physical spawn so restart recovery can classify a launch
+        // whose outcome records are lost as intent-without-outcome.
+        if let Err(error) = self.record_runtime(
+            RuntimeJournalEvent::InstanceLaunching,
+            Some(&instance_name),
+            Some(&lease_ref),
+            "WORKER_LAUNCHING",
+        ) {
+            return Err(provider_status(
+                self.release_owned_lease(owned_lease, &lease)
+                    .err()
+                    .unwrap_or(error),
+            ));
+        }
         if let Err(error) = actor.start() {
             return Err(provider_status(
                 self.release_owned_lease(owned_lease, &lease)
@@ -325,25 +344,41 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     .unwrap_or(error),
             ));
         }
-        let lease_ref = core_v1::ResourceLeaseRef {
-            lease_name: lease.name,
-            fence_token: lease.fence_token,
-        };
         let evidence = match actor.recovery_evidence() {
             Ok(evidence) => evidence,
             Err(error) => {
-                let _ = actor.stop(&cy_kernel_api::StopRequest {
+                let stop_report = actor.stop(&cy_kernel_api::StopRequest {
                     grace_period: Duration::ZERO,
                     immediate: true,
                 });
+                if let Ok(report) = &stop_report {
+                    if !report.complete {
+                        let _ = self.record_runtime(
+                            RuntimeJournalEvent::InstanceCleanupFailed,
+                            Some(&instance_name),
+                            Some(&lease_ref),
+                            &report.reason_code,
+                        );
+                    }
+                }
                 return Err(provider_status(error));
             }
         };
         if let Err(error) = self.record_runtime_launch(&instance_name, &lease_ref, evidence) {
-            let _ = actor.stop(&cy_kernel_api::StopRequest {
+            let stop_report = actor.stop(&cy_kernel_api::StopRequest {
                 grace_period: Duration::ZERO,
                 immediate: true,
             });
+            if let Ok(report) = &stop_report {
+                if !report.complete {
+                    let _ = self.record_runtime(
+                        RuntimeJournalEvent::InstanceCleanupFailed,
+                        Some(&instance_name),
+                        Some(&lease_ref),
+                        &report.reason_code,
+                    );
+                }
+            }
             return Err(provider_status(error));
         }
         self.instances
