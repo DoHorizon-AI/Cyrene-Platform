@@ -19,7 +19,7 @@ use cy_adapter_client::HardwareAdapterObservation;
 use cy_kernel_api::{
     semantic, AuthorityCallContext, DurableEventStore, InstalledPluginResolver,
     KernelProviderAuthority, NamespaceId, NoopRuntimeJournal, ProviderError, ResourceLease,
-    RuntimeJournalEvent, RuntimeJournalSink,
+    RuntimeJournalEvent, RuntimeJournalSink, StopRequest,
 };
 use cy_proto::{core_v1, core_v2};
 use tokio::sync::broadcast;
@@ -427,31 +427,119 @@ impl KernelServiceAdapter {
         if !owned_lease {
             return Ok(());
         }
-        let lease_ref = core_v1::ResourceLeaseRef {
+        self.release_lease_with_cleanup(&core_v1::ResourceLeaseRef {
             lease_name: lease.name.clone(),
             fence_token: lease.fence_token,
-        };
+        })
+    }
+
+    /// Releases a lease only after physical cleanup of the instance still
+    /// fenced by it has been confirmed.
+    ///
+    /// `ACTIVE -> RELEASED` is never a single mutation. The ledger moves to
+    /// `RELEASING` first, the sandbox is reaped, and only a complete
+    /// `CleanupReport` authorizes `complete_release`. Any failure after
+    /// `RELEASING` ends in `FAILED` with the allocation still held, so a
+    /// half-cleaned resource can never be handed to a new lease.
+    pub(crate) fn release_lease_with_cleanup(
+        &self,
+        lease_ref: &core_v1::ResourceLeaseRef,
+    ) -> Result<(), ProviderError> {
         self.record_runtime(
             RuntimeJournalEvent::LeaseReleaseStarted,
             None,
-            Some(&lease_ref),
+            Some(lease_ref),
             "LEASE_RELEASE_STARTED",
         )?;
-        let releasing = self.daemon.begin_release(&lease.name, lease.fence_token)?;
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReleased,
-            None,
-            Some(&lease_ref),
-            "LEASE_RELEASED",
-        ) {
-            let _ = self.daemon.fail_release(&releasing.name, lease.fence_token);
-            return Err(error);
+        let releasing = self
+            .daemon
+            .begin_release(&lease_ref.lease_name, lease_ref.fence_token)?;
+        let outcome = self.confirm_lease_cleanup(lease_ref).and_then(|cleaned| {
+            self.record_runtime(
+                RuntimeJournalEvent::LeaseReleased,
+                cleaned.as_deref(),
+                Some(lease_ref),
+                "LEASE_RELEASED",
+            )?;
+            self.daemon
+                .complete_release(&lease_ref.lease_name, lease_ref.fence_token)?;
+            Ok(cleaned)
+        });
+        match outcome {
+            Ok(cleaned) => {
+                if let Some(instance_name) = cleaned {
+                    self.instances
+                        .lock()
+                        .expect("instance lock poisoned")
+                        .remove(&instance_name);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self
+                    .daemon
+                    .fail_release(&releasing.name, lease_ref.fence_token);
+                Err(error)
+            }
         }
-        if let Err(error) = self.daemon.complete_release(&lease.name, lease.fence_token) {
-            let _ = self.daemon.fail_release(&releasing.name, lease.fence_token);
-            return Err(error);
+    }
+
+    /// Reaps the sandboxed instance still fenced by `lease_ref` and returns its
+    /// runtime name when one was cleaned. An incomplete report is an error so
+    /// the caller keeps the physical allocation held.
+    fn confirm_lease_cleanup(
+        &self,
+        lease_ref: &core_v1::ResourceLeaseRef,
+    ) -> Result<Option<String>, ProviderError> {
+        let cleaned = {
+            let mut instances = self.instances.lock().expect("instance lock poisoned");
+            let bound = instances.iter_mut().find(|(_, process)| {
+                process.lease.as_ref().is_some_and(|lease| {
+                    lease.lease_name == lease_ref.lease_name
+                        && lease.fence_token == lease_ref.fence_token
+                })
+            });
+            match bound {
+                Some((instance_name, process)) => {
+                    let instance_name = instance_name.clone();
+                    let report = process
+                        .actor
+                        .stop(&StopRequest {
+                            grace_period: self.heartbeat.graceful_stop,
+                            immediate: false,
+                        })?
+                        .clone();
+                    Some((instance_name, report))
+                }
+                None => None,
+            }
+        };
+        let Some((instance_name, report)) = cleaned else {
+            return Ok(None);
+        };
+        self.publish_cleanup_events(&instance_name, &report);
+        if !report.complete {
+            if let Err(error) = self.record_runtime(
+                RuntimeJournalEvent::InstanceCleanupFailed,
+                Some(&instance_name),
+                Some(lease_ref),
+                &report.reason_code,
+            ) {
+                eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+            }
+            return Err(ProviderError::new(
+                "kernel-daemon",
+                "CLEANUP_INCOMPLETE",
+                &report.reason_code,
+            ));
         }
-        Ok(())
+        self.record_runtime(
+            RuntimeJournalEvent::InstanceTerminated,
+            Some(&instance_name),
+            Some(lease_ref),
+            "CLEANUP_COMPLETE",
+        )?;
+        Ok(Some(instance_name))
     }
 }
 

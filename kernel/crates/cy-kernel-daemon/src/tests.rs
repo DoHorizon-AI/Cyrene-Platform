@@ -3338,3 +3338,251 @@ fn owned_startup_failure_keeps_resource_unavailable_when_release_cannot_complete
         .block_on(adapter.acquire_lease(authority_request(request("replacement"))))
         .is_err());
 }
+
+/// End-to-end proof of the two-phase release invariant: a resource whose
+/// instance cannot be physically reaped must never reach `RELEASED`. The
+/// legacy `ReleaseLease` RPC must fail closed with `CLEANUP_INCOMPLETE`, the
+/// lease must be left `FAILED` (allocation still held), and the half-cleaned
+/// resource must NOT be handed to a replacement lease.
+///
+/// This exercises the real `release_lease` gRPC path (not just the port),
+/// driving it through the shared `release_lease_with_cleanup` helper that now
+/// gates every legacy release on confirmed physical cleanup.
+#[test]
+fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
+    use crate::watchdog::{InstanceActor, InstanceActorState};
+    use cy_kernel_api::{
+        CgroupLimits, DeviceBinding, EnforcementMode, LaunchPlan, ProcessCondition, ProcessHandle,
+        ProcessRuntime, SandboxBackend, StopRequest,
+    };
+    use core_v1::kernel_service_server::KernelService;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    /// Sandbox whose `stop` reports an incomplete cleanup: the instance is
+    /// stuck (e.g. an uninterruptible process) and must be quarantined, never
+    /// silently released back to the pool.
+    struct StuckSandbox;
+
+    impl ProcessRuntime for StuckSandbox {
+        fn preflight(&self) -> cy_kernel_api::NodeCapabilities {
+            cy_kernel_api::NodeCapabilities {
+                ready: true,
+                facts: Vec::new(),
+                enforcement: Vec::new(),
+            }
+        }
+        fn launch(
+            &self,
+            _plan: &LaunchPlan,
+            _binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            Ok(ProcessHandle {
+                pid: 1,
+                cgroup_path: PathBuf::from("/test"),
+                start_time_ticks: Some(1),
+                transport_socket: None,
+            })
+        }
+        fn stop(
+            &self,
+            _handle: &ProcessHandle,
+            _request: &StopRequest,
+        ) -> Result<cy_kernel_api::CleanupReport, ProviderError> {
+            Ok(cy_kernel_api::CleanupReport {
+                complete: false,
+                exit_code: None,
+                oom_killed: false,
+                conditions: vec![ProcessCondition {
+                    reason_code: "REAP_TIMEOUT".to_string(),
+                    summary: "instance could not be reaped".to_string(),
+                }],
+                reason_code: "PROCESS_UNINTERRUPTIBLE".to_string(),
+            })
+        }
+    }
+
+    impl SandboxBackend for StuckSandbox {
+        fn backend_id(&self) -> &str {
+            "stuck-test"
+        }
+    }
+
+    let adapter = semantic_lease_adapter();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Acquire the sole resource through the legacy KernelService RPC.
+    let lease = runtime
+        .block_on(
+            adapter.acquire_lease(Request::new(core_v1::AcquireLeaseRequest {
+                mutation: Some(core_v1::MutationContext {
+                    request: Some(core_v1::RequestContext {
+                        request_id: "e2e-release".to_string(),
+                        ..Default::default()
+                    }),
+                    idempotency_key: "e2e-release".to_string(),
+                    expected_generation: Some(1),
+                }),
+                node: Some(core_v1::NodeRef {
+                    node_id: "node".to_string(),
+                    node_epoch: 7,
+                }),
+                holder: Some(semantic_v1::Identity {
+                    id: "worker-e2e".to_string(),
+                    generation: 1,
+                }),
+                query: Some(semantic_v1::ResourceQuery {
+                    resource_class: "accelerator".to_string(),
+                    count: 1,
+                    required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                        id: "accelerator.compute".to_string(),
+                        minimum_revision: 1,
+                        required_properties: Default::default(),
+                    }],
+                    minimum_capacity: Default::default(),
+                }),
+                ttl: Some(prost_types::Duration {
+                    seconds: 30,
+                    nanos: 0,
+                }),
+                cpu: None,
+                memory: None,
+            })),
+        )
+        .unwrap()
+        .into_inner();
+
+    let lease_identity = lease.identity.clone().expect("acquired lease has an identity");
+    let fence_token = lease.fence_token;
+
+    // Register a running instance bound to the acquired lease, backed by a
+    // sandbox that reports an incomplete cleanup when stopped.
+    let mut actor = InstanceActor::new(
+        "stuck-instance",
+        lease_identity.id.clone(),
+        fence_token,
+        Arc::new(StuckSandbox),
+        LaunchPlan {
+            instance_name: "stuck-instance".to_string(),
+            executable: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cgroup_name: "stuck-instance".to_string(),
+            limits: CgroupLimits::default(),
+            transport_socket: None,
+        },
+        DeviceBinding {
+            resource_id: "test".to_string(),
+            nodes: Vec::new(),
+            environment: BTreeMap::new(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Soft,
+            adapter_id: "test".to_string(),
+            reason_code: "test".to_string(),
+        },
+        Duration::from_secs(30),
+    );
+    actor.start().expect("stuck instance must start");
+    assert_eq!(actor.state(), InstanceActorState::Healthy);
+
+    let mut process = managed_test_process(
+        "stuck-instance",
+        fence_token,
+        Some(core_v1::ResourceLeaseRef {
+            lease_name: lease_identity.id.clone(),
+            fence_token,
+        }),
+    );
+    process.actor = actor;
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .insert("stuck-instance".to_string(), process);
+
+    // Release through the legacy RPC: because the instance cannot be reaped,
+    // `release_lease_with_cleanup` must fail closed with CLEANUP_INCOMPLETE.
+    let release = runtime.block_on(
+        adapter.release_lease(Request::new(core_v1::ReleaseLeaseRequest {
+            mutation: None,
+            lease: Some(lease_identity.clone()),
+            fence_token,
+        })),
+    );
+    assert!(
+        release.is_err(),
+        "release must fail when physical cleanup is incomplete"
+    );
+    assert_eq!(
+        release
+            .unwrap_err()
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("CLEANUP_INCOMPLETE"),
+        "a failed physical cleanup must surface CLEANUP_INCOMPLETE"
+    );
+
+    // The lease must be FAILED, never RELEASED: the allocation is still held
+    // so it cannot be handed to a replacement while physically dirty.
+    let held = adapter.daemon.lease(&lease_identity.id).unwrap();
+    assert_eq!(
+        held.state,
+        cy_kernel_api::LeaseState::Failed,
+        "a lease whose cleanup could not be confirmed must remain FAILED, not RELEASED"
+    );
+
+    // The half-cleaned resource must NOT be reacquired by another lease.
+    let reacquire = runtime.block_on(
+        adapter.acquire_lease(Request::new(core_v1::AcquireLeaseRequest {
+            mutation: Some(core_v1::MutationContext {
+                request: Some(core_v1::RequestContext {
+                    request_id: "e2e-reacquire".to_string(),
+                    ..Default::default()
+                }),
+                idempotency_key: "e2e-reacquire".to_string(),
+                expected_generation: Some(1),
+            }),
+            node: Some(core_v1::NodeRef {
+                node_id: "node".to_string(),
+                node_epoch: 7,
+            }),
+            holder: Some(semantic_v1::Identity {
+                id: "worker-replacement".to_string(),
+                generation: 1,
+            }),
+            query: Some(semantic_v1::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: vec![semantic_v1::CapabilityRequirement {
+                    id: "accelerator.compute".to_string(),
+                    minimum_revision: 1,
+                    required_properties: Default::default(),
+                }],
+                minimum_capacity: Default::default(),
+            }),
+            ttl: Some(prost_types::Duration {
+                seconds: 30,
+                nanos: 0,
+            }),
+            cpu: None,
+            memory: None,
+        })),
+    );
+    assert!(
+        reacquire.is_err(),
+        "an incompletely cleaned resource must not be reacquired"
+    );
+    assert_eq!(
+        reacquire
+            .unwrap_err()
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("INSUFFICIENT_RESOURCES"),
+        "the still-held FAILED lease must block reallocation with INSUFFICIENT_RESOURCES"
+    );
+}

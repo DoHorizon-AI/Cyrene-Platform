@@ -109,33 +109,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             lease_name: lease_identity.id.clone(),
             fence_token: request.fence_token,
         };
-        // Persist release intent before transitioning to RELEASING. The
-        // allocation remains fenced until cleanup and durable completion.
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReleaseStarted,
-            None,
-            Some(&journal_lease),
-            "LEASE_RELEASE_STARTED",
-        ) {
-            return Err(provider_status(error));
-        }
-        let releasing = self
-            .daemon
-            .begin_release(&lease_identity.id, request.fence_token)
-            .map_err(provider_status)?;
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReleased,
-            None,
-            Some(&journal_lease),
-            "LEASE_RELEASED",
-        ) {
-            let _ = self
-                .daemon
-                .fail_release(&releasing.name, request.fence_token);
-            return Err(provider_status(error));
-        }
-        self.daemon
-            .complete_release(&lease_identity.id, request.fence_token)
+        // A compatibility caller must not be able to free hardware that a
+        // running instance still holds: RELEASED is reached only through
+        // RELEASING plus a confirmed sandbox cleanup.
+        self.release_lease_with_cleanup(&journal_lease)
             .map_err(provider_status)?;
         let lease = self
             .daemon
@@ -202,29 +179,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease reference is required"))?;
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReleaseStarted,
-            None,
-            Some(&lease),
-            "LEASE_RELEASE_STARTED",
-        ) {
-            return Err(provider_status(error));
-        }
-        let releasing = self
-            .daemon
-            .begin_release(&lease.lease_name, lease.fence_token)
-            .map_err(provider_status)?;
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReleased,
-            None,
-            Some(&lease),
-            "LEASE_RELEASED",
-        ) {
-            let _ = self.daemon.fail_release(&releasing.name, lease.fence_token);
-            return Err(provider_status(error));
-        }
-        self.daemon
-            .complete_release(&lease.lease_name, lease.fence_token)
+        // Same invariant as ReleaseLease: cleanup of any instance still fenced
+        // by this lease must be confirmed before the allocation is reusable.
+        self.release_lease_with_cleanup(&lease)
             .map_err(provider_status)?;
         let lease = self
             .daemon
