@@ -4424,3 +4424,344 @@ fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
         old_fence
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7: Durability and Journal Failure Policy
+//
+// Durable writes are Class A (durable-before-visible), Class B (durable intent
+// / physical action / durable outcome), or Class C (best-effort telemetry).
+// These tests inject persistence failures and prove the policy: no unsafe
+// visible authority, no fence reuse, no silently reusable resource, and no
+// corruption of authority state when observability fails.
+// ---------------------------------------------------------------------------
+
+// Class B intent: the watchdog must never begin a physical release without its
+// durable LEASE_RELEASE_STARTED record. A failing journal defers the release to
+// the next scan (fail-closed) instead of leaking the Lease as ACTIVE behind a
+// stopped Worker.
+#[test]
+fn watchdog_release_intent_journal_failure_defers_fail_closed() {
+    let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
+        .with_worker_heartbeat(WorkerHeartbeatConfig {
+            socket_path: PathBuf::from("/run/cyrene/watchdog-journal.sock"),
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_millis(50),
+            graceful_stop: Duration::from_millis(50),
+            shutdown_ack_timeout: Duration::from_millis(20),
+        })
+        .with_runtime_journal(Arc::new(FailingRuntimeJournal));
+    let holder = semantic::Identity {
+        id: "watchdog-journal-holder".to_string(),
+        generation: 1,
+    };
+    let requirements = core_v1::ResourceRequirements {
+        cpu: Some(core_v1::CpuRequirements {
+            request_millicores: 500,
+            limit_millicores: 750,
+        }),
+        memory: Some(core_v1::MemoryRequirements {
+            request_bytes: 1024,
+            limit_bytes: 2048,
+        }),
+        ephemeral_storage_limit_bytes: 0,
+        accelerators: vec![core_v1::AcceleratorRequirements {
+            count: 1,
+            ..Default::default()
+        }],
+    };
+    let request = resource_request("watchdog-journal-lease", 1, holder, None, &requirements)
+        .expect("request");
+    let lease = adapter
+        .daemon
+        .reserve(request)
+        .expect("unique resource is allocatable");
+    let mut actor = InstanceActor::new(
+        "watchdog-journal-w1",
+        lease.name.clone(),
+        lease.fence_token,
+        Arc::new(FakeSandbox),
+        LaunchPlan {
+            instance_name: "watchdog-journal-w1".to_string(),
+            executable: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cgroup_name: "watchdog-journal-w1".to_string(),
+            limits: CgroupLimits::default(),
+            transport_socket: None,
+        },
+        DeviceBinding {
+            resource_id: lease.name.clone(),
+            nodes: Vec::new(),
+            environment: BTreeMap::new(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Soft,
+            adapter_id: "test".to_string(),
+            reason_code: "test".to_string(),
+        },
+        Duration::from_millis(10),
+    );
+    actor.start().expect("watchdog instance must start");
+    let mut process = managed_test_process(
+        "watchdog-journal-w1",
+        lease.fence_token,
+        Some(core_v1::ResourceLeaseRef {
+            lease_name: lease.name.clone(),
+            fence_token: lease.fence_token,
+        }),
+    );
+    process.actor = actor;
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .insert("watchdog-journal-w1".to_string(), process);
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .get_mut("watchdog-journal-w1")
+        .unwrap()
+        .actor
+        .on_heartbeat_received(std::time::Instant::now() - Duration::from_secs(1));
+
+    // The durable intent cannot be persisted: the watchdog must defer.
+    adapter.enforce_heartbeat_deadlines();
+
+    // Fail-closed: the physical release never began; the Lease stays ACTIVE.
+    let after = adapter.daemon.lease(&lease.name).unwrap();
+    assert_eq!(
+        after.state,
+        cy_kernel_api::LeaseState::Active,
+        "the release must not begin without its durable intent"
+    );
+    // The Worker is not stopped/removed and the watchdog is re-armed.
+    let instances = adapter.instances.lock().unwrap();
+    let process = instances
+        .get("watchdog-journal-w1")
+        .expect("the instance must remain for the next scan");
+    assert!(
+        !process.watchdog_triggered,
+        "the watchdog must be re-armed to retry the durable intent"
+    );
+    drop(instances);
+    // The resource is not silently reusable.
+    let retry = resource_request(
+        "watchdog-journal-retry",
+        1,
+        semantic::Identity {
+            id: "watchdog-journal-retry-holder".to_string(),
+            generation: 1,
+        },
+        None,
+        &requirements,
+    )
+    .expect("request");
+    assert!(
+        adapter.daemon.reserve(retry).is_err(),
+        "the still-ACTIVE Lease must keep the resource non-allocatable"
+    );
+}
+
+// Class A/B launch evidence: a Worker must never become visible without its
+// durable InstanceLaunched record. The launch fails closed and the Lease stays
+// held, so the resource is not silently reusable.
+#[test]
+fn worker_launch_journal_failure_fails_closed_and_keeps_lease_held() {
+    #[derive(Default)]
+    struct LaunchFailingJournal {
+        records: std::sync::Mutex<Vec<RuntimeJournalRecord>>,
+    }
+    impl RuntimeJournalSink for LaunchFailingJournal {
+        fn append(&self, record: RuntimeJournalRecord) -> Result<(), ProviderError> {
+            if record.event == RuntimeJournalEvent::InstanceLaunched {
+                return Err(ProviderError::new(
+                    "failing-journal",
+                    "JOURNAL_WRITE_FAILED",
+                    "injected worker launch write failure",
+                ));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
+        .with_runtime_journal(Arc::new(LaunchFailingJournal::default()));
+    let authority = adapter.authority();
+    let context = scoped_authority_context("ns-launch-fail", "launch-journal-fail");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "worker-launch-fail".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(lease.state, semantic::LeaseState::Active);
+
+    // The InstanceLaunched durable evidence cannot be persisted.
+    let launch = authority.start_worker(
+        &context,
+        &principal,
+        semantic::Worker {
+            identity: worker_identity.clone(),
+            principal: principal.identity.clone(),
+            provider: semantic::Identity {
+                id: "provider-launch-fail".to_string(),
+                generation: 1,
+            },
+            lease: lease.identity.clone(),
+            state: semantic::WorkerState::Registered,
+            execution_ref: "opaque-execution-reference".to_string(),
+            limits: BTreeMap::new(),
+        },
+    );
+    assert!(
+        launch.is_err(),
+        "launch must fail closed when its durable evidence cannot be persisted"
+    );
+    assert!(
+        authority.runtime.instances.lock().unwrap().is_empty(),
+        "no Worker may be externally visible without its durable launch evidence"
+    );
+
+    // The held Lease blocks reallocation: no silently reusable resource.
+    let retry = authority.acquire_lease(
+        &context,
+        &principal,
+        semantic::Identity {
+            id: "worker-launch-fail-retry".to_string(),
+            generation: 1,
+        },
+        semantic::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count: 1,
+            required_capabilities: vec![semantic::CapabilityRequirement {
+                id: "accelerator.compute".to_string(),
+                minimum_revision: 1,
+                required_properties: BTreeMap::new(),
+            }],
+            minimum_capacity: BTreeMap::new(),
+        },
+        u64::MAX,
+    );
+    assert!(
+        retry.is_err(),
+        "the held ACTIVE Lease must block reallocation"
+    );
+}
+
+// Class C: semantic event projections are observability, not correctness
+// evidence. When the durable event store rejects an append the projection is
+// dropped without corrupting authority state or panicking.
+#[test]
+fn semantic_event_append_failure_is_class_c_telemetry() {
+    #[derive(Default)]
+    struct FailAppendEventStore;
+    impl DurableEventStore for FailAppendEventStore {
+        fn append_event(&self, _record: DurableEventRecord) -> Result<(), ProviderError> {
+            Err(ProviderError::new(
+                "test",
+                "EVENT_APPEND_FAILED",
+                "injected event append failure",
+            ))
+        }
+
+        fn events_for_source(
+            &self,
+            _source: &semantic::Identity,
+            _namespace: &str,
+        ) -> Result<Option<Vec<DurableEventRecord>>, ProviderError> {
+            Ok(None)
+        }
+    }
+
+    let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
+        .with_event_store(Arc::new(FailAppendEventStore));
+    let authority = adapter.authority();
+    let context = scoped_authority_context("ns-event-fail", "event-append-fail");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker_identity = semantic::Identity {
+        id: "worker-event-fail".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            worker_identity.clone(),
+            query,
+            u64::MAX,
+        )
+        .unwrap();
+    assert_eq!(lease.state, semantic::LeaseState::Active);
+
+    // Authority state transitions succeed even though their semantic
+    // projections are dropped by the failing store.
+    authority
+        .start_worker(
+            &context,
+            &principal,
+            semantic::Worker {
+                identity: worker_identity.clone(),
+                principal: principal.identity.clone(),
+                provider: semantic::Identity {
+                    id: "provider-event-fail".to_string(),
+                    generation: 1,
+                },
+                lease: lease.identity.clone(),
+                state: semantic::WorkerState::Registered,
+                execution_ref: "opaque-execution-reference".to_string(),
+                limits: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    assert!(
+        !authority.runtime.instances.lock().unwrap().is_empty(),
+        "the Worker must be visible even when observability fails"
+    );
+
+    // The dropped projection is observability-only: the worker.starting event
+    // is absent from the public event stream, yet authority state is intact.
+    let page = authority
+        .events_after(
+            &context,
+            &principal,
+            &semantic::EventCursor {
+                source: authority.semantic_event_source_for(&context.namespace),
+                sequence: 0,
+            },
+            OPERATION_EVENT_HISTORY_CAPACITY,
+        )
+        .unwrap();
+    assert!(
+        page.events.is_empty(),
+        "a Class C projection must be dropped, never replayed from authority"
+    );
+}

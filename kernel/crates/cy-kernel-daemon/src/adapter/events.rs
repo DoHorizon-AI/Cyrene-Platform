@@ -1,4 +1,55 @@
 //! KernelServiceAdapter 事件分发、历史追溯与运行时日志沉淀。
+//!
+//! # Durability and Journal Failure Policy
+//!
+//! Every durable write in the Kernel is classified into one of three classes.
+//! A write failure MUST be handled according to its class; never log-and-
+//! continue on a correctness-critical write without an explicit, auditable
+//! decision.
+//!
+//! ## Class A — Durable-before-visible
+//!
+//! Authority must not become externally visible before durable evidence
+//! succeeds. Applied to fence reservation / authority generation: a Lease may
+//! be returned to a caller only after its `LEASE_RESERVED` fence record is
+//! durably persisted. On write failure the reservation is rolled back
+//! (`begin_release` + `complete_release` of the never-bound Lease), so a
+//! Lease that lost its durable fence is never visible and its fence is never
+//! reused. See `AcquireSemanticLease`/`acquire_lease` reserve rollback and the
+//! legacy reserve paths in `kernel_service.rs`.
+//!
+//! ## Class B — Durable intent / physical action / durable outcome
+//!
+//! Used where real-world side effects cannot be atomically committed with
+//! storage. Pattern:
+//!
+//! ```text
+//! persist intent -> physical action -> observe result -> persist outcome
+//! ```
+//!
+//! Recovery classifies an incomplete transition by comparing the durable
+//! intent/outcome records with the current physical state. The intent write
+//! (`LEASE_RELEASE_STARTED`, `WorkerLost`, `LEASE_RESERVED`) is the release
+//! gate: if it fails, the physical action MUST NOT begin. The watchdog release
+//! (`enforce_heartbeat_deadlines`), `release_with_cleanup`, `stop_worker` and
+//! the legacy terminate/cancel paths all gate their physical stop on this
+//! record. If an outcome write (`LEASE_RELEASED`, `InstanceTerminated`) fails
+//! after the physical action, the Lease fails closed (`fail_release` ->
+//! `FAILED`) so the resource is never silently reusable and recovery sees a
+//! durable `FAILED` state it can classify.
+//!
+//! ## Class C — Best-effort diagnostic
+//!
+//! Failure may be logged without invalidating semantic correctness. Only
+//! genuine telemetry belongs here: `InstanceCleanupFailed` (the outcome is
+//! already durably observable as a `FAILED` Lease with the allocation still
+//! held), `WatchdogReaped` (the Lease is already durably `RELEASED`), and
+//! semantic/runtime event projections (state transitions carry their own
+//! journal boundary in `record_runtime`). Do NOT classify correctness-critical
+//! evidence as telemetry.
+//!
+//! A write failure that is neither Class A/B fail-closed nor proven Class C is
+//! a Phase 7 closure violation and must be fixed, not logged.
 
 use std::sync::atomic::Ordering;
 

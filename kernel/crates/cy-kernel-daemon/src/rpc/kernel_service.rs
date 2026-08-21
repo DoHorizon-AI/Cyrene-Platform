@@ -452,6 +452,8 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 lease.as_ref(),
                 &report.reason_code,
             ) {
+                // Class C: the Lease was already fail_released (FAILED) with
+                // the allocation held; this record is telemetry.
                 eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
             }
             let error =
@@ -605,6 +607,8 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 lease.as_ref(),
                 &report.reason_code,
             ) {
+                // Class C: the Lease was already fail_released (FAILED) with
+                // the allocation held; this record is telemetry.
                 eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
             }
             let error =

@@ -1093,6 +1093,8 @@ impl KernelAuthority for LocalKernelAuthority {
                 .runtime
                 .daemon
                 .fail_release(&releasing.name, fence_token);
+            // Class C: the Lease was already fail_released (FAILED) with the
+            // allocation held; the cleanup-failed record is telemetry.
             let _ = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
                 Some(&worker_identity.id),
@@ -2286,6 +2288,10 @@ impl LocalKernelAuthority {
         // durable store accepts them. State transitions carry their own journal
         // boundary; this prevents an in-memory replay cursor from claiming an
         // event that disappears across a restart.
+        // Class C: semantic event projections are observability, not
+        // correctness evidence. State transitions carry their own journal
+        // boundary (record_runtime), so a dropped projection never corrupts
+        // authority state; it only loses telemetry.
         if self
             .runtime
             .event_store
@@ -2545,6 +2551,9 @@ impl LocalKernelAuthority {
                         .runtime
                         .daemon
                         .fail_release(&releasing.name, fence_token);
+                    // Class C: the Lease was already fail_released (FAILED)
+                    // with the allocation held; the cleanup-failed record is
+                    // telemetry. The rejection below is the fail-closed gate.
                     let _ = self.record_runtime(
                         RuntimeJournalEvent::InstanceCleanupFailed,
                         Some(worker_id),

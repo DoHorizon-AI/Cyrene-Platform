@@ -542,6 +542,8 @@ impl KernelServiceAdapter {
                 Some(lease_ref),
                 &report.reason_code,
             ) {
+                // Class C: the cleanup outcome is already fail-closed
+                // (CLEANUP_INCOMPLETE, Lease FAILED, allocation held).
                 eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
             }
             return Err(ProviderError::new(

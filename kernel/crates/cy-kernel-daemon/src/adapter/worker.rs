@@ -509,6 +509,9 @@ impl KernelServiceAdapter {
                     self.authority
                         .mark_worker_lost(&context, &worker.identity, "HEARTBEAT_TIMEOUT")
                 {
+                    // Class B fail-closed: the lost transition did not commit
+                    // durably, so it is retried on the next scan. The Lease
+                    // stays Active and is never silently released.
                     eprintln!("worker lost authority transition failed: {error:?}");
                 }
                 continue;
@@ -561,13 +564,25 @@ impl KernelServiceAdapter {
                     Some(lease),
                     "LEASE_RELEASE_STARTED",
                 ) {
-                    eprintln!("runtime journal LeaseReleaseStarted write failed: {error}");
-                    false
-                } else {
-                    self.daemon
-                        .begin_release(&lease.lease_name, lease.fence_token)
-                        .is_ok()
+                    // Class B durable intent: the physical release must not
+                    // begin without its persisted intent. Re-arm the watchdog
+                    // (the instance was marked triggered above) so the next
+                    // scan retries the write; the Worker keeps running and the
+                    // Lease stays Active (fail-closed, recovery-required).
+                    eprintln!(
+                        "runtime journal LeaseReleaseStarted write failed: {error}; deferred to next watchdog scan"
+                    );
+                    self.instances
+                        .lock()
+                        .expect("instance lock poisoned")
+                        .get_mut(&name)
+                        .expect("watchdog instance must remain")
+                        .watchdog_triggered = false;
+                    continue;
                 }
+                self.daemon
+                    .begin_release(&lease.lease_name, lease.fence_token)
+                    .is_ok()
             } else {
                 true
             };
@@ -594,12 +609,20 @@ impl KernelServiceAdapter {
                             Some(lease),
                             &report.reason_code,
                         ) {
+                            // Class B outcome: without the durable termination
+                            // record the Lease fails closed (FAILED) so the
+                            // resource is never silently reusable.
                             eprintln!("runtime journal InstanceTerminated write failed: {error}");
                             let _ = self
                                 .daemon
                                 .fail_release(&lease.lease_name, lease.fence_token);
                             continue;
                         }
+                        // Class B outcome: the durable LEASE_RELEASED record and
+                        // the ledger's complete_release must both succeed for
+                        // RELEASED to be exposed. On either failure the branch
+                        // below fails the Lease closed (FAILED) so the resource
+                        // is never silently reusable.
                         let released = release_started
                             && self
                                 .record_runtime(
@@ -620,6 +643,8 @@ impl KernelServiceAdapter {
                                 Some(lease),
                                 "HEARTBEAT_TIMEOUT_REAPED",
                             ) {
+                                // Class C: the Lease is already durably RELEASED;
+                                // this record is best-effort telemetry.
                                 eprintln!("runtime journal WatchdogReaped write failed: {error}");
                             }
                             self.instances
@@ -651,6 +676,8 @@ impl KernelServiceAdapter {
                         lease.as_ref(),
                         &report.reason_code,
                     ) {
+                        // Class C: the Lease was already fail_released (FAILED)
+                        // with the allocation held; this record is telemetry.
                         eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
                     }
                 }
@@ -668,6 +695,8 @@ impl KernelServiceAdapter {
                     lease.as_ref(),
                     "WATCHDOG_STOP_FAILED",
                 ) {
+                    // Class C: the Lease was already fail_released (FAILED)
+                    // with the allocation held; this record is telemetry.
                     eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
                 }
             }
