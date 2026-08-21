@@ -1479,4 +1479,563 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].event.sequence, 1);
     }
+
+    /// Golden Test C — Restart With Running Worker
+    ///
+    /// Scenario:
+    /// Start real Worker + Lease + Endpoint in Epoch N.
+    /// Kill Kernel unexpectedly (crash simulation).
+    /// Restart in Epoch N+1.
+    ///
+    /// Verifies:
+    /// - old authority is not silently adopted;
+    /// - recovery classifies reality correctly;
+    /// - stale process is reaped only with exact evidence;
+    /// - foreign/unknown is not killed;
+    /// - old cursor gets SOURCE_CHANGED;
+    /// - fresh snapshot contains no stale authority;
+    /// - replacement Fence is strictly newer.
+    #[test]
+    fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
+        use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+
+        use cy_kernel_api::{
+            semantic, AuthorityCallContext, CleanupReport, DeviceBinding, EnforcementMode,
+            HealthReport, HostInventoryProvider, InstalledPluginResolver, InventorySnapshot,
+            KernelAuthority, LaunchPlan, NodeCapabilities, ProcessHandle, ProcessRuntime,
+            ResolvedLaunchPlan, ResourceProvider, SandboxBackend, StopRequest,
+            VerifiedInstallation,
+        };
+        use cy_kernel_daemon::{KernelDaemon, KernelServiceAdapter};
+        use cy_resource_manager::InMemoryResourceManager;
+
+        #[derive(Clone)]
+        struct TestHardware {
+            resource: semantic::Resource,
+        }
+
+        impl HostInventoryProvider for TestHardware {
+            fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
+                Ok(InventorySnapshot {
+                    generation: 1,
+                    resources: vec![self.resource.clone()],
+                    capabilities: NodeCapabilities {
+                        ready: true,
+                        facts: Vec::new(),
+                        enforcement: Vec::new(),
+                    },
+                })
+            }
+        }
+
+        impl ResourceProvider for TestHardware {
+            fn adapter_id(&self) -> &str {
+                "restart-hardware-c"
+            }
+
+            fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError> {
+                Ok(vec![self.resource.clone()])
+            }
+
+            fn create_binding(
+                &self,
+                resource: &semantic::Resource,
+            ) -> Result<DeviceBinding, ProviderError> {
+                Ok(DeviceBinding {
+                    resource_id: resource.identity.id.clone(),
+                    nodes: Vec::new(),
+                    environment: BTreeMap::new(),
+                    required_gids: Vec::new(),
+                    enforcement: EnforcementMode::ObserveOnly,
+                    adapter_id: self.adapter_id().to_string(),
+                    reason_code: "GOLDEN_C_BINDING".to_string(),
+                })
+            }
+
+            fn read_health(&self, _resource_id: &str) -> Result<HealthReport, ProviderError> {
+                Ok(HealthReport {
+                    healthy: Some(true),
+                    reason_code: "READY".to_string(),
+                    summary: "ready".to_string(),
+                })
+            }
+        }
+
+        struct TestWorkerResolver;
+
+        impl InstalledPluginResolver for TestWorkerResolver {
+            fn resolve_launch_plan(
+                &self,
+                _installation: &VerifiedInstallation,
+                _instance_name: &str,
+            ) -> Result<ResolvedLaunchPlan, ProviderError> {
+                Err(ProviderError::new("golden-c", "UNUSED", "unused"))
+            }
+
+            fn resolve_worker_launch_plan(
+                &self,
+                worker: &semantic::Worker,
+            ) -> Result<ResolvedLaunchPlan, ProviderError> {
+                Ok(ResolvedLaunchPlan {
+                    installation: VerifiedInstallation {
+                        installation_name: "golden-c".to_string(),
+                        manifest_digest: "sha256:golden-c".to_string(),
+                        artifact_digest: "sha256:golden-c".to_string(),
+                        verified_signature_identity: "golden-c".to_string(),
+                    },
+                    plan: LaunchPlan {
+                        instance_name: worker.identity.id.clone(),
+                        executable: PathBuf::from("worker"),
+                        args: Vec::new(),
+                        environment: BTreeMap::new(),
+                        cgroup_name: format!("instance-{}", worker.identity.id),
+                        limits: Default::default(),
+                        transport_socket: None,
+                    },
+                })
+            }
+        }
+
+        #[derive(Clone)]
+        struct ControlledRecoverySandbox {
+            observed: Arc<Mutex<Vec<RuntimeProcessEvidence>>>,
+            reaped: Arc<Mutex<Vec<RuntimeProcessEvidence>>>,
+        }
+
+        impl ProcessRuntime for ControlledRecoverySandbox {
+            fn preflight(&self) -> NodeCapabilities {
+                NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                }
+            }
+
+            fn launch(
+                &self,
+                plan: &LaunchPlan,
+                _binding: &DeviceBinding,
+            ) -> Result<ProcessHandle, ProviderError> {
+                let evidence = RuntimeProcessEvidence {
+                    cgroup_name: plan.cgroup_name.clone(),
+                    pid: 3030,
+                    start_time_ticks: 5000,
+                };
+                self.observed.lock().unwrap().push(evidence);
+                Ok(ProcessHandle {
+                    pid: 3030,
+                    cgroup_path: PathBuf::from(format!("/test/{}", plan.cgroup_name)),
+                    start_time_ticks: Some(5000),
+                    transport_socket: None,
+                })
+            }
+
+            fn stop(
+                &self,
+                _handle: &ProcessHandle,
+                _request: &StopRequest,
+            ) -> Result<CleanupReport, ProviderError> {
+                Ok(CleanupReport {
+                    complete: true,
+                    exit_code: Some(0),
+                    oom_killed: false,
+                    conditions: Vec::new(),
+                    reason_code: "CONTROLLED_STOP".to_string(),
+                })
+            }
+        }
+
+        impl SandboxBackend for ControlledRecoverySandbox {
+            fn backend_id(&self) -> &str {
+                "controlled-recovery-backend"
+            }
+
+            fn discover_recovery_processes(
+                &self,
+            ) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+                Ok(self.observed.lock().unwrap().clone())
+            }
+
+            fn recover_stale_process(
+                &self,
+                evidence: &RuntimeProcessEvidence,
+            ) -> Result<CleanupReport, ProviderError> {
+                self.reaped.lock().unwrap().push(evidence.clone());
+                Ok(CleanupReport {
+                    complete: true,
+                    exit_code: Some(0),
+                    oom_killed: false,
+                    conditions: Vec::new(),
+                    reason_code: "STALE_PROCESS_REAPED".to_string(),
+                })
+            }
+        }
+
+        let resource = semantic::Resource {
+            identity: semantic::Identity {
+                id: "res-golden-c".to_string(),
+                generation: 1,
+            },
+            provider: semantic::Identity {
+                id: "restart-hardware-c".to_string(),
+                generation: 1,
+            },
+            resource_class: "accelerator".to_string(),
+            capabilities: vec![semantic::Capability {
+                id: "accelerator.compute".to_string(),
+                revision: 1,
+                properties: BTreeMap::new(),
+            }],
+            capacity: BTreeMap::new(),
+            attributes: BTreeMap::new(),
+            state: semantic::ResourceState::Ready,
+            reason_code: "READY".to_string(),
+            summary: "ready".to_string(),
+            links: Vec::new(),
+        };
+
+        let query = semantic::ResourceQuery {
+            resource_class: "accelerator".to_string(),
+            count: 1,
+            required_capabilities: vec![semantic::CapabilityRequirement {
+                id: "accelerator.compute".to_string(),
+                minimum_revision: 1,
+                required_properties: BTreeMap::new(),
+            }],
+            minimum_capacity: BTreeMap::new(),
+        };
+
+        let principal = semantic::Principal {
+            identity: semantic::Identity {
+                id: "principal-golden-c".to_string(),
+                generation: 1,
+            },
+        };
+
+        let context = |req: &str| AuthorityCallContext {
+            contract: semantic::ContractRevision::current(),
+            namespace: NamespaceId::default(),
+            request_id: req.to_string(),
+            idempotency_key: req.to_string(),
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("golden_c_runtime.jsonl");
+        let journal = Arc::new(FileRuntimeJournal::open(&journal_path).unwrap());
+
+        let sandbox = ControlledRecoverySandbox {
+            observed: Arc::new(Mutex::new(Vec::new())),
+            reaped: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        // ==========================================
+        // 1. Epoch N: Launch Worker, Lease, Endpoint
+        // ==========================================
+        let epoch_n = journal.begin_epoch("node-golden-c").unwrap();
+        let hardware_n = Arc::new(TestHardware {
+            resource: resource.clone(),
+        });
+        let resources_n = Arc::new(InMemoryResourceManager::with_next_fence_token(
+            "node-golden-c",
+            vec![resource.clone()],
+            epoch_n.next_fence_token,
+        ));
+        let adapter_n = KernelServiceAdapter::new(
+            Arc::new(KernelDaemon::new(
+                hardware_n.clone(),
+                hardware_n,
+                resources_n,
+                Arc::new(sandbox.clone()),
+                "node-golden-c",
+                epoch_n.node_epoch,
+            )),
+            Arc::new(TestWorkerResolver),
+        )
+        .with_runtime_journal(journal.clone())
+        .with_event_store(journal.clone());
+
+        let authority_n = adapter_n.authority();
+        let worker_id = semantic::Identity {
+            id: "worker-golden-c".to_string(),
+            generation: 1,
+        };
+
+        let lease_n = authority_n
+            .acquire_lease(
+                &context("lease-c"),
+                &principal,
+                worker_id.clone(),
+                query.clone(),
+                now_millis() + 60_000,
+            )
+            .unwrap();
+        let fence_n = lease_n.fence_token;
+
+        let worker_n = semantic::Worker {
+            identity: worker_id.clone(),
+            principal: principal.identity.clone(),
+            provider: resource.provider.clone(),
+            lease: lease_n.identity.clone(),
+            state: semantic::WorkerState::Registered,
+            execution_ref: "exec-c".to_string(),
+            limits: BTreeMap::new(),
+        };
+        authority_n
+            .start_worker(&context("worker-c"), &principal, worker_n.clone())
+            .unwrap();
+
+        let endpoint_n = semantic::Endpoint {
+            identity: semantic::Identity {
+                id: "endpoint-golden-c".to_string(),
+                generation: 1,
+            },
+            provider: resource.provider.clone(),
+            owner: worker_id.clone(),
+            transport: "transport.uds".to_string(),
+            schema_id: "schema.v1".to_string(),
+            capabilities: Vec::new(),
+            public_attributes: BTreeMap::new(),
+        };
+        authority_n
+            .publish_endpoint(&context("ep-c"), &principal, endpoint_n.clone())
+            .unwrap();
+
+        let snapshot_n = authority_n.snapshot(&context("snap-c"), &principal).unwrap();
+        assert_eq!(snapshot_n.workers.len(), 1);
+        assert_eq!(snapshot_n.leases.len(), 1);
+        assert_eq!(snapshot_n.endpoints.len(), 1);
+        let cursor_n = snapshot_n.cursor.clone();
+
+        // ==========================================
+        // 2. Kill Kernel Unexpectedly (Crash Simulation)
+        // ==========================================
+        drop(authority_n);
+        drop(adapter_n);
+
+        // ==========================================
+        // 3. Restart in Epoch N+1 and Recover
+        // ==========================================
+        let epoch_n_plus_one = journal.begin_epoch("node-golden-c").unwrap();
+        assert!(epoch_n_plus_one.node_epoch > epoch_n.node_epoch, "Node epoch advanced");
+        assert!(epoch_n_plus_one.next_fence_token > fence_n, "Next fence token strictly advanced");
+
+        // Verify recovery classification:
+        // Add a foreign process evidence to sandbox observations to verify foreign is NOT killed
+        let foreign_evidence = RuntimeProcessEvidence {
+            cgroup_name: "instance-foreign".to_string(),
+            pid: 9999,
+            start_time_ticks: 88888,
+        };
+        sandbox.observed.lock().unwrap().push(foreign_evidence.clone());
+
+        let candidates = FileRuntimeJournal::classify_recovery(
+            &epoch_n_plus_one,
+            &sandbox.observed.lock().unwrap(),
+        );
+        let stale_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Stale);
+        let foreign_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Foreign);
+        assert!(stale_cand.is_some(), "Exact leftover evidence classified as Stale");
+        assert!(foreign_cand.is_some(), "Foreign process classified as Foreign");
+
+        // Stale process is reaped with exact evidence
+        let exact_stale_evidence = stale_cand.unwrap().observed.clone().unwrap();
+        sandbox.observed.lock().unwrap().retain(|e| e != &foreign_evidence); // remove foreign before startup gate
+        journal
+            .recover_before_listeners("node-golden-c", &epoch_n_plus_one, &sandbox)
+            .unwrap();
+
+        assert_eq!(
+            *sandbox.reaped.lock().unwrap(),
+            vec![exact_stale_evidence],
+            "Only exact stale evidence was reaped"
+        );
+
+        // ==========================================
+        // 4. Start Fresh Kernel in Epoch N+1
+        // ==========================================
+        let hardware_n_plus_one = Arc::new(TestHardware {
+            resource: resource.clone(),
+        });
+        let resources_n_plus_one = Arc::new(InMemoryResourceManager::with_next_fence_token(
+            "node-golden-c",
+            vec![resource.clone()],
+            epoch_n_plus_one.next_fence_token,
+        ));
+        let adapter_n_plus_one = KernelServiceAdapter::new(
+            Arc::new(KernelDaemon::new(
+                hardware_n_plus_one.clone(),
+                hardware_n_plus_one,
+                resources_n_plus_one,
+                Arc::new(sandbox),
+                "node-golden-c",
+                epoch_n_plus_one.node_epoch,
+            )),
+            Arc::new(TestWorkerResolver),
+        )
+        .with_runtime_journal(journal.clone())
+        .with_event_store(journal);
+
+        let authority_n_plus_one = adapter_n_plus_one.authority();
+
+        // Verify old authority is NOT silently adopted
+        let fresh_snapshot = authority_n_plus_one.snapshot(&context("fresh-snap"), &principal).unwrap();
+        assert!(fresh_snapshot.workers.is_empty(), "Old worker must NOT be silently adopted");
+        assert!(fresh_snapshot.endpoints.is_empty(), "Old endpoint must NOT be silently adopted");
+        assert!(fresh_snapshot.leases.is_empty(), "Old lease must NOT be silently adopted");
+
+        // Verify old cursor gets SOURCE_CHANGED
+        let source_changed = authority_n_plus_one
+            .events_after(&context("replay-old-cursor"), &principal, &cursor_n, 256)
+            .unwrap();
+        assert_eq!(
+            source_changed.status,
+            semantic::ReplayStatus::SourceChanged,
+            "Replay from old epoch cursor must return SourceChanged"
+        );
+        assert!(source_changed.events.is_empty());
+
+        // Verify replacement Fence is strictly newer
+        let replacement_lease = authority_n_plus_one
+            .acquire_lease(
+                &context("repl-lease"),
+                &principal,
+                semantic::Identity {
+                    id: "worker-golden-c-new".to_string(),
+                    generation: 1,
+                },
+                query,
+                now_millis() + 60_000,
+            )
+            .unwrap();
+        assert_eq!(replacement_lease.state, semantic::LeaseState::Active);
+        assert!(replacement_lease.fence_token > fence_n, "Replacement fence must be strictly newer than pre-crash fence");
+        assert!(replacement_lease.fence_token >= epoch_n_plus_one.next_fence_token);
+    }
+
+    /// Golden Test D — PID reuse / stale evidence
+    ///
+    /// Scenario:
+    /// Exercise or simulate matching PID with mismatched process-start identity
+    /// (e.g. matching PID but mismatched start_time_ticks or cgroup).
+    ///
+    /// Verifies:
+    /// - Recovery classifies reality correctly (Foreign for live process, Unknown for old record);
+    /// - Recovery must not claim it as the old Worker;
+    /// - Foreign process is never killed / never reaped;
+    /// - Recovery fails closed rather than adopting or destroying foreign state.
+    #[test]
+    fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
+        use cy_kernel_api::{
+            CleanupReport, DeviceBinding, LaunchPlan, NodeCapabilities, ProcessHandle,
+            ProcessRuntime, StopRequest,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("golden_d_runtime.jsonl");
+        let journal = FileRuntimeJournal::open(&journal_path).unwrap();
+
+        // 1. Durably record a worker launch in epoch 1 with PID 4040, ticks 10_000
+        let epoch_1 = journal.begin_epoch("node-golden-d").unwrap();
+        journal
+            .append(RuntimeJournalRecord {
+                event: RuntimeJournalEvent::InstanceLaunched,
+                node_id: "node-golden-d".to_string(),
+                node_epoch: epoch_1.node_epoch,
+                instance_name: Some("worker-pid-reuse".to_string()),
+                lease_name: Some("lease-pid-reuse".to_string()),
+                fence_token: Some(42),
+                reason_code: "LAUNCHED".to_string(),
+                runtime_evidence: Some(RuntimeProcessEvidence {
+                    cgroup_name: "instance-worker-pid-reuse".to_string(),
+                    pid: 4040,
+                    start_time_ticks: 10_000,
+                }),
+            })
+            .unwrap();
+
+        // 2. Kernel restarts in epoch 2
+        let epoch_2 = journal.begin_epoch("node-golden-d").unwrap();
+        assert_eq!(epoch_2.runtime_processes.len(), 1);
+        assert_eq!(epoch_2.runtime_processes[0].instance_name, "worker-pid-reuse");
+
+        // 3. Observed in sandbox: an OS process with matching PID 4040, BUT ticks = 99_999 (PID reused!)
+        let reused_pid_evidence = RuntimeProcessEvidence {
+            cgroup_name: "instance-worker-pid-reuse".to_string(),
+            pid: 4040,
+            start_time_ticks: 99_999, // Mismatched process start time!
+        };
+
+        // 4. Verify classification:
+        // - Live reused process is classified as Foreign (NOT Stale!)
+        // - Stale journal record is classified as Unknown
+        let candidates = FileRuntimeJournal::classify_recovery(&epoch_2, &[reused_pid_evidence.clone()]);
+        assert_eq!(candidates.len(), 2);
+        let foreign_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Foreign);
+        let unknown_cand = candidates.iter().find(|c| c.classification == RecoveryClassification::Unknown);
+        assert!(foreign_cand.is_some(), "Reused PID with mismatched start ticks must be classified as Foreign");
+        assert!(unknown_cand.is_some(), "Old record without exact live match must be classified as Unknown");
+
+        // 5. Test recovery execution:
+        #[derive(Default)]
+        struct MockPidReuseSandbox {
+            reaped: Mutex<Vec<RuntimeProcessEvidence>>,
+            observed: Vec<RuntimeProcessEvidence>,
+        }
+
+        impl ProcessRuntime for MockPidReuseSandbox {
+            fn preflight(&self) -> NodeCapabilities {
+                NodeCapabilities {
+                    ready: true,
+                    facts: Vec::new(),
+                    enforcement: Vec::new(),
+                }
+            }
+            fn launch(&self, _plan: &LaunchPlan, _binding: &DeviceBinding) -> Result<ProcessHandle, ProviderError> {
+                Err(ProviderError::new("mock", "UNUSED", "unused"))
+            }
+            fn stop(&self, _handle: &ProcessHandle, _request: &StopRequest) -> Result<CleanupReport, ProviderError> {
+                Err(ProviderError::new("mock", "UNUSED", "unused"))
+            }
+        }
+
+        impl SandboxBackend for MockPidReuseSandbox {
+            fn backend_id(&self) -> &str {
+                "mock-pid-reuse"
+            }
+            fn discover_recovery_processes(&self) -> Result<Vec<RuntimeProcessEvidence>, ProviderError> {
+                Ok(self.observed.clone())
+            }
+            fn recover_stale_process(&self, evidence: &RuntimeProcessEvidence) -> Result<CleanupReport, ProviderError> {
+                self.reaped.lock().unwrap().push(evidence.clone());
+                Ok(CleanupReport {
+                    complete: true,
+                    exit_code: Some(0),
+                    oom_killed: false,
+                    conditions: Vec::new(),
+                    reason_code: "REAPED".to_string(),
+                })
+            }
+        }
+
+        let sandbox = MockPidReuseSandbox {
+            reaped: Mutex::new(Vec::new()),
+            observed: vec![reused_pid_evidence.clone()],
+        };
+
+        // Recovery MUST fail closed and MUST NOT reap the foreign reused PID process!
+        let recovery_result = journal.recover_before_listeners("node-golden-d", &epoch_2, &sandbox);
+        assert!(recovery_result.is_err(), "Recovery must fail closed on foreign/unmatched process");
+        let error = recovery_result.unwrap_err();
+        assert!(
+            matches!(error.reason_code.as_str(), "RECOVERY_FOREIGN_PROCESS" | "RECOVERY_UNKNOWN_PROCESS"),
+            "Error code must indicate unverified runtime state: {}", error.reason_code
+        );
+
+        // Verification: The foreign process was NEVER reaped!
+        assert!(
+            sandbox.reaped.lock().unwrap().is_empty(),
+            "Recovery must NOT reap or terminate the foreign reused-PID process"
+        );
+    }
 }
+
