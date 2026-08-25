@@ -85,6 +85,7 @@ impl ResourceProvider for FakeAdapter {
             resource_id: resource.identity.id.clone(),
             nodes: Vec::new(),
             environment: BTreeMap::new(),
+            joinable_environment_keys: Default::default(),
             required_gids: Vec::new(),
             enforcement: EnforcementMode::Unenforced,
             adapter_id: self.id.clone(),

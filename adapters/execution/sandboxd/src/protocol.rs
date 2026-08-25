@@ -232,6 +232,7 @@ fn binding_from_proto(value: sandbox_v1::SandboxDeviceBinding) -> DeviceBinding 
             })
             .collect(),
         environment: value.environment.into_iter().collect::<BTreeMap<_, _>>(),
+        joinable_environment_keys: std::collections::BTreeSet::new(),
         required_gids: value.required_gids,
         enforcement: enforcement_mode_from_proto(value.enforcement),
         adapter_id: value.adapter_id,

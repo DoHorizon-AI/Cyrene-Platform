@@ -173,6 +173,7 @@ fn hard_device_request_fails_closed_when_disabled() {
         resource_id: "GPU-0".to_string(),
         nodes: Vec::new(),
         environment: BTreeMap::new(),
+        joinable_environment_keys: Default::default(),
         required_gids: Vec::new(),
         enforcement: EnforcementMode::Hard,
         adapter_id: "test".to_string(),

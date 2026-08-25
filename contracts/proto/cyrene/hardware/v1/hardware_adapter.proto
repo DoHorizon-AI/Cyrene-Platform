@@ -72,6 +72,15 @@ message DeviceBinding {
   cyrene.core.v1.EnforcementMode enforcement = 5;
   string reason_code = 6;
   cyrene.semantic.v1.Identity resource = 7;
+  // Adapter-owned merge policy. Kernel concatenates OrderedUniqueJoin keys
+  // and still fail-closes exclusive conflicts. Vendor names stay in the adapter.
+  map<string, EnvironmentMergeMode> environment_merge = 8;
+}
+
+enum EnvironmentMergeMode {
+  ENVIRONMENT_MERGE_MODE_UNSPECIFIED = 0;
+  ENVIRONMENT_MERGE_MODE_EXCLUSIVE = 1;
+  ENVIRONMENT_MERGE_MODE_ORDERED_UNIQUE_JOIN = 2;
 }
 
 message AdapterError {

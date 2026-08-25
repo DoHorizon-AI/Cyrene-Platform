@@ -329,6 +329,14 @@ impl ResourceProvider for UdsHardwareAdapterClient {
                         })
                         .collect(),
                     environment: binding.environment.into_iter().collect::<BTreeMap<_, _>>(),
+                    joinable_environment_keys: binding
+                        .environment_merge
+                        .into_iter()
+                        .filter(|(_, mode)| {
+                            *mode == hardware_v1::EnvironmentMergeMode::OrderedUniqueJoin as i32
+                        })
+                        .map(|(key, _)| key)
+                        .collect(),
                     required_gids: binding.required_gids,
                     enforcement: enforcement_mode_from_proto(binding.enforcement),
                     adapter_id: self.adapter_id.clone(),

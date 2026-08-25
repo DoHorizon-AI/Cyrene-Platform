@@ -267,6 +267,16 @@ fn binding_to_proto(
             })
             .collect(),
         environment: binding.environment.into_iter().collect::<HashMap<_, _>>(),
+        environment_merge: binding
+            .joinable_environment_keys
+            .into_iter()
+            .map(|key| {
+                (
+                    key,
+                    hardware_v1::EnvironmentMergeMode::OrderedUniqueJoin as i32,
+                )
+            })
+            .collect(),
         required_gids: binding.required_gids,
         enforcement: enforcement_mode_to_proto(binding.enforcement),
         reason_code: binding.reason_code,

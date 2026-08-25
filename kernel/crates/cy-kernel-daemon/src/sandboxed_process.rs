@@ -196,6 +196,7 @@ mod tests {
                 resource_id: "gpu-0".into(),
                 nodes: Vec::new(),
                 environment: BTreeMap::new(),
+                joinable_environment_keys: Default::default(),
                 required_gids: Vec::new(),
                 enforcement: EnforcementMode::VisibilityOnly,
                 adapter_id: "test".into(),

@@ -420,6 +420,7 @@ impl ResourceProvider for LinuxSystemProvider {
             resource_id: resource.identity.id.clone(),
             nodes: Vec::new(),
             environment: BTreeMap::new(),
+            joinable_environment_keys: std::collections::BTreeSet::new(),
             required_gids: Vec::new(),
             enforcement: EnforcementMode::Soft,
             adapter_id: self.adapter_id.clone(),

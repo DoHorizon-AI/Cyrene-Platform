@@ -10,7 +10,7 @@
 //! 4. [`parse_nvidia_topology`]: 解析 `nvidia-smi topo -m` 互联拓扑矩阵，识别 NVLink 与 PCIe P2P 链路。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
@@ -295,19 +295,12 @@ impl ResourceProvider for NvidiaSmiProvider {
             ));
         }
 
-        let mut environment = BTreeMap::new();
-        environment.insert(
-            "CUDA_VISIBLE_DEVICES".to_string(),
-            resource.identity.id.clone(),
-        );
-        environment.insert(
-            "NVIDIA_VISIBLE_DEVICES".to_string(),
-            resource.identity.id.clone(),
-        );
+        let environment = nvidia_visibility_environment(&resource.identity.id);
         Ok(DeviceBinding {
             resource_id: resource.identity.id.clone(),
             nodes,
             environment,
+            joinable_environment_keys: nvidia_visibility_join_keys(),
             required_gids: Vec::new(),
             enforcement: cy_kernel_api::EnforcementMode::Hard,
             adapter_id: self.adapter_id().to_string(),
@@ -382,6 +375,20 @@ impl HostInventoryProvider for NvidiaSmiProvider {
             },
         })
     }
+}
+
+pub(crate) fn nvidia_visibility_join_keys() -> BTreeSet<String> {
+    BTreeSet::from([
+        "CUDA_VISIBLE_DEVICES".to_string(),
+        "NVIDIA_VISIBLE_DEVICES".to_string(),
+    ])
+}
+
+pub(crate) fn nvidia_visibility_environment(resource_id: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("CUDA_VISIBLE_DEVICES".to_string(), resource_id.to_string()),
+        ("NVIDIA_VISIBLE_DEVICES".to_string(), resource_id.to_string()),
+    ])
 }
 
 /// 内部结构体：解析自 `nvidia-smi` CSV 行的 GPU 原始信息
@@ -568,5 +575,68 @@ mod tests {
         let third = HostInventoryProvider::probe_inventory(&provider).unwrap();
         assert_eq!(first.generation, second.generation);
         assert!(third.generation > second.generation);
+    }
+
+    fn visibility_binding(resource_id: &str) -> DeviceBinding {
+        DeviceBinding {
+            resource_id: resource_id.to_string(),
+            nodes: Vec::new(),
+            environment: nvidia_visibility_environment(resource_id),
+            joinable_environment_keys: nvidia_visibility_join_keys(),
+            required_gids: Vec::new(),
+            enforcement: cy_kernel_api::EnforcementMode::Hard,
+            adapter_id: "nvidia".to_string(),
+            reason_code: "TEST".to_string(),
+        }
+    }
+
+    #[test]
+    fn one_gpu_visibility_uses_the_resource_uuid() {
+        let merged = DeviceBinding::merge_all(vec![visibility_binding("GPU-UUID-A")]).unwrap();
+        assert_eq!(merged.environment["CUDA_VISIBLE_DEVICES"], "GPU-UUID-A");
+        assert_eq!(merged.environment["NVIDIA_VISIBLE_DEVICES"], "GPU-UUID-A");
+    }
+
+    #[test]
+    fn n_gpu_visibility_joins_uuids_in_stable_order() {
+        let merged = DeviceBinding::merge_all(vec![
+            visibility_binding("GPU-UUID-A"),
+            visibility_binding("GPU-UUID-C"),
+            visibility_binding("GPU-UUID-D"),
+        ])
+        .unwrap();
+        assert_eq!(
+            merged.environment["CUDA_VISIBLE_DEVICES"],
+            "GPU-UUID-A,GPU-UUID-C,GPU-UUID-D"
+        );
+        assert_eq!(
+            merged.environment["NVIDIA_VISIBLE_DEVICES"],
+            "GPU-UUID-A,GPU-UUID-C,GPU-UUID-D"
+        );
+        assert_eq!(merged.resource_id, "GPU-UUID-A,GPU-UUID-C,GPU-UUID-D");
+    }
+
+    #[test]
+    fn duplicate_gpu_uuid_is_not_repeated_in_visibility() {
+        let merged = DeviceBinding::merge_all(vec![
+            visibility_binding("GPU-UUID-A"),
+            visibility_binding("GPU-UUID-A"),
+        ])
+        .unwrap();
+        assert_eq!(merged.environment["CUDA_VISIBLE_DEVICES"], "GPU-UUID-A");
+        assert_eq!(merged.resource_id, "GPU-UUID-A");
+    }
+
+    #[test]
+    fn non_visibility_env_conflict_still_fails_closed() {
+        let mut left = visibility_binding("GPU-UUID-A");
+        left.environment
+            .insert("EXCLUSIVE_TOKEN".to_string(), "one".to_string());
+        let mut right = visibility_binding("GPU-UUID-C");
+        right
+            .environment
+            .insert("EXCLUSIVE_TOKEN".to_string(), "two".to_string());
+        let error = DeviceBinding::merge_all(vec![left, right]).unwrap_err();
+        assert_eq!(error.reason_code, "CONFLICTING_RESOURCE_ENVIRONMENT");
     }
 }

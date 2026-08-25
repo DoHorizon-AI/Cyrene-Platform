@@ -268,6 +268,7 @@ fn binding_to_proto(
             })
             .collect(),
         environment: binding.environment.into_iter().collect::<HashMap<_, _>>(),
+        environment_merge: HashMap::new(),
         required_gids: binding.required_gids,
         enforcement: enforcement_mode_to_proto(binding.enforcement),
         reason_code: binding.reason_code,

@@ -33,7 +33,7 @@ pub use authority::{
     AuthorityCallContext, AuthoritySnapshot, KernelAuthority, KernelProviderAuthority, NamespaceId,
     ObjectRef, ProviderReconcileAction, ProviderReconcileResult, DEFAULT_NAMESPACE,
 };
-pub use binding::DeviceBinding;
+pub use binding::{DeviceBinding, EnvironmentMerge};
 pub use capability::{CapabilityFact, EnforcementMode, EnforcementReport, NodeCapabilities};
 pub use error::ProviderError;
 pub use inventory::{DeviceNode, HealthReport, InventorySnapshot};

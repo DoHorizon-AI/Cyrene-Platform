@@ -102,69 +102,7 @@ pub(crate) fn to_proto_enforcement(mode: EnforcementMode) -> core_v1::Enforcemen
 }
 
 pub(crate) fn merge_bindings(bindings: Vec<DeviceBinding>) -> Result<DeviceBinding, ProviderError> {
-    let Some(first) = bindings.first().cloned() else {
-        return Ok(DeviceBinding {
-            resource_id: "none".to_string(),
-            nodes: Vec::new(),
-            environment: BTreeMap::new(),
-            required_gids: Vec::new(),
-            enforcement: EnforcementMode::Unenforced,
-            adapter_id: "kernel-daemon".to_string(),
-            reason_code: "NO_RESOURCE_BINDING".to_string(),
-        });
-    };
-    let mut nodes = first.nodes;
-    let mut environment = first.environment;
-    let mut required_gids = first.required_gids;
-    let enforcement = first.enforcement;
-    let mut adapter_ids = vec![first.adapter_id.clone()];
-    let mut resource_ids = vec![first.resource_id];
-    for binding in bindings.into_iter().skip(1) {
-        if binding.enforcement != enforcement {
-            return Err(ProviderError::new(
-                "kernel-daemon",
-                "MIXED_RESOURCE_ENFORCEMENT",
-                "a multi-resource binding must use one enforcement mode",
-            ));
-        }
-        if !adapter_ids.contains(&binding.adapter_id) {
-            adapter_ids.push(binding.adapter_id.clone());
-        }
-        resource_ids.push(binding.resource_id);
-        for node in binding.nodes {
-            if !nodes.iter().any(|existing| existing.path == node.path) {
-                nodes.push(node);
-            }
-        }
-        for (key, value) in binding.environment {
-            if let Some(existing) = environment.get(&key) {
-                if existing != &value {
-                    return Err(ProviderError::new(
-                        "kernel-daemon",
-                        "CONFLICTING_RESOURCE_ENVIRONMENT",
-                        &key,
-                    ));
-                }
-            } else {
-                environment.insert(key, value);
-            }
-        }
-        for gid in binding.required_gids {
-            if !required_gids.contains(&gid) {
-                required_gids.push(gid);
-            }
-        }
-    }
-    adapter_ids.sort();
-    Ok(DeviceBinding {
-        resource_id: resource_ids.join(","),
-        nodes,
-        environment,
-        required_gids,
-        enforcement,
-        adapter_id: adapter_ids.join(","),
-        reason_code: "RESOURCE_BINDING_CREATED_BY_UDS_ADAPTERS".to_string(),
-    })
+    DeviceBinding::merge_all(bindings)
 }
 
 pub(crate) fn resource_request(

@@ -458,6 +458,7 @@ fn test_real_subprocess_kill9_to_watchdog_quarantine_integration(
             enforcement: EnforcementMode::Soft,
             nodes: Vec::new(),
             environment: BTreeMap::new(),
+            joinable_environment_keys: Default::default(),
             required_gids: Vec::new(),
             adapter_id: "adapter-1".to_string(),
             reason_code: "ok".to_string(),

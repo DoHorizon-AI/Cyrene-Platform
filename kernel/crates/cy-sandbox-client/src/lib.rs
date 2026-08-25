@@ -604,6 +604,7 @@ mod tests {
                 required: true,
             }],
             environment: BTreeMap::from([("VISIBLE".to_string(), "0".to_string())]),
+            joinable_environment_keys: Default::default(),
             required_gids: vec![44],
             enforcement: EnforcementMode::Hard,
             adapter_id: "nvidia".to_string(),
