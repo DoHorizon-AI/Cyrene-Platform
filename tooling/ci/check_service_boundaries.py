@@ -204,7 +204,38 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                             )
                         )
 
+    # Rule 5: CI Authority and Public Workflow Alignment
+    repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
+    services_dir = workspace_root / "services"
+    if services_dir.exists():
+        for s in services_dir.iterdir():
+            if s.is_dir() and (s / ".git").exists() and not s.name.endswith("-worktree") and not (s / ".git").is_file():
+                repo_dirs.append(s)
+
+    for rdir in repo_dirs:
+        policy_file = rdir / "repository-policy.yaml"
+        if not policy_file.exists():
+            continue
+        try:
+            p_text = policy_file.read_text(encoding="utf-8")
+            if 'visibility: "public"' in p_text or "visibility: public" in p_text:
+                if 'ci: "github"' in p_text or "ci: github" in p_text:
+                    gh_wf = rdir / ".github" / "workflows"
+                    if not gh_wf.exists() or not list(gh_wf.glob("*.yml")):
+                        violations.append(
+                            Violation(
+                                rule="MISSING_PUBLIC_CI_WORKFLOW",
+                                file_path=str(rdir.relative_to(workspace_root)),
+                                line_number=1,
+                                content=str(gh_wf),
+                                message="Public repository policy declares ci_authority=github but missing active GitHub workflow",
+                            )
+                        )
+        except Exception:
+            pass
+
     return violations
+
 
 
 def main() -> int:
