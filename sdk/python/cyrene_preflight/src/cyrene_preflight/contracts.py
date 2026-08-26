@@ -95,9 +95,16 @@ class AcceleratorFacts:
 
 @dataclass(frozen=True)
 class HardwareFacts:
-    """Canonical Node inventory projection; no host or vendor probing is allowed."""
+    """Canonical Node inventory projection; no host or vendor probing is allowed.
+    
+    Invariant (ADR-006): HardwareFacts authority is strictly the Platform Node Agent
+    resource inventory. Neither Services nor Plugins may execute ad-hoc host driver
+    probes or independent nvidia-smi queries. Preflight evaluators accept immutable
+    HardwareFacts snapshots provided by the Platform.
+    """
 
     node_id: str
+
     inventory_generation: int
     source_ref: str
     accelerators: Tuple[AcceleratorFacts, ...] = ()

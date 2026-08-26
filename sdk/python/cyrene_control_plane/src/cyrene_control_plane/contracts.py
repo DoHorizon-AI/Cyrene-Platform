@@ -19,10 +19,20 @@ from cy_artifacts import ArtifactRef
 
 CONTRACT_VERSION = "cyrene.control-plane.v1"
 
+
 AttemptId = NewType("AttemptId", str)
 AttemptNumber = NewType("AttemptNumber", int)
+
+
+# Invariant: Generation is a strictly monotonic counter incremented by the Reconciler
+# upon each state change or retry. It prevents stale asynchronous completion events from
+# a previous Attempt or zombie worker from overwriting the observed status of a newer Attempt.
 Generation = NewType("Generation", int)
+
+# Invariant: IdempotencyKey ensures that re-submitted Product intent produces the exact
+# same ExecutionPlan without creating duplicate concurrent runs or leaked resource leases.
 IdempotencyKey = NewType("IdempotencyKey", str)
+
 
 
 class StepStatus(str, Enum):
