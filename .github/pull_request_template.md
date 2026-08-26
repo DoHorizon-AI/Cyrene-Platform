@@ -1,14 +1,26 @@
-## Change summary
+## Description
+<!-- Provide a brief, clear summary of what this change accomplishes. -->
 
-<!-- Describe the contract, governance, or Core behavior changed. -->
+## Architecture Impact
+Does this change modify or impact any of the following?
 
-## Validation
+- [ ] Public contract or protobuf schema (`contracts/`)
+- [ ] Kernel semantics or OS sandboxing (`kernel/`)
+- [ ] Product ownership or desired/observed state machine
+- [ ] Capability interface definition (`Capability`)
+- [ ] Persistence schema or artifact immutability
+- [ ] Wire protocol or inter-process communication
+- [ ] Public/Private dependency boundary (must remain strictly `PRIVATE -> PUBLIC`)
 
-- [ ] cargo fmt --all -- --check
-- [ ] cargo check --workspace --locked
-- [ ] cargo test --workspace --locked
+*If you checked any of the above, link the relevant ADR or explain why no ADR is required:*
 
-## Release evidence
+---
 
-<!-- Required for pull requests targeting main. -->
-Release evidence:
+## Testing & Verification
+- [ ] Automated unit tests added/updated and passing locally
+- [ ] Governance checks pass (`python -m pytest tooling/ci/test_check_service_boundaries.py`)
+- [ ] Conformance tests pass where applicable
+
+## Compatibility & Migration
+- [ ] Backward-compatible change
+- [ ] Documentation updated (`docs/`)\n
