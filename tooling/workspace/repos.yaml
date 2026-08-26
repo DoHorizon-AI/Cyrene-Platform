@@ -1,0 +1,88 @@
+# Cyrene Workspace Repository Catalog
+# This manifest defines verified public repositories in the Cyrene software matrix.
+# For local private overlays, create `repos.local.yaml` or set `CYRENE_WORKSPACE_OVERLAY`.
+
+schemaVersion: 1
+catalogAuthority: "DoHorizon Cyrene Engineering"
+
+repositories:
+  platform:
+    name: "Cyrene-Platform"
+    path: "Cyrene-Platform"
+    category: "foundation"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+    defaultBranch: "develop"
+    required: true
+    profiles: ["core", "training", "serving", "gateway", "full"]
+
+  plugins:
+    name: "Cyrene-Plugins"
+    path: "plugins"
+    category: "plugins"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+    defaultBranch: "main"
+    required: true
+    profiles: ["core", "training", "serving", "gateway", "full"]
+
+  yield:
+    name: "Cyrene-Yield"
+    path: "services/Cyrene-Yield"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["training", "full"]
+
+  reactor:
+    name: "Cyrene-Reactor"
+    path: "services/cyrene-reactor"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["serving", "full"]
+
+  exchange:
+    name: "Cyrene-Exchange"
+    path: "services/cyrene-exchange"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["gateway", "full"]
+
+  astrbot:
+    name: "cyrene-astrbot-rev"
+    path: "services/cyrene-astrbot-rev"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["full"]
+
+  catalyst:
+    name: "cyrene-catalyst"
+    path: "services/cyrene-catalyst"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["full"]
+
+  echo:
+    name: "cyrene-echo"
+    path: "services/cyrene-echo"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["full"]
+
+  navigator:
+    name: "cyrene-navigator"
+    path: "services/cyrene-navigator"
+    category: "service"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
+    defaultBranch: "main"
+    required: false
+    profiles: ["full"]\n

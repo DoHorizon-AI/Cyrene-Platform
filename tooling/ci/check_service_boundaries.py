@@ -176,6 +176,34 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                             )
                         )
 
+    # 4. Check Public Foundation does not import Private Enterprise/Commercial packages
+    public_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
+    for pdir in public_dirs:
+        if not pdir.exists():
+            continue
+        for root, dirs, files in os.walk(pdir):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs and d != "tooling"]
+            for fname in files:
+                fpath = Path(root) / fname
+                if fpath.suffix not in [".py", ".rs", ".cs", ".kt"]:
+                    continue
+                try:
+                    text = fpath.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                rel_path = fpath.relative_to(workspace_root)
+                for idx, line in enumerate(text.splitlines(), 1):
+                    if re.search(r'^\s*(import|from|using|extern crate)\s+.*\b(cyrene_enterprise|cyrene_commercial|CyreneEnterprise|CyreneCommercial)\b', line):
+                        violations.append(
+                            Violation(
+                                rule="NO_PRIVATE_PACKAGE_IMPORT",
+                                file_path=str(rel_path),
+                                line_number=idx,
+                                content=line.strip(),
+                                message="Public foundational code imports or references private package",
+                            )
+                        )
+
     return violations
 
 
