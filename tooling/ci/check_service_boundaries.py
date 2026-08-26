@@ -213,15 +213,16 @@ def main() -> int:
     violations = check_service_boundaries(workspace_root)
 
     if violations:
-        print(f"\n❌ Found {len(violations)} boundary violation(s):")
+        print(f"\n[ERROR] Found {len(violations)} boundary violation(s):")
         for v in violations:
             print(f"  [{v.rule}] {v.file_path}:{v.line_number}")
             print(f"    Code: {v.content}")
             print(f"    Issue: {v.message}\n")
         return 1
 
-    print("\n✅ All Service, Plugin, Infrastructure, and Kernel boundaries passed clean!")
+    print("\n[OK] All Service, Plugin, Infrastructure, and Kernel boundaries passed clean!")
     return 0
+
 
 
 if __name__ == "__main__":
