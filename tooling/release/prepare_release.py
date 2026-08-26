@@ -2,7 +2,7 @@
 """
 Cyrene Automated Component Release Preparation Tool
 Validates release version, verifies target commit on default branch, checks tag absence,
-runs release test suites, and orchestrates immutable tag creation and draft GitHub Release.
+runs release test suites, and orchestrates immutable tag creation only after all verification passes.
 """
 
 import argparse
@@ -55,7 +55,8 @@ def main():
     parser = argparse.ArgumentParser(description="Cyrene Release Preparation Tool")
     parser.add_argument("--repo-path", default=".", help="Path to repository")
     parser.add_argument("--version", required=True, help="Release version (e.g. 0.4.3 or v0.4.3)")
-    parser.add_argument("--dry-run", action="store_true", help="Perform safety validation and plan commands without publishing")
+    parser.add_argument("--validate", "--dry-run", dest="validate_only", action="store_true", help="Perform safety validation and plan commands without creating tag")
+    parser.add_argument("--create-tag", action="store_true", help="Create the annotated tag at the very end (after verification succeeds)")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow uncommitted local changes for testing")
 
     args = parser.parse_args()
@@ -65,9 +66,9 @@ def main():
     print(f"=== Cyrene Release Preparation ===")
     print(f"Repository: {rp.name} ({rp})")
     print(f"Requested Version: {args.version} -> Canonical Tag: {tag}")
-    print(f"Mode: {'DRY RUN' if args.dry_run else 'EXECUTE'}\n")
+    print(f"Mode: {'CREATE TAG (FINAL STEP)' if args.create_tag else 'VALIDATION ONLY'}\n")
 
-    ok, msg = validate_release_safety(rp, tag, allow_dirty=args.allow_dirty or args.dry_run)
+    ok, msg = validate_release_safety(rp, tag, allow_dirty=args.allow_dirty or args.validate_only)
     if not ok:
         print(f"[REJECTED] {msg}")
         sys.exit(1)
@@ -85,20 +86,22 @@ def main():
     push_tag_cmd = f"git push origin {tag}"
     gh_release_cmd = f"gh release create {tag} --draft --title '{rp.name} {tag}' --notes 'Automated component release for {rp.name} at commit {target_sha}'"
 
+    print("\nPlanned Release Execution Sequence:")
+    print("  1. Version & Tag Safety Validation [PASSED]")
+    print("  2. Full Release Verification (verify.py) [REQUIRED BEFORE TAGGING]")
+    print("  3. Build & Artifact Assembly [REQUIRED BEFORE TAGGING]")
+    print(f"  4. Immutable Tag Creation (LAST STEP) : {tag_cmd}")
+    print(f"  5. Tag Push                           : {push_tag_cmd}")
+    print(f"  6. Draft GitHub Release Publication   : {gh_release_cmd}")
 
-    print("\nPlanned Release Actions:")
-    print(f"  1. Tag Creation : {tag_cmd}")
-    print(f"  2. Tag Push     : {push_tag_cmd}")
-    print(f"  3. Draft Release: {gh_release_cmd}")
-
-    if args.dry_run:
-        print("\n[SUCCESS] Release validation and dry-run completed cleanly.")
+    if not args.create_tag:
+        print("\n[SUCCESS] Pre-release validation passed. Proceed to verification and build steps.")
         sys.exit(0)
 
-    # In execute mode (intended for protected GitHub Actions workflow)
-    print("\nExecuting Tag Creation...")
+    # In execute mode (called at the very end after all tests and builds pass)
+    print("\nExecuting Final Tag Creation...")
     subprocess.run(["git", "-C", str(rp), "tag", "-a", tag, target_sha, "-m", f"Release {rp.name} {tag}"], check=True)
-    print(f"[SUCCESS] Created immutable annotated tag {tag}")
+    print(f"[SUCCESS] Created immutable annotated tag {tag} after successful verification.")
 
 if __name__ == "__main__":
     main()

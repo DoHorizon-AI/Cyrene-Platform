@@ -37,3 +37,18 @@ Use the platform tag validator before creating release tags:
 ```bash
 python tooling/release/validate_tag.py --repo yield --tag v0.2.3
 ```
+
+---
+
+## 4. Release Execution Ordering (Tagging at the Very End)
+
+Release automation enforces a strict verification-first sequence:
+1. **Pre-validation**: Check SemVer syntax, verify tag does not already exist, verify repository policy allows automated release.
+2. **Verification Gate**: Execute complete test suites (`verify.py`, SDK tests, contracts, governance checks).
+3. **Build & Package Assembly**: Build distribution wheels, binaries, or artifacts and verify outputs.
+4. **Final Tag Creation**: Only after steps 1, 2, and 3 pass with 100% green status, create the immutable annotated Git tag (`git tag -a v<version>`).
+5. **Publish**: Push the tag to origin and create a Draft GitHub Release.
+
+> [!IMPORTANT]
+> Git tags are **never** created prematurely. If verification or build fails at any point, the process halts immediately and no Git tag is created.
+
