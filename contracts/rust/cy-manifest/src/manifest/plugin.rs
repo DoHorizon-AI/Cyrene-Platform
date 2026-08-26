@@ -569,6 +569,23 @@ pub struct PluginSetLock {
     pub digest: Option<String>,
 }
 
+impl PluginManifest {
+    /// Return the v1 artifact reference, including a digest from the legacy
+    /// package table when no explicit v1 artifact field is present.
+    pub fn artifact_reference(&self) -> Option<PluginArtifactRef> {
+        if let Some(artifact) = &self.artifact {
+            return Some(artifact.clone());
+        }
+        self.package
+            .as_ref()
+            .and_then(|package| package.sha256.clone())
+            .map(|digest| PluginArtifactRef {
+                uri: format!("plugin://{}", self.plugin.id),
+                digest: Some(digest),
+            })
+    }
+}
+
 impl PluginSetLock {
     pub fn new(mut entries: Vec<ResolvedCapability>) -> Self {
         entries.sort_by(|left, right| {
