@@ -125,6 +125,58 @@ impl CapabilityRegistry {
             .collect()
     }
 
+    /// Validate a manifest against an exact capability interface and its
+    /// execution constraints without selecting a provider.
+    pub fn validate_interface(
+        &self,
+        manifest: &PluginManifest,
+        requirement: &PluginRequirement,
+    ) -> Result<(), CapabilityResolutionError> {
+        let descriptors = manifest
+            .capability_descriptors
+            .iter()
+            .filter(|descriptor| descriptor.id == requirement.capability)
+            .collect::<Vec<_>>();
+        if descriptors.is_empty() {
+            return Err(CapabilityResolutionError::NoProvider {
+                capability: requirement.capability.id.clone(),
+            });
+        }
+
+        let matching_interface = descriptors
+            .iter()
+            .filter(|descriptor| descriptor.interface_version == requirement.interface_version)
+            .any(|descriptor| {
+                allowed_modes(requirement, &[])
+                    .iter()
+                    .any(|mode| descriptor.supports_mode(*mode))
+            });
+        if matching_interface {
+            return Ok(());
+        }
+
+        let mut available = descriptors
+            .iter()
+            .map(|descriptor| descriptor.interface_version.version.clone())
+            .collect::<Vec<_>>();
+        available.sort();
+        available.dedup();
+        if available
+            .iter()
+            .all(|version| version != &requirement.interface_version.version)
+        {
+            return Err(CapabilityResolutionError::InterfaceMismatch {
+                capability: requirement.capability.id.clone(),
+                requested: requirement.interface_version.version.clone(),
+                available,
+            });
+        }
+        Err(CapabilityResolutionError::ExecutionModeMismatch {
+            capability: requirement.capability.id.clone(),
+            requested: allowed_modes(requirement, &[]),
+        })
+    }
+
     pub fn resolver(&self) -> CapabilityResolver<'_> {
         CapabilityResolver { registry: self }
     }
@@ -259,7 +311,7 @@ impl<'a> CapabilityResolver<'a> {
             capability: descriptor.id.clone(),
             interface_version: descriptor.interface_version.clone(),
             execution_mode: mode,
-            artifact: manifest.artifact.clone(),
+            artifact: manifest.artifact_reference(),
             compatibility_evidence: vec![
                 "capability-id-exact".to_string(),
                 "interface-version-exact".to_string(),
@@ -439,6 +491,14 @@ mod tests {
         assert!(matches!(
             error,
             CapabilityResolutionError::InterfaceMismatch { .. }
+        ));
+        let registered = registry
+            .providers(&CapabilityId::new("training.engine.v1").unwrap())
+            .pop()
+            .unwrap();
+        assert!(matches!(
+            registry.validate_interface(&registered, &requirement("training.engine.v1", "2", &[])),
+            Err(CapabilityResolutionError::InterfaceMismatch { .. })
         ));
     }
 
