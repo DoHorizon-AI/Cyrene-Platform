@@ -33,6 +33,7 @@ secrets/
 *.swp
 *.swo
 .DS_Store
-Thumbs.db
 *.tmp
 __pycache__/
+*.egg-info/
+*.dist-info/

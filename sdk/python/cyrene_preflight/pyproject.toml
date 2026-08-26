@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Generic Cyrene preflight contracts and reference evaluators"
 requires-python = ">=3.11"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
