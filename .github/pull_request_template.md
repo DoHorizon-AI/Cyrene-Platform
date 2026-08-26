@@ -1,6 +1,12 @@
 ## Description
 <!-- Provide a brief, clear summary of what this change accomplishes. -->
 
+## Verification
+- [ ] Local quick verification passed (`python tooling/ci/verify.py`)
+- [ ] Relevant unit and SDK tests passed
+- [ ] Dependency lock changes are intentional (`uv.lock` / `Cargo.lock`)
+- [ ] Documentation links and indexes validated (`tooling/docs/validate_docs.py`)
+
 ## Architecture Impact
 Does this change modify or impact any of the following?
 
@@ -16,11 +22,6 @@ Does this change modify or impact any of the following?
 
 ---
 
-## Testing & Verification
-- [ ] Automated unit tests added/updated and passing locally
-- [ ] Governance checks pass (`python -m pytest tooling/ci/test_check_service_boundaries.py`)
-- [ ] Conformance tests pass where applicable
-
 ## Compatibility & Migration
 - [ ] Backward-compatible change
-- [ ] Documentation updated (`docs/`)\n
+- [ ] Documentation updated (`docs/`)
