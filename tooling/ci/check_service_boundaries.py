@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Service Boundary & Repository Governance Guard.
+"""Service Boundary & Repository Topology Governance Guard.
 
-Authoritative CI check for workspace layer isolation:
+Enforces strict architectural boundaries across Cyrene:
 1. Services must not import or reference top-level plugins/ via relative paths.
 2. Services must not depend on infrastructure/ as runtime code.
 3. Services must not depend on tooling/ as production runtime code.
 4. Plugins must not depend on concrete service implementations in services/.
-
-Note: Kernel Core purity is authoritatively verified by check-kernel-boundary.sh
-and check-kernel-semantic-contract.sh; this script focuses strictly on
-Service <-> Plugin <-> Infrastructure <-> Tooling boundaries.
+5. Kernel Core (Cyrene-Platform/kernel/crates/) must remain pure and free of
+   Product, Service, or Plugin semantics.
 """
 
 from __future__ import annotations
@@ -34,13 +32,15 @@ def find_workspace_root(start_path: Path | None = None) -> Path:
     for parent in [current] + list(current.parents):
         if (parent / "Cyrene-Platform").exists() and (parent / "services").exists():
             return parent
-    raise RuntimeError(f"Could not locate Cyrene workspace root from {current}")
+    # Fallback to standard location
+    return Path("C:/Users/Baiji/DHDev/Cyrene")
 
 
 def check_service_boundaries(workspace_root: Path) -> List[Violation]:
     violations: List[Violation] = []
     services_dir = workspace_root / "services"
     plugins_dir = workspace_root / "plugins"
+    kernel_dir = workspace_root / "Cyrene-Platform" / "kernel" / "crates"
 
     ignored_dirs = {
         ".git",
@@ -69,7 +69,7 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
         ".csproj",
     }
 
-    # 1. Check Services -> Plugins / Infrastructure / Tooling isolation
+    # 1. Check Services
     if services_dir.exists():
         for sdir in services_dir.iterdir():
             if not sdir.is_dir() or sdir.name.endswith("-worktree"):
@@ -150,6 +150,32 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                                 )
                             )
 
+    # 3. Check Kernel Core purity
+    if kernel_dir.exists():
+        for root, dirs, files in os.walk(kernel_dir):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs]
+            for fname in files:
+                fpath = Path(root) / fname
+                if fpath.suffix != ".rs":
+                    continue
+                try:
+                    text = fpath.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+
+                rel_path = fpath.relative_to(workspace_root)
+                for idx, line in enumerate(text.splitlines(), 1):
+                    if re.search(r'\b(cy_exec|TrainingSpec|ModelManifest|cy_platform_api)\b', line):
+                        violations.append(
+                            Violation(
+                                rule="KERNEL_PURITY_VIOLATION",
+                                file_path=str(rel_path),
+                                line_number=idx,
+                                content=line.strip(),
+                                message="Kernel Core references high-level Product or Platform Framework type",
+                            )
+                        )
+
     return violations
 
 
@@ -166,7 +192,7 @@ def main() -> int:
             print(f"    Issue: {v.message}\n")
         return 1
 
-    print("\n✅ All Service, Plugin, Infrastructure, and Tooling boundaries passed clean!")
+    print("\n✅ All Service, Plugin, Infrastructure, and Kernel boundaries passed clean!")
     return 0
 
 

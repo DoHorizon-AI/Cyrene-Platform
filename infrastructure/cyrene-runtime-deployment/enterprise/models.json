@@ -1,0 +1,44 @@
+{
+  "models": {
+    "default": {
+      "model_path": "facebook/opt-2.7b",
+      "engine": "cuda-vllm",
+      "max_model_len": 2048,
+      "gpu_memory_utilization": 0.8,
+      "enable_prefix_caching": true,
+      "primary": {
+        "id": "worker-nvidia-1",
+        "host": "worker-nvidia",
+        "port": 50051,
+        "provider": "nvidia"
+      }
+    },
+    "deepseek-v3": {
+      "model_path": "deepseek-ai/DeepSeek-V3",
+      "engine": "cuda-vllm",
+      "max_model_len": 8192,
+      "gpu_memory_utilization": 0.8,
+      "tensor_parallel_size": 1,
+      "enable_prefix_caching": true,
+      "primary": {
+        "id": "worker-nvidia-1",
+        "host": "worker-nvidia",
+        "port": 50051,
+        "provider": "nvidia"
+      }
+    },
+    "deepseek-v3-async": {
+      "model_path": "deepseek-ai/DeepSeek-V3",
+      "engine": "cuda-vllm-async",
+      "max_model_len": 8192,
+      "gpu_memory_utilization": 0.8,
+      "enable_prefix_caching": true,
+      "primary": {
+        "id": "worker-nvidia-1",
+        "host": "worker-nvidia",
+        "port": 50051,
+        "provider": "nvidia"
+      }
+    }
+  }
+}
