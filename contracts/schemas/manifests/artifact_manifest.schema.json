@@ -5,8 +5,9 @@
   "description": "An immutable description of a managed artifact (model snapshot, dataset, checkpoint, merged/quantized model, or report). Its `artifact_id` is a content hash of the record with the `artifact_id` field itself excluded (see schemas/CANONICALIZATION.md).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["kind", "integrity", "lineage"],
-  "properties": {
+    "required": ["kind", "integrity", "lineage"],
+    "properties": {
+    "schema_version": { "type": "string", "description": "Optional version of the canonical artifact manifest schema." },
     "artifact_id": {
       "type": "string",
       "description": "Computed content id, format 'sha256:<hex>'. EXCLUDED from the canonical hash preimage; treat as output only.",
@@ -15,7 +16,7 @@
     "kind": {
       "type": "string",
       "description": "Kind of artifact.",
-      "enum": ["model", "dataset", "checkpoint", "merged", "quantized", "report"]
+      "enum": ["generic", "model", "dataset", "checkpoint", "training_spec", "metrics", "merged", "quantized", "report"]
     },
     "source": { "type": "string", "description": "Where the artifact originated, e.g. a model ref or upstream URL (optional)." },
     "integrity": {
