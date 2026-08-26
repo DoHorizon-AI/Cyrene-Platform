@@ -47,7 +47,7 @@ mapfile -t legacy_refs < <(
     -g '!target/**' \
     -g '!.git/**' \
     -g '!**/*.md' \
-    -g '!tools/ci/check-architecture-governance.sh' \
+    -g '!tooling/ci/check-architecture-governance.sh' \
     'cy\.llm|AgentService|AiService|ai_service\.proto|agent_service\.proto' . || true
 )
 

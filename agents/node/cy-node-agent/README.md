@@ -23,7 +23,7 @@ accepts a shell command, argv, environment, image, or arbitrary payload.
 
 ## Linux service setup
 
-Install `infra/systemd/cy-node-agent.service`, then create a root-owned
+Install `infrastructure/systemd/cy-node-agent.service`, then create a root-owned
 `/etc/cyrene/node-agent.env` (mode `0640`) containing file paths, not PEM
 contents:
 

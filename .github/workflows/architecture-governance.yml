@@ -26,10 +26,10 @@ jobs:
           version: 1.45.0
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check architecture governance
-        run: bash tools/ci/check-architecture-governance.sh
+        run: bash tooling/ci/check-architecture-governance.sh
       - name: Check Core v1 contract
-        run: bash tools/ci/check-core-v1-contract.sh
+        run: bash tooling/ci/check-core-v1-contract.sh
       - name: Check Kernel semantic contract
         env:
           REQUIRE_KOTLIN_TCK: "1"
-        run: bash tools/ci/check-kernel-semantic-contract.sh
+        run: bash tooling/ci/check-kernel-semantic-contract.sh

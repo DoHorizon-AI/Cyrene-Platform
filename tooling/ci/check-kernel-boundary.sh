@@ -58,8 +58,8 @@ required_files=(
   "kernel/crates/cy-sandbox-client/src/lib.rs"
   "adapters/hardware/nvidia/src/main.rs"
   "adapters/execution/sandboxd/src/main.rs"
-  "infra/systemd/cyrene-nvidia-adapter.service"
-  "infra/systemd/cyrene-sandboxd.service"
+  "infrastructure/systemd/cyrene-nvidia-adapter.service"
+  "infrastructure/systemd/cyrene-sandboxd.service"
   "docs/adr/ADR-HARDWARE-ADAPTER-BOUNDARY.md"
   "docs/adr/ADR-SANDBOX-ADAPTER-BOUNDARY.md"
 )

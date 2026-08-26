@@ -27,7 +27,7 @@ Before handing off a core change, run:
 cargo fmt --all -- --check
 cargo check --workspace --locked
 cargo test --workspace --locked
-bash tools/ci/check-kernel-boundary.sh
+bash tooling/ci/check-kernel-boundary.sh
 ```
 
 Contract changes require a versioning decision and a compatibility test before

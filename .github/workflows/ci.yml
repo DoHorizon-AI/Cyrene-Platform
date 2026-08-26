@@ -18,6 +18,6 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
-      - run: bash tools/ci/check-kernel-boundary.sh
+      - run: bash tooling/ci/check-kernel-boundary.sh
       - run: cargo check --workspace --locked
       - run: cargo test --workspace --locked
