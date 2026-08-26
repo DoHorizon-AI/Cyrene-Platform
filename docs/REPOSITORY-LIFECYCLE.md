@@ -58,3 +58,10 @@ This repository does **not** distribute standalone release zip files directly to
 - **Canonical Architecture Docs**: See [`Cyrene-Platform/docs/start-here/00-what-is-cyrene.md`](file:///C:/Users/Baiji/DHDev/Cyrene/Cyrene-Platform/docs/start-here/00-what-is-cyrene.md)
 - **Release Topology**: See [`Cyrene-Platform/docs/release/release-topology.md`](file:///C:/Users/Baiji/DHDev/Cyrene/Cyrene-Platform/docs/release/release-topology.md)
 - **CI Trust Model**: See [`Cyrene-Platform/docs/governance/ci-trust-model.md`](file:///C:/Users/Baiji/DHDev/Cyrene/Cyrene-Platform/docs/governance/ci-trust-model.md)
+
+## 7. Versioning & Tag Strategy
+- **Versioning Scheme**: `semver` (SemVer)
+- **Version Scope**: `repository`
+- **Tag Strategy**: `repository`
+- **Canonical Tag Pattern**: `v{version}`
+- **Tag Immutability**: Published tags are permanent and immutable. Defective releases require patch increments.

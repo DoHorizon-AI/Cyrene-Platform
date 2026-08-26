@@ -4,6 +4,7 @@ repository:
   lifecycle_class: PUBLIC_FOUNDATION
   visibility: public
   source_owner: Platform Core Team
+  remote_default_branch: main
 ownership:
   owns:
   - Foundational contracts & Protobuf schemas
@@ -45,3 +46,9 @@ authorities:
   deployment: community
 trust:
   public_requires_private: false
+versioning:
+  scheme: semver
+  scope: repository
+  tag_strategy: repository
+  tag_pattern: v{version}
+  automated_release: true
