@@ -1,0 +1,19 @@
+# Repository Ownership Map
+
+This table defines the authoritative ownership, dependencies, and boundaries for every repository in the Cyrene software matrix.
+
+---
+
+| Repository | Primary Responsibility (OWNS) | Must NEVER Own (DOES NOT OWN) | Depends On | Consumed By | Where to Start Reading |
+|---|---|---|---|---|---|
+| **`Cyrene-Platform`** | Foundational contracts, Rust Kernel, Control Plane, SDKs, Shared Infra & Tooling | Product-specific AI state, training semantics, serving engine internals | None (Root trust base) | All Services, Plugins, External Clients | [`Cyrene-Platform/README.md`](../../README.md), [`docs/start-here/00-what-is-cyrene.md`](00-what-is-cyrene.md) |
+
+| **`Cyrene-Plugins`** | Replaceable capability implementations, official catalog, manifest schemas, conformance tests | Product desired/observed state, generic Kernel lifecycle mechanisms | `Cyrene-Platform` contracts | `Cyrene-Yield`, `Cyrene-Reactor`, `Cyrene-Exchange` | [`plugins/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/plugins/README.md), [`plugins/catalog/official/catalog.json`](file:///C:/Users/Baiji/DHDev/Cyrene/plugins/catalog/official/catalog.json) |
+| **`Cyrene-Yield`** | Model training product semantics, `TrainingRun`, epoch tracking, training orchestration | Generic resource lifecycle, low-level cgroups, concrete training engine internals | `Cyrene-Platform` (SDK, Contracts) | Training end-users, MLOps orchestration | [`services/Cyrene-Yield/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/Cyrene-Yield/README.md), `training/core/` |
+| **`Cyrene-Reactor`** | Model serving & inference product semantics, deployment desired state, scaling policy | Generic GPU memory allocation, generic lease management | `Cyrene-Platform` (SDK, Contracts) | Inference API consumers, Web clients | [`services/cyrene-reactor/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-reactor/README.md), `runtime/core/` |
+| **`Cyrene-Exchange`** | API Gateway product & control semantics, model load balancing, endpoint routing | Language-specific gateway runtime internals | `Cyrene-Platform` | API clients, UI dashboards | [`services/cyrene-exchange/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-exchange/README.md) |
+| **`cyrene-astrbot-rev`** | Multi-platform agent & instant messaging host service, Star system, session flows | Generic platform infrastructure, generic kernel worker supervision | `Cyrene-Platform`, `Cyrene-Plugins` | End users on IM platforms (Discord, QQ, WeCom) | [`services/cyrene-astrbot-rev/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-astrbot-rev/README.md) |
+| **`cyrene-dh-system-internal`** | Internal enterprise operations, WeCom agent hub, Azure DevOps task synchronization | Core AI execution primitives, public platform contracts | Internal connectors, Azure DevOps SDK | Internal operations teams | [`services/cyrene-dh-system-internal/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-dh-system-internal/README.md) |
+| **`cyrene-catalyst`** | Legacy experimentation & dialogue dataset training archives | Active platform execution, canonical contracts | Legacy toolchains | Historical reference | [`services/cyrene-catalyst/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-catalyst/README.md) |
+| **`cyrene-echo`** | Media streaming & audio processing service scaffold | Core platform contracts | Platform SDK | Multimedia pipelines | [`services/cyrene-echo/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-echo/README.md) |
+| **`cyrene-navigator`** | Distributed service discovery & cluster topology service | Node agent low-level telemetry | Platform contracts | Cluster infrastructure | [`services/cyrene-navigator/README.md`](file:///C:/Users/Baiji/DHDev/Cyrene/services/cyrene-navigator/README.md) |
