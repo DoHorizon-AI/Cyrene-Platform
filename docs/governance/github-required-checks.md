@@ -1,29 +1,30 @@
-# Recommended GitHub Branch Protection & Required CI Checks
+# GitHub Actions Required Status Checks & Release Protections
 
-This document provides recommended branch protection configurations for GitHub repository administrators.
+This document specifies the exact status check names, CI gates, and release environment requirements across Cyrene repositories.
 
 ---
 
-## Recommended Status Checks by Repository
+## 1. Required Status Checks per Repository
 
-### 1. `Cyrene-Platform` (Target branch: `develop` / `main`)
-- `ci / docs` (Markdown link and document index validation)
-- `ci / governance` (Service boundary guard and dependency direction check)
-- `ci / python-sdk` (Preflight, Control Plane, Artifacts, and Environment SDK tests)
-- `ci / rust-kernel` (Cargo fmt, clippy, and unit tests with `--locked`)
+### A. `Cyrene-Platform` (Public Foundation)
+- **`ci / python-sdks-and-tooling`**: SDK test suites, control plane contracts, preflight verification.
+- **`ci / governance-and-boundaries`**: Service boundary guard, repository policy validation, documentation link verification.
+- *Release Workflow (Manual Dispatch)*: **`release / prepare-draft-release`** (runs in protected environment `public-release`).
 
-### 2. `Cyrene-Plugins` (Target branch: `main`)
-- `ci / docs` (Documentation and manifest schema syntax validation)
-- `ci / conformance` (Capability Conformance TCK and Catalog evidence verification)
-- `ci / python-plugins` (Lightweight unit tests for verified Python plugins)
+### B. `Cyrene-Plugins` (Official Public Plugins)
+- **`ci / plugin-conformance`**: Plugin manifest verification, interface compliance test suites.
 
-### 3. `Cyrene-Yield` (Target branch: `main` / `develop`)
-- `ci / governance` (Boundary guard validation)
-- `ci / training-unit` (Training controller, spec compilation, and mock dry-run tests)
+### C. `Cyrene-Yield` (Model Training Product)
+- **`ci / unit-and-contracts`**: Training runtime unit tests, executor and checkpointing tests.
+- **`ci / integration-training`**: Multi-repository integration with Platform and Plugins.
 
-### 4. `Cyrene-Reactor` (Target branch: `main` / `develop`)
-- `ci / rust-clippy-test` (Inference server Rust core tests)
-- `ci / python-serving` (Serving runtime and API tests)
+### D. `cyrene-reactor`, `cyrene-exchange`, `cyrene-astrbot-rev`, `cyrene-catalyst`, `cyrene-echo`, `cyrene-navigator`
+- **`ci / verify`**: Standalone repository verification and test suite.
 
-### 5. `Cyrene-Exchange` (Target branch: `main` / `develop`)
-- `ci / gateway-tests` (Coordinator and routing tests)
+---
+
+## 2. CI Authority & Public Boundary Invariants
+
+1. **Zero Private Credentials in PR CI**: All required GitHub PR status checks run in public GitHub Actions with zero Azure DevOps credentials or tokens.
+2. **Azure Pipelines are NOT PR Status Checks**: In all public repositories, `azure-pipelines.yml` has `pr: none` and `trigger: [main]`. They run exclusively as internal delivery gates.
+3. **Draft Release by Default**: Automated release preparation outputs a **Draft Release**, ensuring maintainer oversight before public artifact availability.
