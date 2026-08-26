@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -594,7 +595,7 @@ fn test_proxy_type_aliases_compatibility() {
 async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses() {
     use cy_plugin_protocol::{
         envelope::Payload,
-        pb::{invoke_result, Envelope, InvokeResult, SendNotificationResponse},
+        pb::{invoke_result, Envelope, HelloAck, InvokeResult, SendNotificationResponse},
         CURRENT_PROTOCOL_VERSION,
     };
     use tokio::net::UnixListener;
@@ -606,6 +607,33 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
         let (stream, _) = listener.accept().await.expect("accept worker transport");
         let (mut reader, mut writer) = stream.into_split();
         let mut buffer = bytes::BytesMut::with_capacity(4096);
+        let hello = crate::transport::read_frame(&mut reader, &mut buffer)
+            .await
+            .expect("read Hello")
+            .expect("Hello frame");
+        assert!(matches!(hello.payload, Some(Payload::Hello(_))));
+        let hello_ack = Envelope {
+            request_id: hello.request_id.clone(),
+            trace_id: hello.trace_id.clone(),
+            plugin_id: hello.plugin_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: 1,
+            generation: hello.generation,
+            fence_token: hello.fence_token,
+            payload: Some(Payload::HelloAck(HelloAck {
+                selected_protocol_version: CURRENT_PROTOCOL_VERSION,
+                plugin_id: hello.plugin_id.clone(),
+                plugin_version: "1.0.0".to_string(),
+                api_version: "1".to_string(),
+                declared_capabilities: Vec::new(),
+                metrics: HashMap::new(),
+                capabilities_json: "{}".to_string(),
+            })),
+        };
+        crate::transport::write_frame(&mut writer, &hello_ack)
+            .await
+            .expect("write HelloAck");
         let request = crate::transport::read_frame(&mut reader, &mut buffer)
             .await
             .expect("read invoke")
@@ -619,10 +647,11 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
             plugin_id: request.plugin_id.clone(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             deadline_ms: 0,
-            sequence_number: 1,
+            sequence_number: 2,
             generation: request.generation,
             fence_token: request.fence_token,
             payload: Some(Payload::InvokeResult(InvokeResult {
+                payload: Vec::new(),
                 response: Some(invoke_result::Response::SendNotification(
                     SendNotificationResponse { success: true },
                 )),
@@ -637,10 +666,11 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
             plugin_id: request.plugin_id,
             protocol_version: CURRENT_PROTOCOL_VERSION,
             deadline_ms: 0,
-            sequence_number: 2,
+            sequence_number: 3,
             generation: request.generation,
             fence_token: 0,
             payload: Some(Payload::InvokeResult(InvokeResult {
+                payload: Vec::new(),
                 response: Some(invoke_result::Response::SendNotification(
                     SendNotificationResponse { success: true },
                 )),
@@ -667,8 +697,8 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
 #[tokio::test]
 async fn invoke_timeout_sends_protocol_cancel_before_actor_fails_closed() {
     use cy_plugin_protocol::envelope::Payload;
-    use cy_plugin_protocol::pb::Invoke;
-    use prost::Message;
+    use cy_plugin_protocol::pb::{Envelope, Invoke};
+    use cy_plugin_protocol::CURRENT_PROTOCOL_VERSION;
     use tokio::net::UnixListener;
 
     let socket = std::env::temp_dir().join(format!(
@@ -679,8 +709,34 @@ async fn invoke_timeout_sends_protocol_cancel_before_actor_fails_closed() {
     let listener = UnixListener::bind(&socket).expect("bind worker transport socket");
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept worker transport");
-        let (mut reader, _) = stream.into_split();
+        let (mut reader, mut writer) = stream.into_split();
         let mut buffer = bytes::BytesMut::with_capacity(4096);
+        let hello = crate::transport::read_frame(&mut reader, &mut buffer)
+            .await
+            .expect("read Hello")
+            .expect("Hello frame");
+        let hello_ack = Envelope {
+            request_id: hello.request_id.clone(),
+            trace_id: hello.trace_id.clone(),
+            plugin_id: hello.plugin_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: 1,
+            generation: hello.generation,
+            fence_token: hello.fence_token,
+            payload: Some(Payload::HelloAck(cy_plugin_protocol::pb::HelloAck {
+                selected_protocol_version: CURRENT_PROTOCOL_VERSION,
+                plugin_id: hello.plugin_id.clone(),
+                plugin_version: "1.0.0".to_string(),
+                api_version: "1".to_string(),
+                declared_capabilities: Vec::new(),
+                metrics: HashMap::new(),
+                capabilities_json: "{}".to_string(),
+            })),
+        };
+        crate::transport::write_frame(&mut writer, &hello_ack)
+            .await
+            .expect("write HelloAck");
         let invoke = crate::transport::read_frame(&mut reader, &mut buffer)
             .await
             .expect("read invoke")
@@ -704,19 +760,20 @@ async fn invoke_timeout_sends_protocol_cancel_before_actor_fails_closed() {
     let mut actor = crate::helper::prepare_instance_actor("test-instance", &actor)
         .await
         .expect("attach transport");
-    let error = actor
-        .invoke_raw(
+    let mut client = WorkerControlClient::new(&mut actor, "test-instance");
+    let error = client
+        .invoke_message(
             Invoke {
                 extension_point: "test".to_string(),
                 method: "timeout".to_string(),
+                payload: Vec::new(),
                 request: None,
-            }
-            .encode_to_vec(),
+            },
             Duration::from_millis(25),
         )
         .await
         .expect_err("invoke must time out");
-    assert_eq!(error.reason_code, "INVOKE_TIMEOUT");
+    assert!(matches!(error, WorkerControlError::Timeout));
     server.await.expect("worker cancellation server task");
     let _ = std::fs::remove_file(socket);
 }

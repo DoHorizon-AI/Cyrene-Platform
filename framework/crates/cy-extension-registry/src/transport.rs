@@ -4,17 +4,17 @@
 //! module owns framing, protocol identity checks, and response correlation at
 //! the plugin boundary.
 
+#[cfg(unix)]
 use std::{path::Path, time::Duration};
 
 use bytes::BytesMut;
 use cy_plugin_protocol::{Envelope, FramedCodec, ProtocolError, CURRENT_PROTOCOL_VERSION};
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{
-        unix::{OwnedReadHalf, OwnedWriteHalf},
-        UnixStream,
-    },
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::net::{
+    unix::{OwnedReadHalf, OwnedWriteHalf},
+    UnixStream,
 };
 
 pub const MAX_WORKER_FRAME_BYTES: usize = 1024 * 1024;
@@ -29,6 +29,7 @@ pub enum WorkerTransportError {
     Timeout,
 }
 
+#[cfg(unix)]
 pub async fn connect(
     path: &Path,
     timeout: Duration,
@@ -132,7 +133,7 @@ impl StreamChunkReceiver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

@@ -65,6 +65,7 @@ impl RuntimeBuilder for RemoteRuntimeBuilder {
         let invoke_req = Invoke {
             extension_point: "runtime-builder".to_string(),
             method: "build_runtime".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::BuildRuntime(
                 BuildRuntimeRequest {
                     workload_request_json: workload_json,

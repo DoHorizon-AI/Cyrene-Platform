@@ -943,10 +943,14 @@ impl ProcessRuntime for CgroupV2Runtime {
             let _ = fs::remove_dir(&cgroup_path);
             return Err(error);
         }
+        #[cfg(unix)]
+        let tracked_child = TrackedChild::new(child, transport);
+        #[cfg(not(unix))]
+        let tracked_child = TrackedChild::new(child);
         self.children
             .lock()
             .map_err(|_| ProviderError::new("native-process", "LOCK_POISONED", "child table"))?
-            .insert(pid, TrackedChild::new(child, transport));
+            .insert(pid, tracked_child);
         Ok(ProcessHandle {
             pid,
             cgroup_path,

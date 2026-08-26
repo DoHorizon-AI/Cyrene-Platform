@@ -57,6 +57,7 @@ impl GatewayFilter for RemoteGatewayFilter {
         let invoke_req = Invoke {
             extension_point: "gateway-filter".to_string(),
             method: "filter_request".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::FilterRequestData(
                 FilterRequest {
                     headers: headers.clone(),

@@ -1,18 +1,18 @@
 #![cfg(unix)]
 
 use bytes::BytesMut;
-use cy_extension_registry::helper::prepare_instance_actor;
 use cy_extension_registry::transport::{connect, read_frame, write_frame};
+use cy_extension_registry::{helper::prepare_instance_actor, WorkerControlClient};
 use cy_kernel_daemon::watchdog::InstanceActor;
 use cy_plugin_protocol::{
     envelope::Payload,
     pb::{
         invoke::Request, invoke_result::Response, stream_item::Data, Envelope,
-        ExecuteInferenceRequest, ExecuteInferenceResponse, Invoke, InvokeResult, StreamItem,
+        ExecuteInferenceRequest, ExecuteInferenceResponse, HelloAck, Invoke, InvokeResult,
+        StreamItem,
     },
     CURRENT_PROTOCOL_VERSION,
 };
-use prost::Message;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
@@ -29,10 +29,38 @@ async fn test_worker_transport_large_payload_integrity() {
     let server_handle = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept connection");
         let (mut reader, mut writer) = stream.into_split();
+        let mut buffer = BytesMut::with_capacity(64 * 1024);
+        let hello = read_frame(&mut reader, &mut buffer)
+            .await
+            .expect("read Hello")
+            .expect("Hello frame");
+        assert!(matches!(hello.payload, Some(Payload::Hello(_))));
+        let hello_ack = Envelope {
+            request_id: hello.request_id.clone(),
+            trace_id: hello.trace_id.clone(),
+            plugin_id: hello.plugin_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: 1,
+            generation: hello.generation,
+            fence_token: hello.fence_token,
+            payload: Some(Payload::HelloAck(HelloAck {
+                selected_protocol_version: CURRENT_PROTOCOL_VERSION,
+                plugin_id: hello.plugin_id.clone(),
+                plugin_version: "1.0.0".to_string(),
+                api_version: "1".to_string(),
+                declared_capabilities: Vec::new(),
+                metrics: HashMap::new(),
+                capabilities_json: "{}".to_string(),
+            })),
+        };
+        write_frame(&mut writer, &hello_ack)
+            .await
+            .expect("write HelloAck");
         let (resp_tx, mut resp_rx) = mpsc::channel::<Envelope>(64);
 
         let writer_task = tokio::spawn(async move {
-            let mut wire_seq = 0_u64;
+            let mut wire_seq = 1_u64;
             while let Some(mut env) = resp_rx.recv().await {
                 wire_seq += 1;
                 env.sequence_number = wire_seq;
@@ -41,8 +69,6 @@ async fn test_worker_transport_large_payload_integrity() {
                 }
             }
         });
-
-        let mut buffer = BytesMut::with_capacity(64 * 1024);
 
         while let Ok(Some(req_env)) = read_frame(&mut reader, &mut buffer).await {
             let req_id = req_env.request_id;
@@ -57,6 +83,7 @@ async fn test_worker_transport_large_payload_integrity() {
                         _ => String::new(),
                     };
                     Payload::InvokeResult(InvokeResult {
+                        payload: Vec::new(),
                         response: Some(Response::ExecuteInference(ExecuteInferenceResponse {
                             output_text: format!("echo:{}", echo_text),
                         })),
@@ -100,6 +127,7 @@ async fn test_worker_transport_large_payload_integrity() {
     let invoke_msg = Invoke {
         extension_point: "execution_engine".to_string(),
         method: "execute_inference".to_string(),
+        payload: Vec::new(),
         request: Some(Request::ExecuteInference(ExecuteInferenceRequest {
             runtime_manifest_json: String::new(),
             model_manifest_json: String::new(),
@@ -108,27 +136,23 @@ async fn test_worker_transport_large_payload_integrity() {
         })),
     };
 
-    let resp_bytes = {
+    let result = {
         let mut guard = actor.lock().await;
-        guard
-            .invoke_raw(invoke_msg.encode_to_vec(), Duration::from_secs(5))
+        WorkerControlClient::new(&mut guard, "test-instance")
+            .invoke_message(invoke_msg, Duration::from_secs(5))
             .await
             .expect("large payload invoke must succeed")
     };
 
-    let resp_env = Envelope::decode(resp_bytes.as_slice()).expect("decode response envelope");
-    match resp_env.payload {
-        Some(Payload::InvokeResult(res)) => match res.response {
-            Some(Response::ExecuteInference(infer_res)) => {
-                assert_eq!(
-                    infer_res.output_text,
-                    format!("echo:{}", large_text),
-                    "large payload text must match exactly"
-                );
-            }
-            other => panic!("expected ExecuteInference response, got {:?}", other),
-        },
-        other => panic!("expected InvokeResult, got {:?}", other),
+    match result.response {
+        Some(Response::ExecuteInference(infer_res)) => {
+            assert_eq!(
+                infer_res.output_text,
+                format!("echo:{}", large_text),
+                "large payload text must match exactly"
+            );
+        }
+        other => panic!("expected ExecuteInference response, got {:?}", other),
     }
 
     // Clean up
@@ -195,6 +219,7 @@ async fn test_pipelined_concurrent_transport_multiplexing_and_correlation() {
                     generation,
                     fence_token,
                     payload: Some(Payload::InvokeResult(InvokeResult {
+                        payload: Vec::new(),
                         response: Some(Response::ExecuteInference(ExecuteInferenceResponse {
                             output_text: format!("resp:{}", prompt),
                         })),
@@ -272,6 +297,7 @@ async fn test_pipelined_concurrent_transport_multiplexing_and_correlation() {
                 payload: Some(Payload::Invoke(Invoke {
                     extension_point: "execution_engine".to_string(),
                     method: "execute_inference".to_string(),
+                    payload: Vec::new(),
                     request: Some(Request::ExecuteInference(ExecuteInferenceRequest {
                         runtime_manifest_json: String::new(),
                         model_manifest_json: String::new(),
@@ -371,6 +397,7 @@ async fn test_streaming_chunking_and_backpressure() {
         payload: Some(Payload::Invoke(Invoke {
             extension_point: "execution_engine".to_string(),
             method: "execute_inference".to_string(),
+            payload: Vec::new(),
             request: Some(Request::ExecuteInference(ExecuteInferenceRequest {
                 runtime_manifest_json: String::new(),
                 model_manifest_json: String::new(),

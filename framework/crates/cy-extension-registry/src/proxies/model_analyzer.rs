@@ -62,6 +62,7 @@ impl ModelAnalyzer for RemoteModelAnalyzer {
         let invoke_req = Invoke {
             extension_point: "model-analyzer".to_string(),
             method: "analyze_model".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::AnalyzeModel(
                 AnalyzeModelRequest {
                     model_manifest_json: model_json,

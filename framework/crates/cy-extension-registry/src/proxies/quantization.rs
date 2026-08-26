@@ -61,6 +61,7 @@ impl Quantization for RemoteQuantization {
         let invoke_req = Invoke {
             extension_point: "quantization".to_string(),
             method: "quantize_model".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::QuantizeModel(
                 QuantizeModelRequest {
                     model_manifest_json: model_json,

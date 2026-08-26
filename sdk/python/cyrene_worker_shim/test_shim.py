@@ -35,27 +35,27 @@ def main():
     out = io.BytesIO()
 
     # 1. Hello with generation 2, fence 5
-    e1 = Envelope(request_id='req-1', plugin_id='com.cy.analyzer', generation=2, fence_token=5, payload=Hello(min_protocol_version=1, max_protocol_version=1))
+    e1 = Envelope(request_id='req-1', plugin_id='com.cy.analyzer', sequence_number=1, generation=2, fence_token=5, payload=Hello(min_protocol_version=1, max_protocol_version=1))
     write_frame(e1.encode(), inp)
 
     # 2. Advance generation to 3, fence 6 -> triggers on_fence_rotated
-    e2 = Envelope(request_id='req-2', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=HealthCheck())
+    e2 = Envelope(request_id='req-2', plugin_id='com.cy.analyzer', sequence_number=2, generation=3, fence_token=6, payload=HealthCheck())
     write_frame(e2.encode(), inp)
 
     # 3. Stale request with generation 1 -> rejected with FENCED_OUT
-    e3 = Envelope(request_id='req-stale', plugin_id='com.cy.analyzer', generation=1, fence_token=5, payload=HealthCheck())
+    e3 = Envelope(request_id='req-stale', plugin_id='com.cy.analyzer', sequence_number=3, generation=1, fence_token=5, payload=HealthCheck())
     write_frame(e3.encode(), inp)
 
     # 4. Invoke with active generation 3, fence 6
-    e4 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
+    e4 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', sequence_number=4, generation=3, fence_token=6, payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
     write_frame(e4.encode(), inp)
 
     # 5. Cancel is acknowledged separately from the eventual Operation result.
-    e5 = Envelope(request_id='cancel-1', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Cancel(target_request_id='req-3', reason='deadline'))
+    e5 = Envelope(request_id='cancel-1', plugin_id='com.cy.analyzer', sequence_number=5, generation=3, fence_token=6, payload=Cancel(target_request_id='req-3', reason='deadline'))
     write_frame(e5.encode(), inp)
 
     # 6. Shutdown
-    e6 = Envelope(request_id='req-4', plugin_id='com.cy.analyzer', generation=3, fence_token=6, payload=Shutdown(grace_period_ms=500))
+    e6 = Envelope(request_id='req-4', plugin_id='com.cy.analyzer', sequence_number=6, generation=3, fence_token=6, payload=Shutdown(grace_period_ms=500))
     write_frame(e6.encode(), inp)
 
     inp.seek(0)

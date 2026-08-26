@@ -114,6 +114,10 @@ message Invoke {
   string extension_point = 1;
   string method = 2;
 
+  // Opaque capability request bytes for generic worker-control consumers.
+  // Typed extension requests remain available below for existing adapters.
+  bytes payload = 3;
+
   oneof request {
     DetectHardwareRequest detect_hardware = 10;
     AnalyzeModelRequest analyze_model = 11;
@@ -130,6 +134,9 @@ message Invoke {
 }
 
 message InvokeResult {
+  // Opaque capability result bytes for generic worker-control consumers.
+  bytes payload = 3;
+
   oneof response {
     DetectHardwareResponse detect_hardware = 10;
     AnalyzeModelResponse analyze_model = 11;

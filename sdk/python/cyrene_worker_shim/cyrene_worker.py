@@ -368,14 +368,14 @@ class CancelAck:
 class Invoke:
     extension_point: str = ""
     method: str = ""
-    payload_tag: int = 10
+    payload_tag: int = 3
     payload: bytes = b""
 
     def __init__(
         self,
         extension_point: str = "",
         method: str = "",
-        payload_tag: int = 10,
+        payload_tag: int = 3,
         payload: bytes = b"",
         capability: str = "",
         action: str = "",
@@ -424,6 +424,11 @@ class Invoke:
                 length, offset = decode_varint(data, offset)
                 inst.method = data[offset:offset + length].decode("utf-8", "replace")
                 offset += length
+            elif field_num == 3 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_tag = 3
+                inst.payload = data[offset:offset + length]
+                offset += length
             elif field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = field_num
@@ -439,7 +444,7 @@ class Invoke:
 
 @dataclasses.dataclass
 class InvokeResult:
-    response_tag: int = 10
+    response_tag: int = 3
     payload: bytes = b""
 
     def encode(self) -> bytes:
@@ -452,7 +457,12 @@ class InvokeResult:
         while offset < len(data):
             tag, offset = decode_varint(data, offset)
             field_num, wire_type = tag >> 3, tag & 7
-            if field_num >= 10 and wire_type == 2:
+            if field_num == 3 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.response_tag = 3
+                inst.payload = data[offset:offset + length]
+                offset += length
+            elif field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
                 inst.response_tag = field_num
                 inst.payload = data[offset:offset + length]
@@ -743,6 +753,9 @@ def run_worker_stream(
     seq = 0
     active_generation = 0
     active_fence_token = 0
+    has_request_sequence = False
+    last_request_sequence = 0
+    handshake_complete = False
 
     while True:
         raw_frame = read_frame(reader, max_frame_bytes)
@@ -758,14 +771,37 @@ def run_worker_stream(
             is_stale = req_env.generation < active_generation or (
                 req_env.generation == active_generation and req_env.fence_token < active_fence_token
             )
+            protocol_invalid = req_env.protocol_version != CURRENT_PROTOCOL_VERSION
+            sequence_invalid = has_request_sequence and req_env.sequence_number <= last_request_sequence
+            hello_required = not handshake_complete and req_env.payload_tag != 10
 
-            if is_stale:
+            if protocol_invalid:
+                resp_payload = PluginErrorPayload(
+                    code=9,
+                    message=f"unsupported worker protocol version {req_env.protocol_version}; expected {CURRENT_PROTOCOL_VERSION}",
+                    details="PROTOCOL_VERSION_MISMATCH",
+                )
+            elif sequence_invalid:
+                resp_payload = PluginErrorPayload(
+                    code=9,
+                    message=f"request sequence {req_env.sequence_number} is not greater than previous sequence {last_request_sequence}",
+                    details="SEQUENCE_OUT_OF_ORDER",
+                )
+            elif hello_required:
+                resp_payload = PluginErrorPayload(
+                    code=9,
+                    message="worker Hello handshake is required before control requests",
+                    details="HELLO_REQUIRED",
+                )
+            elif is_stale:
                 resp_payload = PluginErrorPayload(
                     code=4,  # PERMISSION_DENIED
                     message=f"FENCED_OUT: request gen={req_env.generation}/fence={req_env.fence_token} is older than active gen={active_generation}/fence={active_fence_token}",
                     details="STALE_GENERATION",
                 )
             else:
+                has_request_sequence = True
+                last_request_sequence = req_env.sequence_number
                 if active_generation != 0 and (
                     req_env.generation > active_generation or req_env.fence_token > active_fence_token
                 ):
@@ -775,15 +811,27 @@ def run_worker_stream(
 
                 if req_env.payload_tag == 10:  # Hello
                     hello = req_env.payload if isinstance(req_env.payload, Hello) else Hello()
-                    resp_payload = HelloAck(
-                        selected_protocol_version=min(hello.max_protocol_version, CURRENT_PROTOCOL_VERSION),
-                        plugin_id=worker.plugin_id(),
-                        plugin_version=worker.plugin_version(),
-                        api_version=worker.api_version(),
-                        declared_capabilities=worker.declared_capabilities(),
-                        metrics=worker.metrics(),
-                        capabilities_json=worker.capabilities_json(),
-                    )
+                    if (
+                        hello.min_protocol_version > hello.max_protocol_version
+                        or hello.min_protocol_version > CURRENT_PROTOCOL_VERSION
+                        or hello.max_protocol_version < CURRENT_PROTOCOL_VERSION
+                    ):
+                        resp_payload = PluginErrorPayload(
+                            code=9,
+                            message="worker does not support the host protocol version",
+                            details="INCOMPATIBLE_PROTOCOL_VERSION",
+                        )
+                    else:
+                        handshake_complete = True
+                        resp_payload = HelloAck(
+                            selected_protocol_version=CURRENT_PROTOCOL_VERSION,
+                            plugin_id=worker.plugin_id(),
+                            plugin_version=worker.plugin_version(),
+                            api_version=worker.api_version(),
+                            declared_capabilities=worker.declared_capabilities(),
+                            metrics=worker.metrics(),
+                            capabilities_json=worker.capabilities_json(),
+                        )
                 elif req_env.payload_tag == 14:  # HealthCheck
                     code, msg = worker.on_health_check()
                     resp_payload = HealthStatus(status=code, message=msg)

@@ -57,6 +57,7 @@ pub struct WorkerTransportRequest {
     pub request_id: String,
     pub generation: u64,
     pub fence_token: u64,
+    /// Encoded worker-control Envelope. The Kernel keeps this opaque.
     pub payload: Vec<u8>,
 }
 
@@ -261,6 +262,28 @@ impl InstanceActor {
         payload: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, ProviderError> {
+        self.send_request(uuid::Uuid::new_v4().to_string(), payload, timeout)
+            .await
+    }
+
+    /// Send one opaque worker-control Envelope through the instance transport.
+    ///
+    /// The Kernel owns correlation, timeout, cancellation, generation and
+    /// fence enforcement, but does not decode the worker protocol.
+    pub async fn send_request(
+        &mut self,
+        request_id: String,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ProviderError> {
+        if request_id.is_empty() {
+            return Err(ProviderError::new(
+                "instance-watchdog",
+                "INVALID_REQUEST_ID",
+                "worker request id must not be empty",
+            ));
+        }
+
         if self.state == InstanceActorState::Quarantined {
             return Err(ProviderError::new(
                 "instance-watchdog",
@@ -288,7 +311,7 @@ impl InstanceActor {
             })?
             .clone();
 
-        let req_id = uuid::Uuid::new_v4().to_string();
+        let req_id = request_id;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.pending_requests
             .lock()

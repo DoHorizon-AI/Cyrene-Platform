@@ -57,6 +57,7 @@ impl Notification for RemoteNotification {
         let invoke_req = Invoke {
             extension_point: "notification".to_string(),
             method: "send_notification".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::SendNotification(
                 SendNotificationRequest {
                     topic: topic.to_string(),

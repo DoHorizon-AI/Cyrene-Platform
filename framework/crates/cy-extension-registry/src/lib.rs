@@ -15,6 +15,7 @@
 pub mod helper;
 pub(crate) mod proxies;
 pub(crate) mod registry;
+pub mod worker_control;
 pub mod transport;
 
 #[cfg(test)]
@@ -24,3 +25,4 @@ mod tests;
 pub use helper::prepare_instance_actor;
 pub use proxies::*;
 pub use registry::ExtensionRegistry;
+pub use worker_control::{WorkerControlClient, WorkerControlError, WorkerControlPort};

@@ -56,6 +56,7 @@ impl Probe for RemoteProbe {
         let invoke_req = Invoke {
             extension_point: "probe".to_string(),
             method: "detect_hardware".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::DetectHardware(
                 DetectHardwareRequest {},
             )),

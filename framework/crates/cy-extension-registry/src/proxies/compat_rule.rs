@@ -65,6 +65,7 @@ impl CompatRule for RemoteCompatRule {
         let invoke_req = Invoke {
             extension_point: "compat-rule".to_string(),
             method: "evaluate_compatibility".to_string(),
+            payload: Vec::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::EvaluateCompat(
                 EvaluateCompatRequest {
                     hardware_manifest_json: hw_json,

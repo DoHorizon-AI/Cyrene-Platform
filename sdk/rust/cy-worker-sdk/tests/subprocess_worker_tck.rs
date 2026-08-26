@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::{
     collections::BTreeMap,
     io::{BufReader, BufWriter},
@@ -118,6 +120,7 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         payload: Some(Payload::Invoke(Invoke {
             extension_point: "Probe".to_string(),
             method: "detect_hardware".to_string(),
+            payload: Vec::new(),
             request: Some(InvokeReq::DetectHardware(DetectHardwareRequest {})),
         })),
     };
@@ -263,6 +266,7 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         payload: Some(Payload::Invoke(Invoke {
             extension_point: "Probe".to_string(),
             method: "detect_hardware".to_string(),
+            payload: Vec::new(),
             request: Some(InvokeReq::DetectHardware(DetectHardwareRequest {})),
         })),
     };
