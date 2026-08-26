@@ -38,9 +38,13 @@ def verify_docs() -> bool:
 def verify_governance() -> bool:
     gov_tool = PLATFORM_ROOT / "tooling" / "ci" / "check_service_boundaries.py"
     test_gov = PLATFORM_ROOT / "tooling" / "ci" / "test_check_service_boundaries.py"
+    policy_tool = PLATFORM_ROOT / "tooling" / "governance" / "validate_repository_policy.py"
+    test_policy = PLATFORM_ROOT / "tooling" / "governance" / "tests" / "test_repository_policy.py"
     ok1 = run_step("Service Boundary Governance Guard", [sys.executable, str(gov_tool)])
     ok2 = run_step("Governance Pytest Suite", [sys.executable, "-m", "pytest", str(test_gov)])
-    return ok1 and ok2
+    ok3 = run_step("Repository Policy Validation Guard", [sys.executable, str(policy_tool)])
+    ok4 = run_step("Repository Policy Pytest Suite", [sys.executable, "-m", "pytest", str(test_policy)])
+    return ok1 and ok2 and ok3 and ok4
 
 def verify_python() -> bool:
     tests = [
@@ -50,9 +54,12 @@ def verify_python() -> bool:
         PLATFORM_ROOT / "sdk/python/cyrene_environment/tests",
         PLATFORM_ROOT / "tooling/workspace/tests",
         PLATFORM_ROOT / "tooling/docs/tests",
+        PLATFORM_ROOT / "tooling/governance/tests",
+        PLATFORM_ROOT / "tooling/ci/tests",
     ]
     existing = [str(t) for t in tests if t.exists()]
     return run_step("Python SDKs & Tooling Unit Tests", [sys.executable, "-m", "pytest"] + existing)
+
 
 def verify_rust() -> bool:
     if not shutil.which("cargo"):
