@@ -1,61 +1,70 @@
 # Cyrene Development Compatibility Baseline
 # Records exact verified public baseline references for multi-repository testing.
-# NOT a Cyrene Distribution ReleaseLock.
+# Distinguishes local development commits from remotely-fetchable origin/main commits.
 
-schema_version: "cyrene.workspace-baseline.v1"
-updated_at: "2026-08-26T20:00:00Z"
+schema_version: "cyrene.workspace-baseline.v2"
+updated_at: "2026-08-26T20:10:00Z"
 
 repositories:
   platform:
     logical_name: "Cyrene-Platform"
-    path: "Cyrene-Platform"
-    ref: "21f9a494e94b4c115d4e3a877e28a68d6f5a455b"
+    canonical_path: "Cyrene-Platform"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+    remote_ref: "142280f79fe497301b5f8fe7121f19d2bf922a2f"
+    local_ref: "0b0c88fccae4f1a2e7bbde62a2b17f23ba70bda8"
 
   plugins:
     logical_name: "Cyrene-Plugins"
-    path: "plugins"
-    ref: "6417f55f98b7d6a1bc4927a8410598b7541e9ad9"
+    canonical_path: "plugins"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+    remote_ref: "f13cafe99983fce7ba8df1c452230580e5a971f8"
+    local_ref: "3f9054d10f8753fa0ea3f09cfdc46f5f3345d29b"
 
   yield:
     logical_name: "Cyrene-Yield"
-    path: "services/Cyrene-Yield"
-    ref: "5c273b9bcaa6add3d9861f911a14c788d2713250"
+    canonical_path: "services/Cyrene-Yield"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+    remote_ref: "bf88c448b05370e03698c9d051239ccadf1a9b9a"
+    local_ref: "1e0a3239f7ed338bc92e1900485d55449f29b604"
 
   reactor:
     logical_name: "Cyrene-Reactor"
-    path: "services/cyrene-reactor"
-    ref: "40b791063a1a91832eedddc4ec21e839d694d6c0"
+    canonical_path: "services/cyrene-reactor"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+    remote_ref: "4f4f26f08a7e522f1e42b68a3b99f3c92898234b"
+    local_ref: "d8cfbf2ca4d0bc3ee7c75b5d05866d3fde5c3e1d"
 
   exchange:
     logical_name: "Cyrene-Exchange"
-    path: "services/cyrene-exchange"
-    ref: "50f0d2373737aceba18bb3f3ee4d6b657fe2ff68"
+    canonical_path: "services/cyrene-exchange"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+    remote_ref: "5bd4eb15229b199e5b7e7c11f1a2c7c50738e5c0"
+    local_ref: "8689324cfd09b647054de52e2f72969ac9c27b41"
 
   astrbot:
     logical_name: "cyrene-astrbot-rev"
-    path: "services/cyrene-astrbot-rev"
-    ref: "559236d413686a120dfeb9b3876a06f34a51d981"
+    canonical_path: "services/cyrene-astrbot-rev"
     remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+    remote_ref: "8d4cd3d8b076cbc9200fee0f16c80e4e7e0a445a"
+    local_ref: "e00392052871b0e7c6381d40b4d9ddede631664c"
 
   catalyst:
     logical_name: "cyrene-catalyst"
-    path: "services/cyrene-catalyst"
-    ref: "09ecb6a04bbaafa131ddd3177e166959852824e0"
+    canonical_path: "services/cyrene-catalyst"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+    remote_ref: "e0a0a36c5919b1a37f04036c834aa94eb3a2645b"
+    local_ref: "43aef39f71cde7d952d30b10fb8938fd05f6530b"
 
   echo:
     logical_name: "cyrene-echo"
-    path: "services/cyrene-echo"
-    ref: "4e67c21910ba2cc8b11650ae1afa512494f5d5f1"
+    canonical_path: "services/cyrene-echo"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
+    remote_ref: "4c39a6881cf5719058f228921eaa01ad3b008478"
+    local_ref: "c2c59be50db0cf7b91c8b7187fa7415a4cb6717c"
 
   navigator:
     logical_name: "cyrene-navigator"
-    path: "services/cyrene-navigator"
-    ref: "36c6bbe27313877491ea605610a6ed2da302103d"
+    canonical_path: "services/cyrene-navigator"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
+    remote_ref: "88ec1f2ed0274c9f3363da00f3d1341eb690643f"
+    local_ref: "bc40d2660942134732252d81e11676b312c12c4a"
