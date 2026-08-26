@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.platform/contracts/execution-plan-v1.schema.json",
+  "title": "Cyrene ExecutionPlan v1",
+  "type": "object",
+  "required": ["plan_id", "contract_version", "steps"],
+  "properties": {
+    "plan_id": {"type": "string", "minLength": 1},
+    "contract_version": {"const": "cyrene.control-plane.v1"},
+    "steps": {"type": "array", "items": {"type": "object", "required": ["step_id", "capability", "dependencies", "retry_policy"]}}
+  }
+}
