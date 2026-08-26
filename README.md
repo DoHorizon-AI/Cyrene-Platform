@@ -24,11 +24,15 @@ release-evidence checks pass.
 
 | Directory    | Responsibility                                                                                             |
 | ------------ | ---------------------------------------------------------------------------------------------------------- |
-| `kernel/`    | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
-| `framework/` | Extension API, registry, and JVM boundary                                                                  |
-| `contracts/` | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
-| `examples/`  | Non-production plugin integration examples                                                                 |
-| `docs/`      | Architecture, protocol, and repository-boundary decisions                                                  |
+| `kernel/`         | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
+| `framework/`      | Extension API, registry, and JVM boundary                                                                  |
+| `contracts/`      | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
+| `sdk/`            | Language client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`)                        |
+| `infrastructure/` | Shared Docker/Compose, Kubernetes, Nginx, Observability, and systemd runtime assets                        |
+| `tooling/`        | Shared repository governance, CI boundary guards, codegen, and migration tooling archives                 |
+| `examples/`       | Non-production plugin integration examples                                                                 |
+| `docs/`           | Architecture, protocol, and repository-boundary decisions                                                  |
+
 
 The former Rust control plane contained service-level training, runtime,
 artifact, and serving implementations, so it is preserved in the private
