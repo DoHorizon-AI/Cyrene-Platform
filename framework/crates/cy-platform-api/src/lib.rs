@@ -14,8 +14,10 @@
 //! 10. [`Storage`][]: 产物（模型权重、数据集、检查点）存储读写适配器。
 
 pub mod builtin;
+pub mod plugin;
 use async_trait::async_trait;
-use cy_manifest::*;
+pub use cy_manifest::*;
+pub use plugin::{CapabilityRegistry, CapabilityResolutionError, CapabilityResolver};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
