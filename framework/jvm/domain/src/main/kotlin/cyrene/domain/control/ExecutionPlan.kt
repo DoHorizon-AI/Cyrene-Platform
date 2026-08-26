@@ -52,19 +52,7 @@ data class PlanStep(
         require(dependencies.none { it.stepId == stepId }) { "A PlanStep cannot depend on itself" }
     }
 
-    fun normalizedIdentity(): String = listOf(
-        stepId,
-        capability,
-        inputs.sortedBy { "${it.uri}|${it.digest}|${it.kind}" }.joinToString(",") { "${it.uri}|${it.digest}|${it.kind}" },
-        outputs.sorted().joinToString(","),
-        environmentIdentity.orEmpty(),
-        resourceReference.orEmpty(),
-        dependencies.sortedBy { it.stepId }.joinToString(",") { "${it.stepId}|${it.requiredStatus}" },
-        "${retryPolicy.maxAttempts}|${retryPolicy.retryFailed}|${retryPolicy.retryLost}",
-        executionPayloadReference.orEmpty(),
-        metadata.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" },
-        provenance.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }
-    ).joinToString("\u001f")
+    fun normalizedIdentity(): String = canonicalIdentityJson()
 }
 
 data class ExecutionPlan(
@@ -103,6 +91,15 @@ data class ExecutionPlan(
         return ordered
     }
 
+    fun canonicalIdentityJson(): String = canonicalObject(
+        mapOf(
+            "contract_version" to quoteCanonical(contractVersion),
+            "steps" to canonicalArray(steps.map { it.canonicalIdentityJson() }),
+            "metadata" to canonicalMap(metadata),
+            "provenance" to canonicalMap(provenance),
+        )
+    )
+
     companion object {
         fun deterministic(
             steps: List<PlanStep>,
@@ -110,13 +107,9 @@ data class ExecutionPlan(
             provenance: Map<String, String> = emptyMap(),
             contractVersion: String = CONTROL_PLANE_CONTRACT_VERSION
         ): ExecutionPlan {
-            val normalized = listOf(
-                contractVersion,
-                steps.joinToString("\u001e") { it.normalizedIdentity() },
-                metadata.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" },
-                provenance.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }
-            ).joinToString("\u001d")
-            val digest = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
+            val canonical = ExecutionPlan("fixture-plan", steps, contractVersion, metadata, provenance)
+                .canonicalIdentityJson()
+            val digest = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it.toInt() and 0xff) }
             return ExecutionPlan("plan-$digest", steps, contractVersion, metadata, provenance)
         }
