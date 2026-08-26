@@ -1,0 +1,61 @@
+# Cyrene Development Compatibility Baseline
+# Records exact verified public baseline references for multi-repository testing.
+# NOT a Cyrene Distribution ReleaseLock.
+
+schema_version: "cyrene.workspace-baseline.v1"
+updated_at: "2026-08-26T20:00:00Z"
+
+repositories:
+  platform:
+    logical_name: "Cyrene-Platform"
+    path: "Cyrene-Platform"
+    ref: "21f9a494e94b4c115d4e3a877e28a68d6f5a455b"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+
+  plugins:
+    logical_name: "Cyrene-Plugins"
+    path: "plugins"
+    ref: "6417f55f98b7d6a1bc4927a8410598b7541e9ad9"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+
+  yield:
+    logical_name: "Cyrene-Yield"
+    path: "services/Cyrene-Yield"
+    ref: "5c273b9bcaa6add3d9861f911a14c788d2713250"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+
+  reactor:
+    logical_name: "Cyrene-Reactor"
+    path: "services/cyrene-reactor"
+    ref: "40b791063a1a91832eedddc4ec21e839d694d6c0"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+
+  exchange:
+    logical_name: "Cyrene-Exchange"
+    path: "services/cyrene-exchange"
+    ref: "50f0d2373737aceba18bb3f3ee4d6b657fe2ff68"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+
+  astrbot:
+    logical_name: "cyrene-astrbot-rev"
+    path: "services/cyrene-astrbot-rev"
+    ref: "559236d413686a120dfeb9b3876a06f34a51d981"
+    remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+
+  catalyst:
+    logical_name: "cyrene-catalyst"
+    path: "services/cyrene-catalyst"
+    ref: "09ecb6a04bbaafa131ddd3177e166959852824e0"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+
+  echo:
+    logical_name: "cyrene-echo"
+    path: "services/cyrene-echo"
+    ref: "4e67c21910ba2cc8b11650ae1afa512494f5d5f1"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
+
+  navigator:
+    logical_name: "cyrene-navigator"
+    path: "services/cyrene-navigator"
+    ref: "36c6bbe27313877491ea605610a6ed2da302103d"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"

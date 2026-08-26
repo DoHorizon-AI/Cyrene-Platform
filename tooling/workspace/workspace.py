@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Cyrene Workspace CLI Tooling
-Provides status inspection, environment doctor diagnostics, and safe profile bootstrapping.
+Cyrene Multi-Repository Workspace Orchestrator
+Provides status, doctor, bootstrap/hydration, and dependency closure management.
 """
 
 import argparse
@@ -9,172 +9,190 @@ import os
 import shutil
 import subprocess
 import sys
+import yaml
 from pathlib import Path
 
-# Locate workspace root (parent of Cyrene-Platform if run from inside, or directory containing Cyrene-Platform)
 def find_workspace_root() -> Path:
     curr = Path.cwd().resolve()
-    # Check if curr is workspace root containing Cyrene-Platform
-    if (curr / "Cyrene-Platform").exists() or (curr / "plugins").exists():
-        return curr
-    # Check parents
     for parent in [curr] + list(curr.parents):
-        if (parent / "Cyrene-Platform").exists() and (parent / "plugins").exists():
+        if (parent / "Cyrene-Platform").exists():
             return parent
-        if parent.name == "Cyrene-Platform" and parent.parent.exists():
-            return parent.parent
     return curr
 
-WORKSPACE_ROOT = find_workspace_root()
+def load_catalog(workspace_root: Path) -> dict:
+    cat_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "repos.yaml"
+    if not cat_file.exists():
+        return {"profiles": {}, "repositories": {}}
+    try:
+        return yaml.safe_load(cat_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {"profiles": {}, "repositories": {}}
 
-def load_catalog() -> dict:
-    catalog_path = Path(__file__).resolve().parent / "repos.yaml"
-    # Basic YAML-like parser using simple line reading to avoid external pyyaml dependency
-    repos = {}
-    if catalog_path.exists():
-        current_key = None
-        current_repo = {}
-        for line in catalog_path.read_text(encoding="utf-8").splitlines():
-            sline = line.strip()
-            if not sline or sline.startswith("#"):
-                continue
-            if line.startswith("  ") and not line.startswith("    ") and sline.endswith(":"):
-                if current_key and current_repo:
-                    repos[current_key] = current_repo
-                current_key = sline[:-1].strip()
-                current_repo = {}
-            elif line.startswith("    ") and ":" in sline:
-                k, v = sline.split(":", 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if v.startswith("[") and v.endswith("]"):
-                    v = [item.strip().strip('"').strip("'") for item in v[1:-1].split(",")]
-                elif v.lower() == "true":
-                    v = True
-                elif v.lower() == "false":
-                    v = False
-                current_repo[k] = v
-        if current_key and current_repo:
-            repos[current_key] = current_repo
-    return repos
+def load_baseline(workspace_root: Path) -> dict:
+    base_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "workspace-baseline.yaml"
+    if not base_file.exists():
+        return {}
+    try:
+        data = yaml.safe_load(base_file.read_text(encoding="utf-8")) or {}
+        return data.get("repositories", {})
+    except Exception:
+        return {}
+
+def resolve_dependency_closure(catalog: dict, target_repos: list) -> set:
+    repos_meta = catalog.get("repositories", {})
+    closure = set()
+    stack = list(target_repos)
+
+    while stack:
+        r_key = stack.pop()
+        if r_key not in closure:
+            closure.add(r_key)
+            deps = repos_meta.get(r_key, {}).get("dependencies", [])
+            for d in deps:
+                if d not in closure:
+                    stack.append(d)
+
+    return closure
 
 def cmd_status(args):
-    print(f"=== Cyrene Workspace Status (Root: {WORKSPACE_ROOT}) ===\n")
-    catalog = load_catalog()
-    
-    header = f"{'Repository':<22} {'Branch':<28} {'Status':<12} {'Worktrees':<10} {'Remote Target'}"
+    root = find_workspace_root()
+    catalog = load_catalog(root)
+    baseline = load_baseline(root)
+    repos = catalog.get("repositories", {})
+
+    print(f"=== Cyrene Workspace Status ===")
+    print(f"Workspace Root: {root}\n")
+    header = f"{'Repository':<20} | {'Present':<7} | {'Host':<10} | {'Visibility':<8} | {'Branch':<26} | {'Dirty':<5} | {'Baseline Ref':<10}"
     print(header)
-    print("-" * len(header) + "-" * 20)
+    print("-" * len(header))
 
-    for key, info in catalog.items():
-        rel_path = info.get("path", key)
-        p = WORKSPACE_ROOT / rel_path
-        if not p.exists():
-            print(f"{info.get('name', key):<22} {'[MISSING]':<28} {'N/A':<12} {'0':<10} {info.get('remote', 'None')}")
-            continue
+    for key, info in repos.items():
+        name = info.get("logical_name", key)
+        rel_path = info.get("canonical_path", key)
+        target_path = root / rel_path
+        present = target_path.exists()
+        host = info.get("source_host", "unknown")
+        vis = info.get("visibility", "public")
+        base_ref = baseline.get(key, {}).get("ref", "HEAD")[:7]
 
-        git_dir = p / ".git"
-        if not git_dir.exists():
-            print(f"{info.get('name', key):<22} {'[NOT A GIT REPO]':<28} {'N/A':<12} {'0':<10} {info.get('remote', 'None')}")
-            continue
+        branch = "MISSING"
+        dirty = "N/A"
+        if present:
+            try:
+                b = subprocess.run(["git", "-C", str(target_path), "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
+                branch = b if b else "DETACHED"
+                stat = subprocess.run(["git", "-C", str(target_path), "status", "--short"], capture_output=True, text=True).stdout.strip()
+                dirty = "DIRTY" if stat else "CLEAN"
+            except Exception:
+                branch = "ERROR"
 
-        branch = subprocess.run(["git", "-C", str(p), "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
-        if not branch:
-            branch = "(detached HEAD)"
-        status_raw = subprocess.run(["git", "-C", str(p), "status", "--short"], capture_output=True, text=True).stdout.strip()
-        status = "Clean" if not status_raw else "Dirty"
-        
-        wt_out = subprocess.run(["git", "-C", str(p), "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout.strip()
-        wt_count = len([w for w in wt_out.split("worktree ") if w.strip()])
-
-        remotes = subprocess.run(["git", "-C", str(p), "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
-        if not remotes:
-            remotes = "No remote configured"
-
-        print(f"{info.get('name', key):<22} {branch:<28} {status:<12} {wt_count:<10} {remotes}")
-    print()
+        print(f"{name:<20} | {str(present):<7} | {host:<10} | {vis:<8} | {branch:<26} | {dirty:<5} | {base_ref:<10}")
 
 def cmd_doctor(args):
-    print("=== Cyrene Developer Environment Doctor ===\n")
-    checks = [
-        ("Git", ["git", "--version"]),
-        ("Python", [sys.executable, "--version"]),
-        ("Rust (cargo)", ["cargo", "--version"]),
-        (".NET SDK", ["dotnet", "--version"]),
-        ("Java (JDK)", ["java", "-version"]),
-        ("uv (fast package manager)", ["uv", "--version"]),
-    ]
+    root = find_workspace_root()
+    catalog = load_catalog(root)
+    print(f"=== Cyrene Workspace Doctor ===")
+    print(f"Checking workspace at: {root}\n")
 
-    all_ok = True
-    for name, cmd in checks:
-        exe = cmd[0]
-        loc = shutil.which(exe)
-        if loc:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            ver = (res.stdout or res.stderr).splitlines()[0].strip()
-            print(f"  [OK] {name:<26} -> {ver} ({loc})")
-        else:
-            if name in ["Git", "Python", "Rust (cargo)"]:
-                print(f"  [MISSING - REQUIRED] {name:<14} -> Not found in PATH!")
-                all_ok = False
-            else:
-                print(f"  [OPTIONAL - NOT FOUND] {name:<12} -> Optional toolchain not found")
+    issues = []
 
-    print("\nChecking Workspace Root Structure:")
-    for d in ["Cyrene-Platform", "plugins", "services"]:
-        dp = WORKSPACE_ROOT / d
-        if dp.exists():
-            print(f"  [OK] Found top-level directory: {d}/")
-        else:
-            print(f"  [WARN] Missing top-level directory: {d}/")
+    # 1. Root Git check
+    if (root / ".git").exists():
+        issues.append("[WARNING] Cyrene workspace root is initialized as a Git repository. Cyrene root should be a container, not a Git repository.")
 
-    print("\nDoctor check finished.\n")
+    # 2. Outer folder naming check
+    if root.name.lower() != "cyrene":
+        print(f"[INFO] Outer directory is '{root.name}'. Canonical naming is 'Cyrene'.")
 
-def cmd_bootstrap(args):
-    profile = args.profile or "core"
-    print(f"=== Bootstrapping Workspace for Profile: [{profile}] ===\n")
-    catalog = load_catalog()
-    
-    for key, info in catalog.items():
-        profiles = info.get("profiles", ["full"])
-        if profile != "full" and profile not in profiles:
-            continue
+    # 3. Toolchain checks
+    for tool in ["git", "python", "cargo", "uv", "dotnet"]:
+        found = shutil.which(tool) is not None
+        status = "[OK]" if found else "[MISSING]"
+        print(f"  {tool:<10} : {status}")
 
-        rel_path = info.get("path", key)
-        p = WORKSPACE_ROOT / rel_path
-        remote = info.get("remote")
-
+    # 4. Repository layout and policy check
+    for key, info in catalog.get("repositories", {}).items():
+        rel = info.get("canonical_path", key)
+        p = root / rel
         if p.exists():
-            print(f"  [EXISTS] {info.get('name', key)} is already present at {rel_path}.")
+            if not (p / ".git").exists():
+                issues.append(f"[ERROR] {rel} exists but is not a Git repository!")
+            policy_file = p / "repository-policy.yaml"
+            if not policy_file.exists():
+                issues.append(f"[WARNING] {rel} is missing repository-policy.yaml")
+
+    print("\n=== Doctor Summary ===")
+    if issues:
+        for issue in issues:
+            print(" ", issue)
+    else:
+        print(" [OK] All workspace structure and policies are fully healthy!")
+
+def cmd_hydrate(args):
+    root = find_workspace_root()
+    catalog = load_catalog(root)
+    baseline = load_baseline(root)
+
+    profile = args.profile
+    profile_info = catalog.get("profiles", {}).get(profile)
+    if not profile_info:
+        print(f"[ERROR] Unknown profile '{profile}'. Available: {list(catalog.get('profiles', {}).keys())}")
+        sys.exit(1)
+
+    target_repos = profile_info.get("repositories", [])
+    closure = resolve_dependency_closure(catalog, target_repos)
+
+    print(f"=== Hydrating Cyrene Profile: {profile} ===")
+    print(f"Target Repositories: {target_repos}")
+    print(f"Resolved Dependency Closure: {sorted(list(closure))}\n")
+
+    cloned_count = 0
+    skipped_count = 0
+
+    for key in sorted(list(closure)):
+        info = catalog.get("repositories", {}).get(key, {})
+        name = info.get("logical_name", key)
+        rel_path = info.get("canonical_path", key)
+        remote = info.get("remote")
+        target_path = root / rel_path
+
+        if target_path.exists():
+            print(f"  [EXISTS] {name:<20} at {rel_path} (Untouched)")
+            skipped_count += 1
             continue
 
-        if not remote or remote == "None":
-            print(f"  [SKIPPED] {info.get('name', key)} has no verified public remote configured.")
-            continue
+        print(f"  [CLONING] {name:<20} from {remote} -> {rel_path}...")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        res = subprocess.run(["git", "clone", remote, str(target_path)], capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"    [FAILED] Failed to clone {name}: {res.stderr.strip()}")
+        else:
+            cloned_count += 1
+            # Checkout baseline ref if provided
+            base_ref = baseline.get(key, {}).get("ref")
+            if base_ref and args.use_baseline:
+                subprocess.run(["git", "-C", str(target_path), "checkout", base_ref], capture_output=True, text=True)
+                print(f"    [CHECKOUT] Checked out baseline ref {base_ref[:7]}")
 
-        print(f"  [CLONING] Cloning {info.get('name', key)} from {remote} into {rel_path}...")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "clone", remote, str(p)], check=True)
-
-    print(f"\nBootstrap completed for profile [{profile}].\n")
+    print(f"\nHydration Complete: {cloned_count} cloned, {skipped_count} existing.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Cyrene Workspace Developer Tool")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="Cyrene Workspace Orchestrator")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("status", help="Show git status across workspace repositories")
-    subparsers.add_parser("doctor", help="Inspect local toolchains, runtimes, and dependencies")
-    
-    boot = subparsers.add_parser("bootstrap", help="Safely clone missing repositories for a profile")
-    boot.add_argument("--profile", choices=["core", "training", "serving", "gateway", "full"], default="core")
+    p_stat = sub.add_parser("status", help="Show workspace repository status table")
+    p_stat.set_defaults(func=cmd_status)
+
+    p_doc = sub.add_parser("doctor", help="Check workspace health and toolchains")
+    p_doc.set_defaults(func=cmd_doctor)
+
+    p_hyd = sub.add_parser("bootstrap", aliases=["hydrate"], help="Hydrate repositories for a specific profile")
+    p_hyd.add_argument("--profile", default="training", choices=["core", "training", "serving", "gateway", "full"], help="Target profile")
+    p_hyd.add_argument("--use-baseline", action="store_true", help="Checkout exact baseline refs for newly cloned dependencies")
+    p_hyd.set_defaults(func=cmd_hydrate)
 
     args = parser.parse_args()
-    if args.command == "status":
-        cmd_status(args)
-    elif args.command == "doctor":
-        cmd_doctor(args)
-    elif args.command == "bootstrap":
-        cmd_bootstrap(args)
+    args.func(args)
 
 if __name__ == "__main__":
     main()
