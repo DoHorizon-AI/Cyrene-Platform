@@ -25,7 +25,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: []
     profiles: ["core", "training", "serving", "gateway", "full"]
 
@@ -35,7 +35,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform"]
     profiles: ["training", "serving", "gateway", "full"]
 
@@ -45,7 +45,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform", "plugins"]
     profiles: ["training", "full"]
 
@@ -55,7 +55,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform", "plugins"]
     profiles: ["serving", "full"]
 
@@ -65,7 +65,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform", "plugins"]
     profiles: ["gateway", "full"]
 
@@ -75,7 +75,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform"]
     profiles: ["full"]
 
@@ -85,7 +85,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform"]
     profiles: ["full"]
 
@@ -95,7 +95,7 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform"]
     profiles: ["full"]
 
@@ -105,6 +105,6 @@ repositories:
     remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
     source_host: "github.com"
     visibility: "public"
-    default_branch: "main"
+    default_branch: "develop"
     dependencies: ["platform"]
     profiles: ["full"]

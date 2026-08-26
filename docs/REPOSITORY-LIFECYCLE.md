@@ -65,3 +65,8 @@ This repository does **not** distribute standalone release zip files directly to
 - **Tag Strategy**: `repository`
 - **Canonical Tag Pattern**: `v{version}`
 - **Tag Immutability**: Published tags are permanent and immutable. Defective releases require patch increments.
+
+## 8. Branch Model & Promotion
+- **Integration Branch (`develop`)**: Primary branch for daily development and PRs. Must remain green.
+- **Release Branch (`main`)**: Protected release-only branch. Code promoted via Release PRs.
+- **Release Source**: Official component releases and tags are created strictly from `main`.

@@ -78,7 +78,7 @@ def main():
     # Determine target SHA
     target_sha = "UNKNOWN"
     if (rp / ".git").exists():
-        target_sha = subprocess.run(["git", "-C", str(rp), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        target_sha = subprocess.run(["git", "-C", str(rp), "rev-parse", "main"] if (rp / ".git").exists() else "UNKNOWN", capture_output=True, text=True).stdout.strip()
     print(f"Target Release Commit SHA: {target_sha}")
 
     # Release Plan
