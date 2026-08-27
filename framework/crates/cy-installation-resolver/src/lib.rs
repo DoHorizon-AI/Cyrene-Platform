@@ -169,6 +169,7 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
                 environment: record.environment,
                 cgroup_name: format!("instance-{instance_name}"),
                 limits: CgroupLimits::default(),
+                working_dir: Some(installation_path),
                 transport_socket: Some(self.transport_root.join(format!("{instance_name}.sock"))),
             },
         })

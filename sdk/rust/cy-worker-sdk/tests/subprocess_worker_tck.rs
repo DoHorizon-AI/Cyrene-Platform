@@ -447,6 +447,7 @@ fn test_real_subprocess_kill9_to_watchdog_quarantine_integration(
         environment: BTreeMap::new(),
         cgroup_name: "cgroup-py-worker".to_string(),
         limits: CgroupLimits::default(),
+        working_dir: None,
         transport_socket: None,
     };
 

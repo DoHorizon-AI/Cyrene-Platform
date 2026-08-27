@@ -660,6 +660,7 @@ impl InstanceActor {
                 environment: BTreeMap::new(),
                 cgroup_name: "test".to_string(),
                 limits: CgroupLimits::default(),
+                working_dir: None,
                 transport_socket: None,
             },
             DeviceBinding {
@@ -747,6 +748,7 @@ mod tests {
             environment: BTreeMap::new(),
             cgroup_name: "instance-inst-1".to_string(),
             limits: CgroupLimits::default(),
+            working_dir: None,
             transport_socket: None,
         }
     }

@@ -73,6 +73,7 @@ fn initialization_preserves_unclassified_instance_dirs() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn recovery_rejects_foreign_or_mismatched_evidence_before_cleanup() {
     let root = std::env::temp_dir().join(format!("cyrene-recovery-{}", std::process::id()));

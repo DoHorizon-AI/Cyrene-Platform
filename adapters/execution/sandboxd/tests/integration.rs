@@ -1,5 +1,7 @@
 //! End-to-end integration tests connecting cy-sandbox-client with cyrene-sandboxd.
 
+#![cfg(unix)]
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -115,6 +117,7 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
         args: Vec::new(),
         environment: BTreeMap::new(),
         cgroup_name: "instance-test-1".to_string(),
+        working_dir: None,
         transport_socket: None,
         limits: CgroupLimits {
             cpu_max_millicores: Some(500),
@@ -168,6 +171,7 @@ fn test_uds_kernel_sandbox_soft_enforcement_roundtrip() {
         args: vec!["10".to_string()],
         environment: BTreeMap::new(),
         cgroup_name: "instance-test-2".to_string(),
+        working_dir: None,
         transport_socket: None,
         limits: CgroupLimits {
             cpu_max_millicores: Some(1000),

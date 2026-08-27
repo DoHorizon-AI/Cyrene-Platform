@@ -190,6 +190,7 @@ mod tests {
                 environment: BTreeMap::new(),
                 cgroup_name: "instance-1".into(),
                 limits: CgroupLimits::default(),
+                working_dir: None,
                 transport_socket: None,
             },
             DeviceBinding {

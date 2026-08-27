@@ -989,6 +989,7 @@ mod tests {
                         environment: BTreeMap::new(),
                         cgroup_name: format!("worker-{}", worker.identity.id),
                         limits: Default::default(),
+                        working_dir: None,
                         transport_socket: None,
                     },
                 })
@@ -1592,6 +1593,7 @@ mod tests {
                         environment: BTreeMap::new(),
                         cgroup_name: format!("instance-{}", worker.identity.id),
                         limits: Default::default(),
+                        working_dir: None,
                         transport_socket: None,
                     },
                 })

@@ -593,6 +593,7 @@ impl InstalledPluginResolver for TestWorkerResolver {
                 environment: BTreeMap::new(),
                 cgroup_name: format!("instance-{}", worker.identity.id),
                 limits: CgroupLimits::default(),
+                working_dir: None,
                 transport_socket: None,
             },
         })
@@ -3498,6 +3499,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
             environment: BTreeMap::new(),
             cgroup_name: "stuck-instance".to_string(),
             limits: CgroupLimits::default(),
+            working_dir: None,
             transport_socket: None,
         },
         DeviceBinding {
@@ -4302,6 +4304,7 @@ fn watchdog_instance_scenario(
             environment: BTreeMap::new(),
             cgroup_name: instance_name.to_string(),
             limits: CgroupLimits::default(),
+            working_dir: None,
             transport_socket: None,
         },
         DeviceBinding {
@@ -4512,6 +4515,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
             environment: BTreeMap::new(),
             cgroup_name: "watchdog-journal-w1".to_string(),
             limits: CgroupLimits::default(),
+            working_dir: None,
             transport_socket: None,
         },
         DeviceBinding {
@@ -5159,6 +5163,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
                 environment: BTreeMap::new(),
                 cgroup_name: worker_id.to_string(),
                 limits: CgroupLimits::default(),
+                working_dir: None,
                 transport_socket: None,
             },
             DeviceBinding {
@@ -5363,6 +5368,7 @@ fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() 
                     environment: BTreeMap::new(),
                     cgroup_name: format!("instance-{instance_name}"),
                     limits: CgroupLimits::default(),
+                    working_dir: None,
                     transport_socket: None,
                 },
             })
@@ -7552,6 +7558,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
 /// 4. restart daemon with epoch change;
 /// 5. old source cursor -> SOURCE_CHANGED;
 /// 6. snapshot + new cursor -> resume correctly with CURRENT.
+#[cfg(unix)]
 #[tokio::test]
 async fn production_event_eviction_and_resume_over_real_authority_uds() {
     use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
@@ -7783,6 +7790,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
 /// 4. authority state mutations continue without blocking;
 /// 5. slow stream is disconnected with OutOfRange error;
 /// 6. reconnect using last acknowledged cursor and verify replay resumes correctly.
+#[cfg(unix)]
 #[tokio::test]
 async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real_uds() {
     use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
@@ -7945,6 +7953,7 @@ async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real
 /// 3. exactly one event is committed (sequence 6) at the replay/live transition boundary;
 /// 4. no subsequent events are published;
 /// 5. subscriber waiting for live events still receives event 6 promptly without requiring future events to wake up.
+#[cfg(unix)]
 #[tokio::test]
 async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff() {
     use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
