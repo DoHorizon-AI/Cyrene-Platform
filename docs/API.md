@@ -75,6 +75,13 @@ requirement = CapabilityRequirement(
 plugin_target = resolver.resolve(requirement)
 ```
 
+The `cyrene-capability-resolver` executable used by the current cross-language
+Product integration is a **REFERENCE / EXPERIMENTAL BRIDGE**. It proves the
+registry and resolver boundary for a Python Product, but it is not a
+prescription that production deployments must start a subprocess per
+resolution. The production transport and lifecycle remain open to the
+Platform runtime design.
+
 ### B. WorkerControl Lifecycle Channel (`IMPLEMENTED_STABLE`)
 Kernel supervises worker execution using standard transitions:
 - `INIT` $\rightarrow$ Worker process spawned, assigned cgroup/sandbox.
