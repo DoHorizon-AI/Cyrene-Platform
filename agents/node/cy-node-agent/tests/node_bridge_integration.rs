@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::{collections::HashMap, time::Duration};
 
 use cy_node_agent::{

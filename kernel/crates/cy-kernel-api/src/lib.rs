@@ -22,6 +22,7 @@ pub mod launch;
 pub mod lease;
 pub mod ports;
 pub mod runtime;
+pub mod service;
 
 /// Canonical, transport-independent Kernel vocabulary. New public ports must
 /// use these nouns; the remaining device/process structs below are internal
@@ -50,4 +51,8 @@ pub use ports::{
 pub use runtime::{
     CgroupTelemetry, CleanupReport, ProcessCondition, ProcessHandle, RuntimeProcessEvidence,
     StopRequest,
+};
+pub use service::{
+    BackoffConfig, ProbeConfig, ReadinessProbe, RestartPolicy, ServiceEndpointSpec, ServiceEvent,
+    ServiceSpec, ServiceState, ServiceStatus,
 };

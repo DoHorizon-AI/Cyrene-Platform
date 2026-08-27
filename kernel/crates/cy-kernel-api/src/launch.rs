@@ -21,6 +21,8 @@ pub struct LaunchPlan {
     pub cgroup_name: String,
     /// 进程启动前必须生效的 cgroup 配额。
     pub limits: CgroupLimits,
+    /// Optional working directory for the process.
+    pub working_dir: Option<PathBuf>,
     /// Optional byte-stream endpoint that sandboxd exposes for the worker's
     /// stdin/stdout. The Kernel treats this as an opaque transport address.
     pub transport_socket: Option<PathBuf>,

@@ -291,6 +291,7 @@ impl Quantization for DummyQuantization {
         _target_precision: WeightPrecision,
     ) -> Result<ArtifactManifest, PluginError> {
         Ok(ArtifactManifest {
+            schema_version: None,
             artifact_id: Some("art-1".to_string()),
             kind: ArtifactKind::Model,
             source: Some("s3://bucket/art-1".to_string()),

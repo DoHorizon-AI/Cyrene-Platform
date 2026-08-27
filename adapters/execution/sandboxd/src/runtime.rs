@@ -851,6 +851,9 @@ impl ProcessRuntime for CgroupV2Runtime {
             .args(&plan.args)
             .envs(environment)
             .stderr(Stdio::inherit());
+        if let Some(dir) = &plan.working_dir {
+            command.current_dir(dir);
+        }
         #[cfg(unix)]
         if transport_listener.is_some() {
             command.stdin(Stdio::piped()).stdout(Stdio::piped());

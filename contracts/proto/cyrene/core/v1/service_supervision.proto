@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/duration.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.core.v1";
+option java_outer_classname = "ServiceSupervisionProto";
+
+// Generic, Product-neutral Service and Workload Supervision Service.
+// Drives long-running application processes across any runtime.
+service ServiceSupervisionService {
+  rpc StartService(StartServiceRequest) returns (ServiceStatus);
+  rpc GetServiceStatus(GetServiceStatusRequest) returns (ServiceStatus);
+  rpc StopService(StopServiceRequest) returns (ServiceStatus);
+  rpc CancelService(CancelServiceRequest) returns (ServiceStatus);
+  rpc WatchServiceEvents(WatchServiceEventsRequest) returns (stream ServiceEvent);
+}
+
+enum ServiceState {
+  SERVICE_STATE_UNSPECIFIED = 0;
+  SERVICE_STATE_STARTING = 1;
+  SERVICE_STATE_READY = 2;
+  SERVICE_STATE_RUNNING = 3;
+  SERVICE_STATE_STOPPING = 4;
+  SERVICE_STATE_STOPPED = 5;
+  SERVICE_STATE_FAILED = 6;
+  SERVICE_STATE_RESTARTING = 7;
+  SERVICE_STATE_QUARANTINED = 8;
+}
+
+message ProcessAliveProbe {}
+
+message TcpSocketProbe {
+  string host = 1;
+  uint32 port = 2;
+}
+
+message HttpGetProbe {
+  string host = 1;
+  uint32 port = 2;
+  string path = 3;
+  optional uint32 expected_status = 4;
+}
+
+message WorkerControlProbe {}
+
+message ReadinessProbe {
+  oneof probe {
+    ProcessAliveProbe process_alive = 1;
+    TcpSocketProbe tcp_socket = 2;
+    HttpGetProbe http_get = 3;
+    WorkerControlProbe worker_control = 4;
+  }
+}
+
+message ProbeConfig {
+  google.protobuf.Duration initial_delay = 1;
+  google.protobuf.Duration period = 2;
+  google.protobuf.Duration timeout = 3;
+  uint32 success_threshold = 4;
+  uint32 failure_threshold = 5;
+}
+
+message BackoffConfig {
+  google.protobuf.Duration initial_delay = 1;
+  google.protobuf.Duration max_delay = 2;
+  double multiplier = 3;
+  google.protobuf.Duration reset_after = 4;
+}
+
+message RestartPolicyNever {}
+
+message RestartPolicyOnFailure {
+  optional uint32 max_retries = 1;
+  BackoffConfig backoff = 2;
+}
+
+message RestartPolicyAlways {
+  optional uint32 max_retries = 1;
+  BackoffConfig backoff = 2;
+}
+
+message RestartPolicy {
+  oneof policy {
+    RestartPolicyNever never = 1;
+    RestartPolicyOnFailure on_failure = 2;
+    RestartPolicyAlways always = 3;
+  }
+}
+
+message ServiceEndpointSpec {
+  string transport = 1;
+  string schema_id = 2;
+  optional uint32 port = 3;
+  optional string path = 4;
+  map<string, string> attributes = 5;
+}
+
+message ServiceSpec {
+  string name = 1;
+  string executable = 2;
+  repeated string args = 3;
+  map<string, string> environment = 4;
+  string cgroup_name = 5;
+  optional string working_dir = 6;
+  optional string transport_socket = 7;
+  ReadinessProbe readiness_probe = 8;
+  ProbeConfig probe_config = 9;
+  RestartPolicy restart_policy = 10;
+  google.protobuf.Duration graceful_stop_timeout = 11;
+  ServiceEndpointSpec endpoint = 12;
+}
+
+message ServiceStatus {
+  string name = 1;
+  ServiceState state = 2;
+  uint32 restart_count = 3;
+  optional int32 exit_code = 4;
+  bool oom_killed = 5;
+  string reason_code = 6;
+  optional cyrene.semantic.v1.Endpoint published_endpoint = 7;
+  optional string last_error = 8;
+}
+
+message ServiceEvent {
+  string service_name = 1;
+  ServiceState state = 2;
+  uint64 timestamp_unix_ms = 3;
+  string reason_code = 4;
+  string message = 5;
+}
+
+message StartServiceRequest {
+  ServiceSpec spec = 1;
+}
+
+message GetServiceStatusRequest {
+  string service_name = 1;
+}
+
+message StopServiceRequest {
+  string service_name = 1;
+  google.protobuf.Duration grace_period = 2;
+}
+
+message CancelServiceRequest {
+  string service_name = 1;
+}
+
+message WatchServiceEventsRequest {
+  string service_name = 1;
+}

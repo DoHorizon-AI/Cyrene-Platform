@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.0.20" apply false
+    kotlin("jvm") version "2.4.10" apply false
     id("org.springframework.boot") version "3.3.3" apply false
     id("io.spring.dependency-management") version "1.1.6" apply false
     id("com.google.protobuf") version "0.9.4" apply false
@@ -17,15 +17,8 @@ allprojects {
 subprojects {
     apply(plugin = "org.jetbrains.kotlin.jvm")
 
-    tasks.withType<org.gradle.api.tasks.compile.JavaCompile> {
-        options.release.set(17)
-    }
-
-    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-            freeCompilerArgs.add("-Xjsr305=strict")
-        }
+    kotlin {
+        jvmToolchain(25)
     }
 
     tasks.withType<Test> {

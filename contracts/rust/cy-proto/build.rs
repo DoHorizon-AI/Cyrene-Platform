@@ -10,10 +10,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox_adapter_proto = proto_dir.join("cyrene/sandbox/v1/sandbox_adapter.proto");
     let semantic_contract_proto = proto_dir.join("cyrene/semantic/v1/kernel_contract.proto");
     let provider_proto = proto_dir.join("cyrene/provider/v1/kernel_provider.proto");
+    let service_supervision_proto = proto_dir.join("cyrene/core/v1/service_supervision.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
     println!("cargo:rerun-if-changed={}", authority_proto.display());
     println!("cargo:rerun-if-changed={}", authority_v2_proto.display());
+    println!("cargo:rerun-if-changed={}", service_supervision_proto.display());
     println!(
         "cargo:rerun-if-changed={}",
         proto_dir.join("cyrene/core/v1").display()
@@ -39,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 core_proto,
                 authority_proto,
                 authority_v2_proto,
+                service_supervision_proto,
                 hardware_adapter_proto,
                 sandbox_adapter_proto,
                 semantic_contract_proto,

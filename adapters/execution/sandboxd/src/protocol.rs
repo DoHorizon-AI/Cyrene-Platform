@@ -112,6 +112,7 @@ fn launch_request(
         environment: request.environment.into_iter().collect(),
         cgroup_name: request.cgroup_name,
         limits: limits_from_proto(limits),
+        working_dir: None,
         transport_socket: (!request.transport_socket_path.is_empty())
             .then(|| PathBuf::from(request.transport_socket_path)),
     };

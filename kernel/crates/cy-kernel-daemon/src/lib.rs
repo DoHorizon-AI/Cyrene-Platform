@@ -18,6 +18,7 @@ pub(crate) mod daemon;
 pub mod peer_cred;
 pub(crate) mod rpc;
 pub(crate) mod sandboxed_process;
+pub mod service_manager;
 pub(crate) mod session;
 pub mod watchdog;
 
@@ -27,5 +28,6 @@ mod tests;
 pub use adapter::KernelServiceAdapter;
 pub use authority::LocalKernelAuthority;
 pub use daemon::KernelDaemon;
+pub use service_manager::ServiceSupervisionManager;
 pub use session::WorkerHeartbeatConfig;
-pub use watchdog::{InstanceActor, InstanceActorState, InstanceHealthVerdict};
+pub use watchdog::{InstanceActor, InstanceActorState, InstanceHealthVerdict, ServiceSupervisor};
