@@ -661,3 +661,136 @@ async fn test_generic_service_real_os_child_process_lifecycle_and_cleanup() {
     let stop_status = supervisor.stop().await.expect("real process stop");
     assert_eq!(stop_status.state, ServiceState::Stopped);
 }
+
+#[tokio::test]
+async fn test_generic_service_single_restart_authority_and_worker_active_isolation() {
+    let backend = Arc::new(MockExecutionBackend::new());
+    let plan = sample_plan("single-restart-svc");
+    let mut attrs = BTreeMap::new();
+    attrs.insert("api".to_string(), "v1".to_string());
+
+    let spec = ServiceSpec::new("single-restart-svc", plan)
+        .with_readiness_probe(ReadinessProbe::ProcessAlive, ProbeConfig::default())
+        .with_endpoint(ServiceEndpointSpec {
+            transport: "http".to_string(),
+            schema_id: "test.api.v1".to_string(),
+            port: Some(8080),
+            path: None,
+            attributes: attrs,
+        })
+        .with_restart_policy(RestartPolicy::OnFailure {
+            max_retries: Some(3),
+            backoff: BackoffConfig {
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_millis(50),
+                multiplier: 2.0,
+                reset_after: Duration::from_secs(60),
+            },
+        });
+
+    let mut supervisor = ServiceSupervisor::new(spec, backend.clone(), sample_binding());
+
+    // 1. Initial start -> Generation 1 becomes Ready and Running
+    let status_gen1 = supervisor.start().await.expect("initial start succeeds");
+    assert_eq!(status_gen1.state, ServiceState::Running);
+    assert_eq!(supervisor.generation(), 1);
+    assert_eq!(supervisor.restart_count(), 0);
+    assert_eq!(backend.launched_count.load(Ordering::SeqCst), 1);
+    assert!(supervisor.handle().is_some(), "exactly one active process handle");
+    assert_eq!(
+        supervisor.status().published_endpoint.unwrap().identity.generation,
+        1
+    );
+
+    // 2. Process crashes
+    let crash_report = CleanupReport {
+        complete: true,
+        exit_code: Some(1),
+        oom_killed: false,
+        conditions: vec![ProcessCondition {
+            reason_code: "PANIC".to_string(),
+            summary: "Simulated unhandled panic".to_string(),
+        }],
+        reason_code: "CRASH".to_string(),
+    };
+
+    let status_restarting = supervisor.handle_observed_exit(crash_report).await;
+    assert_eq!(status_restarting.state, ServiceState::Restarting);
+    assert_eq!(supervisor.restart_count(), 1);
+    assert!(supervisor.status().published_endpoint.is_none(), "endpoint revoked immediately on crash");
+
+    // 3. Step supervisor -> Exactly one replacement generation launches
+    let status_gen2 = supervisor.step_supervision().await.expect("restart succeeds");
+    assert_eq!(status_gen2.state, ServiceState::Running);
+    assert_eq!(supervisor.generation(), 2);
+    assert_eq!(supervisor.restart_count(), 1);
+    assert_eq!(backend.launched_count.load(Ordering::SeqCst), 2, "exactly one replacement launched (total 2)");
+
+    // 4. Exactly one process and exactly one endpoint remain active
+    let handle = supervisor.handle().expect("exactly one active process handle");
+    assert_eq!(handle.pid, 1002);
+    let ep = supervisor.status().published_endpoint.expect("exactly one endpoint published");
+    assert_eq!(ep.identity.generation, 2);
+    assert_eq!(ep.owner.generation, 2);
+
+    // 5. Subsequent step_supervision on healthy running service does NOT cause duplicate restarts
+    let status_noop = supervisor.step_supervision().await.expect("noop supervision");
+    assert_eq!(status_noop.state, ServiceState::Running);
+    assert_eq!(supervisor.generation(), 2);
+    assert_eq!(backend.launched_count.load(Ordering::SeqCst), 2, "no duplicate launch occurred");
+}
+
+#[tokio::test]
+async fn test_generic_service_stale_endpoint_protection_across_generations() {
+    let backend = Arc::new(MockExecutionBackend::new());
+    let plan = sample_plan("stale-endpoint-svc");
+
+    let spec = ServiceSpec::new("stale-endpoint-svc", plan)
+        .with_readiness_probe(ReadinessProbe::ProcessAlive, ProbeConfig::default())
+        .with_endpoint(ServiceEndpointSpec {
+            transport: "grpc".to_string(),
+            schema_id: "test.grpc.v1".to_string(),
+            port: Some(9090),
+            path: None,
+            attributes: BTreeMap::new(),
+        })
+        .with_restart_policy(RestartPolicy::OnFailure {
+            max_retries: Some(2),
+            backoff: BackoffConfig {
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_millis(50),
+                multiplier: 2.0,
+                reset_after: Duration::from_secs(60),
+            },
+        });
+
+    let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
+
+    // 1. Generation N (1) ready -> Endpoint published with generation 1
+    supervisor.start().await.expect("start");
+    let ep_gen1 = supervisor.status().published_endpoint.expect("endpoint published");
+    assert_eq!(ep_gen1.identity.generation, 1);
+    assert_eq!(ep_gen1.identity.id, "endpoint/stale-endpoint-svc");
+
+    // 2. Generation 1 crashes -> Endpoint revoked immediately
+    let crash = CleanupReport {
+        complete: true,
+        exit_code: Some(1),
+        oom_killed: false,
+        conditions: Vec::new(),
+        reason_code: "SEGFAULT".to_string(),
+    };
+    supervisor.handle_observed_exit(crash).await;
+    assert_eq!(supervisor.state(), ServiceState::Restarting);
+    assert!(supervisor.status().published_endpoint.is_none(), "endpoint must be None during Restarting");
+
+    // 3. Generation N+1 (2) launches -> Endpoint is NOT published until ready
+    supervisor.step_supervision().await.expect("restart");
+    assert_eq!(supervisor.state(), ServiceState::Running);
+
+    // 4. Endpoint is published with Generation 2, old Generation 1 endpoint NEVER reappears
+    let ep_gen2 = supervisor.status().published_endpoint.expect("generation 2 endpoint published");
+    assert_eq!(ep_gen2.identity.generation, 2);
+    assert_ne!(ep_gen2.identity.generation, ep_gen1.identity.generation);
+    assert_eq!(ep_gen2.owner.generation, 2);
+}

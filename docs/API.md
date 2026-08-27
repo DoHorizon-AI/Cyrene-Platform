@@ -123,6 +123,8 @@ artifact_ref = provider.put(
 
 The Platform Kernel provides generic, Product-neutral process hosting and supervision mechanisms capable of running long-running service workloads across any runtime (Python, Node.js, JVM, .NET, Rust, Go, or native C/C++ binaries).
 
+> **Architectural Invariant**: `ServiceSpec`, `ServiceState`, `ServiceStatus`, and `ServiceSupervisor` are daemon/orchestration layer constructs. They drive existing Kernel primitives (`LaunchPlan`, `ProcessRuntime`, `SandboxBackend`, `CleanupReport`, and `semantic::Endpoint`). They do **NOT** create a new authoritative Kernel domain entity (no authoritative `ServiceId` resource, no Service ledger/table, and no independent Service repository).
+
 ```mermaid
 stateDiagram-v2
     [*] --> Starting: spawn_process(LaunchPlan)
@@ -140,12 +142,22 @@ stateDiagram-v2
     Quarantined --> [*]
 ```
 
-### A. Core Declarative Types (`cy-kernel-api::service`)
+### A. State Machine & Exact Lifecycle Semantics
+- **`Starting`**: Process has been launched into the sandbox/OS runtime and the supervisor is actively evaluating configured readiness probes. The service is **not yet ready** to receive consumer traffic; no endpoint is published.
+- **`Ready`**: All configured readiness probes have succeeded (e.g. TCP port open, HTTP 2xx returned, or WorkerControl handshake completed). The semantic `Endpoint` is published to the registry.
+- **`Running`**: The service workload is actively running and continuously supervised for liveness, crashes, and exit events.
+- **`Stopping`**: Graceful shutdown has been initiated. Published endpoints are revoked immediately. The supervisor waits for the process to exit cleanly within `graceful_stop_timeout`.
+- **`Stopped`**: Process has terminated cleanly (exit code 0 or successful graceful stop). This is a terminal resting state.
+- **`Failed`**: Process spawn failed, readiness probe timed out, or process required forced termination after shutdown deadline expired.
+- **`Restarting`**: An unexpected crash occurred under an active restart policy (`OnFailure` or `Always`). The supervisor is actively counting restart attempts and holding the deterministic backoff delay before spawning the next generation.
+- **`Quarantined`**: The consecutive restart ceiling (`max_retries`) has been exhausted. Automated restarts are suspended to prevent infinite crash loops, and the service remains in isolation for investigation.
+
+### B. Core Declarative Types (`cy-kernel-api::service`)
 - **`LaunchPlan`**: Contains `executable`, `args`, `environment`, `cgroup_name`, `limits`, `working_dir: Option<PathBuf>`, and optional `transport_socket`.
 - **`ReadinessProbe`**:
-  - `ProcessAlive`: Validates that the OS process was spawned and is running.
+  - `ProcessAlive`: **Permissive shallow readiness strategy**. Confirms only that the OS/sandbox process was spawned and is alive. It does **NOT** imply application-level, framework-level, or network-level readiness.
   - `TcpSocket { host, port }`: Validates TCP connectivity to the service listening port.
-  - `HttpGet { host, port, path, expected_status }`: Validates HTTP endpoint response (e.g. `/health/ready` -> 200 OK).
+  - `HttpGet { host, port, path, expected_status }`: Validates HTTP endpoint response (e.g. `GET /health/ready` $\rightarrow$ 200 OK).
   - `WorkerControl`: Validates bidirectional framing handshake (`Hello` / `HelloAck`).
 - **`RestartPolicy`**:
   - `Never`: Terminal on any exit.
@@ -154,10 +166,10 @@ stateDiagram-v2
 - **`BackoffConfig`**: `initial_delay`, `max_delay`, `multiplier`, and `reset_after` for resetting retry counts after sustained healthy execution.
 - **`ServiceEndpointSpec`**: Declares transport (e.g. `http`), schema ID, port, path, and public attributes published to the Kernel registry upon reaching `Ready`.
 
-### B. Lifecycle Invariants & Failure Semantics
-1. **Endpoint Lifecycle Coupling**: Endpoints are only published when the service state reaches `Ready`, and are strictly revoked upon `Stopping`, `Failed`, or `Quarantined`.
-2. **Graceful Shutdown & Escalation**: On stop request, processes receive graceful termination. If the process does not terminate within `graceful_stop_timeout`, forced termination is executed and reported via `CleanupReport`.
-3. **Deterministic Backoff**: Backoff delays follow $D_n = \min(D_{\text{initial}} \cdot \text{multiplier}^{n-1}, D_{\text{max}})$.
-4. **Retry Exhaustion & Quarantine**: Exceeding `max_retries` transitions the service to `Quarantined`, isolating crashing workloads without endless crash-loops.
-5. **Zero Zombie / Orphan Guarantee**: All child processes and cgroup allocations are tracked and cleaned up on termination.
-
+### C. Lifecycle Invariants, Restart Ownership & Failure Semantics
+1. **Single Restart Ownership**: Exactly one component (`ServiceSupervisor`) owns restart policies, attempt counters, and backoff timing across generations. Physical execution actors (`InstanceActor` / `SandboxedProcess`) detect and report single-generation crash/exit facts upward; they do not perform restarts.
+2. **Stale Endpoint Protection Across Generations**: Endpoints are strictly scoped to the active generation ($N$). When generation $N$ crashes or stops, its endpoint is immediately revoked. During backoff (`Restarting`) and `Starting`, no endpoint is exposed. When generation $N+1$ passes readiness checks, a new endpoint with generation $N+1$ is published; old generation $N$ endpoints are never re-exposed.
+3. **Graceful Shutdown & Escalation**: On stop request, processes receive graceful termination. If the process does not terminate within `graceful_stop_timeout`, forced termination is executed and reported via `CleanupReport`.
+4. **Deterministic Backoff**: Backoff delays follow $D_n = \min(D_{\text{initial}} \cdot \text{multiplier}^{n-1}, D_{\text{max}})$.
+5. **Retry Exhaustion & Quarantine**: Exceeding `max_retries` transitions the service to `Quarantined`, isolating crashing workloads without endless crash-loops.
+6. **Zero Zombie / Orphan Guarantee**: All child processes and cgroup allocations are tracked and cleaned up on termination.
