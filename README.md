@@ -9,16 +9,10 @@ Navigator, or Echo product logic. Those products and other closed plugins live
 in the private advanced-services repository and depend on versioned contracts
 from this repository.
 
-Development is split into language-specific lanes and converges through
-`develop`:
+All platform development converges through the standard branch model:
 
-- `develop-kernel` is the Rust Kernel/Node Runtime development branch.
-- `develop-framework` is the Kotlin Framework/Control Plane development branch.
-- `develop` is the reviewed integration branch for cross-language changes.
-
-`main` is a protected release branch and accepts only reviewed pull requests
-from `develop` after the required Core CI, architecture-governance, and
-release-evidence checks pass.
+- `develop` is the active integration branch for all platform features, SDKs, and contracts. Pull requests merge to `develop` after passing CI and boundary governance checks.
+- `main` is the protected release branch. Releases and immutable tags are cut strictly from `main` after verified staging.
 
 ## Repository layout
 
@@ -64,5 +58,10 @@ state, and private service implementations. Preserved legacy applications in
 the advanced-services repository are not expected to build until their imports
 are migrated to released core contracts.
 
-See [architecture](docs/ARCHITECTURE.md) and
-[repository boundaries](docs/REPOSITORY_BOUNDARIES.md).
+## Documentation & Authoritative Contracts
+
+- **Authoritative Substrate API Specification**: [`docs/API.md`](docs/API.md)
+- **Canonical Capability & API Index**: [`docs/api/CAPABILITY_INDEX.md`](docs/api/CAPABILITY_INDEX.md)
+- **Architecture Blueprint**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- **Repository Boundaries**: [`docs/REPOSITORY_BOUNDARIES.md`](docs/REPOSITORY_BOUNDARIES.md)
+- **Contributing & Governance**: [`CONTRIBUTING.md`](CONTRIBUTING.md)

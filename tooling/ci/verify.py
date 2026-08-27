@@ -12,11 +12,11 @@ import sys
 from pathlib import Path
 
 def find_platform_root() -> Path:
-    curr = Path.cwd().resolve()
-    for parent in [curr] + list(curr.parents):
+    file_dir = Path(__file__).resolve().parent
+    for parent in [file_dir] + list(file_dir.parents):
         if (parent / "tooling" / "ci" / "check_service_boundaries.py").exists():
             return parent
-    return curr
+    return file_dir.parent.parent
 
 PLATFORM_ROOT = find_platform_root()
 
@@ -38,13 +38,19 @@ def verify_docs() -> bool:
 def verify_governance() -> bool:
     gov_tool = PLATFORM_ROOT / "tooling" / "ci" / "check_service_boundaries.py"
     test_gov = PLATFORM_ROOT / "tooling" / "ci" / "test_check_service_boundaries.py"
+    api_doc_tool = PLATFORM_ROOT / "tooling" / "ci" / "check_api_documentation.py"
+    test_api_doc = PLATFORM_ROOT / "tooling" / "ci" / "test_check_api_documentation.py"
     policy_tool = PLATFORM_ROOT / "tooling" / "governance" / "validate_repository_policy.py"
     test_policy = PLATFORM_ROOT / "tooling" / "governance" / "tests" / "test_repository_policy.py"
+    test_manifest = PLATFORM_ROOT / "tooling" / "ci" / "tests" / "test_service_manifest_semantics.py"
     ok1 = run_step("Service Boundary Governance Guard", [sys.executable, str(gov_tool)])
     ok2 = run_step("Governance Pytest Suite", [sys.executable, "-m", "pytest", str(test_gov)])
-    ok3 = run_step("Repository Policy Validation Guard", [sys.executable, str(policy_tool)])
-    ok4 = run_step("Repository Policy Pytest Suite", [sys.executable, "-m", "pytest", str(test_policy)])
-    return ok1 and ok2 and ok3 and ok4
+    ok3 = run_step("API Documentation Coverage Guard", [sys.executable, str(api_doc_tool)])
+    ok4 = run_step("API Documentation Coverage Pytest", [sys.executable, "-m", "pytest", str(test_api_doc)])
+    ok5 = run_step("Service Manifest Semantics Pytest", [sys.executable, "-m", "pytest", str(test_manifest)])
+    ok6 = run_step("Repository Policy Validation Guard", [sys.executable, str(policy_tool)])
+    ok7 = run_step("Repository Policy Pytest Suite", [sys.executable, "-m", "pytest", str(test_policy)])
+    return ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
 
 def verify_python() -> bool:
     tests = [

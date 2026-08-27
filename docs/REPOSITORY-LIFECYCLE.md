@@ -55,9 +55,9 @@ This repository does **not** distribute standalone release zip files directly to
 
 ## 6. Verification & Governance Links
 - **Local Verification**: Run `python -m pytest` or `python tooling/ci/verify.py` (Platform).
-- **Canonical Architecture Docs**: See [`Cyrene-Platform/docs/start-here/00-what-is-cyrene.md`](file:///C:/Users/Baiji/DHDev/Cyrene/Cyrene-Platform/docs/start-here/00-what-is-cyrene.md)
-- **Release Topology**: See [`Cyrene-Platform/docs/release/release-topology.md`](file:///C:/Users/Baiji/DHDev/Cyrene/Cyrene-Platform/docs/release/release-topology.md)
-- **CI Trust Model**: See [`Cyrene-Platform/docs/governance/ci-trust-model.md`](file:///C:/Users/Baiji/DHDev/Cyrene/Cyrene-Platform/docs/governance/ci-trust-model.md)
+- **Canonical Architecture Docs**: See [`Cyrene-Platform/docs/start-here/00-what-is-cyrene.md`](start-here/00-what-is-cyrene.md)
+- **Release Topology**: See [`Cyrene-Platform/docs/release/release-topology.md`](release/release-topology.md)
+- **CI Trust Model**: See [`Cyrene-Platform/docs/governance/ci-trust-model.md`](governance/ci-trust-model.md)
 
 ## 7. Versioning & Tag Strategy
 - **Versioning Scheme**: `semver` (SemVer)
