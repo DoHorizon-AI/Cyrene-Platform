@@ -3,7 +3,7 @@
 # Distinguishes local development commits from remotely-fetchable origin/main commits.
 
 schema_version: "cyrene.workspace-baseline.v2"
-updated_at: "2026-08-26T20:10:00Z"
+updated_at: "2026-08-27T02:11:00Z"
 
 repositories:
   platform:
@@ -11,14 +11,14 @@ repositories:
     canonical_path: "Cyrene-Platform"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
     remote_ref: "142280f79fe497301b5f8fe7121f19d2bf922a2f"
-    local_ref: "0b0c88fccae4f1a2e7bbde62a2b17f23ba70bda8"
+    local_ref: "0441350120f18f8bff5b4c69a2d3544e2d14e1f0"
 
   plugins:
     logical_name: "Cyrene-Plugins"
     canonical_path: "plugins"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
     remote_ref: "f13cafe99983fce7ba8df1c452230580e5a971f8"
-    local_ref: "3f9054d10f8753fa0ea3f09cfdc46f5f3345d29b"
+    local_ref: "1ff1d7bfe082dfd75a76e5712b100bc23a991463"
 
   yield:
     logical_name: "Cyrene-Yield"
@@ -39,7 +39,7 @@ repositories:
     canonical_path: "services/cyrene-exchange"
     remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
     remote_ref: "5bd4eb15229b199e5b7e7c11f1a2c7c50738e5c0"
-    local_ref: "8689324cfd09b647054de52e2f72969ac9c27b41"
+    local_ref: "b571a8f8d41023eadced1318fcc46d882f5d0286"
 
   astrbot:
     logical_name: "cyrene-astrbot-rev"
