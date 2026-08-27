@@ -10,3 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "protobuf>=4.21",
 ]
+
+[tool.setuptools]
+py-modules = ["cyrene_worker", "echo_worker"]
+
