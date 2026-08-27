@@ -5,9 +5,11 @@
 //! and bounded sandbox lifecycle.
 
 mod instance_actor;
+pub mod supervisor;
 
 pub use instance_actor::{
     InstanceActor, InstanceActorState, InstanceHealthVerdict, WorkerCancelAck,
     WorkerTransportCommand, WorkerTransportDispatcher, WorkerTransportRequest,
     WorkerTransportResponse,
 };
+pub use supervisor::ServiceSupervisor;
