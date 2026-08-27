@@ -260,11 +260,18 @@ async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
     assert_eq!(ep1.identity.id, "endpoint/cyrene.service.astrbot-rev");
 
     // ==========================================
-    // 3. Real HTTP Request Path to Running Host
+    // 3. Real HTTP Request Path to Running Host:
+    // Verify /health/live (process alive) vs /health/ready (dependency gate)
     // ==========================================
     let (status_live, body_live) = http_get_text("127.0.0.1", port, "/health/live").await.expect("HTTP GET /health/live");
-    assert_eq!(status_live, 200, "expected HTTP 200 from /health/live");
+    assert_eq!(status_live, 200, "expected HTTP 200 from /health/live for process liveness");
     assert!(body_live.contains("AstrBot.DotNetHost"), "expected body to mention AstrBot.DotNetHost");
+
+    // In this standalone test without database connection configured, /health/ready returns 503 not_ready
+    let (status_ready, body_ready) = http_get_text("127.0.0.1", port, "/health/ready").await.expect("HTTP GET /health/ready");
+    assert_eq!(status_ready, 503, "expected HTTP 503 from /health/ready when dependencies (PostgreSQL) are not initialized");
+    assert!(body_ready.contains("not_ready") || body_ready.contains("database_not_configured"),
+        "expected /health/ready to reflect dependency readiness gate");
 
     let (status_ver, body_ver) = http_get_text("127.0.0.1", port, "/health/version").await.expect("HTTP GET /health/version");
     assert_eq!(status_ver, 200, "expected HTTP 200 from /health/version");
