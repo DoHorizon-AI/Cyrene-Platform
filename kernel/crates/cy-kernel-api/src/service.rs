@@ -3,6 +3,19 @@
 //! Provides Product-neutral definitions for hosting long-running services,
 //! including lifecycle states, readiness probes, deterministic restart
 //! backoff policies, endpoint bindings, and structured lifecycle events.
+//!
+//! # Architectural Invariant (ADR-010):
+//!
+//! `ServiceSpec`, `ServiceState`, `ServiceStatus`, and `ServiceEvent` are
+//! **daemon-level process supervision & orchestration abstractions**.
+//! They are **NOT** authoritative Kernel semantic entities.
+//!
+//! - **NO** `ServiceId` resource in `cy-kernel-contract`.
+//! - **NO** `ServiceRepository`, `ServiceLedger`, or `Service` persistence in Kernel authority.
+//! - **NO** independent authoritative `Service` event stream in the authority ledger.
+//!
+//! Service workloads compose existing Kernel primitives: [`LaunchPlan`],
+//! [`crate::ProcessRuntime`], [`crate::SandboxBackend`], [`CleanupReport`], and [`semantic::Endpoint`].
 
 use std::{collections::BTreeMap, time::Duration};
 

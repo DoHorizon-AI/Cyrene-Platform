@@ -3,6 +3,13 @@
 //! Provides deterministic lifecycle management, asynchronous readiness probing,
 //! bounded exponential backoff restarts, graceful shutdown deadlines, forced
 //! termination escalation, and endpoint lifecycle integration for generic services.
+//!
+//! # Architectural Invariant (ADR-010):
+//!
+//! `ServiceSupervisor` is a **daemon-level generic orchestration abstraction**.
+//! It is **NOT** an authoritative Kernel semantic domain entity. It drives
+//! existing Kernel primitives ([`cy_kernel_api::LaunchPlan`], [`SandboxBackend`],
+//! [`CleanupReport`], and [`semantic::Endpoint`]).
 
 use std::{
     sync::Arc,

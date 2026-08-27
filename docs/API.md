@@ -123,7 +123,7 @@ artifact_ref = provider.put(
 
 The Platform Kernel provides generic, Product-neutral process hosting and supervision mechanisms capable of running long-running service workloads across any runtime (Python, Node.js, JVM, .NET, Rust, Go, or native C/C++ binaries).
 
-> **Architectural Invariant**: `ServiceSpec`, `ServiceState`, `ServiceStatus`, and `ServiceSupervisor` are daemon/orchestration layer constructs. They drive existing Kernel primitives (`LaunchPlan`, `ProcessRuntime`, `SandboxBackend`, `CleanupReport`, and `semantic::Endpoint`). They do **NOT** create a new authoritative Kernel domain entity (no authoritative `ServiceId` resource, no Service ledger/table, and no independent Service repository).
+> **Architectural Invariant ([ADR-010](adr/ADR-010-service-is-supervisor-orchestration-not-kernel-authority.md))**: `ServiceSpec`, `ServiceState`, `ServiceStatus`, and `ServiceSupervisor` are daemon/orchestration layer constructs. They drive existing Kernel primitives (`LaunchPlan`, `ProcessRuntime`, `SandboxBackend`, `CleanupReport`, and `semantic::Endpoint`). They do **NOT** create a new authoritative Kernel domain entity (no authoritative `ServiceId` resource, no Service ledger/table, and no independent Service repository).
 
 ```mermaid
 stateDiagram-v2
