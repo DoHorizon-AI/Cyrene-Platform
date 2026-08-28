@@ -14,8 +14,9 @@ pub use cy_plugin_protocol::{
     envelope::Payload,
     health_status,
     pb::{
-        self, Cancel, CancelAck, Configure, Envelope, HealthCheck, HealthStatus, Hello, HelloAck,
-        Invoke, InvokeResult, PluginErrorPayload, Shutdown,
+        self, ApplicationEvent, ApplicationEventStreamEnd, Cancel, CancelAck, Configure, Envelope,
+        HealthCheck, HealthStatus, Hello, HelloAck, Invoke, InvokeResult, PluginErrorPayload,
+        Shutdown, Subscribe, SubscribeAck,
     },
     plugin_error_payload, CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_MESSAGE_BYTES,
 };

@@ -13,6 +13,7 @@ import argparse
 import base64
 import dataclasses
 import importlib
+import inspect
 import json
 import sys
 import threading
@@ -83,6 +84,49 @@ class GenericCapabilityWorker(CyreneWorker):
 
     def declared_capabilities(self) -> List[str]:
         return self._capabilities
+
+    def on_subscribe(
+        self,
+        subscription_id: str,
+        capability: str,
+        filter_payload: bytes,
+    ) -> Optional[str]:
+        handler = getattr(self._instance, "on_subscribe", None)
+        if handler is None:
+            return None
+
+        emitter = self.application_event_emitter(subscription_id)
+        try:
+            signature = inspect.signature(handler)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None:
+            positional = [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            accepts_varargs = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                for parameter in signature.parameters.values()
+            )
+            if not accepts_varargs and len(positional) < 4:
+                return handler(subscription_id, capability, filter_payload)
+
+        # The emitter is an additive fourth positional argument. Do not catch
+        # TypeError from the handler body: it must surface as a subscription
+        # failure instead of invoking user code twice.
+        return handler(subscription_id, capability, filter_payload, emitter)
+
+    def on_unsubscribe(self, subscription_id: str, reason: str) -> None:
+        handler = getattr(self._instance, "on_unsubscribe", None)
+        if handler is not None:
+            handler(subscription_id, reason)
 
     def on_cancel(self, target_request_id: str, reason: str) -> None:
         with self._lock:

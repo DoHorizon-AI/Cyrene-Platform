@@ -3,6 +3,7 @@
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -11,7 +12,10 @@ manifest_dir = Path(__file__).resolve().parents[4]
 shim_dir = manifest_dir / "sdk/python/cyrene_worker_shim"
 sys.path.insert(0, str(shim_dir))
 
-from cyrene_worker import CyreneWorker, run_worker_stdio
+try:
+    from cyrene_worker_shim.cyrene_worker import CyreneWorker, run_worker_stdio
+except ImportError:
+    from cyrene_worker import CyreneWorker, run_worker_stdio
 
 
 class GenericTckWorker(CyreneWorker):
@@ -28,7 +32,56 @@ class GenericTckWorker(CyreneWorker):
         return "1.0"
 
     def declared_capabilities(self):
-        return ["test.capability.v1"]
+        return ["test.capability.v1", "test.application-events.v1"]
+
+    def on_subscribe(self, subscription_id: str, capability: str, filter_payload: bytes):
+        if capability != "test.application-events.v1":
+            return f"unsupported capability {capability}"
+
+        try:
+            request = json.loads(filter_payload.decode("utf-8")) if filter_payload else {}
+        except Exception:
+            return "INVALID_INPUT: malformed subscription payload"
+
+        mode = request.get("mode", "single")
+        emitter = self.application_event_emitter(subscription_id)
+
+        def emit_events():
+            if mode == "single":
+                emitter.emit("synthetic", b"one")
+                emitter.complete("single event complete")
+            elif mode == "ordered":
+                for value in range(1, 4):
+                    if not emitter.emit("synthetic", str(value).encode("ascii")):
+                        return
+                emitter.complete("ordered events complete")
+            elif mode == "burst":
+                for value in range(1, 128):
+                    if not emitter.emit("synthetic", str(value).encode("ascii")):
+                        return
+                emitter.complete("burst complete")
+            elif mode == "slow":
+                time.sleep(0.15)
+                if emitter.emit("synthetic", b"slow"):
+                    emitter.complete("slow event complete")
+            elif mode == "generation":
+                emitter.terminate(5, "synthetic generation changed")
+            elif mode == "hold":
+                return
+            else:
+                emitter.terminate(4, f"unknown synthetic mode {mode}")
+
+        threading.Thread(
+            target=emit_events,
+            name=f"synthetic-events-{subscription_id}",
+            daemon=True,
+        ).start()
+        return None
+
+    def on_unsubscribe(self, subscription_id: str, reason: str) -> None:
+        # The canonical runner owns terminal delivery; this hook only records
+        # the lifecycle callback for the synthetic worker.
+        self.cancelled_requests.add(subscription_id)
 
     def on_cancel(self, target_request_id: str, reason: str) -> None:
         self.cancelled_requests.add(target_request_id)

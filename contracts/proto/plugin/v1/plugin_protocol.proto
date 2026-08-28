@@ -39,6 +39,14 @@ message Envelope {
     InvokeResult invoke_result = 21;
     StreamItem stream_item = 22;
 
+    // Capability application-event stream. This is deliberately separate from
+    // the Kernel Event/SubscribeEvents control plane: the payload is owned by
+    // the capability and is not a Kernel control-state record.
+    Subscribe subscribe = 23;
+    SubscribeAck subscribe_ack = 24;
+    ApplicationEvent application_event = 25;
+    ApplicationEventStreamEnd application_event_stream_end = 26;
+
     // Error
     PluginErrorPayload error = 30;
   }
@@ -162,4 +170,58 @@ message StreamItem {
     bytes binary_chunk = 11;
     string log_line = 12;
   }
+}
+
+// Starts one live application-event subscription for a capability. The
+// subscription identity is the enclosing Envelope.request_id and is echoed by
+// SubscribeAck and every subsequent event/end message.
+message Subscribe {
+  string capability = 1;
+
+  // Opaque capability-defined subscription/filter bytes. The Platform does
+  // not interpret this payload.
+  bytes filter_payload = 2;
+
+  // Maximum number of events the worker may buffer for this subscription.
+  // Zero requests the worker default. Implementations must reject values above
+  // their documented bound; this is never an unbounded queue.
+  uint32 max_buffered_events = 3;
+}
+
+message SubscribeAck {
+  string subscription_id = 1;
+  string capability = 2;
+}
+
+// One capability-owned application event. Envelope.generation and
+// Envelope.plugin_id provide the generation/source identity. event_sequence is
+// strictly increasing from one within this subscription and worker generation.
+// The v1 stream is live-only: it does not imply durable replay or exactly-once
+// delivery.
+message ApplicationEvent {
+  string subscription_id = 1;
+  string capability = 2;
+  uint64 event_sequence = 3;
+  string event_type = 4;
+  bytes payload = 5;
+}
+
+// Terminal condition for one application-event stream. A worker crash may
+// prevent this frame from being sent; in that case the caller synthesizes the
+// WORKER_CRASH reason from the observed transport disconnect.
+message ApplicationEventStreamEnd {
+  enum Reason {
+    NORMAL_COMPLETION = 0;
+    CANCELLED = 1;
+    WORKER_UNAVAILABLE = 2;
+    WORKER_CRASH = 3;
+    PROTOCOL_FAILURE = 4;
+    GENERATION_TERMINATED = 5;
+    BACKPRESSURE = 6;
+  }
+
+  string subscription_id = 1;
+  string capability = 2;
+  Reason reason = 3;
+  string message = 4;
 }

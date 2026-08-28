@@ -29,8 +29,11 @@ pub use media::{
 pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
 pub use plugin::{CapabilityRegistry, CapabilityResolutionError, CapabilityResolver};
 pub use worker::{
-    AtomicCancellationToken, CapabilityWorkerActivator, CapabilityWorkerClient,
-    WorkerActivationOptions, WorkerMediaProcessor, WorkerTerminalError,
+    ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
+    ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
+    CapabilityWorkerClient, WorkerApplicationEvent, WorkerActivationOptions,
+    WorkerMediaProcessor, WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

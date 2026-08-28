@@ -10,7 +10,7 @@ use cy_manifest::{
     Runtime,
 };
 use cy_platform_api::{
-    AtomicCancellationToken, CapabilityWorkerActivator,
+    ApplicationEventStreamEndReason, AtomicCancellationToken, CapabilityWorkerActivator,
     NeverCancelled, WorkerActivationOptions, WorkerTerminalError,
 };
 use serde_json::json;
@@ -59,6 +59,11 @@ fn fixture_manifest() -> PluginManifest {
             CapabilityInterfaceVersion::new("1").unwrap(),
             vec![ExecutionMode::Worker],
         )
+        .unwrap(), CapabilityDescriptor::new(
+            CapabilityId::new("test.application-events.v1").unwrap(),
+            CapabilityInterfaceVersion::new("1").unwrap(),
+            vec![ExecutionMode::Worker],
+        )
         .unwrap()],
         artifact: None,
     }
@@ -104,6 +109,206 @@ fn test_capability_worker_activation_and_handshake() {
     assert!(client.declared_capabilities().contains(&"test.capability.v1".to_string()));
 
     client.shutdown(Duration::from_secs(1)).expect("shutdown should succeed");
+}
+
+fn event_filter(mode: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({"mode": mode})).unwrap()
+}
+
+#[test]
+fn test_capability_worker_application_events_single_and_ordered() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let single = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("single"),
+            4,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    let event = single.next(Duration::from_secs(2)).unwrap();
+    assert_eq!(event.event_sequence, 1);
+    assert_eq!(event.event_type, "synthetic");
+    assert_eq!(event.payload, b"one");
+    let terminal = single.next(Duration::from_secs(2)).unwrap_err();
+    assert_eq!(
+        terminal.termination().unwrap().reason,
+        ApplicationEventStreamEndReason::NormalCompletion
+    );
+
+    let ordered = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("ordered"),
+            4,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    let values = (0..3)
+        .map(|_| String::from_utf8(ordered.next(Duration::from_secs(2)).unwrap().payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec!["1", "2", "3"]);
+    assert_eq!(
+        ordered.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ApplicationEventStreamEndReason::NormalCompletion
+    );
+
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
+fn test_capability_worker_application_events_bounded_backpressure_and_slow_consumer() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let burst = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("burst"),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(burst.next(Duration::from_secs(2)).unwrap().event_sequence, 1);
+    assert_eq!(burst.next(Duration::from_secs(2)).unwrap().event_sequence, 2);
+    let terminal = burst.next(Duration::from_secs(2)).unwrap_err();
+    assert_eq!(
+        terminal.termination().unwrap().reason,
+        ApplicationEventStreamEndReason::Backpressure
+    );
+
+    let slow = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("slow"),
+            1,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(slow.next(Duration::from_secs(2)).unwrap().payload, b"slow");
+    assert_eq!(
+        slow.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ApplicationEventStreamEndReason::NormalCompletion
+    );
+
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
+fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let cancellation = AtomicCancellationToken::new();
+    cancellation.cancel();
+    let pre_cancelled = client.subscribe_application_events_with_cancellation(
+        "test.application-events.v1",
+        &event_filter("hold"),
+        2,
+        Duration::from_secs(2),
+        &cancellation,
+    );
+    assert!(matches!(pre_cancelled, Err(WorkerTerminalError::Cancelled(_))));
+
+    let subscription = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("hold"),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    subscription.unsubscribe(&mut client, Duration::from_secs(2)).unwrap();
+    let terminal = subscription.next(Duration::from_secs(2)).unwrap_err();
+    assert_eq!(
+        terminal.termination().unwrap().reason,
+        ApplicationEventStreamEndReason::Cancelled
+    );
+
+    // Cancel while the synthetic producer is still in flight; the delayed
+    // event must not turn cancellation into a successful completion.
+    let in_flight = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("slow"),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    in_flight.unsubscribe(&mut client, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        in_flight.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ApplicationEventStreamEndReason::Cancelled
+    );
+
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
+fn test_capability_worker_application_events_generation_and_worker_crash() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let generation = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("generation"),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(
+        generation.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ApplicationEventStreamEndReason::GenerationTerminated
+    );
+
+    let crash = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("hold"),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    let invoke_error = client.invoke(
+        "test.capability.v1",
+        "crash",
+        b"{}",
+        Duration::from_secs(2),
+        &NeverCancelled,
+    );
+    assert!(matches!(invoke_error, Err(WorkerTerminalError::WorkerCrashed(_))));
+    assert_eq!(
+        crash.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ApplicationEventStreamEndReason::WorkerCrash
+    );
+}
+
+#[test]
+fn test_capability_worker_application_events_normal_shutdown() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let subscription = client
+        .subscribe_application_events_with_buffer(
+            "test.application-events.v1",
+            &event_filter("hold"),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+    client.shutdown(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        subscription.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ApplicationEventStreamEndReason::NormalCompletion
+    );
 }
 
 #[test]

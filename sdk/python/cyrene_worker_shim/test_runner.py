@@ -10,6 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from cyrene_worker import (
+    ApplicationEvent,
+    ApplicationEventStreamEnd,
     Cancel,
     CancelAck,
     Envelope,
@@ -19,6 +21,7 @@ from cyrene_worker import (
     InvokeResult,
     PluginErrorPayload,
     Shutdown,
+    Subscribe,
     read_frame,
     run_worker_stream,
     write_frame,
@@ -37,6 +40,12 @@ class DummyService:
 
     def fail(self, req: dict, cancellation=None) -> dict:
         raise ValueError("INVALID_INPUT: invalid argument provided")
+
+
+class EventService:
+    def on_subscribe(self, subscription_id, capability, filter_payload, emitter):
+        emitter.emit("synthetic", b"payload")
+        emitter.complete("done")
 
 
 def test_generic_capability_worker_lifecycle():
@@ -138,5 +147,77 @@ def test_generic_capability_worker_lifecycle():
     print("test_generic_capability_worker_lifecycle PASSED!")
 
 
+def test_generic_capability_worker_application_events():
+    worker = GenericCapabilityWorker(
+        instance=EventService(),
+        plugin_id="com.cyrene.test.events",
+        capabilities=["test.application-events.v1"],
+    )
+    inp = io.BytesIO()
+    out = io.BytesIO()
+
+    write_frame(
+        Envelope(
+            request_id="hello",
+            plugin_id="com.cyrene.test.events",
+            sequence_number=1,
+            generation=1,
+            fence_token=1,
+            payload=Hello(min_protocol_version=1, max_protocol_version=1),
+        ).encode(),
+        inp,
+    )
+    write_frame(
+        Envelope(
+            request_id="sub-1",
+            plugin_id="com.cyrene.test.events",
+            sequence_number=2,
+            generation=1,
+            fence_token=1,
+            payload=Subscribe(
+                capability="test.application-events.v1",
+                max_buffered_events=2,
+            ),
+        ).encode(),
+        inp,
+    )
+    write_frame(
+        Envelope(
+            request_id="shutdown",
+            plugin_id="com.cyrene.test.events",
+            sequence_number=3,
+            generation=1,
+            fence_token=1,
+            payload=Shutdown(grace_period_ms=500),
+        ).encode(),
+        inp,
+    )
+
+    inp.seek(0)
+    run_worker_stream(inp, out, worker)
+
+    out.seek(0)
+    frames = []
+    while True:
+        frame = read_frame(out)
+        if frame is None:
+            break
+        frames.append(Envelope.decode(frame))
+
+    assert len(frames) == 5
+    assert any(
+        envelope.request_id == "sub-1" and isinstance(envelope.payload, ApplicationEvent)
+        for envelope in frames
+    )
+    assert any(
+        envelope.request_id == "sub-1"
+        and isinstance(envelope.payload, ApplicationEventStreamEnd)
+        for envelope in frames
+    )
+    assert any(envelope.request_id == "shutdown" for envelope in frames)
+    print("test_generic_capability_worker_application_events PASSED!")
+
+
 if __name__ == "__main__":
     test_generic_capability_worker_lifecycle()
+    test_generic_capability_worker_application_events()
