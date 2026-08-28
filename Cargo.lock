@@ -263,6 +263,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-capability-execution-service"
+version = "0.1.0"
+dependencies = [
+ "cy-manifest",
+ "cy-platform-api",
+ "cy-proto",
+ "futures-core",
+ "prost-types",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
+]
+
+[[package]]
 name = "cy-extension-registry"
 version = "0.1.0"
 dependencies = [

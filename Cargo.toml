@@ -19,6 +19,7 @@ members = [
     "framework/crates/cy-installation-resolver",
     "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
+    "framework/crates/cy-capability-execution-service",
     "sdk/rust/cy-worker-sdk",
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）

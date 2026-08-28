@@ -125,6 +125,17 @@ impl CapabilityRegistry {
             .collect()
     }
 
+    /// Return one exact registered manifest by immutable provider identity.
+    ///
+    /// Resolution remains the only selection authority; this lookup is used
+    /// only after a resolved provider has been selected so the execution
+    /// service can pass the same canonical manifest to the worker activator.
+    pub fn manifest_for(&self, plugin_id: &str, plugin_version: &str) -> Option<PluginManifest> {
+        self.manifests
+            .get(&(plugin_id.to_string(), plugin_version.to_string()))
+            .cloned()
+    }
+
     /// Validate a manifest against an exact capability interface and its
     /// execution constraints without selecting a provider.
     pub fn validate_interface(
@@ -416,19 +427,27 @@ mod tests {
     #[test]
     fn registry_queries_registered_capability_providers() {
         let mut registry = CapabilityRegistry::new();
-        registry
-            .register(manifest(
-                "cyrene.training.reference",
-                "1.0.0",
-                "training.engine.v1",
-                "1",
-                &[ExecutionMode::Worker],
-            ))
-            .unwrap();
+        let registered_manifest = manifest(
+            "cyrene.training.reference",
+            "1.0.0",
+            "training.engine.v1",
+            "1",
+            &[ExecutionMode::Worker],
+        );
+        registry.register(registered_manifest.clone()).unwrap();
 
         let providers = registry.providers(&CapabilityId::new("training.engine.v1").unwrap());
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].plugin.id, "cyrene.training.reference");
+        assert_eq!(
+            registry.manifest_for("cyrene.training.reference", "1.0.0"),
+            Some(registered_manifest)
+        );
+        assert!(
+            registry
+                .manifest_for("cyrene.training.reference", "2.0.0")
+                .is_none()
+        );
     }
 
     #[test]
