@@ -1,6 +1,8 @@
 # Rust and JVM build output
 target/
 **/target/
+tck/capability-execution-service/dotnet/bin/
+tck/capability-execution-service/dotnet/obj/
 *.rs.bk
 .gradle/
 **/.gradle/
