@@ -9,6 +9,11 @@ The `plugin/v1/` module remains a separate local stdio protocol. Its imports
 are module-relative, while its `cy.plugin.v1` package and wire semantics stay
 unchanged.
 
+`cyrene/capability/v1/` owns the language-neutral Product execution service.
+Capability-specific payloads live under their own packages; the EXPERIMENTAL
+`cyrene/message/connector/v1/` module defines typed message connector payloads
+without declaring another gRPC service.
+
 Core service responses intentionally use the typed domain messages from the
 blueprint, and `Connect` intentionally streams the node/control envelopes;
 Buf's generic RPC Request/Response naming rules are excluded for that reason.

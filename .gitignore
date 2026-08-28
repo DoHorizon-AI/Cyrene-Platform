@@ -3,6 +3,8 @@ target/
 **/target/
 tck/capability-execution-service/dotnet/bin/
 tck/capability-execution-service/dotnet/obj/
+tck/message-connector-contract/dotnet/bin/
+tck/message-connector-contract/dotnet/obj/
 *.rs.bk
 .gradle/
 **/.gradle/

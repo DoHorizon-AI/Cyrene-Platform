@@ -14,6 +14,8 @@
 // precedence over hand-boxing generated variants in this projection crate.
 #![allow(clippy::large_enum_variant)]
 
+pub mod message_connector;
+
 pub mod google {
     pub mod rpc {
         tonic::include_proto!("google.rpc");
@@ -35,6 +37,14 @@ pub mod cyrene {
     pub mod capability {
         pub mod v1 {
             tonic::include_proto!("cyrene.capability.v1");
+        }
+    }
+
+    pub mod message {
+        pub mod connector {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.message.connector.v1");
+            }
         }
     }
 
@@ -71,6 +81,8 @@ pub use cyrene::core::v1 as core_v1;
 pub use cyrene::core::v2 as core_v2;
 /// Versioned local protocol between the Kernel and external hardware adapters.
 pub use cyrene::hardware::v1 as hardware_v1;
+/// EXPERIMENTAL typed payloads for `message.connector.v1`.
+pub use cyrene::message::connector::v1 as message_connector_v1;
 /// Dedicated local Provider lifecycle and reconciliation projection.
 pub use cyrene::provider::v1 as provider_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.
