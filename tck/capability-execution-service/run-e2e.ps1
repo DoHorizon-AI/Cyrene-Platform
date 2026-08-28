@@ -184,7 +184,7 @@ try {
     $timeoutService = Start-CapabilityService $mediaManifest $mediaWorkingDirectory 32 1
     $timeout = Invoke-GeneratedDotnetClient @(
         'invoke', "http://127.0.0.1:$($timeoutService.Port)", 'media.processor.v1', '1', 'transform_image',
-        (Join-Path $mediaFixtures 'media-timeout-transform.json'), '10000'
+        (Join-Path $mediaFixtures 'media-timeout-transform.json')
     )
     if ($timeout.ExitCode -ne 5) { throw "media worker timeout did not return generic execution error: $($timeout.Output -join ' ')" }
     Assert-OutputContains $timeout 'execution:Timeout:'
