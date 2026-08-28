@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/media-processor-v1.schema.json",
+  "title": "MediaProcessorV1",
+  "description": "Product-neutral image inspection and transformation contract.",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "InspectImageRequest",
+      "additionalProperties": false,
+      "required": ["operation", "input"],
+      "properties": {
+        "operation": { "const": "inspect_image" },
+        "input": { "$ref": "#/$defs/imageInput" }
+      }
+    },
+    {
+      "title": "TransformImageRequest",
+      "additionalProperties": false,
+      "required": ["operation", "input"],
+      "properties": {
+        "operation": { "const": "transform_image" },
+        "input": { "$ref": "#/$defs/imageInput" },
+        "resize": { "$ref": "#/$defs/resizeOptions" },
+        "output_format": { "$ref": "#/$defs/imageFormat" },
+        "quality": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "normalize_orientation": { "type": "boolean", "default": false }
+      }
+    }
+  ],
+  "$defs": {
+    "inspectImageRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input"],
+      "properties": {
+        "input": { "$ref": "#/$defs/imageInput" }
+      }
+    },
+    "transformImageRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input"],
+      "properties": {
+        "input": { "$ref": "#/$defs/imageInput" },
+        "resize": { "$ref": "#/$defs/resizeOptions" },
+        "output_format": { "$ref": "#/$defs/imageFormat" },
+        "quality": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "normalize_orientation": { "type": "boolean", "default": false }
+      }
+    },
+    "imageFormat": {
+      "type": "string",
+      "enum": ["png", "jpeg", "webp", "gif", "bmp", "tiff"]
+    },
+    "imageInput": {
+      "oneOf": [
+        {
+          "title": "InlineImageBytes",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data_base64"],
+          "properties": {
+            "kind": { "const": "bytes" },
+            "data_base64": { "type": "string", "minLength": 1 },
+            "media_type": { "$ref": "#/$defs/imageFormat" }
+          }
+        },
+        {
+          "title": "CallerOwnedImageFile",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "const": "file" },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*://).+"
+            },
+            "media_type": { "$ref": "#/$defs/imageFormat" }
+          }
+        }
+      ]
+    },
+    "resizeOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "preserve_aspect_ratio": { "type": "boolean", "default": false }
+      }
+    },
+    "imageInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "width", "height", "orientation", "size_bytes", "content_sha256"],
+      "properties": {
+        "format": { "$ref": "#/$defs/imageFormat" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "orientation": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "transformedImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content", "format", "width", "height", "orientation", "size_bytes", "content_sha256"],
+      "properties": {
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["data_base64", "media_type"],
+          "properties": {
+            "data_base64": { "type": "string", "minLength": 1 },
+            "media_type": { "$ref": "#/$defs/imageFormat" }
+          }
+        },
+        "format": { "$ref": "#/$defs/imageFormat" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "orientation": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["INVALID_INPUT", "UNSUPPORTED_INPUT", "CANCELLED", "EXECUTION_FAILED"]
+        },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
