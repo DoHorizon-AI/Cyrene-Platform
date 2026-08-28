@@ -848,11 +848,19 @@ def run_worker_stream(
                     resp_payload = CancelAck(target_request_id=cancel.target_request_id)
                 elif req_env.payload_tag == 20:  # Invoke
                     inv = req_env.payload if isinstance(req_env.payload, Invoke) else Invoke()
-                    ok, res_bytes = worker.on_invoke(inv.capability, inv.action, inv.payload)
+                    ok, res = worker.on_invoke(inv.capability, inv.action, inv.payload)
                     if ok:
-                        resp_payload = InvokeResult(payload=res_bytes)
+                        resp_payload = InvokeResult(payload=res if isinstance(res, bytes) else bytes(res))
+                    elif isinstance(res, PluginErrorPayload):
+                        resp_payload = res
                     else:
-                        resp_payload = PluginErrorPayload(code=8, message=res_bytes.decode("utf-8", "replace"))
+                        msg = res.decode("utf-8", "replace") if isinstance(res, bytes) else str(res)
+                        code = 8
+                        if "INVALID_INPUT" in msg or "UNSUPPORTED_INPUT" in msg:
+                            code = 3
+                        elif "CANCELLED" in msg:
+                            code = 6
+                        resp_payload = PluginErrorPayload(code=code, message=msg)
                 elif req_env.payload_tag == 16:  # Shutdown
                     shut = req_env.payload if isinstance(req_env.payload, Shutdown) else Shutdown()
                     worker.on_shutdown(shut.grace_period_ms)

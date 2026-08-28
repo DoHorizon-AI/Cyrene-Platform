@@ -1,0 +1,41 @@
+"""CYRENE Capability Worker Shim."""
+
+from .cyrene_worker import (
+    Cancel,
+    CancelAck,
+    Configure,
+    CyreneWorker,
+    Envelope,
+    HealthCheck,
+    HealthStatus,
+    Hello,
+    HelloAck,
+    Invoke,
+    InvokeResult,
+    PluginErrorPayload,
+    Shutdown,
+    read_frame,
+    run_worker_stdio,
+    run_worker_stream,
+    write_frame,
+)
+
+__all__ = [
+    "Cancel",
+    "CancelAck",
+    "Configure",
+    "CyreneWorker",
+    "Envelope",
+    "HealthCheck",
+    "HealthStatus",
+    "Hello",
+    "HelloAck",
+    "Invoke",
+    "InvokeResult",
+    "PluginErrorPayload",
+    "Shutdown",
+    "read_frame",
+    "run_worker_stdio",
+    "run_worker_stream",
+    "write_frame",
+]

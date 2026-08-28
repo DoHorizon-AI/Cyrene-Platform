@@ -165,21 +165,7 @@ pub struct TransformedImage {
     pub content_sha256: String,
 }
 
-/// Cancellation is intentionally supplied by the host rather than tied to a
-/// transport or runtime implementation.
-pub trait CancellationToken {
-    fn is_cancelled(&self) -> bool;
-}
-
-/// A token for callers that do not need cancellation.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NeverCancelled;
-
-impl CancellationToken for NeverCancelled {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
+pub use crate::worker::{AtomicCancellationToken, CancellationToken, NeverCancelled};
 
 /// Stable, transport-neutral error categories for the first slice.
 #[derive(Debug, Clone, PartialEq, Eq)]

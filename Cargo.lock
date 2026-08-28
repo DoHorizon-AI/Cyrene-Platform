@@ -369,9 +369,15 @@ name = "cy-platform-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cy-manifest",
+ "cy-plugin-protocol",
+ "prost",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

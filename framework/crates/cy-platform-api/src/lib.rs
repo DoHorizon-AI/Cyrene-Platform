@@ -17,6 +17,7 @@ pub mod builtin;
 pub mod media;
 pub mod official_manifest;
 pub mod plugin;
+pub mod worker;
 use async_trait::async_trait;
 pub use cy_manifest::*;
 pub use media::{
@@ -27,6 +28,10 @@ pub use media::{
 };
 pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
 pub use plugin::{CapabilityRegistry, CapabilityResolutionError, CapabilityResolver};
+pub use worker::{
+    AtomicCancellationToken, CapabilityWorkerActivator, CapabilityWorkerClient,
+    WorkerActivationOptions, WorkerMediaProcessor, WorkerTerminalError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
