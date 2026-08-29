@@ -38,6 +38,10 @@ message InvokeCapabilityRequest {
   // Capability-owned typed protobuf payload. Products should use Any's
   // type_url/value contract; the Platform never interprets domain fields.
   google.protobuf.Any request = 4;
+
+  // Optional stable identity of the configured capability instance to target.
+  // Empty/omitted preserves legacy implicit resolution when it is unambiguous.
+  optional string binding_id = 5;
 }
 
 message InvokeCapabilityResponse {
@@ -56,6 +60,10 @@ message SubscribeCapabilityEventsRequest {
 
   // Optional capability-owned typed filter. The Platform does not inspect it.
   google.protobuf.Any filter = 3;
+
+  // Optional stable identity of the configured capability instance to target.
+  // Empty/omitted preserves legacy implicit resolution when it is unambiguous.
+  optional string binding_id = 4;
 }
 
 // Event and terminal state are structurally distinct stream items.
@@ -79,6 +87,10 @@ message CapabilityApplicationEvent {
   // contain a PID, process handle, stdio identity, or other worker detail.
   uint64 generation = 6;
   string source_id = 7;
+
+  // Stable configured capability identity selected for this stream. It is
+  // independent from the provider source and runtime generation.
+  string binding_id = 8;
 }
 
 message CapabilityEventStreamEnd {
@@ -89,6 +101,10 @@ message CapabilityEventStreamEnd {
   CapabilityEventStreamEndReason reason = 5;
   string message = 6;
   CapabilityExecutionError error = 7;
+
+  // Stable configured capability identity selected for this stream. It is
+  // independent from the provider source and runtime generation.
+  string binding_id = 8;
 }
 
 enum CapabilityEventStreamEndReason {

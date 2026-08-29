@@ -95,6 +95,7 @@ struct ResolvedExecution {
     manifest: PluginManifest,
     worker_options: WorkerActivationOptions,
     source_id: String,
+    binding_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -135,6 +136,7 @@ pub struct CapabilityExecutionService {
     registry: Arc<CapabilityRegistry>,
     config: Arc<CapabilityExecutionConfig>,
     provider_worker_options: Arc<HashMap<(String, String), WorkerActivationOptions>>,
+    binding_worker_options: Arc<HashMap<String, WorkerActivationOptions>>,
     active: Arc<Mutex<HashMap<String, Arc<AtomicCancellationToken>>>>,
     running_tasks: Arc<AtomicUsize>,
     stopping: Arc<AtomicBool>,
@@ -154,6 +156,7 @@ impl CapabilityExecutionService {
             registry: Arc::new(registry),
             config: Arc::new(config),
             provider_worker_options: Arc::new(HashMap::new()),
+            binding_worker_options: Arc::new(HashMap::new()),
             active: Arc::new(Mutex::new(HashMap::new())),
             running_tasks: Arc::new(AtomicUsize::new(0)),
             stopping: Arc::new(AtomicBool::new(false)),
@@ -172,6 +175,20 @@ impl CapabilityExecutionService {
         let mut options_by_provider = (*self.provider_worker_options).clone();
         options_by_provider.insert((plugin_id.into(), plugin_version.into()), options);
         self.provider_worker_options = Arc::new(options_by_provider);
+        self
+    }
+
+    /// Associate activation settings with one exact configured binding. The
+    /// binding ID is stable configuration identity; these options are only
+    /// Platform runtime details and are never part of the Product contract.
+    pub fn with_binding_worker_options(
+        mut self,
+        binding_id: impl Into<String>,
+        options: WorkerActivationOptions,
+    ) -> Self {
+        let mut options_by_binding = (*self.binding_worker_options).clone();
+        options_by_binding.insert(binding_id.into(), options);
+        self.binding_worker_options = Arc::new(options_by_binding);
         self
     }
 
@@ -232,6 +249,7 @@ impl CapabilityExecutionService {
         &self,
         capability: &str,
         interface_version: &str,
+        binding_id: Option<&str>,
     ) -> Result<ResolvedExecution, ApiError> {
         if capability.trim().is_empty() || interface_version.trim().is_empty() {
             return Err(ApiError::new(
@@ -261,11 +279,14 @@ impl CapabilityExecutionService {
         let resolved = self
             .registry
             .resolver()
-            .resolve(&requirement)
+            .resolve_target(&requirement, binding_id)
             .map_err(ApiError::from_resolution)?;
         let manifest = self
             .registry
-            .manifest_for(&resolved.plugin.id, &resolved.plugin_version.version)
+            .manifest_for(
+                &resolved.capability.plugin.id,
+                &resolved.capability.plugin_version.version,
+            )
             .ok_or_else(|| {
                 ApiError::new(
                     capability_execution_error::Code::CapabilityUnavailable,
@@ -273,18 +294,24 @@ impl CapabilityExecutionService {
                 )
             })?;
         let worker_options = self
-            .provider_worker_options
-            .get(&(
-                resolved.plugin.id.clone(),
-                resolved.plugin_version.version.clone(),
-            ))
+            .binding_worker_options
+            .get(resolved.binding_id.as_deref().unwrap_or_default())
             .cloned()
+            .or_else(|| {
+                self.provider_worker_options
+                    .get(&(
+                        resolved.capability.plugin.id.clone(),
+                        resolved.capability.plugin_version.version.clone(),
+                    ))
+                    .cloned()
+            })
             .unwrap_or_else(|| self.config.worker_options.clone());
 
         Ok(ResolvedExecution {
             manifest,
             worker_options,
-            source_id: resolved.plugin.id,
+            source_id: resolved.capability.plugin.id,
+            binding_id: resolved.binding_id,
         })
     }
 
@@ -312,6 +339,7 @@ impl CapabilityExecutionService {
         subscription_id: String,
         capability: String,
         source_id: String,
+        binding_id: String,
         error: ApiError,
         reason: i32,
     ) -> CapabilityEventStream {
@@ -321,6 +349,7 @@ impl CapabilityExecutionService {
             capability,
             0,
             source_id,
+            binding_id,
             reason,
             error.message.clone(),
             Some(error.into_wire()),
@@ -340,6 +369,7 @@ impl CapabilityExecutionService {
             subscription_id,
             capability,
             0,
+            String::new(),
             String::new(),
             reason,
             message,
@@ -379,7 +409,15 @@ impl CapabilityExecutionService {
             ));
         }
 
-        let execution = match self.resolve_worker(&request.capability, &request.interface_version) {
+        let binding_id = request
+            .binding_id
+            .as_deref()
+            .filter(|binding_id| !binding_id.trim().is_empty());
+        let execution = match self.resolve_worker(
+            &request.capability,
+            &request.interface_version,
+            binding_id,
+        ) {
             Ok(execution) => execution,
             Err(error) => return Self::invoke_response_error(error),
         };
@@ -469,6 +507,7 @@ impl CapabilityExecutionService {
                     subscription_id,
                     request.capability,
                     String::new(),
+                    String::new(),
                     ApiError::new(
                         capability_execution_error::Code::InvalidRequest,
                         "filter Any.type_url is required when filter is present",
@@ -477,13 +516,22 @@ impl CapabilityExecutionService {
                 );
             }
         }
-        let execution = match self.resolve_worker(&request.capability, &request.interface_version) {
+        let binding_id = request
+            .binding_id
+            .as_deref()
+            .filter(|binding_id| !binding_id.trim().is_empty());
+        let execution = match self.resolve_worker(
+            &request.capability,
+            &request.interface_version,
+            binding_id,
+        ) {
             Ok(execution) => execution,
             Err(error) => {
                 let reason = stream_reason_for_error(error.code);
                 return Self::stream_for_terminal(
                     subscription_id,
                     request.capability,
+                    String::new(),
                     String::new(),
                     error,
                     reason,
@@ -497,7 +545,8 @@ impl CapabilityExecutionService {
                 return Self::stream_for_terminal(
                     subscription_id,
                     request.capability,
-                    execution.source_id,
+                    execution.source_id.clone(),
+                    execution.binding_id.clone().unwrap_or_default(),
                     ApiError::new(capability_execution_error::Code::InvalidRequest, message),
                     stream_reason::UNSPECIFIED,
                 );
@@ -507,7 +556,8 @@ impl CapabilityExecutionService {
             return Self::stream_for_terminal(
                 subscription_id,
                 request.capability,
-                execution.source_id,
+                execution.source_id.clone(),
+                execution.binding_id.clone().unwrap_or_default(),
                 ApiError::new(
                     capability_execution_error::Code::Timeout,
                     "gRPC deadline has expired",
@@ -524,7 +574,8 @@ impl CapabilityExecutionService {
                 return Self::stream_for_terminal(
                     subscription_id,
                     request.capability,
-                    execution.source_id,
+                    execution.source_id.clone(),
+                    execution.binding_id.clone().unwrap_or_default(),
                     ApiError::new(
                         capability_execution_error::Code::Backpressure,
                         "failed to reserve the bounded stream terminal slot",
@@ -586,7 +637,8 @@ impl CapabilityExecutionService {
                         public_subscription_id,
                         capability,
                         0,
-                        execution.source_id,
+                        execution.source_id.clone(),
+                        execution.binding_id.clone().unwrap_or_default(),
                         reason,
                         api_error.message.clone(),
                         Some(api_error.into_wire()),
@@ -609,7 +661,8 @@ impl CapabilityExecutionService {
                     public_subscription_id,
                     capability,
                     1,
-                    execution.source_id,
+                    execution.source_id.clone(),
+                    execution.binding_id.clone().unwrap_or_default(),
                     if stopping {
                         stream_reason::NORMAL_COMPLETION
                     } else {
@@ -655,7 +708,8 @@ impl CapabilityExecutionService {
                         public_subscription_id,
                         capability,
                         if service_shutdown { 1 } else { 0 },
-                        execution.source_id,
+                        execution.source_id.clone(),
+                        execution.binding_id.clone().unwrap_or_default(),
                         if service_shutdown {
                             stream_reason::NORMAL_COMPLETION
                         } else {
@@ -696,7 +750,8 @@ impl CapabilityExecutionService {
                             public_subscription_id,
                             capability,
                             last_generation,
-                            execution.source_id,
+                            execution.source_id.clone(),
+                            execution.binding_id.clone().unwrap_or_default(),
                             stream_reason::NORMAL_COMPLETION,
                             "capability execution service shutting down",
                             None,
@@ -712,7 +767,8 @@ impl CapabilityExecutionService {
                             public_subscription_id,
                             capability,
                             last_generation,
-                            execution.source_id,
+                            execution.source_id.clone(),
+                            execution.binding_id.clone().unwrap_or_default(),
                             stream_reason::CANCELLED,
                             "subscription cancelled by the gRPC caller",
                             Some(
@@ -731,7 +787,11 @@ impl CapabilityExecutionService {
             match subscription.next(self.config.event_poll_interval) {
                 Ok(event) => {
                     last_generation = event.generation;
-                    let item = event_item(&public_subscription_id, event);
+                    let item = event_item(
+                        &public_subscription_id,
+                        execution.binding_id.as_deref(),
+                        event,
+                    );
                     match sender.try_send(Ok(item)) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
@@ -744,7 +804,8 @@ impl CapabilityExecutionService {
                                     public_subscription_id,
                                     capability,
                                     last_generation,
-                                    execution.source_id,
+                                    execution.source_id.clone(),
+                                    execution.binding_id.clone().unwrap_or_default(),
                                     stream_reason::BACKPRESSURE,
                                     "bounded capability-event stream buffer is full",
                                     Some(
@@ -790,7 +851,8 @@ impl CapabilityExecutionService {
                             public_subscription_id,
                             capability,
                             generation,
-                            execution.source_id,
+                            execution.source_id.clone(),
+                            execution.binding_id.clone().unwrap_or_default(),
                             reason,
                             message,
                             error,
@@ -885,15 +947,21 @@ impl ApiError {
 
     fn from_resolution(error: CapabilityResolutionError) -> Self {
         let code = match error {
-            CapabilityResolutionError::NoProvider { .. } => {
+            CapabilityResolutionError::NoProvider { .. }
+            | CapabilityResolutionError::UnknownBinding { .. }
+            | CapabilityResolutionError::BindingProviderUnavailable { .. } => {
                 capability_execution_error::Code::CapabilityUnavailable
             }
             CapabilityResolutionError::InterfaceMismatch { .. }
-            | CapabilityResolutionError::ExecutionModeMismatch { .. } => {
+            | CapabilityResolutionError::ExecutionModeMismatch { .. }
+            | CapabilityResolutionError::BindingCapabilityMismatch { .. }
+            | CapabilityResolutionError::AmbiguousBinding { .. } => {
                 capability_execution_error::Code::InvalidRequest
             }
             CapabilityResolutionError::InvalidManifest { .. }
-            | CapabilityResolutionError::DuplicateManifest { .. } => {
+            | CapabilityResolutionError::InvalidBinding { .. }
+            | CapabilityResolutionError::DuplicateManifest { .. }
+            | CapabilityResolutionError::DuplicateBinding { .. } => {
                 capability_execution_error::Code::ActivationFailed
             }
         };
@@ -946,6 +1014,7 @@ fn event_any(value: Vec<u8>) -> Any {
 
 fn event_item(
     public_subscription_id: &str,
+    binding_id: Option<&str>,
     event: WorkerApplicationEvent,
 ) -> CapabilityEventStreamItem {
     CapabilityEventStreamItem {
@@ -958,6 +1027,7 @@ fn event_item(
                 payload: Some(event_any(event.payload)),
                 generation: event.generation,
                 source_id: event.source_id,
+                binding_id: binding_id.unwrap_or_default().to_string(),
             },
         )),
     }
@@ -968,6 +1038,7 @@ fn stream_end_item(
     capability: String,
     generation: u64,
     source_id: String,
+    binding_id: String,
     reason: i32,
     message: impl Into<String>,
     error: Option<CapabilityExecutionError>,
@@ -979,6 +1050,7 @@ fn stream_end_item(
                 capability,
                 generation,
                 source_id,
+                binding_id,
                 reason,
                 message: message.into(),
                 error,
@@ -1087,6 +1159,7 @@ mod tests {
             "capability".into(),
             4,
             "source".into(),
+            "binding".into(),
             stream_reason::GENERATION_TERMINATED,
             "generation changed",
             None,
@@ -1095,6 +1168,38 @@ mod tests {
             item.item,
             Some(capability_event_stream_item::Item::StreamEnd(_))
         ));
+    }
+
+    #[test]
+    fn configured_binding_identity_is_independent_from_runtime_generation() {
+        let event = |generation| {
+            event_item(
+                "subscription",
+                Some("configured-main"),
+                WorkerApplicationEvent {
+                    subscription_id: "worker-subscription".to_string(),
+                    capability: "capability.v1".to_string(),
+                    event_sequence: 1,
+                    event_type: "event".to_string(),
+                    payload: Vec::new(),
+                    generation,
+                    source_id: "provider".to_string(),
+                },
+            )
+        };
+
+        let first = event(1);
+        let second = event(2);
+        let Some(capability_event_stream_item::Item::ApplicationEvent(first)) = first.item else {
+            panic!("expected application event");
+        };
+        let Some(capability_event_stream_item::Item::ApplicationEvent(second)) = second.item else {
+            panic!("expected application event");
+        };
+        assert_eq!(first.binding_id, "configured-main");
+        assert_eq!(second.binding_id, "configured-main");
+        assert_eq!(first.generation, 1);
+        assert_eq!(second.generation, 2);
     }
 
     #[test]

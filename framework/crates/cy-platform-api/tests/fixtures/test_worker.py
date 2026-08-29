@@ -2,6 +2,7 @@
 """Deterministic generic capability worker for Platform TCK."""
 
 import json
+import os
 import sys
 import threading
 import time
@@ -21,6 +22,12 @@ except ImportError:
 class GenericTckWorker(CyreneWorker):
     def __init__(self):
         self.cancelled_requests = set()
+        self.instance_id = os.environ.get("CYRENE_TEST_INSTANCE_ID", "")
+
+    def scoped_payload(self, value: bytes) -> bytes:
+        if not self.instance_id:
+            return value
+        return self.instance_id.encode("utf-8") + b":" + value
 
     def plugin_id(self) -> str:
         return "com.cyrene.tck.generic-worker"
@@ -48,21 +55,25 @@ class GenericTckWorker(CyreneWorker):
 
         def emit_events():
             if mode == "single":
-                emitter.emit("synthetic", b"one")
+                emitter.emit("synthetic", self.scoped_payload(b"one"))
                 emitter.complete("single event complete")
             elif mode == "ordered":
                 for value in range(1, 4):
-                    if not emitter.emit("synthetic", str(value).encode("ascii")):
+                    if not emitter.emit(
+                        "synthetic", self.scoped_payload(str(value).encode("ascii"))
+                    ):
                         return
                 emitter.complete("ordered events complete")
             elif mode == "burst":
                 for value in range(1, 128):
-                    if not emitter.emit("synthetic", str(value).encode("ascii")):
+                    if not emitter.emit(
+                        "synthetic", self.scoped_payload(str(value).encode("ascii"))
+                    ):
                         return
                 emitter.complete("burst complete")
             elif mode == "slow":
                 time.sleep(0.15)
-                if emitter.emit("synthetic", b"slow"):
+                if emitter.emit("synthetic", self.scoped_payload(b"slow")):
                     emitter.complete("slow event complete")
             elif mode == "generation":
                 emitter.terminate(5, "synthetic generation changed")
@@ -93,7 +104,10 @@ class GenericTckWorker(CyreneWorker):
             return False, b"INVALID_INPUT: malformed json payload"
 
         if action == "echo":
-            return True, json.dumps({"echo": req.get("message", "")}).encode("utf-8")
+            response = {"echo": req.get("message", "")}
+            if self.instance_id:
+                response["instance_id"] = self.instance_id
+            return True, json.dumps(response).encode("utf-8")
 
         elif action == "compute":
             val = req.get("value")
