@@ -1,0 +1,9 @@
+# name|action|current_generation|provided_generation|expected
+register_provider_ok|REGISTER_PROVIDER|0|1|ACCEPT
+register_provider_zero_gen|REGISTER_PROVIDER|0|0|GENERATION_INVALID
+register_provider_invalid_gen|REGISTER_PROVIDER|1|0|GENERATION_INVALID
+publish_inventory_ok|PUBLISH_INVENTORY|3|4|ACCEPT
+publish_inventory_stale|PUBLISH_INVENTORY|5|5|STALE_GENERATION
+publish_inventory_lower|PUBLISH_INVENTORY|5|3|STALE_GENERATION
+reconcile_provider_ok|RECONCILE_PROVIDER|2|3|ACCEPT
+reconcile_provider_stale|RECONCILE_PROVIDER|4|2|STALE_GENERATION

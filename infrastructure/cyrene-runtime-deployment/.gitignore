@@ -1,0 +1,60 @@
+# Local editors and assistants
+.idea/
+.vscode/
+.claude/
+.workbuddy/
+.agents/
+
+# Secrets and local configuration
+.env
+.env.*
+!**/.env.example
+credentials/
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Rust, JVM, frontend, and mobile output
+target/
+**/target/
+.gradle/
+**/.gradle/
+**/build/
+node_modules/
+dist/
+out/
+.pnpm-store/
+coverage/
+*.tsbuildinfo
+*.class
+*.jar
+!**/gradle-wrapper.jar
+
+# Runtime output and model artifacts
+logs/
+runs/
+output/
+checkpoints/
+models/
+*.log
+*.tmp
+*.temp
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.onnx
+*.engine
+
+# OS files
+.DS_Store
+Thumbs.db

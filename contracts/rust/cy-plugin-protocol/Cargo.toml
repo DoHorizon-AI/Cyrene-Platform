@@ -5,10 +5,8 @@ edition = "2021"
 
 [dependencies]
 prost = "0.12"
-tokio = { version = "1.0", features = ["full"] }
 bytes = "1.0"
 thiserror = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 
 [build-dependencies]
 prost-build = "0.12"

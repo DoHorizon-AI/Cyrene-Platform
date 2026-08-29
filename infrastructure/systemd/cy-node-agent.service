@@ -1,0 +1,31 @@
+[Unit]
+Description=CYRENE outbound Node Agent
+After=network-online.target cyrene-kernel.service
+Wants=network-online.target
+Requires=cyrene-kernel.service
+# A Kernel restart changes its node epoch. Restart the external bridge so it
+# must rediscover the current local NodeRef before reconnecting remotely.
+PartOf=cyrene-kernel.service
+
+[Service]
+Type=simple
+User=cyrene-agent
+Group=cyrene
+EnvironmentFile=/etc/cyrene/node-agent.env
+ExecStart=/usr/bin/cy-node-agent --kernel-socket /run/cyrene/kernel.sock
+Restart=always
+RestartSec=2s
+UMask=0077
+
+# This service is allowed to connect to the local Kernel socket and make
+# outbound mTLS calls. It never owns cgroups, device nodes, or Worker trees.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/cyrene/agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package google.rpc;
+
+import "google/protobuf/any.proto";
+
+// Source: googleapis/googleapis/google/rpc/status.proto.
+// Kept locally so descriptor and code generation do not depend on a developer
+// machine's installed Proto include tree.
+message Status {
+  int32 code = 1;
+  string message = 2;
+  repeated google.protobuf.Any details = 3;
+}

@@ -1,0 +1,7 @@
+# name|state|fence_matches|current_expiry|new_expiry|now|expected
+extends_active_lease|ACTIVE|true|2000|3000|1000|ACCEPT
+same_expiry|ACTIVE|true|2000|2000|1000|LEASE_RENEWAL_INVALID
+shorter_expiry|ACTIVE|true|2000|1500|1000|LEASE_RENEWAL_INVALID
+expired_lease|ACTIVE|true|2000|3000|2000|LEASE_EXPIRED
+wrong_fence|ACTIVE|false|2000|3000|1000|FENCE_MISMATCH
+releasing_lease|RELEASING|true|2000|3000|1000|LEASE_NOT_ACTIVE

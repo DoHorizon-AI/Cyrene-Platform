@@ -1,0 +1,110 @@
+# Official Public Cyrene Workspace Repository Catalog
+schema_version: "cyrene.workspace-catalog.v1"
+
+profiles:
+  core:
+    description: "Foundational contracts, Rust Kernel, Control Plane, SDKs, and local tooling"
+    repositories: ["platform"]
+  training:
+    description: "Complete model training stack: Platform + Yield + Training Plugins"
+    repositories: ["platform", "plugins", "yield"]
+  serving:
+    description: "Complete model inference stack: Platform + Reactor + Serving Plugins"
+    repositories: ["platform", "plugins", "reactor"]
+  gateway:
+    description: "API gateway, proxy, and routing stack: Platform + Exchange + Gateway Plugins"
+    repositories: ["platform", "plugins", "exchange"]
+  full:
+    description: "Complete public developer matrix of all official repositories"
+    repositories: ["platform", "plugins", "yield", "reactor", "exchange", "astrbot", "catalyst", "echo", "navigator"]
+
+repositories:
+  platform:
+    logical_name: "Cyrene-Platform"
+    canonical_path: "Cyrene-Platform"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: []
+    profiles: ["core", "training", "serving", "gateway", "full"]
+
+  plugins:
+    logical_name: "Cyrene-Plugins"
+    canonical_path: "plugins"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform"]
+    profiles: ["training", "serving", "gateway", "full"]
+
+  yield:
+    logical_name: "Cyrene-Yield"
+    canonical_path: "services/Cyrene-Yield"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform", "plugins"]
+    profiles: ["training", "full"]
+
+  reactor:
+    logical_name: "Cyrene-Reactor"
+    canonical_path: "services/cyrene-reactor"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform", "plugins"]
+    profiles: ["serving", "full"]
+
+  exchange:
+    logical_name: "Cyrene-Exchange"
+    canonical_path: "services/cyrene-exchange"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform", "plugins"]
+    profiles: ["gateway", "full"]
+
+  astrbot:
+    logical_name: "cyrene-astrbot-rev"
+    canonical_path: "services/cyrene-astrbot-rev"
+    remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform"]
+    profiles: ["full"]
+
+  catalyst:
+    logical_name: "cyrene-catalyst"
+    canonical_path: "services/cyrene-catalyst"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform"]
+    profiles: ["full"]
+
+  echo:
+    logical_name: "cyrene-echo"
+    canonical_path: "services/cyrene-echo"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform"]
+    profiles: ["full"]
+
+  navigator:
+    logical_name: "cyrene-navigator"
+    canonical_path: "services/cyrene-navigator"
+    remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
+    source_host: "github.com"
+    visibility: "public"
+    default_branch: "develop"
+    dependencies: ["platform"]
+    profiles: ["full"]

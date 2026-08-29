@@ -1,0 +1,14 @@
+# name|value
+max_id_bytes|256
+max_namespaced_id_bytes|128
+max_capabilities|64
+max_properties|64
+max_resources_per_snapshot|1024
+max_resources_per_lease|256
+max_workers_per_snapshot|4096
+max_endpoints_per_snapshot|4096
+max_execution_ref_bytes|512
+max_error_message_bytes|1024
+max_event_body_bytes|65536
+max_events_per_page|256
+max_timestamp_unix_ms|253402300799999

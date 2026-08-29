@@ -1,0 +1,790 @@
+{
+  "project_name": "CY-LLM Engine Refactoring",
+  "version": "1.5.2.0 → 2.0.0",
+  "mode": "REFACTOR",
+  "created_at": "2026-02-10",
+  "status": "approved",
+  
+  "milestones": [
+    {
+      "id": "M0",
+      "name": "Baseline & Prep",
+      "description": "重构前必须完成的基线建立",
+      "success_criteria": [
+        "现有构建命令100%可执行",
+        "至少1个E2E测试通过",
+        "代码覆盖率达到基线值"
+      ],
+      "tasks": ["T-000", "T-001", "T-002"]
+    },
+    {
+      "id": "M1", 
+      "name": "Directory Consolidation",
+      "description": "消除src/cy_llm/和CY_LLM_Backend/重复",
+      "success_criteria": [
+        "目录重复率降至0%",
+        "所有import路径统一",
+        "单元测试通过率100%"
+      ],
+      "tasks": ["T-020", "T-021", "T-022", "T-023", "T-024", "T-025"]
+    },
+    {
+      "id": "M2",
+      "name": "Dependency System",
+      "description": "实现智能依赖管理",
+      "success_criteria": [
+        "Registry JSON Schema有效",
+        "硬件检测准确率>95%",
+        "cy-llm setup命令可用"
+      ],
+      "tasks": ["T-030", "T-031", "T-032", "T-033", "T-034", "T-035", "T-036", "T-037"]
+    },
+    {
+      "id": "M3",
+      "name": "Engine Refactoring", 
+      "description": "引擎继承BaseEngine，消除重复代码",
+      "success_criteria": [
+        "所有引擎通过ABC验证",
+        "引擎工厂统一调度",
+        "性能无退化(TTFT差异<5%)"
+      ],
+      "tasks": ["T-040", "T-041", "T-042", "T-043", "T-044", "T-045", "T-046"]
+    },
+    {
+      "id": "M4",
+      "name": "Testing & Regression",
+      "description": "完整测试覆盖",
+      "success_criteria": [
+        "测试覆盖率>70%",
+        "集成测试通过率100%",
+        "E2E测试通过"
+      ],
+      "tasks": ["T-010", "T-011", "T-012", "T-013"]
+    }
+  ],
+
+  "tasks": [
+    {
+      "id": "T-000",
+      "title": "建立代码基线",
+      "milestone": "M0",
+      "priority": "P0-Critical",
+      "depends_on": [],
+      "blocks": ["T-001", "T-002"],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "捕获重构前的完整代码状态，建立可比较的基线",
+      "deliverables": [
+        "docs/refactor/cy-llm-engine/baseline/tree_snapshot.txt",
+        "docs/refactor/cy-llm-engine/baseline/requirements_conflict_report.md",
+        "docs/refactor/cy-llm-engine/baseline/test_baseline_report.md"
+      ],
+      "acceptance": [
+        "目录树导出完整",
+        "识别所有requirements.txt冲突",
+        "记录当前可通过的测试列表"
+      ],
+      "links": ["FR-G2"],
+      "risk": "低",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-001",
+      "title": "构建命令文档化",
+      "milestone": "M0",
+      "priority": "P0-Critical",
+      "depends_on": ["T-000"],
+      "blocks": ["T-002"],
+      "owner_type": "Python/Shell",
+      "estimated_hours": 2,
+      "goal": "记录并验证当前所有构建/运行命令",
+      "deliverables": [
+        "docs/refactor/cy-llm-engine/baseline/build_commands.md"
+      ],
+      "acceptance": [
+        "记录Worker启动方式",
+        "记录Docker构建命令",
+        "记录测试执行命令"
+      ],
+      "links": ["FR-G2"],
+      "risk": "低",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-002",
+      "title": "基线行为验证",
+      "milestone": "M0",
+      "priority": "P0-Critical",
+      "depends_on": ["T-000", "T-001"],
+      "blocks": ["T-010", "T-011", "T-012", "T-013"],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "确保至少一个端到端测试可以通过",
+      "deliverables": [
+        "docs/refactor/cy-llm-engine/baseline/e2e_baseline.json"
+      ],
+      "acceptance": [
+        "记录模型加载时间",
+        "记录首Token延迟(TTFT)",
+        "记录显存使用峰值"
+      ],
+      "links": ["FR-G5"],
+      "risk": "中",
+      "risk_note": "需要GPU环境，否则使用CPU/mock",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-010",
+      "title": "单元测试增强",
+      "milestone": "M4",
+      "priority": "P1-High",
+      "depends_on": ["T-002"],
+      "blocks": ["T-020"],
+      "owner_type": "Python",
+      "estimated_hours": 16,
+      "goal": "提高核心模块单元测试覆盖率到70%+",
+      "deliverables": [
+        "src/cy_llm/worker/tests/test_abstract_engine.py (增强)",
+        "src/cy_llm/worker/tests/test_engine_factory.py (增强)",
+        "src/cy_llm/worker/tests/test_config_loader.py (增强)"
+      ],
+      "acceptance": [
+        "pytest覆盖率 >= 70%",
+        "所有单元测试通过"
+      ],
+      "links": ["FR-G5", "NFR-覆盖率"],
+      "risk": "低",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-011",
+      "title": "集成测试套件",
+      "milestone": "M4",
+      "priority": "P1-High",
+      "depends_on": ["T-002"],
+      "blocks": [],
+      "owner_type": "Python",
+      "estimated_hours": 12,
+      "goal": "创建Gateway-Coordinator-Worker链的集成测试",
+      "deliverables": [
+        "tests/integration/test_gateway_coordinator_worker.py",
+        "tests/integration/test_grpc_api.py"
+      ],
+      "acceptance": [
+        "不依赖外部服务可运行",
+        "使用Mock引擎验证链路"
+      ],
+      "links": ["FR-G5", "NFR-接口兼容"],
+      "risk": "中",
+      "frozen_interface": true,
+      "frozen_note": "gRPC/HTTP API必须兼容"
+    },
+    {
+      "id": "T-012",
+      "title": "E2E测试框架",
+      "milestone": "M4",
+      "priority": "P1-High",
+      "depends_on": ["T-002"],
+      "blocks": [],
+      "owner_type": "Python/Shell",
+      "estimated_hours": 12,
+      "goal": "创建可重复执行的E2E测试脚本",
+      "deliverables": [
+        "tests/e2e/test_e2e_inference.py",
+        "scripts/run_e2e_test.sh"
+      ],
+      "acceptance": [
+        "E2E测试脚本可独立运行",
+        "使用tiny模型可在<5分钟完成"
+      ],
+      "links": ["FR-G5", "NFR-可用性"],
+      "risk": "中",
+      "risk_note": "需要完整服务栈",
+      "frozen_interface": true,
+      "frozen_note": "OpenAI API兼容"
+    },
+    {
+      "id": "T-013",
+      "title": "API兼容性测试",
+      "milestone": "M4",
+      "priority": "P1-High",
+      "depends_on": ["T-002"],
+      "blocks": [],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "验证重构前后API响应一致",
+      "deliverables": [
+        "tests/api/test_api_compatibility.py",
+        "tests/api/api_contract.json"
+      ],
+      "acceptance": [
+        "API契约文档化",
+        "响应字段100%匹配"
+      ],
+      "links": ["FR-NG2"],
+      "risk": "高",
+      "risk_note": "触及冻结接口，必须保证兼容",
+      "frozen_interface": true
+    },
+    {
+      "id": "T-020",
+      "title": "目录重复分析",
+      "milestone": "M1",
+      "priority": "P0-Critical",
+      "depends_on": ["T-010"],
+      "blocks": ["T-021"],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "分析src/cy_llm/和CY_LLM_Backend/的重复情况",
+      "deliverables": [
+        "docs/refactor/cy-llm-engine/phase1/diff_analysis.md",
+        "docs/refactor/cy-llm-engine/phase1/file_mapping.csv"
+      ],
+      "acceptance": [
+        "列出所有重复文件",
+        "标记建议保留版本及理由"
+      ],
+      "links": ["FR-G2"],
+      "risk": "中",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-021",
+      "title": "迁移计划制定",
+      "milestone": "M1",
+      "priority": "P0-Critical",
+      "depends_on": ["T-020"],
+      "blocks": ["T-022"],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "制定详细的文件迁移计划",
+      "deliverables": [
+        "docs/refactor/cy-llm-engine/phase1/migration_plan.md",
+        "docs/refactor/cy-llm-engine/phase1/target_structure.md"
+      ],
+      "acceptance": [
+        "目录结构获批准",
+        "迁移顺序合理"
+      ],
+      "links": ["FR-G2"],
+      "risk": "中",
+      "rollback": "git revert",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-022",
+      "title": "合并核心模块",
+      "milestone": "M1",
+      "priority": "P1-High",
+      "depends_on": ["T-021"],
+      "blocks": ["T-023"],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "合并worker/core/目录文件",
+      "deliverables": [
+        "src/cy_llm/worker/core/memory_manager.py (合并)",
+        "src/cy_llm/worker/core/task_scheduler.py (合并)",
+        "src/cy_llm/worker/core/telemetry.py (合并)"
+      ],
+      "acceptance": [
+        "from worker.core.memory_manager import GPUMemoryManager 工作正常",
+        "所有core测试通过"
+      ],
+      "links": ["FR-G2"],
+      "risk": "高",
+      "risk_note": "核心逻辑",
+      "rollback": "git分支保留原代码",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-023",
+      "title": "合并引擎模块",
+      "milestone": "M1",
+      "priority": "P1-High",
+      "depends_on": ["T-022"],
+      "blocks": ["T-024"],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "合并worker/engines/目录文件",
+      "deliverables": [
+        "src/cy_llm/worker/engines/abstract_engine.py (统一)",
+        "src/cy_llm/worker/engines/engine_factory.py (统一)"
+      ],
+      "acceptance": [
+        "list_available_engines() 返回完整列表",
+        "无ImportError"
+      ],
+      "links": ["FR-G2", "FR-G3"],
+      "risk": "高",
+      "rollback": "git revert",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-024",
+      "title": "合并配置和工具",
+      "milestone": "M1",
+      "priority": "P1-High",
+      "depends_on": ["T-023"],
+      "blocks": ["T-025"],
+      "owner_type": "Python",
+      "estimated_hours": 6,
+      "goal": "统一配置管理和工具函数",
+      "deliverables": [
+        "src/cy_llm/worker/config/ (统一)",
+        "src/cy_llm/worker/utils/ (统一)"
+      ],
+      "acceptance": [
+        "load_worker_config() 工作正常",
+        "无重复工具函数"
+      ],
+      "links": ["FR-G2"],
+      "risk": "中",
+      "rollback": "git revert",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-025",
+      "title": "清理废弃目录",
+      "milestone": "M1",
+      "priority": "P1-High",
+      "depends_on": ["T-024"],
+      "blocks": ["T-030", "T-040"],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "删除合并后的CY_LLM_Backend目录",
+      "deliverables": [
+        "删除确认清单"
+      ],
+      "acceptance": [
+        "无CY_LLM_Backend残留",
+        "grep -r 'CY_LLM_Backend' src/ 无结果"
+      ],
+      "links": ["FR-G2"],
+      "risk": "高",
+      "risk_note": "破坏性操作",
+      "rollback": "git历史保留可恢复",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-030",
+      "title": "Dependency Registry Schema设计",
+      "milestone": "M2",
+      "priority": "P0-Critical",
+      "depends_on": ["T-025"],
+      "blocks": ["T-031", "T-032"],
+      "owner_type": "Python/JSON",
+      "estimated_hours": 8,
+      "goal": "设计并验证dependency_registry.json的JSON Schema",
+      "deliverables": [
+        "deploy/dependency_registry.json (模板)",
+        "src/cy_llm/deps/schemas/registry_schema.json"
+      ],
+      "acceptance": [
+        "Schema可以通过JSON Schema验证",
+        "示例数据可以通过验证"
+      ],
+      "links": ["FR-G1", "FR-G4", "API-DEPS-1"],
+      "risk": "中",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-031",
+      "title": "硬件检测模块",
+      "milestone": "M2",
+      "priority": "P0-Critical",
+      "depends_on": ["T-030"],
+      "blocks": ["T-034"],
+      "owner_type": "Python",
+      "estimated_hours": 12,
+      "goal": "实现自动硬件检测",
+      "deliverables": [
+        "src/cy_llm/deps/hardware_detector.py",
+        "tests/deps/test_hardware_detector.py"
+      ],
+      "acceptance": [
+        "detect_hardware() 返回HardwareProfile",
+        "准确率>95%",
+        "支持mock模式测试"
+      ],
+      "links": ["FR-G1", "FR-G3"],
+      "risk": "中",
+      "risk_note": "需要多硬件环境",
+      "rollback": "保留原检测逻辑",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-032",
+      "title": "依赖解析模块",
+      "milestone": "M2",
+      "priority": "P0-Critical",
+      "depends_on": ["T-030"],
+      "blocks": ["T-034"],
+      "owner_type": "Python",
+      "estimated_hours": 16,
+      "goal": "实现依赖兼容性解析",
+      "deliverables": [
+        "src/cy_llm/deps/resolver.py",
+        "tests/deps/test_resolver.py"
+      ],
+      "acceptance": [
+        "resolve_dependencies(profile, engine_type) 工作正常",
+        "支持vllm-0.12.0的protobuf==6.33.4",
+        "支持基础环境的protobuf<6.0.0"
+      ],
+      "links": ["FR-G1", "FR-G4"],
+      "risk": "高",
+      "risk_note": "解决依赖地狱，核心功能",
+      "rollback": "保留原requirements",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-033",
+      "title": "CLI框架搭建",
+      "milestone": "M2",
+      "priority": "P1-High",
+      "depends_on": ["T-025"],
+      "blocks": ["T-034", "T-035"],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "创建cy-llm CLI框架",
+      "deliverables": [
+        "src/cy_llm/cli/__init__.py",
+        "src/cy_llm/cli/main.py"
+      ],
+      "acceptance": [
+        "CLI入口可用",
+        "帮助信息完整"
+      ],
+      "links": ["FR-G1"],
+      "risk": "低",
+      "rollback": "删除cli目录",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-034",
+      "title": "Setup命令实现",
+      "milestone": "M2",
+      "priority": "P0-Critical",
+      "depends_on": ["T-031", "T-032", "T-033"],
+      "blocks": ["T-036"],
+      "owner_type": "Python",
+      "estimated_hours": 12,
+      "goal": "实现cy-llm setup命令",
+      "deliverables": [
+        "src/cy_llm/cli/commands/setup.py",
+        "tests/cli/test_setup.py"
+      ],
+      "acceptance": [
+        "命令可用且稳定",
+        "生成的requirements.lock可安装"
+      ],
+      "links": ["FR-G1", "FR-G3", "API-CLI-1"],
+      "risk": "中",
+      "rollback": "保留pip list输出",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-035",
+      "title": "Verify命令实现",
+      "milestone": "M2",
+      "priority": "P1-High",
+      "depends_on": ["T-033"],
+      "blocks": ["T-037"],
+      "owner_type": "Python",
+      "estimated_hours": 6,
+      "goal": "实现cy-llm verify环境验证命令",
+      "deliverables": [
+        "src/cy_llm/cli/commands/verify.py",
+        "tests/cli/test_verify.py"
+      ],
+      "acceptance": [
+        "可以检测所有引擎可用性",
+        "输出JSON格式支持--json"
+      ],
+      "links": ["FR-G1"],
+      "risk": "低",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-036",
+      "title": "虚拟环境生成",
+      "milestone": "M2",
+      "priority": "P2-Medium",
+      "depends_on": ["T-034"],
+      "blocks": [],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "支持生成隔离的虚拟环境",
+      "deliverables": [
+        "src/cy_llm/deps/env_manager.py",
+        "tests/deps/test_env_manager.py"
+      ],
+      "acceptance": [
+        "环境创建成功",
+        "pip list显示正确依赖"
+      ],
+      "links": ["FR-G1", "FR-G3"],
+      "risk": "中",
+      "rollback": "删除venv目录",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-037",
+      "title": "镜像源支持",
+      "milestone": "M2",
+      "priority": "P1-High",
+      "depends_on": ["T-035"],
+      "blocks": [],
+      "owner_type": "Python",
+      "estimated_hours": 6,
+      "goal": "支持国内镜像源和离线安装",
+      "deliverables": [
+        "src/cy_llm/deps/mirror_config.py",
+        "镜像配置文件"
+      ],
+      "acceptance": [
+        "国内环境安装成功率>95%",
+        "离线安装模式可用"
+      ],
+      "links": ["FR-G4"],
+      "risk": "中",
+      "risk_note": "网络依赖",
+      "rollback": "使用官方源",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-040",
+      "title": "BaseEngine抽象类重构",
+      "milestone": "M3",
+      "priority": "P0-Critical",
+      "depends_on": ["T-025"],
+      "blocks": ["T-041", "T-042", "T-043"],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "设计并完善BaseEngine ABC",
+      "deliverables": [
+        "src/cy_llm/worker/engines/base_engine.py",
+        "tests/engines/test_base_engine.py"
+      ],
+      "acceptance": [
+        "issubclass(VllmCudaEngine, BaseEngine) 为True",
+        "所有引擎可以实例化"
+      ],
+      "links": ["FR-G3", "API-ENGINE-1"],
+      "risk": "高",
+      "risk_note": "核心接口",
+      "rollback": "保留原abstract_engine",
+      "frozen_interface": true,
+      "frozen_note": "BaseEngine接口定义"
+    },
+    {
+      "id": "T-041",
+      "title": "vLLM引擎适配",
+      "milestone": "M3",
+      "priority": "P0-Critical",
+      "depends_on": ["T-040"],
+      "blocks": ["T-044"],
+      "owner_type": "Python",
+      "estimated_hours": 12,
+      "goal": "重构vLLM引擎继承BaseEngine",
+      "deliverables": [
+        "src/cy_llm/worker/engines/vllm_cuda_engine.py (重构)",
+        "src/cy_llm/worker/engines/vllm_async_engine.py (重构)",
+        "src/cy_llm/worker/engines/vllm_ascend_engine.py (重构)"
+      ],
+      "acceptance": [
+        "继承BaseEngine",
+        "通过引擎工厂创建",
+        "性能无退化"
+      ],
+      "links": ["FR-G3"],
+      "risk": "高",
+      "risk_note": "核心引擎",
+      "rollback": "保留原实现分支",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-042",
+      "title": "TensorRT引擎适配",
+      "milestone": "M3",
+      "priority": "P1-High",
+      "depends_on": ["T-040"],
+      "blocks": ["T-044"],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "重构TensorRT引擎继承BaseEngine",
+      "deliverables": [
+        "src/cy_llm/worker/engines/trt_engine.py (重构)"
+      ],
+      "acceptance": [
+        "继承BaseEngine",
+        "通过引擎工厂创建"
+      ],
+      "links": ["FR-G3"],
+      "risk": "中",
+      "risk_note": "需要TRT环境",
+      "rollback": "保留原实现",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-043",
+      "title": "MindIE引擎适配",
+      "milestone": "M3",
+      "priority": "P1-High",
+      "depends_on": ["T-040"],
+      "blocks": ["T-044"],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "重构MindIE引擎继承BaseEngine",
+      "deliverables": [
+        "src/cy_llm/worker/engines/mindie_engine.py (重构)",
+        "src/cy_llm/worker/engines/ascend_engine.py (重构)"
+      ],
+      "acceptance": [
+        "继承BaseEngine",
+        "通过引擎工厂创建"
+      ],
+      "links": ["FR-G3"],
+      "risk": "高",
+      "risk_note": "无本地测试环境，需要华为Ascend环境CI测试",
+      "rollback": "保留原实现",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-044",
+      "title": "引擎工厂重构",
+      "milestone": "M3",
+      "priority": "P0-Critical",
+      "depends_on": ["T-041", "T-042", "T-043"],
+      "blocks": ["T-045"],
+      "owner_type": "Python",
+      "estimated_hours": 8,
+      "goal": "统一EngineFactory接口",
+      "deliverables": [
+        "src/cy_llm/worker/engines/engine_factory.py (重构)"
+      ],
+      "acceptance": [
+        "EngineFactory.create('cuda-vllm') 返回BaseEngine",
+        "EngineFactory.auto_detect() 工作正常"
+      ],
+      "links": ["FR-G3", "API-ENGINE-2"],
+      "risk": "高",
+      "risk_note": "核心组件",
+      "rollback": "保留旧工厂别名",
+      "frozen_interface": true,
+      "frozen_note": "create接口"
+    },
+    {
+      "id": "T-045",
+      "title": "Memory Manager集成",
+      "milestone": "M3",
+      "priority": "P1-High",
+      "depends_on": ["T-044"],
+      "blocks": ["T-046"],
+      "owner_type": "Python",
+      "estimated_hours": 6,
+      "goal": "引擎与Memory Manager集成",
+      "deliverables": [
+        "src/cy_llm/worker/engines/base_engine.py (更新)",
+        "src/cy_llm/worker/core/memory_manager.py (更新)"
+      ],
+      "acceptance": [
+        "引擎生命周期与内存管理同步",
+        "OOM时正确触发GC"
+      ],
+      "links": ["FR-G3", "FR-G5"],
+      "risk": "中",
+      "rollback": "保留原集成逻辑",
+      "frozen_interface": false
+    },
+    {
+      "id": "T-046",
+      "title": "Telemetry集成",
+      "milestone": "M3",
+      "priority": "P2-Medium",
+      "depends_on": ["T-045"],
+      "blocks": [],
+      "owner_type": "Python",
+      "estimated_hours": 4,
+      "goal": "引擎与Telemetry系统集成",
+      "deliverables": [
+        "src/cy_llm/worker/engines/base_engine.py (telemetry hooks)",
+        "tests/engines/test_telemetry.py"
+      ],
+      "acceptance": [
+        "指标可以被Prometheus抓取",
+        "日志格式统一"
+      ],
+      "links": ["FR-G5"],
+      "risk": "低",
+      "rollback": "保留原telemetry",
+      "frozen_interface": false
+    }
+  ],
+
+  "risks": [
+    {
+      "id": "R-001",
+      "level": "P0-Critical",
+      "title": "protobuf版本冲突",
+      "description": "vLLM需要protobuf 6.x，base需要<6.0.0",
+      "impact": "vLLM无法运行或base功能异常",
+      "mitigation": "通过Registry按引擎隔离依赖，各引擎独立环境",
+      "owner": "T-032"
+    },
+    {
+      "id": "R-002", 
+      "level": "P0-Critical",
+      "title": "目录合并丢失代码",
+      "description": "src/cy_llm/和CY_LLM_Backend/可能有未版本控制的差异",
+      "impact": "功能回退或丢失",
+      "mitigation": "完整diff比对+基线测试+渐进式迁移",
+      "owner": "T-020, T-021"
+    },
+    {
+      "id": "R-003",
+      "level": "P1-High",
+      "title": "MindIE/Ascend无本地测试环境",
+      "description": "开发者环境只有NVIDIA GPU",
+      "impact": "Ascend/MindIE适配错误无法及时发现",
+      "mitigation": "CI环境+mock+华为云测试资源",
+      "owner": "T-043"
+    },
+    {
+      "id": "R-004",
+      "level": "P1-High",
+      "title": "依赖下载失败",
+      "description": "国内网络环境下PyPI/HuggingFace访问受限",
+      "impact": "新用户安装失败",
+      "mitigation": "清华/阿里镜像+预下载wheel+离线安装支持",
+      "owner": "T-037"
+    },
+    {
+      "id": "R-005",
+      "level": "P2-Medium",
+      "title": "重构期间主分支冲突",
+      "description": "长期重构分支与主分支并行开发",
+      "impact": "合并困难，代码冲突",
+      "mitigation": "特性分支+频繁rebase+小步快跑",
+      "owner": "All"
+    }
+  ],
+
+  "parallel_groups": [
+    {
+      "name": "Phase 2 依赖系统设计",
+      "tasks": ["T-030", "T-031", "T-032", "T-033"],
+      "note": "Schema/Detector/Resolver/CLI框架可并行设计"
+    },
+    {
+      "name": "Phase 3 引擎适配",
+      "tasks": ["T-041", "T-042", "T-043"],
+      "note": "各引擎适配相互独立，可并行"
+    },
+    {
+      "name": "测试套件",
+      "tasks": ["T-010", "T-011", "T-012", "T-013"],
+      "note": "各测试类型可并行开发"
+    }
+  ]
+}

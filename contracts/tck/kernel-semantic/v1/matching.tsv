@@ -1,0 +1,8 @@
+# name|provided_id|provided_revision|provided_properties|required_id|minimum_revision|required_properties|provided_capacity|minimum_capacity|expected
+exact_match|accelerator.compute|2|numeric=bf16|accelerator.compute|1|numeric=bf16|memory=80@gib|memory=40@gib|true
+revision_too_old|accelerator.compute|1|-|accelerator.compute|2|-|memory=80@gib|memory=40@gib|false
+capability_id_mismatch|vendor.example.fast|2|-|accelerator.compute|1|-|memory=80@gib|memory=40@gib|false
+property_mismatch|accelerator.compute|2|numeric=fp16|accelerator.compute|1|numeric=bf16|memory=80@gib|memory=40@gib|false
+missing_property|accelerator.compute|2|-|accelerator.compute|1|numeric=bf16|memory=80@gib|memory=40@gib|false
+capacity_too_small|accelerator.compute|2|-|accelerator.compute|1|-|memory=39@gib|memory=40@gib|false
+capacity_unit_mismatch|accelerator.compute|2|-|accelerator.compute|1|-|memory=80@gib|memory=40@gb|false

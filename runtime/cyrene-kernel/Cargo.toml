@@ -1,0 +1,30 @@
+[package]
+name = "cyrene-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Linux host composition for the CYRENE Kernel"
+license = "Apache-2.0"
+
+[[bin]]
+name = "cyrene-kernel"
+path = "src/main.rs"
+
+[dependencies]
+cy-adapter-client = { path = "../../kernel/crates/cy-adapter-client" }
+cy-installation-resolver = { path = "../../framework/crates/cy-installation-resolver" }
+cy-kernel-daemon = { path = "../../kernel/crates/cy-kernel-daemon" }
+cy-resource-manager = { path = "../../kernel/crates/cy-resource-manager" }
+cy-sandbox-client = { path = "../../kernel/crates/cy-sandbox-client" }
+cy-kernel-api = { path = "../../kernel/crates/cy-kernel-api" }
+cy-proto = { path = "../../contracts/rust/cy-proto" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.11"
+
+[dev-dependencies]
+tempfile = "3.8"
+prost = "0.12"
+cyrene-linux-sys-adapter = { path = "../../adapters/hardware/linux_sys" }
+cyrene-nvidia-adapter = { path = "../../adapters/hardware/nvidia" }

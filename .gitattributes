@@ -1,0 +1,11 @@
+# Normalize line endings to LF on checkout and in the repo.
+# Prevents CRLF noise from appearing as whole-file diffs across the project.
+* text=auto eol=lf
+
+# Rust / Cargo build artifacts are binary / generated; never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary

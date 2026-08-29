@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package cyrene.message.connector.v1;
+
+import "google/protobuf/duration.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.message.connector.v1";
+option java_outer_classname = "MessageConnectorProto";
+option csharp_namespace = "Cyrene.Message.Connector.V1";
+
+// EXPERIMENTAL capability-specific payload contract for message.connector.v1.
+//
+// Transport is cyrene.capability.v1.CapabilityExecutionService:
+//   capability ID: message.connector.v1
+//   interface version: 1
+//   outbound method: send_message
+//   inbound application-event type: inbound_message
+//
+// This file intentionally declares no gRPC service. It contains connector
+// facts and delivery data only; Product policy and worker mechanics remain
+// outside this contract.
+
+enum ConversationKind {
+  CONVERSATION_KIND_UNSPECIFIED = 0;
+  CONVERSATION_KIND_PRIVATE = 1;
+  CONVERSATION_KIND_GROUP = 2;
+  CONVERSATION_KIND_CHANNEL = 3;
+}
+
+message ConversationScope {
+  // Canonical vendor/protocol identifier, for example "onebot.v11".
+  string vendor = 1;
+  // Vendor account or bot identity that owns this conversation.
+  string account_id = 2;
+  // Vendor-resolvable user, group, or channel identity.
+  string conversation_id = 3;
+  ConversationKind kind = 4;
+}
+
+message InboundMessagePayload {
+  // Vendor message identity. It is not a Product persistence key.
+  string message_id = 1;
+  ConversationScope conversation = 2;
+  string sender_id = 3;
+  string sender_display_name = 4;
+  repeated MessageContentPart content = 5;
+
+  // The sole cross-vendor reply authority. Reply is not also represented as
+  // an ordered content part.
+  ReplyReference reply = 6;
+  VendorExtension vendor_extension = 7;
+}
+
+message MessageContentPart {
+  oneof kind {
+    TextContent text = 1;
+    MentionContent mention = 2;
+    ImageContent image = 3;
+    FileContent file = 4;
+  }
+}
+
+message TextContent {
+  string text = 1;
+}
+
+enum MentionTarget {
+  MENTION_TARGET_UNSPECIFIED = 0;
+  MENTION_TARGET_USER = 1;
+  MENTION_TARGET_EVERYONE = 2;
+}
+
+message MentionContent {
+  MentionTarget target = 1;
+  // Required for MENTION_TARGET_USER and empty for MENTION_TARGET_EVERYONE.
+  string target_id = 2;
+  string display_name = 3;
+}
+
+message ImageContent {
+  AttachmentReference reference = 1;
+  string mime_type = 2;
+}
+
+message FileContent {
+  AttachmentReference reference = 1;
+  string file_name = 2;
+  string mime_type = 3;
+}
+
+message AttachmentReference {
+  oneof location {
+    // Absolute HTTP(S) URI fetched by the connector runtime. Relative paths,
+    // file URIs, and Product-local filesystem paths are not valid.
+    string remote_uri = 1;
+    // Opaque reference resolvable only by the named vendor/account owner.
+    VendorMediaReference vendor_media = 2;
+  }
+}
+
+message VendorMediaReference {
+  string vendor = 1;
+  string account_id = 2;
+  string media_id = 3;
+}
+
+message ReplyReference {
+  string message_id = 1;
+}
+
+message SendMessageRequest {
+  ConversationScope conversation = 1;
+  repeated MessageContentPart content = 2;
+  ReplyReference reply = 3;
+  VendorExtension vendor_extension = 4;
+}
+
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  // The vendor accepted/submitted the request. This does not claim end-user
+  // delivery or exactly-once processing.
+  DELIVERY_STATUS_ACCEPTED = 1;
+  DELIVERY_STATUS_REJECTED = 2;
+  DELIVERY_STATUS_RATE_LIMITED = 3;
+}
+
+message DeliveryResult {
+  DeliveryStatus status = 1;
+  string vendor_message_id = 2;
+  string reason = 3;
+  google.protobuf.Duration retry_after = 4;
+  VendorExtension vendor_extension = 5;
+}
+
+// Bounded textual vendor facts that cannot be normalized safely in V1.
+// Producers MUST use a vendor identifier of at most 64 UTF-8 bytes and emit
+// at most 32 uniquely named facts. UTF-8 names are at most 64 bytes,
+// individual values at most 2048 bytes, and the aggregate name/value bytes at
+// most 8192. Values MUST NOT contain secrets, tokens, cryptographic material,
+// raw payload bytes, or transport session state.
+message VendorExtension {
+  string vendor = 1;
+  repeated VendorFact facts = 2;
+}
+
+message VendorFact {
+  string name = 1;
+  string value = 2;
+}

@@ -1,0 +1,7 @@
+# name|expected|direction:type:worker_generation:lease_generation:fence:shutdown_id;...
+semantic_graceful_shutdown|ACCEPT|W2K:HELLO:7:11:23:;K2W:WELCOME:7:11:23:;W2K:HEARTBEAT:7:11:23:;K2W:HEARTBEAT_ACK:7:11:23:;K2W:SHUTDOWN:7:11:23:shutdown-1;W2K:SHUTDOWN_ACK:7:11:23:shutdown-1
+semantic_heartbeat_fence_mismatch|FENCE_MISMATCH|W2K:HELLO:7:11:23:;K2W:WELCOME:7:11:23:;W2K:HEARTBEAT:7:11:22:
+semantic_shutdown_ack_lease_mismatch|FENCE_MISMATCH|W2K:HELLO:7:11:23:;K2W:WELCOME:7:11:23:;K2W:SHUTDOWN:7:11:23:shutdown-1;W2K:SHUTDOWN_ACK:7:12:23:shutdown-1
+semantic_missing_hello|HELLO_REQUIRED|W2K:HEARTBEAT:7:11:23:
+semantic_stale_shutdown_id|SHUTDOWN_ID_MISMATCH|W2K:HELLO:7:11:23:;K2W:WELCOME:7:11:23:;K2W:SHUTDOWN:7:11:23:shutdown-1;W2K:SHUTDOWN_ACK:7:11:23:shutdown-old
+heartbeat_worker_accepted|ACCEPT|W2K:HELLO:7:11:23:;K2W:WELCOME:7:11:23:;W2K:HEARTBEAT:7:11:23:;K2W:HEARTBEAT_ACK:7:11:23:;K2W:SHUTDOWN:7:11:23:shutdown-1;W2K:SHUTDOWN_ACK:7:11:23:shutdown-1

@@ -1,0 +1,31 @@
+[Unit]
+Description=CYRENE NVIDIA Hardware Adapter Host
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=cyrene
+# Fail-closed UDS admission: the adapter refuses to start without at least one
+# trusted Kernel peer identity. The values must equal the cyrene-kernel service
+# account (example uid 991 / cyrene gid 992 -> `id -u cyrene-kernel`,
+# `getent group cyrene`). The Kernel, in turn, asserts THIS process via
+# `--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`
+# in cyrene-kernel.service (see docs/operations/kernel-runtime.md).
+ExecStart=/usr/bin/cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock --allowed-client-uid 991 --allowed-client-gid 992
+Restart=on-failure
+RestartSec=2s
+
+# This is deliberately a separate service from the Kernel.  It may read the
+# vendor-facing device and sysfs state, but it never shares the Kernel address
+# space or cgroup fate with workload workers.
+RuntimeDirectory=cyrene
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cyrene
+
+[Install]
+WantedBy=multi-user.target

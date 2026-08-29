@@ -15,7 +15,7 @@
     },
     "visibility": { "type": "string", "enum": ["private"] },
     "distribution": { "type": "string", "enum": ["advanced-service-plugin"] },
-    "status": { "type": "string", "enum": ["preserved-source", "adapting", "validated"] },
+    "status": { "type": "string", "enum": ["preserved-source", "adapting", "validated", "training-migrated", "migrated-runtime"] },
     "core": {
       "type": "object",
       "additionalProperties": false,
@@ -28,6 +28,11 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string" }
+        },
+        "planned_extension_points": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
         }
       }
     },
@@ -36,6 +41,8 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": { "type": "string" }
-    }
+    },
+    "migration": { "type": "object" },
+    "runtime": { "type": "object" }
   }
 }

@@ -1,0 +1,167 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astrbot-standalone
+  namespace: astrbot-standalone-ns
+  labels:
+    app: astrbot-standalone
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: astrbot-standalone
+  template:
+    metadata:
+      labels:
+        app: astrbot-standalone
+    spec:
+      securityContext:
+        fsGroup: 0
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: initialize-app-data-ownership
+          image: &astrbot-image __ASTRBOT_IMAGE_REF__
+          imagePullPolicy: IfNotPresent
+          command: ["chown", "-R", "1654:0", "/AstrBot/data"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+          volumeMounts:
+            - name: data
+              mountPath: /AstrBot/data
+        - name: migrate-database
+          image: *astrbot-image
+          imagePullPolicy: IfNotPresent
+          command: ["dotnet", "/app/migrator/AstrBot.DatabaseMigrator.dll"]
+          securityContext:
+            runAsUser: 1654
+            runAsGroup: 0
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: ConnectionStrings__AstrBotMigrator
+              valueFrom:
+                secretKeyRef:
+                  name: __ASTRBOT_POSTGRES_SECRET_NAME__
+                  key: migrator-connection-string
+            - name: ConnectionStrings__AstrBot
+              valueFrom:
+                secretKeyRef:
+                  name: __ASTRBOT_POSTGRES_SECRET_NAME__
+                  key: app-connection-string
+      containers:
+        - name: astrbot
+          image: *astrbot-image
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1654
+            runAsGroup: 0
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: ASPNETCORE_URLS
+              value: "http://+:15031"
+            - name: Runtime__Mode
+              value: Production
+            - name: DeveloperCompatibility__PythonPluginsEnabled
+              value: "false"
+            - name: HostRuntimeOptions__EnableWorkerSupervision
+              value: "false"
+            - name: ConnectionStrings__AstrBot
+              valueFrom:
+                secretKeyRef:
+                  name: __ASTRBOT_POSTGRES_SECRET_NAME__
+                  key: app-connection-string
+            - name: ProviderPersistence__CertificatePath
+              value: /run/astrbot/provider-persistence/provider-persistence.pfx
+            - name: ProviderPersistence__CertificatePassword
+              valueFrom:
+                secretKeyRef:
+                  name: __ASTRBOT_PROVIDER_PERSISTENCE_SECRET_NAME__
+                  key: provider-persistence-password
+            - name: ProviderPersistence__RequireKeyEncryption
+              value: "true"
+            - name: ProviderEndpointAuth__DashboardJwtSecretFile
+              value: /run/astrbot/provider-endpoint-auth/dashboard-jwt-secret
+            - name: ProviderEndpointAuth__BootstrapSecretFile
+              value: /run/astrbot/provider-endpoint-auth/bootstrap-secret
+          ports:
+            - containerPort: 15031
+              name: dotnet-host
+            # - containerPort: 6195
+            #   name: wecom-wh
+            # - containerPort: 6196
+            #   name: qq-off-wh
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 15031
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 15031
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /AstrBot/data
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+            - name: provider-persistence-certificate
+              mountPath: /run/astrbot/provider-persistence/provider-persistence.pfx
+              subPath: provider-persistence.pfx
+              readOnly: true
+            - name: provider-endpoint-auth
+              mountPath: /run/astrbot/provider-endpoint-auth
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: astrbot-data-pvc
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+        - name: provider-persistence-certificate
+          secret:
+            secretName: __ASTRBOT_PROVIDER_PERSISTENCE_SECRET_NAME__
+            defaultMode: 416 # 0640: readable by AstrBot UID 1654 / group 0 only.
+            items:
+              - key: provider-persistence.pfx
+                path: provider-persistence.pfx
+        - name: provider-endpoint-auth
+          secret:
+            secretName: __ASTRBOT_PROVIDER_ENDPOINT_AUTH_SECRET_NAME__
+            defaultMode: 288 # 0440: readable by AstrBot UID 1654 / group 0 only.
+            items:
+              - key: dashboard-jwt-secret
+                path: dashboard-jwt-secret
+              - key: provider-bootstrap-secret
+                path: bootstrap-secret
