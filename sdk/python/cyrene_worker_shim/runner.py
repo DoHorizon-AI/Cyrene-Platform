@@ -24,6 +24,7 @@ try:
     from .cyrene_worker import (
         CyreneWorker,
         PluginErrorPayload,
+        TypedCapabilityPayload,
         run_worker_stdio,
     )
 except ImportError:
@@ -31,12 +32,14 @@ except ImportError:
         from cyrene_worker_shim.cyrene_worker import (
             CyreneWorker,
             PluginErrorPayload,
+            TypedCapabilityPayload,
             run_worker_stdio,
         )
     except ImportError:
         from cyrene_worker import (
             CyreneWorker,
             PluginErrorPayload,
+            TypedCapabilityPayload,
             run_worker_stdio,
         )
 
@@ -173,6 +176,9 @@ class GenericCapabilityWorker(CyreneWorker):
                             result = handler(raw_req)
                         except TypeError:
                             result = handler(**raw_req)
+
+            if isinstance(result, TypedCapabilityPayload):
+                return True, result
 
             wire_out: Any
             if hasattr(result, "to_wire"):

@@ -23,7 +23,7 @@ use cy_platform_api::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     AtomicCancellationToken, CancellationToken, CapabilityRegistry, CapabilityResolutionError,
     CapabilityWorkerActivator, WorkerActivationOptions, WorkerApplicationEvent,
-    WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    WorkerInvocationResult, WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
     MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
 };
 use cy_proto::capability_v1::{
@@ -446,7 +446,7 @@ impl CapabilityExecutionService {
             let _task_guard = task_guard;
             let mut client =
                 CapabilityWorkerActivator::activate_from_manifest(&manifest, &worker_options)?;
-            let result = client.invoke(
+            let result = client.invoke_typed(
                 &capability,
                 &method,
                 &payload,
@@ -999,16 +999,25 @@ fn parse_grpc_timeout(metadata: &MetadataMap) -> Result<Option<Duration>, String
     Ok(Some(duration))
 }
 
-fn response_any(capability: &str, method: &str, value: Vec<u8>) -> Any {
+fn response_any(capability: &str, method: &str, result: WorkerInvocationResult) -> Any {
+    let type_url = if result.payload_type_url.trim().is_empty() {
+        format!("type.cyrene.io/capability/{capability}/{method}/response")
+    } else {
+        result.payload_type_url
+    };
     Any {
-        type_url: format!("type.cyrene.io/capability/{capability}/{method}/response"),
-        value,
+        type_url,
+        value: result.payload,
     }
 }
 
-fn event_any(value: Vec<u8>) -> Any {
+fn event_any(value: Vec<u8>, type_url: String) -> Any {
     Any {
-        type_url: OPAQUE_PAYLOAD_TYPE_URL.to_string(),
+        type_url: if type_url.trim().is_empty() {
+            OPAQUE_PAYLOAD_TYPE_URL.to_string()
+        } else {
+            type_url
+        },
         value,
     }
 }
@@ -1025,7 +1034,7 @@ fn event_item(
                 capability: event.capability,
                 event_sequence: event.event_sequence,
                 event_type: event.event_type,
-                payload: Some(event_any(event.payload)),
+                payload: Some(event_any(event.payload, event.payload_type_url)),
                 generation: event.generation,
                 source_id: event.source_id,
                 binding_id: binding_id.unwrap_or_default().to_string(),
@@ -1183,6 +1192,7 @@ mod tests {
                     event_sequence: 1,
                     event_type: "event".to_string(),
                     payload: Vec::new(),
+                    payload_type_url: String::new(),
                     generation,
                     source_id: "provider".to_string(),
                 },
@@ -1201,6 +1211,42 @@ mod tests {
         assert_eq!(second.binding_id, "configured-main");
         assert_eq!(first.generation, 1);
         assert_eq!(second.generation, 2);
+    }
+
+    #[test]
+    fn typed_worker_response_preserves_capability_owned_any_type_url() {
+        let response = response_any(
+            "message.connector.v1",
+            "send_message",
+            WorkerInvocationResult {
+                payload: vec![1, 2, 3],
+                payload_type_url: "type.googleapis.com/cyrene.message.connector.v1.DeliveryResult"
+                    .into(),
+            },
+        );
+
+        assert_eq!(
+            response.type_url,
+            "type.googleapis.com/cyrene.message.connector.v1.DeliveryResult"
+        );
+        assert_eq!(response.value, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn legacy_worker_response_without_type_url_keeps_generic_projection() {
+        let response = response_any(
+            "test.capability.v1",
+            "echo",
+            WorkerInvocationResult {
+                payload: vec![4, 5],
+                payload_type_url: String::new(),
+            },
+        );
+
+        assert_eq!(
+            response.type_url,
+            "type.cyrene.io/capability/test.capability.v1/echo/response"
+        );
     }
 
     #[test]

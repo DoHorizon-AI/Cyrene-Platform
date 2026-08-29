@@ -445,6 +445,7 @@ class ApplicationEvent:
     event_sequence: int = 0
     event_type: str = ""
     payload: bytes = b""
+    payload_type_url: str = ""
 
     def encode(self) -> bytes:
         return (
@@ -453,6 +454,7 @@ class ApplicationEvent:
             + encode_uint64_field(3, self.event_sequence)
             + encode_string_field(4, self.event_type)
             + encode_bytes_field(5, self.payload)
+            + encode_string_field(6, self.payload_type_url)
         )
 
     @classmethod
@@ -479,6 +481,10 @@ class ApplicationEvent:
             elif field_num == 5 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
                 inst.payload = data[offset:offset + length]
+                offset += length
+            elif field_num == 6 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_type_url = data[offset:offset + length].decode("utf-8", "replace")
                 offset += length
             elif wire_type == 0:
                 _, offset = decode_varint(data, offset)
@@ -623,9 +629,13 @@ class Invoke:
 class InvokeResult:
     response_tag: int = 3
     payload: bytes = b""
+    payload_type_url: str = ""
 
     def encode(self) -> bytes:
-        return encode_bytes_field(self.response_tag, self.payload)
+        return (
+            encode_bytes_field(self.response_tag, self.payload)
+            + encode_string_field(4, self.payload_type_url)
+        )
 
     @classmethod
     def decode(cls, data: bytes) -> InvokeResult:
@@ -639,6 +649,10 @@ class InvokeResult:
                 inst.response_tag = 3
                 inst.payload = data[offset:offset + length]
                 offset += length
+            elif field_num == 4 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_type_url = data[offset:offset + length].decode("utf-8", "replace")
+                offset += length
             elif field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
                 inst.response_tag = field_num
@@ -650,6 +664,14 @@ class InvokeResult:
                 length, offset = decode_varint(data, offset)
                 offset += length
         return inst
+
+
+@dataclasses.dataclass(frozen=True)
+class TypedCapabilityPayload:
+    """Worker-owned payload bytes plus optional canonical Any type metadata."""
+
+    value: bytes
+    type_url: str
 
 
 @dataclasses.dataclass
@@ -890,7 +912,7 @@ class _ApplicationEventStream:
         self._terminal: Optional[ApplicationEventStreamEnd] = None
         self._terminal_delivered = False
 
-    def emit(self, event_type: str, payload: bytes) -> bool:
+    def emit(self, event_type: str, payload: bytes, type_url: str = "") -> bool:
         with self._condition:
             if self._terminal is not None:
                 return False
@@ -912,6 +934,7 @@ class _ApplicationEventStream:
                         event_sequence=self._next_sequence,
                         event_type=event_type,
                         payload=bytes(payload),
+                        payload_type_url=type_url,
                     )
                 )
                 self._next_sequence += 1
@@ -963,9 +986,9 @@ class ApplicationEventEmitter:
         self.capability = stream.capability
         self._stream = stream
 
-    def emit(self, event_type: str, payload: bytes) -> bool:
+    def emit(self, event_type: str, payload: bytes, type_url: str = "") -> bool:
         """Try to enqueue one event; False means the stream is terminated."""
-        return self._stream.emit(event_type, payload)
+        return self._stream.emit(event_type, payload, type_url)
 
     def complete(self, message: str = "stream completed") -> None:
         self._stream.terminate(
@@ -1493,9 +1516,15 @@ def run_worker_stream(
                         inv = req_env.payload if isinstance(req_env.payload, Invoke) else Invoke()
                         ok, res = worker.on_invoke(inv.capability, inv.action, inv.payload)
                         if ok:
-                            resp_payload = InvokeResult(
-                                payload=res if isinstance(res, bytes) else bytes(res)
-                            )
+                            if isinstance(res, TypedCapabilityPayload):
+                                resp_payload = InvokeResult(
+                                    payload=res.value,
+                                    payload_type_url=res.type_url,
+                                )
+                            else:
+                                resp_payload = InvokeResult(
+                                    payload=res if isinstance(res, bytes) else bytes(res)
+                                )
                         elif isinstance(res, PluginErrorPayload):
                             resp_payload = res
                         else:

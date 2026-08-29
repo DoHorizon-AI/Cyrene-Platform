@@ -22,6 +22,7 @@ from cyrene_worker import (
     PluginErrorPayload,
     Shutdown,
     Subscribe,
+    TypedCapabilityPayload,
     read_frame,
     run_worker_stream,
     write_frame,
@@ -45,6 +46,24 @@ class DummyService:
 class EventService:
     def on_subscribe(self, subscription_id, capability, filter_payload, emitter):
         emitter.emit("synthetic", b"payload")
+        emitter.complete("done")
+
+
+class TypedService:
+    def send(self, req: dict, cancellation=None) -> TypedCapabilityPayload:
+        del req, cancellation
+        return TypedCapabilityPayload(
+            value=b"typed-response",
+            type_url="type.googleapis.com/example.TypedResponse",
+        )
+
+    def on_subscribe(self, subscription_id, capability, filter_payload, emitter):
+        del subscription_id, capability, filter_payload
+        emitter.emit(
+            "typed-event",
+            b"typed-event-payload",
+            "type.googleapis.com/example.TypedEvent",
+        )
         emitter.complete("done")
 
 
@@ -218,6 +237,96 @@ def test_generic_capability_worker_application_events():
     print("test_generic_capability_worker_application_events PASSED!")
 
 
+def test_typed_capability_payload_metadata_round_trip():
+    worker = GenericCapabilityWorker(
+        instance=TypedService(),
+        plugin_id="com.cyrene.test.typed",
+        capabilities=["example.typed.v1"],
+    )
+    inp = io.BytesIO()
+    out = io.BytesIO()
+    write_frame(
+        Envelope(
+            request_id="hello",
+            plugin_id="com.cyrene.test.typed",
+            sequence_number=1,
+            generation=1,
+            fence_token=1,
+            payload=Hello(min_protocol_version=1, max_protocol_version=1),
+        ).encode(),
+        inp,
+    )
+    write_frame(
+        Envelope(
+            request_id="invoke",
+            plugin_id="com.cyrene.test.typed",
+            sequence_number=2,
+            generation=1,
+            fence_token=1,
+            payload=Invoke(
+                capability="example.typed.v1",
+                action="send",
+                payload=b"{}",
+            ),
+        ).encode(),
+        inp,
+    )
+    write_frame(
+        Envelope(
+            request_id="subscribe",
+            plugin_id="com.cyrene.test.typed",
+            sequence_number=3,
+            generation=1,
+            fence_token=1,
+            payload=Subscribe(
+                capability="example.typed.v1",
+                max_buffered_events=2,
+            ),
+        ).encode(),
+        inp,
+    )
+    write_frame(
+        Envelope(
+            request_id="shutdown",
+            plugin_id="com.cyrene.test.typed",
+            sequence_number=4,
+            generation=1,
+            fence_token=1,
+            payload=Shutdown(grace_period_ms=500),
+        ).encode(),
+        inp,
+    )
+
+    inp.seek(0)
+    run_worker_stream(inp, out, worker)
+    out.seek(0)
+    frames = []
+    while True:
+        frame = read_frame(out)
+        if frame is None:
+            break
+        frames.append(Envelope.decode(frame))
+
+    invoke = next(
+        envelope.payload
+        for envelope in frames
+        if envelope.request_id == "invoke"
+    )
+    assert isinstance(invoke, InvokeResult)
+    assert invoke.payload == b"typed-response"
+    assert invoke.payload_type_url == "type.googleapis.com/example.TypedResponse"
+
+    event = next(
+        envelope.payload
+        for envelope in frames
+        if isinstance(envelope.payload, ApplicationEvent)
+    )
+    assert event.payload == b"typed-event-payload"
+    assert event.payload_type_url == "type.googleapis.com/example.TypedEvent"
+    print("test_typed_capability_payload_metadata_round_trip PASSED!")
+
+
 if __name__ == "__main__":
     test_generic_capability_worker_lifecycle()
     test_generic_capability_worker_application_events()
+    test_typed_capability_payload_metadata_round_trip()

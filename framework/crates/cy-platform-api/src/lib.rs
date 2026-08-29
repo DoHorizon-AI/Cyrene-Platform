@@ -35,6 +35,7 @@ pub use worker::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
     CapabilityWorkerClient, WorkerApplicationEvent, WorkerActivationOptions,
+    WorkerInvocationResult,
     WorkerMediaProcessor, WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
     MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
 };

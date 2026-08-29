@@ -88,8 +88,19 @@ pub struct WorkerApplicationEvent {
     pub event_sequence: u64,
     pub event_type: String,
     pub payload: Vec<u8>,
+    pub payload_type_url: String,
     pub generation: u64,
     pub source_id: String,
+}
+
+/// Product-neutral result returned by one worker invocation.
+///
+/// The worker owns the payload schema. The optional type URL is only transport
+/// metadata that lets the CES preserve a capability-owned protobuf `Any`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerInvocationResult {
+    pub payload: Vec<u8>,
+    pub payload_type_url: String,
 }
 
 /// Terminal condition for one application-event subscription.
@@ -397,6 +408,7 @@ impl EventRegistry {
                         event_sequence: event.event_sequence,
                         event_type: event.event_type,
                         payload: event.payload,
+                        payload_type_url: event.payload_type_url,
                         generation: envelope.generation,
                         source_id,
                     };
@@ -1071,6 +1083,20 @@ impl CapabilityWorkerClient {
         timeout: Duration,
         cancellation: &dyn CancellationToken,
     ) -> Result<Vec<u8>, WorkerTerminalError> {
+        self.invoke_typed(capability, method, payload, timeout, cancellation)
+            .map(|result| result.payload)
+    }
+
+    /// Invoke a capability and preserve optional worker-owned payload type
+    /// metadata for the Product-facing CES `Any` response.
+    pub fn invoke_typed(
+        &mut self,
+        capability: &str,
+        method: &str,
+        payload: &[u8],
+        timeout: Duration,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<WorkerInvocationResult, WorkerTerminalError> {
         if self.is_shut_down {
             return Err(WorkerTerminalError::WorkerUnavailable(
                 "worker client is already shut down".into(),
@@ -1152,7 +1178,12 @@ impl CapabilityWorkerClient {
                         continue;
                     }
                     match response.payload {
-                        Some(Payload::InvokeResult(result)) => return Ok(result.payload),
+                        Some(Payload::InvokeResult(result)) => {
+                            return Ok(WorkerInvocationResult {
+                                payload: result.payload,
+                                payload_type_url: result.payload_type_url,
+                            })
+                        }
                         Some(Payload::Error(err)) => {
                             return Err(Self::map_error_payload(err));
                         }
