@@ -10,8 +10,8 @@ use std::{
     collections::HashMap,
     pin::Pin,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -22,24 +22,25 @@ use cy_manifest::{
 use cy_platform_api::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     AtomicCancellationToken, CancellationToken, CapabilityRegistry, CapabilityResolutionError,
-    CapabilityWorkerActivator, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
-    MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions, WorkerApplicationEvent,
-    WorkerTerminalError,
+    CapabilityWorkerActivator, WorkerActivationOptions, WorkerApplicationEvent,
+    WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
 };
 use cy_proto::capability_v1::{
-    CapabilityApplicationEvent, CapabilityEventStreamEnd, CapabilityEventStreamItem,
-    CapabilityExecutionError, InvokeCapabilityRequest, InvokeCapabilityResponse,
-    SubscribeCapabilityEventsRequest, capability_event_stream_item, capability_execution_error,
+    capability_event_stream_item, capability_execution_error,
     capability_execution_service_server::{
         CapabilityExecutionService as CapabilityExecutionServiceTrait,
         CapabilityExecutionServiceServer,
     },
+    CapabilityApplicationEvent, CapabilityEventStreamEnd, CapabilityEventStreamItem,
+    CapabilityExecutionError, InvokeCapabilityRequest, InvokeCapabilityResponse,
+    SubscribeCapabilityEventsRequest,
 };
 use futures_core::Stream;
 use prost_types::Any;
-use tokio::sync::mpsc::{self, OwnedPermit, Sender, error::TrySendError};
+use tokio::sync::mpsc::{self, error::TrySendError, OwnedPermit, Sender};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status, metadata::MetadataMap};
+use tonic::{metadata::MetadataMap, Request, Response, Status};
 use uuid::Uuid;
 
 /// The fixed type URL used when the legacy worker wire has opaque bytes but no

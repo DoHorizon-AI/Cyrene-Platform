@@ -11,26 +11,26 @@ use cy_manifest::{
     Runtime,
 };
 use cy_platform_api::{
-    CapabilityBinding, CapabilityRegistry, MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
-    WorkerActivationOptions,
+    CapabilityBinding, CapabilityRegistry, WorkerActivationOptions,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
 };
 use cy_proto::capability_v1::{
-    CapabilityEventStreamEnd, CapabilityEventStreamEndReason, InvokeCapabilityRequest,
-    SubscribeCapabilityEventsRequest, capability_event_stream_item, capability_execution_error,
+    capability_event_stream_item, capability_execution_error,
     capability_execution_service_client::CapabilityExecutionServiceClient,
-    invoke_capability_response,
+    invoke_capability_response, CapabilityEventStreamEnd, CapabilityEventStreamEndReason,
+    InvokeCapabilityRequest, SubscribeCapabilityEventsRequest,
 };
 use prost_types::Any;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{
-    Request,
     transport::{Channel, Endpoint, Server},
+    Request,
 };
 
 use cy_capability_execution_service::{
-    CapabilityExecutionConfig, CapabilityExecutionService, server,
+    server, CapabilityExecutionConfig, CapabilityExecutionService,
 };
 
 fn platform_root() -> PathBuf {
@@ -557,11 +557,9 @@ async fn configured_binding_unknown_target_is_deterministic() {
         error.code,
         capability_execution_error::Code::CapabilityUnavailable as i32
     );
-    assert!(
-        error
-            .message
-            .contains("unknown configured capability binding: missing")
-    );
+    assert!(error
+        .message
+        .contains("unknown configured capability binding: missing"));
     server.shutdown().await;
 }
 
@@ -590,11 +588,9 @@ async fn configured_binding_capability_mismatch_is_deterministic() {
         error.code,
         capability_execution_error::Code::InvalidRequest as i32
     );
-    assert!(
-        error
-            .message
-            .contains("does not expose capability missing.capability.v1")
-    );
+    assert!(error
+        .message
+        .contains("does not expose capability missing.capability.v1"));
     server.shutdown().await;
 }
 
