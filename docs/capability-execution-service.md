@@ -48,14 +48,19 @@ The source of truth is
 
 `CapabilityEventStreamEndReason` values are all present because each is an
 observable lifecycle outcome of the frozen worker event substrate:
-`NORMAL_COMPLETION`, `CANCELLED`, `CAPABILITY_UNAVAILABLE`, `WORKER_CRASH`,
-`PROTOCOL_FAILURE`, `GENERATION_TERMINATED`, and `BACKPRESSURE`. The
+`CAPABILITY_EVENT_STREAM_END_REASON_NORMAL_COMPLETION`,
+`CAPABILITY_EVENT_STREAM_END_REASON_CANCELLED`,
+`CAPABILITY_EVENT_STREAM_END_REASON_CAPABILITY_UNAVAILABLE`,
+`CAPABILITY_EVENT_STREAM_END_REASON_WORKER_CRASH`,
+`CAPABILITY_EVENT_STREAM_END_REASON_PROTOCOL_FAILURE`,
+`CAPABILITY_EVENT_STREAM_END_REASON_GENERATION_TERMINATED`, and
+`CAPABILITY_EVENT_STREAM_END_REASON_BACKPRESSURE`. The
 `CapabilityExecutionError.Code` values are the stable unary/terminal error
-categories: `CAPABILITY_UNAVAILABLE`, `ACTIVATION_FAILED`,
-`PROTOCOL_MISMATCH`, `INVALID_REQUEST`, `EXECUTION_FAILURE`,
-`WORKER_CRASHED`, `TIMEOUT`, `CANCELLED`, `BACKPRESSURE`,
-`STREAM_TERMINATED`, and `GENERATION_TERMINATED`; the zero values are required
-protobuf sentinels and are never used as successful outcomes.
+categories: `CODE_CAPABILITY_UNAVAILABLE`, `CODE_ACTIVATION_FAILED`,
+`CODE_PROTOCOL_MISMATCH`, `CODE_INVALID_REQUEST`, `CODE_EXECUTION_FAILURE`,
+`CODE_WORKER_CRASHED`, `CODE_TIMEOUT`, `CODE_CANCELLED`, `CODE_BACKPRESSURE`,
+`CODE_STREAM_TERMINATED`, and `CODE_GENERATION_TERMINATED`; the zero values are
+required protobuf sentinels and are never used as successful outcomes.
 
 There is no caller-provided invocation ID, worker subscription ID, timeout
 field, queue-size hint, or process-control field. Invocation cancellation is

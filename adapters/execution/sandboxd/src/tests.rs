@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fs, fs::File, path::PathBuf};
 use cy_kernel_api::{DeviceBinding, DeviceMapper, EnforcementMode, ProcessHandle, ProcessRuntime};
 
 #[cfg(target_os = "linux")]
-use cy_kernel_api::RuntimeProcessEvidence;
+use cy_kernel_api::{RuntimeProcessEvidence, SandboxBackend};
 
 #[cfg(target_os = "linux")]
 use crate::bpf::{
