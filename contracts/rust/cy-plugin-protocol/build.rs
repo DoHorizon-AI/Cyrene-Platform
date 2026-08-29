@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(windows)]
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use_ascii_temp_dir();
