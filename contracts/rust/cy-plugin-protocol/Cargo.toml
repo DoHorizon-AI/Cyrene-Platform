@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-prost = "0.12"
+prost = "0.14"
 bytes = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = "0.14"
 protoc-bin-vendored = "3"

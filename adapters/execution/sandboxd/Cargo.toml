@@ -13,8 +13,8 @@ path = "src/lib.rs"
 cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 libc = "0.2"
-nix = { version = "0.29", features = ["socket", "user", "process"] }
-prost = "0.12"
+nix = { version = "0.31", features = ["socket", "user", "process"] }
+prost = "0.14"
 
 [dev-dependencies]
 cy-sandbox-client = { path = "../../../kernel/crates/cy-sandbox-client" }
