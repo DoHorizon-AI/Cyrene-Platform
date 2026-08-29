@@ -27,7 +27,10 @@ pub use media::{
     TRANSFORM_IMAGE_OPERATION, TransformImageRequest, TransformedImage,
 };
 pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
-pub use plugin::{CapabilityRegistry, CapabilityResolutionError, CapabilityResolver};
+pub use plugin::{
+    CapabilityBinding, CapabilityRegistry, CapabilityResolutionError, CapabilityResolver,
+    ResolvedCapabilityTarget,
+};
 pub use worker::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
