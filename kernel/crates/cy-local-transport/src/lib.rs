@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::BytesMut;
 use cy_plugin_protocol::{Envelope, FramedCodec, ProtocolError};
+use std::ffi::OsStr;
 use std::process::Stdio;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -42,7 +43,11 @@ pub struct StdioTransport {
 impl StdioTransport {
     /// Launch an out-of-process plugin via explicit binary executable and argument array.
     /// SHELL STRING CONCATENATION IS STRICTLY PROHIBITED.
-    pub fn spawn(executable: &str, args: &[&str]) -> Result<Self, TransportError> {
+    pub fn spawn<P, A>(executable: P, args: &[A]) -> Result<Self, TransportError>
+    where
+        P: AsRef<OsStr>,
+        A: AsRef<OsStr>,
+    {
         let mut cmd = Command::new(executable);
         cmd.args(args)
             .stdin(Stdio::piped())

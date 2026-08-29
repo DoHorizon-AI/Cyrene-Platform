@@ -12,8 +12,21 @@ Before handing off a core change, run:
 ```bash
 cargo fmt --all -- --check
 cargo check --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+cargo build --workspace --locked --release
 ```
+
+The JVM example has a separate compatibility check because it needs a Java
+toolchain and Maven-generated protobuf sources:
+
+```bash
+mvn --batch-mode --file examples/plugins/jvm/poc/pom.xml package
+CYRENE_REQUIRE_JVM_IT=1 cargo test -p cy-extension-registry --test jvm_integration_test --locked -- --nocapture
+```
+
+The JVM check may be skipped during local Rust-only development when the Java
+toolchain is unavailable, but CI runs it as a required job.
 
 Contract changes require a versioning decision and a compatibility test before
 an advanced service may consume them.

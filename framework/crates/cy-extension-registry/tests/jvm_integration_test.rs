@@ -53,10 +53,16 @@ fn test_model() -> ModelManifest {
 
 #[tokio::test]
 async fn test_jvm_plugin_full_wire_protocol_lifecycle() {
+    let required = std::env::var_os("CYRENE_REQUIRE_JVM_IT").is_some();
+
     // Check java availability
     let java_check = Command::new("java").arg("-version").output();
     if java_check.is_err() || !java_check.unwrap().status.success() {
-        println!("Java runtime absent on host; skipping JVM integration test gracefully.");
+        let message = "Java runtime absent on host; JVM integration test was not executed.";
+        if required {
+            panic!("{message}");
+        }
+        println!("{message}");
         return;
     }
 
@@ -66,10 +72,14 @@ async fn test_jvm_plugin_full_wire_protocol_lifecycle() {
     let jar_path = root_dir.join("examples/plugins/jvm/poc/protobuf-java.jar");
 
     if !jar_path.exists() {
-        println!(
-            "protobuf-java.jar absent at {}; skipping JVM integration test.",
+        let message = format!(
+            "protobuf-java.jar absent at {}; JVM integration test was not executed.",
             jar_path.display()
         );
+        if required {
+            panic!("{message}");
+        }
+        println!("{message}");
         return;
     }
 
@@ -80,12 +90,14 @@ async fn test_jvm_plugin_full_wire_protocol_lifecycle() {
             .unwrap_or(true)
     {
         let javac_check = Command::new("javac").arg("-version").output();
-        if let Ok(javac_out) = javac_check {
-            if javac_out.status.success() {
+        match javac_check {
+            Ok(javac_out) if javac_out.status.success() => {
                 println!("Compiling Java POC plugin classes before test...");
                 std::fs::create_dir_all(&classes_dir).expect("Failed to create classes dir");
                 let gen_dir = root_dir.join("examples/plugins/jvm/poc/target/generated-sources");
-                let poc_java = root_dir.join("examples/plugins/jvm/poc/PocNotificationPlugin.java");
+                let poc_java = root_dir.join(
+                    "examples/plugins/jvm/poc/src/main/java/com/cy/plugin/jvm/PocNotificationPlugin.java",
+                );
                 let mut java_files: Vec<std::path::PathBuf> = vec![poc_java];
                 if gen_dir.exists() {
                     if let Ok(entries) = std::fs::read_dir(&gen_dir) {
@@ -111,6 +123,13 @@ async fn test_jvm_plugin_full_wire_protocol_lifecycle() {
                         stdout, stderr
                     );
                 }
+            }
+            Ok(_) | Err(_) => {
+                if required {
+                    panic!("javac is required to compile the JVM plugin classes");
+                }
+                println!("javac absent on host; JVM integration test was not executed.");
+                return;
             }
         }
     }
