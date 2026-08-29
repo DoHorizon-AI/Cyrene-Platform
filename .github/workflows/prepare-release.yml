@@ -1,0 +1,82 @@
+name: Prepare Component Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release Version (e.g. 0.4.3 or v0.4.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    name: release / prepare-draft-release
+    runs-on: ubuntu-latest
+    environment: public-release
+    steps:
+      - name: Checkout Source at Default Branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Tooling Dependencies
+        run: |
+          python -m pip install --upgrade pip pytest hypothesis pyyaml
+
+      # STEP 1: Pre-validation of requested version and policy BEFORE doing anything
+      - name: Step 1 - Pre-validate Release Version & Tag Safety
+        run: |
+          python tooling/release/prepare_release.py \
+            --repo-path . \
+            --version "${{ github.event.inputs.version }}" \
+            --validate
+
+      # STEP 2: Full verification gate (all SDK tests, contracts, governance)
+      - name: Step 2 - Run Full Release Verification Suite
+        run: |
+          python tooling/ci/verify.py
+
+      # STEP 3: Build release artifacts and packages
+      - name: Step 3 - Build Release Packages & SDKs
+        run: |
+          echo "Building SDK packages and verifying build artifacts..."
+          python -m pip install --upgrade build
+          python -m build sdk/python/cyrene_control_plane
+          python -m build sdk/python/cyrene_preflight
+
+      # STEP 4: Only after Step 1, 2, 3 succeed 100%, create the annotated tag AT THE VERY END!
+      - name: Step 4 - Create Immutable Annotated Tag (Final Step)
+        run: |
+          python tooling/release/prepare_release.py \
+            --repo-path . \
+            --version "${{ github.event.inputs.version }}" \
+            --create-tag
+
+      # STEP 5: Push the newly created tag
+      - name: Step 5 - Push Release Tag
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TAG="${VERSION#v}"
+          TAG="v${TAG}"
+          git push origin "${TAG}"
+
+      # STEP 6: Publish Draft GitHub Release
+      - name: Step 6 - Create Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TAG="${VERSION#v}"
+          TAG="v${TAG}"
+          gh release create "${TAG}" \
+            --draft \
+            --title "Cyrene Platform ${TAG}" \
+            --notes "Automated component release for Cyrene Platform at commit ${{ github.sha }} (Verified green)"

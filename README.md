@@ -9,15 +9,24 @@ Navigator, or Echo product logic. Those products and other closed plugins live
 in the private advanced-services repository and depend on versioned contracts
 from this repository.
 
+All platform development converges through the standard branch model:
+
+- `develop` is the active integration branch for all platform features, SDKs, and contracts. Pull requests merge to `develop` after passing CI and boundary governance checks.
+- `main` is the protected release branch. Releases and immutable tags are cut strictly from `main` after verified staging.
+
 ## Repository layout
 
-| Directory | Responsibility |
-| --- | --- |
-| `kernel/` | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
-| `framework/` | Extension API, registry, and JVM boundary |
-| `contracts/` | Protobuf, JSON Schema, canonical manifests, and generated protocol crates |
-| `examples/` | Non-production plugin integration examples |
-| `docs/` | Architecture, protocol, and repository-boundary decisions |
+| Directory    | Responsibility                                                                                             |
+| ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `kernel/`         | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
+| `framework/`      | Extension API, registry, and JVM boundary                                                                  |
+| `contracts/`      | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
+| `sdk/`            | Language client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`)                        |
+| `infrastructure/` | Shared Docker/Compose, Kubernetes, Nginx, Observability, and systemd runtime assets                        |
+| `tooling/`        | Shared repository governance, CI boundary guards, codegen, and migration tooling archives                 |
+| `examples/`       | Non-production plugin integration examples                                                                 |
+| `docs/`           | Architecture, protocol, and repository-boundary decisions                                                  |
+
 
 The former Rust control plane contained service-level training, runtime,
 artifact, and serving implementations, so it is preserved in the private
@@ -26,13 +35,20 @@ framework may evolve toward Kotlin/JVM, but it must continue to consume the
 language-neutral contracts in `contracts/`; business behavior must not move
 back into the kernel.
 
+service.json describes a first-party service bundle. plugin.toml describes an
+installable component inside the signed package; these are metadata levels, not
+two package or installation protocols.
+
 ## Hardware boundary
 
-The Rust kernel discovers devices, reads telemetry, maps permitted device nodes,
-injects vendor visibility variables, and supervises worker processes. CUDA,
-ROCm, Ascend, model execution, training, and quantization stay in out-of-process
-plugins. Vendor-specific discovery is an adapter boundary, not a driver inside
-the kernel.
+The Rust Kernel keeps only node-local leases, fencing, lifecycle decisions and
+generic local-adapter clients. Privileged cgroup/device/process execution runs
+in the separately supervised `adapters/execution/sandboxd`; vendor discovery,
+telemetry, device-node enumeration, and C ABI loading run in separate hardware
+adapter processes under `adapters/hardware/`. CUDA, ROCm, Ascend, model
+execution, training, and quantization stay outside the Kernel. Kernel and all
+local adapters exchange versioned Protobuf frames over UDS; a C ABI may exist
+only inside an adapter process, never as a public Kernel API.
 
 ## Current checkpoint
 
@@ -42,5 +58,10 @@ state, and private service implementations. Preserved legacy applications in
 the advanced-services repository are not expected to build until their imports
 are migrated to released core contracts.
 
-See [architecture](docs/ARCHITECTURE.md) and
-[repository boundaries](docs/REPOSITORY_BOUNDARIES.md).
+## Documentation & Authoritative Contracts
+
+- **Authoritative Substrate API Specification**: [`docs/API.md`](docs/API.md)
+- **Canonical Capability & API Index**: [`docs/api/CAPABILITY_INDEX.md`](docs/api/CAPABILITY_INDEX.md)
+- **Architecture Blueprint**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- **Repository Boundaries**: [`docs/REPOSITORY_BOUNDARIES.md`](docs/REPOSITORY_BOUNDARIES.md)
+- **Contributing & Governance**: [`CONTRIBUTING.md`](CONTRIBUTING.md)

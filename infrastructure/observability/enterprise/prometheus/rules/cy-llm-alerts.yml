@@ -1,0 +1,58 @@
+groups:
+  - name: cy_llm_pro_gateway
+    rules:
+      - alert: ProGatewayHighErrorRate
+        expr: sum(rate(http_server_requests_seconds_count{job="cy-llm-pro-gateway",status=~"5.."}[5m])) / sum(rate(http_server_requests_seconds_count{job="cy-llm-pro-gateway"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pro gateway error rate is high"
+          description: "The Pro gateway 5xx ratio is above 10 percent for five minutes."
+
+      - alert: ProGatewayDown
+        expr: up{job="cy-llm-pro-gateway"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pro gateway is down"
+          description: "The Pro gateway has not been reachable for more than one minute."
+
+      - alert: ProCoordinatorDown
+        expr: up{job="cy-llm-pro-coordinator"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pro coordinator is down"
+          description: "The Pro coordinator has not been reachable for more than one minute."
+
+  - name: cy_llm_pro_worker
+    rules:
+      - alert: ProWorkerDown
+        expr: up{job="cy-llm-pro-worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pro worker is down"
+          description: "The configured Pro execution worker is unavailable."
+
+      - alert: ProWorkerQueueBacklog
+        expr: cy_llm_worker_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pro worker queue backlog is high"
+          description: "Worker queue depth has exceeded 100 for five minutes."
+
+      - alert: ProCircuitBreakerOpen
+        expr: cy_llm_circuit_breaker_state == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pro circuit breaker is open"
+          description: "A Pro worker circuit breaker has remained open for two minutes."

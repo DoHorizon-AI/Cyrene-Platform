@@ -13,9 +13,12 @@ in-repository implementation. External language bindings must produce byte-ident
 ```rust
 use cy_manifest::{runtime_id, RuntimeManifest, Manifest};
 
-let m: RuntimeManifest = serde_json::from_str(json)?;
-let id = runtime_id(&m); // "sha256:<hex>", runtime_id field excluded from preimage
-let bytes = m.canonical_bytes();
+fn runtime_id_from_json(json: &str) -> Result<String, serde_json::Error> {
+    let manifest: RuntimeManifest = serde_json::from_str(json)?;
+    let id = runtime_id(&manifest); // "sha256:<hex>", runtime_id field excluded from preimage
+    let _bytes = manifest.canonical_bytes();
+    Ok(id)
+}
 ```
 
 ## CLI

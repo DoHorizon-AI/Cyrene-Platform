@@ -1,0 +1,15 @@
+# name|kind|state|holder_or_grantee_match|resource_or_endpoint_match|lease_identity_match|fence_match|lease_expiry|grant_expiry|now|expected
+lease_current|lease|ACTIVE|true|true|true|true|2000|-|1000|true
+lease_wrong_holder|lease|ACTIVE|false|true|true|true|2000|-|1000|false
+lease_wrong_resource_generation|lease|ACTIVE|true|false|true|true|2000|-|1000|false
+lease_wrong_fence|lease|ACTIVE|true|true|true|false|2000|-|1000|false
+lease_releasing|lease|RELEASING|true|true|true|true|2000|-|1000|false
+lease_at_expiry|lease|ACTIVE|true|true|true|true|2000|-|2000|false
+grant_current|grant|ACTIVE|true|true|true|true|2000|1500|1000|true
+grant_wrong_grantee|grant|ACTIVE|false|true|true|true|2000|1500|1000|false
+grant_wrong_endpoint|grant|ACTIVE|true|false|true|true|2000|1500|1000|false
+grant_wrong_lease_identity|grant|ACTIVE|true|true|false|true|2000|1500|1000|false
+grant_wrong_fence|grant|ACTIVE|true|true|true|false|2000|1500|1000|false
+grant_lease_revoked|grant|REVOKED|true|true|true|true|2000|1500|1000|false
+grant_at_own_expiry|grant|ACTIVE|true|true|true|true|2000|1500|1500|false
+grant_at_lease_expiry|grant|ACTIVE|true|true|true|true|2000|2500|2000|false

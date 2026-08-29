@@ -1,0 +1,19 @@
+# =============================================================================
+# Prometheus 监控配置
+# 用于 prometheus.yml 的 scrape 配置
+# =============================================================================
+
+# Prometheus scrape configuration for the Python community services.
+rule_files:
+  - /etc/prometheus/rules/cy-llm-alerts.yml
+
+scrape_configs:
+  - job_name: 'cy-llm-worker'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['worker:9090']
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']

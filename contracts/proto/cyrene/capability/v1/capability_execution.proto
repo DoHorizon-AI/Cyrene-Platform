@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package cyrene.capability.v1;
+
+import "google/protobuf/any.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.capability.v1";
+option java_outer_classname = "CapabilityExecutionProto";
+option csharp_namespace = "Cyrene.Capability.V1";
+
+// Product-facing capability execution boundary.
+//
+// This service exposes capability semantics only. Resolution, activation,
+// worker lifecycle, protocol framing, and process details remain inside the
+// Platform implementation. Capability application events are also distinct
+// from cyrene.core.v1 Kernel control events and are not written to the Kernel
+// event history by this service.
+service CapabilityExecutionService {
+  // Resolve, activate, invoke, and clean up one capability execution.
+  // The caller's native gRPC deadline and cancellation are the execution
+  // lifetime authority; there is no timeout field in this request.
+  rpc InvokeCapability(InvokeCapabilityRequest)
+      returns (InvokeCapabilityResponse);
+
+  // Start one live capability application-event stream. The server allocates
+  // the opaque subscription identity returned in stream items; callers do not
+  // choose or operate a worker subscription ID.
+  rpc SubscribeCapabilityEvents(SubscribeCapabilityEventsRequest)
+      returns (stream CapabilityEventStreamItem);
+}
+
+message InvokeCapabilityRequest {
+  string capability = 1;
+  string interface_version = 2;
+  string method = 3;
+
+  // Capability-owned typed protobuf payload. Products should use Any's
+  // type_url/value contract; the Platform never interprets domain fields.
+  google.protobuf.Any request = 4;
+}
+
+message InvokeCapabilityResponse {
+  oneof result {
+    // Capability-owned typed protobuf result.
+    google.protobuf.Any response = 1;
+    // Generic execution failure. This is distinct from a gRPC transport
+    // status and from a capability/domain result encoded in response.
+    CapabilityExecutionError error = 2;
+  }
+}
+
+message SubscribeCapabilityEventsRequest {
+  string capability = 1;
+  string interface_version = 2;
+
+  // Optional capability-owned typed filter. The Platform does not inspect it.
+  google.protobuf.Any filter = 3;
+}
+
+// Event and terminal state are structurally distinct stream items.
+message CapabilityEventStreamItem {
+  oneof item {
+    CapabilityApplicationEvent application_event = 1;
+    CapabilityEventStreamEnd stream_end = 2;
+  }
+}
+
+message CapabilityApplicationEvent {
+  // Server-assigned opaque Product subscription identity. It is not a worker
+  // request ID and is never caller-controlled.
+  string subscription_id = 1;
+  string capability = 2;
+  uint64 event_sequence = 3;
+  string event_type = 4;
+  google.protobuf.Any payload = 5;
+
+  // Abstract provider execution identity for diagnostics. These fields never
+  // contain a PID, process handle, stdio identity, or other worker detail.
+  uint64 generation = 6;
+  string source_id = 7;
+}
+
+message CapabilityEventStreamEnd {
+  string subscription_id = 1;
+  string capability = 2;
+  uint64 generation = 3;
+  string source_id = 4;
+  CapabilityEventStreamEndReason reason = 5;
+  string message = 6;
+  CapabilityExecutionError error = 7;
+}
+
+enum CapabilityEventStreamEndReason {
+  CAPABILITY_EVENT_STREAM_END_REASON_UNSPECIFIED = 0;
+  NORMAL_COMPLETION = 1;
+  CANCELLED = 2;
+  CAPABILITY_UNAVAILABLE = 3;
+  WORKER_CRASH = 4;
+  PROTOCOL_FAILURE = 5;
+  GENERATION_TERMINATED = 6;
+  BACKPRESSURE = 7;
+}
+
+message CapabilityExecutionError {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CAPABILITY_UNAVAILABLE = 1;
+    ACTIVATION_FAILED = 2;
+    PROTOCOL_MISMATCH = 3;
+    INVALID_REQUEST = 4;
+    EXECUTION_FAILURE = 5;
+    WORKER_CRASHED = 6;
+    TIMEOUT = 7;
+    CANCELLED = 8;
+    BACKPRESSURE = 9;
+    STREAM_TERMINATED = 10;
+    GENERATION_TERMINATED = 11;
+  }
+
+  Code code = 1;
+  string message = 2;
+}

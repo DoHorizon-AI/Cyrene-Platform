@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package cyrene.core.v2;
+
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.core.v2";
+
+// Core v2 adds an explicit authority namespace while continuing to project the
+// frozen semantic contract v1 nouns unchanged.
+service KernelAuthorityService {
+  rpc Negotiate(NegotiateRequest) returns (cyrene.semantic.v1.ContractRevision);
+
+  rpc AcquireLease(AcquireSemanticLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+  rpc RenewLease(RenewLeaseRequest) returns (cyrene.semantic.v1.Lease);
+  rpc ReleaseLease(ReleaseSemanticLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+
+  rpc StartWorker(StartWorkerRequest) returns (cyrene.semantic.v1.Operation);
+  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (cyrene.semantic.v1.Worker);
+  rpc StopWorker(StopWorkerRequest) returns (cyrene.semantic.v1.Operation);
+
+  rpc CreateOperation(CreateOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+  rpc ReportOperation(ReportOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+  rpc CancelOperation(CancelSemanticOperationRequest)
+      returns (cyrene.semantic.v1.Operation);
+
+  rpc PublishEndpoint(PublishEndpointRequest) returns (cyrene.semantic.v1.Endpoint);
+  rpc AuthorizeEndpoint(AuthorizeEndpointRequest)
+      returns (cyrene.semantic.v1.EndpointGrant);
+  rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
+  rpc SubscribeEvents(SubscribeEventsRequest)
+      returns (stream cyrene.semantic.v1.Event);
+}
+
+// Namespace is mandatory for every stateful Core v2 authority request. It is
+// deliberately transport metadata, not a semantic v1 field.
+message AuthorityCallContext {
+  string namespace = 1;
+  cyrene.semantic.v1.ContractRevision contract = 2;
+  string request_id = 3;
+  string idempotency_key = 4;
+}
+
+message NegotiateRequest {
+  repeated cyrene.semantic.v1.ContractRevision offered = 1;
+}
+
+message AcquireSemanticLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity holder = 2;
+  cyrene.semantic.v1.ResourceQuery query = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message RenewLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message ReleaseSemanticLeaseRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+}
+
+message StartWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Worker worker = 2;
+}
+
+message HeartbeatWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+}
+
+message StopWorkerRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+  google.protobuf.Duration grace_period = 5;
+}
+
+message CreateOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Operation operation = 2;
+}
+
+message ReportOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Operation operation = 2;
+}
+
+message CancelSemanticOperationRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity operation = 2;
+}
+
+message PublishEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Endpoint endpoint = 2;
+}
+
+message AuthorizeEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EndpointGrant grant = 2;
+}
+
+message RevokeEndpointRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.Identity grant = 2;
+}
+
+message SubscribeEventsRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EventCursor cursor = 2;
+  uint32 page_size = 3;
+}

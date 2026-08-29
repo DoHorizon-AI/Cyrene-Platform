@@ -18,20 +18,25 @@ The six products are plugins, not branches inside the core.
 
 ### Rust kernel
 
-The kernel is a stateless host and enforcement layer. It supervises processes,
-applies resource and filesystem policy, exposes transport primitives, records
-lifecycle events, and maintains the extension registry boundary.
+The Kernel is a node-local decision and lifecycle layer. It owns leases/fencing,
+launch authorization, generic local IPC, and lifecycle events. It does not own
+global scheduling policy, a vendor driver integration, cgroup files, or a
+worker process tree.
 
-GPU support is intentionally shallow. The kernel may:
+GPU support is intentionally outside the Kernel process. A separately
+supervised Hardware Adapter Host may:
 
-- read `/proc`, `/sys/class/drm`, NVML-style telemetry, or vendor CLI output;
-- map approved `/dev/*` nodes into a sandbox;
-- inject `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, or equivalent values;
-- observe exit, OOM, health, and resource events.
+- read vendor `/proc` or sysfs facts, telemetry, or CLI output;
+- enumerate approved device nodes and binding environment variables;
+- load a vendor C ABI library when a CLI is insufficient;
+- return versioned inventory, health, and binding facts over UDS.
 
-It does not link model runtimes or implement CUDA/ROCm kernels. Discovery and
-visibility rules are vendor adapters because device layouts and telemetry APIs
-can change even when the kernel contract remains stable.
+The Kernel sends the returned binding to a separately supervised `sandboxd`
+over UDS. sandboxd applies cgroup/device enforcement and reports exit, OOM,
+and cgroup resource facts. Neither process links model runtimes, vendor
+libraries, or vendor commands into Kernel address space. Adapter loss blocks
+new dependent leases rather than crashing the Kernel; a C ABI is an internal
+Adapter Host detail, not a public Kernel extension API.
 
 ### Framework and control plane
 
@@ -45,9 +50,14 @@ worker code.
 
 ### Worker and advanced-service plugins
 
-Python, JVM, Rust, and web assets run outside the kernel. They implement concrete
-data, training, inference, gateway, UI, and evaluation behavior. A worker crash
-must become a lifecycle event, not a core crash.
+Python, JVM, and third-party Rust business code run outside the kernel. They
+implement concrete data, training, inference, gateway, UI, and evaluation
+behavior. A worker crash must become a lifecycle event, not a core crash.
+Statically compiled Rust code inside the Kernel is limited to pure-safe state
+machines, contracts, and transport clients. Hardware and sandbox adapters are
+Core components but run as separate processes; they are not installable plugin
+runtimes. The Core repository does not link PyO3 or AI compute runtimes into
+the Kernel.
 
 ## Communication planes
 
@@ -63,9 +73,24 @@ extension points, and source roots in `service.json`. Other plugins continue to
 use `plugin.toml`. The framework discovers declarations; it never imports one of
 the six product packages by name.
 
+service.json is first-party service-bundle metadata. plugin.toml is component
+manifest metadata inside the same signed package; the two files are not
+alternative installation protocols.
+
 ## UI boundary
 
 Production servers are headless. Plugins may provide micro-frontend assets. A
 thin cross-platform shell renders those assets and talks to the framework over
 public APIs. Navigator is the first-party implementation of that shell, not a
 kernel component.
+
+## Kernel document layers
+
+- [Kernel design goals](architecture/kernel-design-goals.md): durable design
+  direction and boundaries.
+- [Kernel semantic contract v1](contracts/kernel-semantic-contract-v1.md): the
+  sole normative definition of current v1 semantics.
+- [Kernel execution goals](operations/kernel-execution-goals.md): active P2
+  implementation and Linux acceptance work.
+- [Kernel runtime baseline](operations/kernel-runtime.md): deployment and
+  operating guidance.

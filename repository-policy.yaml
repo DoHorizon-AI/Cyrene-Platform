@@ -1,0 +1,57 @@
+schema_version: cyrene.repository-policy.v1
+repository:
+  logical_name: Cyrene-Platform
+  lifecycle_class: PUBLIC_FOUNDATION
+  visibility: public
+  source_owner: Platform Core Team
+  remote_default_branch: develop
+  integration_branch: develop
+  release_branch: main
+  default_branch: develop
+ownership:
+  owns:
+  - Foundational contracts & Protobuf schemas
+  - Rust Kernel, process isolation & cgroup sandboxing
+  - Product Control Plane primitives
+  - Shared infrastructure and CI/CD tooling
+  does_not_own:
+  - Product-specific AI state
+  - Training epoch loops or Serving engine internals
+build:
+  independent: true
+  build_systems:
+  - cargo
+  - pyproject
+  - gradle
+artifacts:
+  package_units:
+  - cyrene-control-plane
+  - cyrene-preflight
+  - cyrene-artifacts
+  - cyrene-environment
+  native_binaries:
+  - cy-kernel-daemon
+  - cy-node-agent
+distribution:
+  role: COMPONENT_RELEASE
+  profiles:
+  - core
+  - training
+  - serving
+  - gateway
+  - full
+  standalone_user_product: false
+integration:
+  multi_repo_required: false
+authorities:
+  ci: github
+  release: github_releases
+  deployment: community
+trust:
+  public_requires_private: false
+versioning:
+  scheme: semver
+  scope: repository
+  tag_strategy: repository
+  tag_pattern: v{version}
+  automated_release: true

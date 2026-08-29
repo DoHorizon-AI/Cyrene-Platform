@@ -1,0 +1,6 @@
+# name|action|principal_authorized|worker_exists|expected
+publish_endpoint_ok|PUBLISH_ENDPOINT|true|true|ACCEPT
+publish_endpoint_unauthorized|PUBLISH_ENDPOINT|false|true|AUTHORITY_DENIED
+publish_endpoint_no_worker|PUBLISH_ENDPOINT|true|false|AUTHORITY_DENIED
+revoke_endpoint_ok|REVOKE_ENDPOINT|true|true|ACCEPT
+revoke_endpoint_unauthorized|REVOKE_ENDPOINT|false|true|AUTHORITY_DENIED

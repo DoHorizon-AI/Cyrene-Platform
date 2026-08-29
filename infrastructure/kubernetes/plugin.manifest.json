@@ -1,0 +1,1 @@
+{"schemaVersion":"0.1","id":"io.cyrene.infrastructure.k8s","name":"CYRENE Kubernetes Templates","version":"0.1.0","kind":"service-plugin","execution":"out-of-process","capabilities":["deployment.kubernetes"],"storage":{"directDatabaseAccess":false},"contract":{"status":"compatibility-snapshot","authority":"CYRENE deployment contract"}}

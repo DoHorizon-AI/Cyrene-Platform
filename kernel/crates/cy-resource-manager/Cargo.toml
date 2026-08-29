@@ -1,0 +1,13 @@
+[package]
+name = "cy-resource-manager"
+version = "0.1.0"
+edition = "2021"
+description = "Atomic local resource leases and fencing for the CYRENE node kernel"
+license = "Apache-2.0"
+
+[lib]
+name = "cy_resource_manager"
+path = "src/lib.rs"
+
+[dependencies]
+cy-kernel-api = { path = "../cy-kernel-api" }

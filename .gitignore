@@ -1,6 +1,10 @@
 # Rust and JVM build output
 target/
 **/target/
+tck/capability-execution-service/dotnet/bin/
+tck/capability-execution-service/dotnet/obj/
+tck/message-connector-contract/dotnet/bin/
+tck/message-connector-contract/dotnet/obj/
 *.rs.bk
 .gradle/
 **/.gradle/
@@ -29,8 +33,15 @@ secrets/
 .vscode/
 .claude/
 .gemini/
+.workbuddy/
 *.swp
 *.swo
 .DS_Store
-Thumbs.db
 *.tmp
+__pycache__/
+*.egg-info/
+*.dist-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/

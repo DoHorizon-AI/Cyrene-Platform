@@ -1,22 +1,72 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use_ascii_temp_dir();
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let proto_dir = PathBuf::from("../../proto");
-    let ai_proto = proto_dir.join("ai_service.proto");
-    let agent_proto = proto_dir.join("agent_service.proto");
-    let absolute_ai_proto = manifest_dir.join(&ai_proto);
-    let absolute_agent_proto = manifest_dir.join(&agent_proto);
+    let core_proto = proto_dir.join("cyrene/core/v1/cyrene_core.proto");
+    let authority_proto = proto_dir.join("cyrene/core/v1/kernel_authority.proto");
+    let authority_v2_proto = proto_dir.join("cyrene/core/v2/kernel_authority.proto");
+    let hardware_adapter_proto = proto_dir.join("cyrene/hardware/v1/hardware_adapter.proto");
+    let sandbox_adapter_proto = proto_dir.join("cyrene/sandbox/v1/sandbox_adapter.proto");
+    let semantic_contract_proto = proto_dir.join("cyrene/semantic/v1/kernel_contract.proto");
+    let provider_proto = proto_dir.join("cyrene/provider/v1/kernel_provider.proto");
+    let service_supervision_proto = proto_dir.join("cyrene/core/v1/service_supervision.proto");
+    let capability_execution_proto =
+        proto_dir.join("cyrene/capability/v1/capability_execution.proto");
+    let message_connector_proto =
+        proto_dir.join("cyrene/message/connector/v1/message_connector.proto");
 
-    println!("cargo:rerun-if-changed={}", absolute_ai_proto.display());
-    println!("cargo:rerun-if-changed={}", absolute_agent_proto.display());
+    println!("cargo:rerun-if-changed={}", core_proto.display());
+    println!("cargo:rerun-if-changed={}", authority_proto.display());
+    println!("cargo:rerun-if-changed={}", authority_v2_proto.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        service_supervision_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        capability_execution_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        message_connector_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        proto_dir.join("cyrene/core/v1").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        hardware_adapter_proto.display()
+    );
+    println!("cargo:rerun-if-changed={}", sandbox_adapter_proto.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        semantic_contract_proto.display()
+    );
+    println!("cargo:rerun-if-changed={}", provider_proto.display());
+    let protoc_include = protoc_include_path()?;
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
 
     tonic_build::configure()
         .build_client(true)
         .build_server(true)
-        .compile(&[ai_proto, agent_proto], &[proto_dir])?;
+        .build_transport(false)
+        .compile(
+            &[
+                core_proto,
+                authority_proto,
+                authority_v2_proto,
+                service_supervision_proto,
+                capability_execution_proto,
+                message_connector_proto,
+                hardware_adapter_proto,
+                sandbox_adapter_proto,
+                semantic_contract_proto,
+                provider_proto,
+            ],
+            &[proto_dir, protoc_include],
+        )?;
 
     Ok(())
 }
@@ -49,3 +99,37 @@ fn use_ascii_temp_dir() {
 
 #[cfg(not(windows))]
 fn use_ascii_temp_dir() {}
+
+#[cfg(windows)]
+fn protoc_include_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let include_path = protoc_bin_vendored::include_path()?;
+    let temp_root = std::env::temp_dir();
+    if include_path.to_string_lossy().is_ascii() || !temp_root.to_string_lossy().is_ascii() {
+        return Ok(include_path);
+    }
+
+    let ascii_include = temp_root.join("cyrene-protoc-vendored-include");
+    copy_directory(&include_path, &ascii_include)?;
+    Ok(ascii_include)
+}
+
+#[cfg(not(windows))]
+fn protoc_include_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(protoc_bin_vendored::include_path()?)
+}
+
+#[cfg(windows)]
+fn copy_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}

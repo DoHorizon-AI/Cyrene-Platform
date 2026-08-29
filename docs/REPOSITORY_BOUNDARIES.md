@@ -20,6 +20,15 @@ Core contains only its explicit public whitelist. Legacy service source remains
 byte-preserved in the private repository; follow-up work may refactor imports
 only after a service has a stable public contract and an acceptance test.
 
+Development uses two language-specific lanes and one integration branch:
+`develop-kernel` is for Rust Kernel/Node Runtime work, `develop-framework` is
+for Kotlin Framework/Control Plane work, and `develop` is the reviewed
+cross-language integration branch. `main` is protected and accepts only a
+reviewed release pull request from `develop` after Core CI,
+architecture-governance, and release-evidence checks pass. GitHub branch
+protection is part of this governance checkpoint; it does not publish either
+repository or deploy any service.
+
 Language-specific plugin SDKs, generators, and compatibility tests are private
 migration tooling until the replacement API is designed. A Python process may
 implement an out-of-process plugin, but Python is not part of the core runtime or
@@ -28,7 +37,7 @@ its repository toolchain.
 ## Non-goals for this checkpoint
 
 - publishing or making either repository public;
-- configuring GitHub or Azure DevOps remotes;
+- configuring Azure DevOps service/deployment remotes;
 - claiming GPU support from source presence;
 - making every private legacy application build from its new path;
 - deleting legacy bundles or generated compatibility code.

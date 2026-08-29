@@ -1,0 +1,215 @@
+# CY-LLM Pro enterprise deployment.
+# The build context is the single-repository root, not the external Pro checkout.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: cy-llm-pro-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - cy-llm-pro-redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - cy-llm-pro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: cy-llm-pro-postgres
+    restart: unless-stopped
+    profiles: [database]
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-cy_llm}"
+      POSTGRES_USER: "${POSTGRES_USER:-cy_llm}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - cy-llm-pro-postgres-data:/var/lib/postgresql/data
+    networks:
+      - cy-llm-pro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cy_llm} -d ${POSTGRES_DB:-cy_llm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker-nvidia:
+    build:
+      context: ../../../..
+      dockerfile: infrastructure/cyrene-runtime-deployment/enterprise/docker/Dockerfile.vllm
+      args:
+        BASE_IMAGE: "${PRO_VLLM_BASE_IMAGE:-vllm/vllm-openai:v0.12.0}"
+        CUDA_TAG: "${PRO_CUDA_TAG:-124}"
+    image: cy-llm-pro-vllm:${PRO_IMAGE_TAG:-dev}
+    restart: unless-stopped
+    environment:
+      CY_LLM_ENGINE: "${CY_LLM_ENGINE:-cuda-vllm}"
+      CY_LLM_MODEL: "${CY_LLM_MODEL:-default}"
+      CY_LLM_MODEL_REGISTRY_PATH: /etc/cy-llm-pro/models.json
+      CY_LLM_INTERNAL_TOKEN: "${CY_LLM_INTERNAL_TOKEN:-}"
+      CY_LLM_HEALTH_PORT: "9090"
+      VLLM_TP: "${VLLM_TP:-1}"
+      VLLM_GPU_MEM: "${VLLM_GPU_MEM:-0.9}"
+    volumes:
+      - ../models.json:/etc/cy-llm-pro/models.json:ro
+      - "${CY_LLM_MODEL_CACHE:-~/.cache/cy-llm/models}:/models"
+      - "${CY_LLM_CHECKPOINT_DIR:-~/.cache/cy-llm/checkpoints}:/checkpoints"
+    ports:
+      - "${WORKER_NVIDIA_PORT:-50051}:50051"
+      - "${WORKER_NVIDIA_METRICS_PORT:-19090}:9090"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - cy-llm-pro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/healthz')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  coordinator:
+    build:
+      context: ../../../..
+      dockerfile: infrastructure/cyrene-runtime-deployment/enterprise/docker/Dockerfile.coordinator
+    image: cy-llm-pro-coordinator:${PRO_IMAGE_TAG:-dev}
+    container_name: cy-llm-pro-coordinator
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CY_LLM_INTERNAL_TOKEN: "${CY_LLM_INTERNAL_TOKEN:-}"
+      SCHEDULER_BRIDGE_ENABLED: "${SCHEDULER_BRIDGE_ENABLED:-false}"
+    ports:
+      - "${COORDINATOR_GRPC_PORT:-50050}:50050"
+      - "${COORDINATOR_HTTP_PORT:-8081}:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker-nvidia:
+        condition: service_healthy
+    networks:
+      - cy-llm-pro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  gateway:
+    build:
+      context: ../../../..
+      dockerfile: infrastructure/cyrene-runtime-deployment/enterprise/docker/Dockerfile.gateway
+    image: cy-llm-pro-gateway:${PRO_IMAGE_TAG:-dev}
+    container_name: cy-llm-pro-gateway
+    restart: unless-stopped
+    environment:
+      CY_LLM_COORDINATOR_ENABLED: "${CY_LLM_COORDINATOR_ENABLED:-true}"
+      CY_LLM_COORDINATOR_HOST: "${CY_LLM_COORDINATOR_HOST:-coordinator}"
+      CY_LLM_COORDINATOR_PORT: "${CY_LLM_COORDINATOR_PORT:-50050}"
+      CY_LLM_WORKER_HOST: "${CY_LLM_WORKER_HOST:-worker-nvidia}"
+      CY_LLM_WORKER_PORT: "${CY_LLM_WORKER_PORT:-50051}"
+      CY_LLM_MODEL_REGISTRY_PATH: /etc/cy-llm-pro/models.json
+      CY_LLM_REGISTRY_PATH: /etc/cy-llm-pro/models.json
+      CY_LLM_SECURITY_ENABLED: "${CY_LLM_SECURITY_ENABLED:-true}"
+      CY_LLM_API_KEY: "${CY_LLM_API_KEY:-}"
+      CY_LLM_INTERNAL_TOKEN: "${CY_LLM_INTERNAL_TOKEN:-}"
+      CY_LLM_DATABASE_ENABLED: "${CY_LLM_DATABASE_ENABLED:-false}"
+      SPRING_R2DBC_URL: "${SPRING_R2DBC_URL:-r2dbc:postgresql://postgres:5432/cy_llm}"
+      SPRING_R2DBC_USERNAME: "${POSTGRES_USER:-cy_llm}"
+      SPRING_R2DBC_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      JAVA_OPTS: "${JAVA_OPTS:--XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC}"
+    ports:
+      - "${CY_LLM_PORT:-8080}:8080"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      worker-nvidia:
+        condition: service_healthy
+    networks:
+      - cy-llm-pro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: cy-llm-pro-prometheus
+    restart: unless-stopped
+    profiles: [observability]
+    volumes:
+      - ../observability/prometheus/prometheus-config.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/prometheus/rules:/etc/prometheus/rules:ro
+      - cy-llm-pro-prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    depends_on:
+      gateway:
+        condition: service_healthy
+      coordinator:
+        condition: service_healthy
+      worker-nvidia:
+        condition: service_healthy
+    networks:
+      - cy-llm-pro
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: cy-llm-pro-alertmanager
+    restart: unless-stopped
+    profiles: [observability]
+    volumes:
+      - ../observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - cy-llm-pro-alertmanager-data:/alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    networks:
+      - cy-llm-pro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: cy-llm-pro-grafana
+    restart: unless-stopped
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - cy-llm-pro-grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - cy-llm-pro
+
+networks:
+  cy-llm-pro:
+    driver: bridge
+
+volumes:
+  cy-llm-pro-redis-data:
+  cy-llm-pro-postgres-data:
+  cy-llm-pro-prometheus-data:
+  cy-llm-pro-alertmanager-data:
+  cy-llm-pro-grafana-data:

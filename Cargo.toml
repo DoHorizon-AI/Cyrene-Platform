@@ -1,14 +1,35 @@
 [workspace]
 resolver = "2"
 members = [
+    # 1. 契约层 (Contracts)
     "contracts/rust/cy-manifest",
+    "contracts/rust/cy-kernel-contract",
     "contracts/rust/cy-plugin-protocol",
     "contracts/rust/cy-proto",
-    "kernel/crates/cy-local-transport",
-    "kernel/crates/cy-node-agent",
-    "kernel/crates/cy-plugin-supervisor",
+
+    # 2. 内核层 (Kernel Crates)
+    "kernel/crates/cy-kernel-api",
+    "kernel/crates/cy-adapter-client",
+    "kernel/crates/cy-resource-manager",
+    "kernel/crates/cy-sandbox-client",
+    "kernel/crates/cy-kernel-daemon",
+
+    # 3. 框架层与 SDK (Framework & SDK Crates)
     "framework/crates/cy-extension-registry",
+    "framework/crates/cy-installation-resolver",
+    "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
+    "framework/crates/cy-capability-execution-service",
+    "sdk/rust/cy-worker-sdk",
+
+    # 4. 外层节点运行时组合（不属于 Kernel crate）
+    "runtime/cyrene-kernel",
+    "agents/node/cy-node-agent",
+
+    # 5. 进程外硬件适配器（不属于 Kernel 进程）
+    "adapters/hardware/nvidia",
+    "adapters/hardware/linux_sys",
+    "adapters/execution/sandboxd",
 ]
 
 [profile.release]

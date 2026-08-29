@@ -1,0 +1,38 @@
+# Build context: repository root.
+# Use the Gradle base image instead of an un-migrated wrapper JAR.
+
+FROM gradle:8.10-jdk21 AS builder
+
+WORKDIR /workspace
+COPY services/cyrene-exchange/components/coordinator ./services/cyrene-exchange/components/coordinator
+COPY plugins/enterprise-bundle/proto ./plugins/enterprise-bundle/proto
+COPY plugins/cy-plugin-spring-gateway/proto ./proto
+
+WORKDIR /workspace/services/cyrene-exchange/components/coordinator
+RUN gradle --no-daemon --build-cache bootJar -x test
+
+FROM eclipse-temurin:21-jre
+
+LABEL org.opencontainers.image.title="CY-LLM Pro Coordinator"
+LABEL org.opencontainers.image.description="Optional Pro Kotlin worker coordinator"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system cyllm \
+    && useradd --system --gid cyllm --home-dir /nonexistent --shell /usr/sbin/nologin cyllm
+
+WORKDIR /app
+COPY --from=builder /workspace/services/cyrene-exchange/components/coordinator/build/libs/*.jar /app/app.jar
+
+RUN chown -R cyllm:cyllm /app
+USER cyllm
+
+ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC"
+ENV SPRING_PROFILES_ACTIVE=docker
+
+EXPOSE 50050 8081
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -fsS http://localhost:8081/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]

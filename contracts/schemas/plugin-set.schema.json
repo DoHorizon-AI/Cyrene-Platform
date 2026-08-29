@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/plugin-set.schema.json",
+  "title": "PluginSetSpec and PluginSetLock",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/spec" },
+    { "$ref": "#/$defs/lock" }
+  ],
+  "$defs": {
+    "id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1 } }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": { "version": { "type": "string", "minLength": 1 } }
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["INLINE", "WORKER", "SERVICE"]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "minLength": 1 }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "interface_version"],
+      "properties": {
+        "capability": { "$ref": "#/$defs/id" },
+        "interface_version": { "$ref": "#/$defs/version" },
+        "execution_modes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/mode" }
+        }
+      }
+    },
+    "resolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plugin",
+        "plugin_version",
+        "capability",
+        "interface_version",
+        "execution_mode",
+        "compatibility_evidence"
+      ],
+      "properties": {
+        "plugin": { "$ref": "#/$defs/id" },
+        "plugin_version": { "$ref": "#/$defs/version" },
+        "capability": { "$ref": "#/$defs/id" },
+        "interface_version": { "$ref": "#/$defs/version" },
+        "execution_mode": { "$ref": "#/$defs/mode" },
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "compatibility_evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirements", "allowed_execution_modes"],
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requirement" }
+        },
+        "allowed_execution_modes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/mode" }
+        }
+      }
+    },
+    "lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "entries"],
+      "properties": {
+        "contract_version": { "const": "cyrene.plugin.v1" },
+        "entries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/resolved" }
+        },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

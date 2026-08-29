@@ -94,15 +94,15 @@ Consequences worth noting:
 Within a string, the following characters are escaped; everything else
 (including all non-ASCII Unicode) is emitted verbatim as UTF-8:
 
-| Character            | Output |
-|----------------------|--------|
-| `"` (U+0022)         | `\"`   |
-| `\` (U+005C)         | `\\`   |
-| backspace (U+0008)   | `\b`   |
-| tab (U+0009)         | `\t`   |
-| line feed (U+000A)   | `\n`   |
-| form feed (U+000C)   | `\f`   |
-| carriage return (U+000D) | `\r` |
+| Character                                          | Output                   |
+| -------------------------------------------------- | ------------------------ |
+| `"` (U+0022)                                       | `\"`                     |
+| `\` (U+005C)                                       | `\\`                     |
+| backspace (U+0008)                                 | `\b`                     |
+| tab (U+0009)                                       | `\t`                     |
+| line feed (U+000A)                                 | `\n`                     |
+| form feed (U+000C)                                 | `\f`                     |
+| carriage return (U+000D)                           | `\r`                     |
 | other C0 controls (U+0000–U+001F not listed above) | `\u00xx` (lowercase hex) |
 
 Note: `/` (solidus) is **not** escaped. Non-ASCII characters are **not**
@@ -121,17 +121,17 @@ The same guarantee holds for the immutable resources: the reference inputs
 
 ## 6. Contract inventory
 
-| Type | Schema | Computed id | Preimage exclusion |
-|------|--------|-------------|--------------------|
-| `HardwareManifest` | `manifests/hardware_manifest.schema.json` | — | — |
-| `ModelManifest` | `manifests/model_manifest.schema.json` | — | — |
-| `WorkloadRequest` | `manifests/workload_request.schema.json` | — | — |
-| `RuntimeManifest` | `manifests/runtime_manifest.schema.json` | `runtime_id` | `runtime_id` |
-| `WhyReport` | `manifests/why_report.schema.json` | none (hash available) | — |
-| `ValidationResult` | `manifests/validation_result.schema.json` | none (hash available) | — |
-| `TrainingRevision` | `manifests/training_revision.schema.json` | `revision_id` | `revision_id` |
-| `CheckpointMetadata` | `manifests/checkpoint_metadata.schema.json` | `checkpoint_id` | `checkpoint_id` |
-| `ArtifactManifest` | `manifests/artifact_manifest.schema.json` | `artifact_id` | `artifact_id` |
+| Type                 | Schema                                      | Computed id           | Preimage exclusion   |
+| -------------------- | ------------------------------------------- | --------------------- | -------------------- |
+| `HardwareManifest`   | `manifests/hardware_manifest.schema.json`   | —                     | —                    |
+| `ModelManifest`      | `manifests/model_manifest.schema.json`      | —                     | —                    |
+| `WorkloadRequest`    | `manifests/workload_request.schema.json`    | —                     | —                    |
+| `RuntimeManifest`    | `manifests/runtime_manifest.schema.json`    | `runtime_id`          | `runtime_id`         |
+| `WhyReport`          | `manifests/why_report.schema.json`          | none (hash available) | —                    |
+| `ValidationResult`   | `manifests/validation_result.schema.json`   | none (hash available) | —                    |
+| `TrainingRevision`   | `manifests/training_revision.schema.json`   | `revision_id`         | `revision_id`        |
+| `CheckpointMetadata` | `manifests/checkpoint_metadata.schema.json` | `checkpoint_id`       | `checkpoint_id`      |
+| `ArtifactManifest`   | `manifests/artifact_manifest.schema.json`   | `artifact_id`         | `artifact_id`        |
 
 The three new immutable resources compute their id exactly as `RuntimeManifest`
 does: `id = "sha256:" + hex(sha256(canonical_bytes(record_without_its_id)))`.

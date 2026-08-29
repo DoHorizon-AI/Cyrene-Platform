@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+package cyrene.sandbox.v1;
+
+// This protocol is local-only: it joins the unprivileged Kernel decision plane
+// to a separately supervised, privileged Sandbox Adapter Host over a bounded
+// Unix-domain-socket frame. It is not a public plugin or remote control-plane
+// API.
+message SandboxRequest {
+  uint32 protocol_version = 1;
+
+  oneof body {
+    SandboxPreflightRequest preflight = 2;
+    SandboxLaunchRequest launch = 3;
+    SandboxStopRequest stop = 4;
+    SandboxTelemetryRequest telemetry = 5;
+    SandboxDiscoverRecoveryRequest discover_recovery = 6;
+    SandboxRecoverStaleRequest recover_stale = 7;
+  }
+}
+
+message SandboxPreflightRequest {}
+
+message SandboxLaunchRequest {
+  string instance_name = 1;
+  string executable = 2;
+  repeated string args = 3;
+  map<string, string> environment = 4;
+  string cgroup_name = 5;
+  SandboxLimits limits = 6;
+  SandboxDeviceBinding binding = 7;
+  // Optional bounded worker byte-stream endpoint. sandboxd owns the stdio
+  // bridge; the Kernel never interprets the worker protocol on this channel.
+  string transport_socket_path = 8;
+}
+
+message SandboxStopRequest {
+  SandboxProcessHandle handle = 1;
+  uint64 grace_period_ms = 2;
+  bool immediate = 3;
+}
+
+message SandboxTelemetryRequest {
+  SandboxProcessHandle handle = 1;
+}
+
+// Restart recovery remains local to the Kernel and sandboxd. These process
+// facts are intentionally absent from the semantic and Core service APIs.
+message SandboxDiscoverRecoveryRequest {}
+
+message SandboxRecoverStaleRequest {
+  SandboxRuntimeEvidence evidence = 1;
+}
+
+message SandboxResponse {
+  uint32 protocol_version = 1;
+  string adapter_id = 2;
+
+  oneof body {
+    SandboxCapabilities capabilities = 3;
+    SandboxProcessHandle process = 4;
+    SandboxCleanupReport cleanup = 5;
+    SandboxTelemetry telemetry = 6;
+    SandboxError error = 7;
+    SandboxRecoveryProcesses recovery_processes = 8;
+  }
+}
+
+message SandboxCapabilities {
+  bool ready = 1;
+  repeated SandboxFact facts = 2;
+  repeated SandboxEnforcementReport enforcement = 3;
+}
+
+message SandboxFact {
+  string name = 1;
+  bool available = 2;
+  bool required = 3;
+  string detail = 4;
+}
+
+enum SandboxEnforcementMode {
+  SANDBOX_ENFORCEMENT_MODE_UNSPECIFIED = 0;
+  SANDBOX_ENFORCEMENT_MODE_HARD = 1;
+  SANDBOX_ENFORCEMENT_MODE_SOFT = 2;
+  SANDBOX_ENFORCEMENT_MODE_VISIBILITY_ONLY = 3;
+  SANDBOX_ENFORCEMENT_MODE_OBSERVE_ONLY = 4;
+  SANDBOX_ENFORCEMENT_MODE_UNENFORCED = 5;
+}
+
+message SandboxEnforcementReport {
+  string resource_kind = 1;
+  SandboxEnforcementMode mode = 2;
+  string adapter_id = 3;
+  string reason_code = 4;
+}
+
+message SandboxLimits {
+  optional uint32 cpu_max_millicores = 1;
+  optional uint64 memory_max_bytes = 2;
+  optional string cpuset_cpus = 3;
+}
+
+message SandboxDeviceNode {
+  string path = 1;
+  optional uint32 major = 2;
+  optional uint32 minor = 3;
+  bool required = 4;
+}
+
+message SandboxDeviceBinding {
+  string device_id = 1;
+  repeated SandboxDeviceNode nodes = 2;
+  map<string, string> environment = 3;
+  repeated uint32 required_gids = 4;
+  SandboxEnforcementMode enforcement = 5;
+  string adapter_id = 6;
+  string reason_code = 7;
+}
+
+message SandboxProcessHandle {
+  uint32 pid = 1;
+  string cgroup_path = 2;
+  optional uint64 start_time_ticks = 3;
+  string transport_socket_path = 4;
+}
+
+message SandboxRuntimeEvidence {
+  string cgroup_name = 1;
+  uint32 pid = 2;
+  uint64 start_time_ticks = 3;
+}
+
+message SandboxRecoveryProcesses {
+  repeated SandboxRuntimeEvidence processes = 1;
+}
+
+message SandboxProcessCondition {
+  string reason_code = 1;
+  string summary = 2;
+}
+
+message SandboxCleanupReport {
+  bool complete = 1;
+  optional int32 exit_code = 2;
+  bool oom_killed = 3;
+  repeated SandboxProcessCondition conditions = 4;
+  string reason_code = 5;
+}
+
+message SandboxTelemetry {
+  optional uint64 memory_current_bytes = 1;
+  optional uint64 memory_peak_bytes = 2;
+  optional uint64 cpu_usage_usec = 3;
+  optional uint64 cpu_user_usec = 4;
+  optional uint64 cpu_system_usec = 5;
+  uint64 oom_kill_count = 6;
+}
+
+message SandboxError {
+  string reason_code = 1;
+  string message = 2;
+  bool retryable = 3;
+}

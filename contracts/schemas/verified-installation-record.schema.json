@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/verified-installation-record.schema.json",
+  "title": "CYRENE Verified Installation Record",
+  "description": "Evidence written by an external OCI installer after policy, signature, SBOM, and provenance verification. The Kernel only consumes the resulting digest-bound launch plan.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_version",
+    "installation_name",
+    "manifest_digest",
+    "artifact_digest",
+    "verified_signature_identity",
+    "signature_policy_name",
+    "sbom_digest",
+    "provenance_digest",
+    "executable"
+  ],
+  "properties": {
+    "record_version": { "const": 1 },
+    "installation_name": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+    "manifest_digest": { "$ref": "#/$defs/sha256" },
+    "artifact_digest": { "$ref": "#/$defs/sha256" },
+    "verified_signature_identity": { "type": "string", "minLength": 1 },
+    "signature_policy_name": { "type": "string", "minLength": 1 },
+    "sbom_digest": { "$ref": "#/$defs/sha256" },
+    "provenance_digest": { "$ref": "#/$defs/sha256" },
+    "executable": { "type": "string", "minLength": 1 },
+    "args": { "type": "array", "items": { "type": "string" } },
+    "environment": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

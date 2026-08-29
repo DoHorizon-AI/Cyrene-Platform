@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use jsonschema::Validator;
+use jsonschema::JSONSchema;
 use serde_json::Value;
 
 fn contracts_dir() -> PathBuf {
@@ -16,23 +16,23 @@ fn read_json(relative_path: impl AsRef<Path>) -> Value {
         .unwrap_or_else(|error| panic!("invalid JSON in {}: {error}", path.display()))
 }
 
-fn compile_schema(relative_path: impl AsRef<Path>) -> Validator {
-    let path = relative_path.as_ref();
-    let schema = read_json(path);
-    jsonschema::validator_for(&schema)
-        .unwrap_or_else(|error| panic!("invalid JSON Schema in {}: {error}", path.display()))
-}
-
 fn assert_valid(relative_schema: impl AsRef<Path>, instance: &Value) {
     let schema_path = relative_schema.as_ref();
-    let validator = compile_schema(schema_path);
-    if let Err(error) = validator.validate(instance) {
+    let schema = read_json(schema_path);
+    let compiled = JSONSchema::compile(&schema).unwrap_or_else(|error| {
+        panic!("invalid JSON Schema in {}: {error}", schema_path.display())
+    });
+
+    if let Err(errors) = compiled.validate(instance) {
+        let details = errors
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         panic!(
-            "{} does not validate against {}: {error}",
-            "contract instance",
+            "contract instance does not validate against {}:\n{details}",
             schema_path.display()
         );
-    }
+    };
 }
 
 #[test]
@@ -62,7 +62,13 @@ fn every_checked_in_schema_compiles() {
         let relative_path = path
             .strip_prefix(contracts_dir())
             .expect("schema path must be inside contracts/");
-        compile_schema(relative_path);
+        let schema = read_json(relative_path);
+        JSONSchema::compile(&schema).unwrap_or_else(|error| {
+            panic!(
+                "invalid JSON Schema in {}: {error}",
+                relative_path.display()
+            )
+        });
     }
 }
 
@@ -107,7 +113,7 @@ fn checked_in_yaml_example_is_valid_and_matches_json_contract() {
 fn checked_in_plugin_manifest_is_toml_and_schema_valid() {
     let plugin_path = contracts_dir().join("../examples/plugins/jvm/poc/plugin.toml");
     let plugin_contents = fs::read_to_string(&plugin_path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", plugin_path.display()));
+        .unwrap_or_else(|error| panic!("invalid TOML in {}: {error}", plugin_path.display()));
     let plugin_toml: toml::Value = toml::from_str(&plugin_contents)
         .unwrap_or_else(|error| panic!("invalid TOML in {}: {error}", plugin_path.display()));
     let plugin_json =

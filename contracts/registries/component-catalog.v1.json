@@ -1,0 +1,235 @@
+{
+  "$schema": "../schemas/component-catalog.schema.json",
+  "catalogVersion": "1.0",
+  "authority": "docs/contracts/platform-component-boundary-v1.md",
+  "components": [
+    {
+      "path": "services/cyrene-astrbot-rev",
+      "id": "cyrene.service.astrbot-rev",
+      "class": "service",
+      "state": "host-native-transition"
+    },
+    {
+      "path": "services/cyrene-catalyst",
+      "id": "cyrene.service.catalyst",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "services/cyrene-dh-system-internal",
+      "id": "cyrene.service.dh-system-internal",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "services/cyrene-echo",
+      "id": "cyrene.service.echo",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "services/cyrene-exchange",
+      "id": "cyrene.service.exchange",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "services/cyrene-navigator",
+      "id": "cyrene.service.navigator",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "services/cyrene-reactor",
+      "id": "cyrene.service.reactor",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "services/cyrene-yield",
+      "id": "cyrene.service.yield",
+      "class": "service",
+      "state": "reserved"
+    },
+    {
+      "path": "plugins/cy-plugin-agent-system",
+      "id": "cyrene.agent-system",
+      "class": "compatibility-snapshot",
+      "state": "needs-agent-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-asp.net-core-gateway",
+      "id": "cyrene.gateway.aspnet",
+      "class": "compatibility-snapshot",
+      "state": "needs-service-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-astrbot-star-system",
+      "id": "cyrene.astrbot-star",
+      "class": "compatibility-snapshot",
+      "state": "legacy-in-process"
+    },
+    {
+      "path": "plugins/cy-plugin-compat-rules",
+      "id": "com.cy.compat-rules",
+      "class": "compatibility-snapshot",
+      "state": "needs-compatibility-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-content-policy",
+      "id": "cyrene.content-policy",
+      "class": "compatibility-snapshot",
+      "state": "needs-policy-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-conversation",
+      "id": "cyrene.conversation",
+      "class": "compatibility-snapshot",
+      "state": "needs-conversation-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-docker",
+      "id": "cyrene.infrastructure.docker",
+      "class": "infrastructure-asset",
+      "state": "not-installable"
+    },
+    {
+      "path": "plugins/cy-plugin-im-connector",
+      "id": "cyrene.im-connector",
+      "class": "compatibility-snapshot",
+      "state": "needs-channel-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-k8s",
+      "id": "cyrene.infrastructure.k8s",
+      "class": "infrastructure-asset",
+      "state": "not-installable"
+    },
+    {
+      "path": "plugins/cy-plugin-mcp",
+      "id": "cyrene.mcp",
+      "class": "compatibility-snapshot",
+      "state": "needs-agent-tool-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-media",
+      "id": "cyrene.media",
+      "class": "compatibility-snapshot",
+      "state": "needs-media-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-memory-system",
+      "id": "cyrene.memory-system",
+      "class": "compatibility-snapshot",
+      "state": "needs-memory-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-model-api-connector",
+      "id": "io.cyrene.model-api.connector",
+      "class": "compatibility-snapshot",
+      "state": "needs-model-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-model-api-router",
+      "id": "io.cyrene.model-api.router",
+      "class": "compatibility-snapshot",
+      "state": "needs-model-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-mysql",
+      "id": "cyrene.mysql",
+      "class": "compatibility-snapshot",
+      "state": "needs-data-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-nginx",
+      "id": "cyrene.infrastructure.nginx",
+      "class": "infrastructure-asset",
+      "state": "not-installable"
+    },
+    {
+      "path": "plugins/cy-plugin-postgre-sql",
+      "id": "cyrene.postgresql",
+      "class": "compatibility-snapshot",
+      "state": "needs-data-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-py-gateway",
+      "id": "cyrene.gateway.python",
+      "class": "compatibility-snapshot",
+      "state": "needs-service-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-redis",
+      "id": "cyrene.redis",
+      "class": "infrastructure-asset",
+      "state": "placeholder"
+    },
+    {
+      "path": "plugins/cy-plugin-skills",
+      "id": "cyrene.skills",
+      "class": "compatibility-snapshot",
+      "state": "needs-skill-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-spring-gateway",
+      "id": "cyrene.gateway.spring",
+      "class": "compatibility-snapshot",
+      "state": "needs-service-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-sqlite",
+      "id": "cyrene.sqlite",
+      "class": "compatibility-snapshot",
+      "state": "needs-data-contract"
+    },
+    {
+      "path": "plugins/cy-plugin-uv",
+      "id": "cyrene.uv",
+      "class": "infrastructure-asset",
+      "state": "placeholder"
+    },
+    {
+      "path": "plugins/docker-uv-builder",
+      "id": "com.cy.runtime.docker-uv",
+      "class": "compatibility-snapshot",
+      "state": "needs-runtime-builder-contract"
+    },
+    {
+      "path": "plugins/enterprise-bundle",
+      "id": "com.cy.enterprise.bundle",
+      "class": "compatibility-snapshot",
+      "state": "archived-not-installable"
+    },
+    {
+      "path": "plugins/hf-model-analyzer",
+      "id": "com.cy.model.hf-analyzer",
+      "class": "compatibility-snapshot",
+      "state": "needs-model-analyzer-contract"
+    },
+    {
+      "path": "plugins/llama-factory-training",
+      "id": "com.cy.training.llama-factory",
+      "class": "compatibility-snapshot",
+      "state": "needs-training-contract"
+    },
+    {
+      "path": "plugins/nvidia-probe",
+      "id": "com.cy.adapter.nvidia",
+      "class": "adapter-host",
+      "state": "migrate-from-plugin"
+    },
+    {
+      "path": "plugins/tensorrt-quantization",
+      "id": "com.cy.quantization.tensorrt",
+      "class": "compatibility-snapshot",
+      "state": "needs-quantization-contract"
+    },
+    {
+      "path": "plugins/vllm-engine",
+      "id": "com.cy.execution.vllm",
+      "class": "compatibility-snapshot",
+      "state": "needs-execution-contract"
+    }
+  ]
+}

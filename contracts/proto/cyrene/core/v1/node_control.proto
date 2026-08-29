@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/core/v1/common.proto";
+import "cyrene/core/v1/kernel_runtime.proto";
+import "cyrene/core/v1/kernel_authority.proto";
+import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+message NodeHello {
+  NodeRef node = 1;
+  string agent_version = 2;
+  uint32 min_protocol_version = 3;
+  uint32 max_protocol_version = 4;
+  string resume_token = 5;
+  repeated cyrene.semantic.v1.ContractRevision offered_contracts = 6;
+}
+
+message NodeWelcome {
+  string session_id = 1;
+  uint32 selected_protocol_version = 2;
+  uint64 desired_generation = 3;
+  google.protobuf.Duration heartbeat_interval = 4;
+  google.protobuf.Timestamp server_time = 5;
+  // Opaque control-plane cursor presented by the Agent on its next reconnect.
+  // It has no authority without the mutually authenticated stream identity.
+  string resume_token = 6;
+  cyrene.semantic.v1.ContractRevision selected_contract = 7;
+}
+
+message NodeHeartbeat {
+  NodeRef node = 1;
+  uint64 observed_generation = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+message NodeToControlPlane {
+  string frame_id = 1;
+  uint64 sequence_number = 2;
+  // Empty only on the initial NodeHello. Every later frame is bound to the
+  // session selected by NodeWelcome so stale reconnects cannot report state.
+  string session_id = 3;
+
+  oneof body {
+    NodeHello hello = 10;
+    NodeHeartbeat heartbeat = 11;
+    KernelCommandResult command_result = 12;
+    OperationEvent operation_event = 13;
+  }
+}
+
+message ControlPlaneToNode {
+  string frame_id = 1;
+  uint64 sequence_number = 2;
+  // Must equal NodeWelcome.session_id for the welcome and every later command.
+  string session_id = 3;
+
+  oneof body {
+    NodeWelcome welcome = 10;
+    KernelCommand command = 11;
+  }
+}
+
+message KernelCommand {
+  string command_id = 1;
+
+  oneof request {
+    GetKernelCapabilitiesRequest get_capabilities = 10;
+    ReserveResourcesRequest reserve_resources = 11;
+    ReleaseResourcesRequest release_resources = 12;
+    LaunchPluginRequest launch_plugin = 13;
+    TerminatePluginRequest terminate_plugin = 14;
+    CancelOperationRequest cancel_operation = 15;
+    KernelAuthorityCommand authority = 16;
+  }
+}
+
+message KernelCommandResult {
+  string command_id = 1;
+
+  oneof outcome {
+    KernelCapabilities capabilities = 10;
+    ResourceLease resource_lease = 11;
+    Operation operation = 12;
+    google.rpc.Status error = 13;
+    KernelAuthorityCommandResult authority = 14;
+  }
+}
+
+// Typed control-plane envelope for canonical KernelAuthorityService actions.
+// It deliberately carries no legacy plugin, installation, LRO or Any payload.
+message KernelAuthorityCommand {
+  oneof request {
+    NegotiateRequest negotiate = 1;
+    AcquireSemanticLeaseRequest acquire_lease = 2;
+    RenewLeaseRequest renew_lease = 3;
+    ReleaseSemanticLeaseRequest release_lease = 4;
+    StartWorkerRequest start_worker = 5;
+    HeartbeatWorkerRequest heartbeat_worker = 6;
+    StopWorkerRequest stop_worker = 7;
+    CreateOperationRequest create_operation = 8;
+    ReportOperationRequest report_operation = 9;
+    CancelSemanticOperationRequest cancel_operation = 10;
+    PublishEndpointRequest publish_endpoint = 11;
+    AuthorizeEndpointRequest authorize_endpoint = 12;
+    RevokeEndpointRequest revoke_endpoint = 13;
+    SubscribeEventsRequest subscribe_events = 14;
+  }
+}
+
+message KernelAuthorityCommandResult {
+  oneof outcome {
+    cyrene.semantic.v1.ContractRevision negotiated_contract = 1;
+    cyrene.semantic.v1.Lease lease = 2;
+    cyrene.semantic.v1.Worker worker = 3;
+    cyrene.semantic.v1.Operation operation = 4;
+    cyrene.semantic.v1.Endpoint endpoint = 5;
+    cyrene.semantic.v1.EndpointGrant endpoint_grant = 6;
+    bool revoked = 7;
+    cyrene.semantic.v1.EventPage event_page = 8;
+  }
+}

@@ -2,16 +2,16 @@ syntax = "proto3";
 
 package cy.plugin.v1;
 
-import "proto/plugin/v1/probe.proto";
-import "proto/plugin/v1/model_analyzer.proto";
-import "proto/plugin/v1/compat_rule.proto";
-import "proto/plugin/v1/runtime_builder.proto";
-import "proto/plugin/v1/execution_engine.proto";
-import "proto/plugin/v1/training_backend.proto";
-import "proto/plugin/v1/quantization.proto";
-import "proto/plugin/v1/gateway_filter.proto";
-import "proto/plugin/v1/notification.proto";
-import "proto/plugin/v1/storage.proto";
+import "plugin/v1/probe.proto";
+import "plugin/v1/model_analyzer.proto";
+import "plugin/v1/compat_rule.proto";
+import "plugin/v1/runtime_builder.proto";
+import "plugin/v1/execution_engine.proto";
+import "plugin/v1/training_backend.proto";
+import "plugin/v1/quantization.proto";
+import "plugin/v1/gateway_filter.proto";
+import "plugin/v1/notification.proto";
+import "plugin/v1/storage.proto";
 
 message Envelope {
   string request_id = 1;
@@ -20,6 +20,8 @@ message Envelope {
   uint32 protocol_version = 4;
   int64 deadline_ms = 5;
   uint64 sequence_number = 6;
+  uint64 generation = 7;
+  uint64 fence_token = 8;
 
   oneof payload {
     // Control & Lifecycle
@@ -30,11 +32,20 @@ message Envelope {
     HealthCheck health_check = 14;
     HealthStatus health_status = 15;
     Shutdown shutdown = 16;
+    CancelAck cancel_ack = 17;
 
     // Extension Points Payload RPC
     Invoke invoke = 20;
     InvokeResult invoke_result = 21;
     StreamItem stream_item = 22;
+
+    // Capability application-event stream. This is deliberately separate from
+    // the Kernel Event/SubscribeEvents control plane: the payload is owned by
+    // the capability and is not a Kernel control-state record.
+    Subscribe subscribe = 23;
+    SubscribeAck subscribe_ack = 24;
+    ApplicationEvent application_event = 25;
+    ApplicationEventStreamEnd application_event_stream_end = 26;
 
     // Error
     PluginErrorPayload error = 30;
@@ -64,6 +75,12 @@ message Configure {
 message Cancel {
   string target_request_id = 1;
   string reason = 2;
+}
+
+// Receipt only: it proves the executor accepted the cancellation request. The
+// host must wait for the authoritative Operation terminal report separately.
+message CancelAck {
+  string target_request_id = 1;
 }
 
 message HealthCheck {}
@@ -105,6 +122,10 @@ message Invoke {
   string extension_point = 1;
   string method = 2;
 
+  // Opaque capability request bytes for generic worker-control consumers.
+  // Typed extension requests remain available below for existing adapters.
+  bytes payload = 3;
+
   oneof request {
     DetectHardwareRequest detect_hardware = 10;
     AnalyzeModelRequest analyze_model = 11;
@@ -121,6 +142,9 @@ message Invoke {
 }
 
 message InvokeResult {
+  // Opaque capability result bytes for generic worker-control consumers.
+  bytes payload = 3;
+
   oneof response {
     DetectHardwareResponse detect_hardware = 10;
     AnalyzeModelResponse analyze_model = 11;
@@ -146,4 +170,58 @@ message StreamItem {
     bytes binary_chunk = 11;
     string log_line = 12;
   }
+}
+
+// Starts one live application-event subscription for a capability. The
+// subscription identity is the enclosing Envelope.request_id and is echoed by
+// SubscribeAck and every subsequent event/end message.
+message Subscribe {
+  string capability = 1;
+
+  // Opaque capability-defined subscription/filter bytes. The Platform does
+  // not interpret this payload.
+  bytes filter_payload = 2;
+
+  // Maximum number of events the worker may buffer for this subscription.
+  // Zero requests the worker default. Implementations must reject values above
+  // their documented bound; this is never an unbounded queue.
+  uint32 max_buffered_events = 3;
+}
+
+message SubscribeAck {
+  string subscription_id = 1;
+  string capability = 2;
+}
+
+// One capability-owned application event. Envelope.generation and
+// Envelope.plugin_id provide the generation/source identity. event_sequence is
+// strictly increasing from one within this subscription and worker generation.
+// The v1 stream is live-only: it does not imply durable replay or exactly-once
+// delivery.
+message ApplicationEvent {
+  string subscription_id = 1;
+  string capability = 2;
+  uint64 event_sequence = 3;
+  string event_type = 4;
+  bytes payload = 5;
+}
+
+// Terminal condition for one application-event stream. A worker crash may
+// prevent this frame from being sent; in that case the caller synthesizes the
+// WORKER_CRASH reason from the observed transport disconnect.
+message ApplicationEventStreamEnd {
+  enum Reason {
+    NORMAL_COMPLETION = 0;
+    CANCELLED = 1;
+    WORKER_UNAVAILABLE = 2;
+    WORKER_CRASH = 3;
+    PROTOCOL_FAILURE = 4;
+    GENERATION_TERMINATED = 5;
+    BACKPRESSURE = 6;
+  }
+
+  string subscription_id = 1;
+  string capability = 2;
+  Reason reason = 3;
+  string message = 4;
 }
