@@ -107,10 +107,7 @@ pub enum ReadinessProbe {
     /// Process is alive and running in the OS / sandbox.
     ProcessAlive,
     /// TCP connection can be established to the specified host and port.
-    TcpSocket {
-        host: String,
-        port: u16,
-    },
+    TcpSocket { host: String, port: u16 },
     /// HTTP GET request returns an acceptable status code (default 200..=299).
     HttpGet {
         host: String,

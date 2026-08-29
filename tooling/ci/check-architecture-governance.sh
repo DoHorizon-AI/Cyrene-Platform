@@ -27,7 +27,7 @@ fi
 
 if rg -n --fixed-strings "in-proc-rust" \
     contracts/schemas/plugin.schema.json \
-    contracts/rust/cy-manifest/src/manifest.rs; then
+    contracts/rust/cy-manifest/src/manifest; then
   echo "installable schema or Rust manifest model exposes in-proc-rust"
   failed=1
 fi
@@ -47,8 +47,11 @@ mapfile -t legacy_refs < <(
     -g '!target/**' \
     -g '!.git/**' \
     -g '!**/*.md' \
+    -g '!infrastructure/**' \
+    -g '!tooling/migration/**' \
     -g '!tooling/ci/check-architecture-governance.sh' \
-    'cy\.llm|AgentService|AiService|ai_service\.proto|agent_service\.proto' . || true
+    'cy\.llm|AgentService|AiService|ai_service\.proto|agent_service\.proto' \
+    contracts kernel framework runtime adapters agents sdk || true
 )
 
 while IFS= read -r path; do

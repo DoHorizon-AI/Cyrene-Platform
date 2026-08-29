@@ -429,8 +429,7 @@ impl InstanceActor {
     }
 
     pub fn cancel(&mut self, target_request_id: String) -> Result<(), ProviderError> {
-        self.request_cancel(target_request_id)
-            .map(drop)
+        self.request_cancel(target_request_id).map(drop)
     }
 
     /// Launch the process inside the privileged sandbox.

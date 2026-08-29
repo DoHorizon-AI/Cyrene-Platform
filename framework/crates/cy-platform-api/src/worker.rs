@@ -10,9 +10,9 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
-        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -20,12 +20,13 @@ use std::{
 
 use cy_manifest::{PluginManifest, Runtime};
 use cy_plugin_protocol::{
+    CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_MESSAGE_BYTES,
     envelope::Payload,
     pb::{
         ApplicationEvent, ApplicationEventStreamEnd, Cancel, Envelope, Hello, Invoke,
         PluginErrorPayload, Shutdown, Subscribe,
     },
-    plugin_error_payload, CURRENT_PROTOCOL_VERSION, DEFAULT_MAX_MESSAGE_BYTES,
+    plugin_error_payload,
 };
 use prost::Message;
 use thiserror::Error;
@@ -242,7 +243,10 @@ impl EventRegistry {
         let mut subscriptions = self.subscriptions.lock().map_err(|_| {
             WorkerTerminalError::WorkerUnavailable("event registry lock poisoned".into())
         })?;
-        if subscriptions.insert(subscription_id.clone(), state).is_some() {
+        if subscriptions
+            .insert(subscription_id.clone(), state)
+            .is_some()
+        {
             return Err(WorkerTerminalError::ProtocolMismatch(format!(
                 "duplicate application-event subscription {subscription_id}"
             )));
@@ -305,9 +309,7 @@ impl EventRegistry {
 
     fn route(&self, envelope: Envelope) -> (bool, Option<String>) {
         match envelope.payload.clone() {
-            Some(Payload::ApplicationEvent(event)) => {
-                (true, self.route_event(envelope, event))
-            }
+            Some(Payload::ApplicationEvent(event)) => (true, self.route_event(envelope, event)),
             Some(Payload::ApplicationEventStreamEnd(end)) => {
                 self.route_end(envelope, end);
                 (true, None)
@@ -552,7 +554,8 @@ impl Drop for ApplicationEventSubscription {
     fn drop(&mut self) {
         if !self.cancel_requested.swap(true, Ordering::SeqCst) {
             self.registry.remove(&self.subscription_id);
-            self.transport.send_cancel_best_effort(&self.subscription_id);
+            self.transport
+                .send_cancel_best_effort(&self.subscription_id);
         }
     }
 }
@@ -646,7 +649,7 @@ pub fn read_frame<R: Read>(
         Err(e) => {
             return Err(WorkerTerminalError::WorkerCrashed(format!(
                 "failed to read frame length: {e}"
-            )))
+            )));
         }
     }
 
@@ -684,9 +687,9 @@ pub fn write_frame<W: Write>(
     }
 
     let len_bytes = (payload_len as u32).to_be_bytes();
-    writer
-        .write_all(&len_bytes)
-        .map_err(|e| WorkerTerminalError::WorkerCrashed(format!("failed to write frame length: {e}")))?;
+    writer.write_all(&len_bytes).map_err(|e| {
+        WorkerTerminalError::WorkerCrashed(format!("failed to write frame length: {e}"))
+    })?;
     let mut buf = Vec::with_capacity(payload_len);
     envelope.encode(&mut buf).map_err(|e| {
         WorkerTerminalError::ProtocolMismatch(format!("protobuf encode failed: {e}"))
@@ -758,7 +761,8 @@ impl CapabilityWorkerClient {
                 loop {
                     match read_frame(&mut reader, max_bytes) {
                         Ok(Some(env)) => {
-                            let (routed, cancel_subscription_id) = reader_registry.route(env.clone());
+                            let (routed, cancel_subscription_id) =
+                                reader_registry.route(env.clone());
                             if let Some(subscription_id) = cancel_subscription_id {
                                 reader_transport.send_cancel_best_effort(&subscription_id);
                             }
@@ -779,10 +783,8 @@ impl CapabilityWorkerClient {
                             } else {
                                 ApplicationEventStreamEndReason::WorkerCrash
                             };
-                            reader_registry.terminate_all(
-                                reason,
-                                "worker process closed stream (EOF)",
-                            );
+                            reader_registry
+                                .terminate_all(reason, "worker process closed stream (EOF)");
                             let _ = reader_tx.try_send(Err(WorkerTerminalError::WorkerCrashed(
                                 format!("worker '{}' closed stream (EOF)", reader_plugin_id),
                             )));
@@ -863,7 +865,7 @@ impl CapabilityWorkerClient {
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(WorkerTerminalError::WorkerCrashed(
                         "worker communication channel disconnected".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1164,7 +1166,7 @@ impl CapabilityWorkerClient {
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(WorkerTerminalError::WorkerCrashed(
                         "worker communication stream broken".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1190,7 +1192,9 @@ impl CapabilityWorkerClient {
                 WorkerTerminalError::Timeout(err.message)
             }
             _ => {
-                if err.message.contains("INVALID_INPUT") || err.message.contains("UNSUPPORTED_INPUT") {
+                if err.message.contains("INVALID_INPUT")
+                    || err.message.contains("UNSUPPORTED_INPUT")
+                {
                     WorkerTerminalError::InvalidRequest(err.message)
                 } else if err.message.contains("CANCELLED") {
                     WorkerTerminalError::Cancelled(err.message)
@@ -1401,9 +1405,7 @@ impl CapabilityWorkerActivator {
 
         let hello_ack = client
             .read_envelope_timed(options.handshake_timeout, &NeverCancelled)
-            .map_err(|e| {
-                WorkerTerminalError::ActivationFailed(format!("handshake failed: {e}"))
-            })?;
+            .map_err(|e| WorkerTerminalError::ActivationFailed(format!("handshake failed: {e}")))?;
 
         match hello_ack.payload {
             Some(Payload::HelloAck(ack)) => {
@@ -1466,7 +1468,13 @@ impl MediaProcessor for WorkerMediaProcessor {
 
         let timeout = client.options.default_invoke_timeout;
         let response_bytes = client
-            .invoke("media.processor.v1", "inspect_image", &payload, timeout, cancellation)
+            .invoke(
+                "media.processor.v1",
+                "inspect_image",
+                &payload,
+                timeout,
+                cancellation,
+            )
             .map_err(map_worker_error_to_media)?;
 
         serde_json::from_slice::<ImageInspection>(&response_bytes).map_err(|e| {

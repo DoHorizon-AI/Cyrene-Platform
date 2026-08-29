@@ -141,7 +141,9 @@ impl TransformImageRequest {
         if let Some(resize) = self.resize {
             resize.validate()?;
         }
-        if let Some(quality) = self.quality && !(1..=100).contains(&quality) {
+        if let Some(quality) = self.quality
+            && !(1..=100).contains(&quality)
+        {
             return Err(MediaProcessorError::invalid_input(
                 "quality must be between 1 and 100",
             ));

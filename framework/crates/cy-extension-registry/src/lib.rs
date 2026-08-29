@@ -15,8 +15,8 @@
 pub mod helper;
 pub(crate) mod proxies;
 pub(crate) mod registry;
-pub mod worker_control;
 pub mod transport;
+pub mod worker_control;
 
 #[cfg(test)]
 mod tests;

@@ -28,15 +28,15 @@ pub use media::{
 };
 pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
 pub use plugin::{CapabilityRegistry, CapabilityResolutionError, CapabilityResolver};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 pub use worker::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
-    CapabilityWorkerClient, WorkerApplicationEvent, WorkerActivationOptions,
-    WorkerMediaProcessor, WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
-    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
+    CapabilityWorkerClient, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions, WorkerApplicationEvent,
+    WorkerMediaProcessor, WorkerTerminalError,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// 规范化插件分类字典枚举 (`kind`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

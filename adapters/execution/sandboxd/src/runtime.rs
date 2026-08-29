@@ -10,11 +10,9 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use std::thread;

@@ -387,7 +387,10 @@ pub(crate) fn nvidia_visibility_join_keys() -> BTreeSet<String> {
 pub(crate) fn nvidia_visibility_environment(resource_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("CUDA_VISIBLE_DEVICES".to_string(), resource_id.to_string()),
-        ("NVIDIA_VISIBLE_DEVICES".to_string(), resource_id.to_string()),
+        (
+            "NVIDIA_VISIBLE_DEVICES".to_string(),
+            resource_id.to_string(),
+        ),
     ])
 }
 
