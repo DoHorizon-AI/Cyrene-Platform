@@ -84,6 +84,7 @@ async fn test_worker_transport_large_payload_integrity() {
                     };
                     Payload::InvokeResult(InvokeResult {
                         payload: Vec::new(),
+                        payload_type_url: String::new(),
                         response: Some(Response::ExecuteInference(ExecuteInferenceResponse {
                             output_text: format!("echo:{}", echo_text),
                         })),
@@ -220,6 +221,7 @@ async fn test_pipelined_concurrent_transport_multiplexing_and_correlation() {
                     fence_token,
                     payload: Some(Payload::InvokeResult(InvokeResult {
                         payload: Vec::new(),
+                        payload_type_url: String::new(),
                         response: Some(Response::ExecuteInference(ExecuteInferenceResponse {
                             output_text: format!("resp:{}", prompt),
                         })),

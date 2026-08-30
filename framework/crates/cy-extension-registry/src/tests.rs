@@ -653,6 +653,7 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
             fence_token: request.fence_token,
             payload: Some(Payload::InvokeResult(InvokeResult {
                 payload: Vec::new(),
+                payload_type_url: String::new(),
                 response: Some(invoke_result::Response::SendNotification(
                     SendNotificationResponse { success: true },
                 )),
@@ -672,6 +673,7 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
             fence_token: 0,
             payload: Some(Payload::InvokeResult(InvokeResult {
                 payload: Vec::new(),
+                payload_type_url: String::new(),
                 response: Some(invoke_result::Response::SendNotification(
                     SendNotificationResponse { success: true },
                 )),

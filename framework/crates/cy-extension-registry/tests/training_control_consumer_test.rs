@@ -120,6 +120,7 @@ async fn training_backend_consumes_the_same_generic_configure_invoke_client() {
             3,
             Payload::InvokeResult(InvokeResult {
                 payload: Vec::new(),
+                payload_type_url: String::new(),
                 response: Some(cy_plugin_protocol::pb::invoke_result::Response::RunTrainingStep(
                     RunTrainingStepResponse {
                         checkpoint_metadata_json: r#"{"run_id":"run-1","step":1,"digest":"sha256:checkpoint","metrics":{}}"#.to_string(),

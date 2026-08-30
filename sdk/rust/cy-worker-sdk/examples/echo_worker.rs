@@ -28,6 +28,7 @@ impl CyreneWorker for EchoWorker {
     fn on_invoke(&mut self, _invoke: Invoke) -> Result<InvokeResult, PluginErrorPayload> {
         Ok(InvokeResult {
             payload: Vec::new(),
+            payload_type_url: String::new(),
             response: Some(InvokeResp::DetectHardware(DetectHardwareResponse {
                 hardware_manifest_json: "{\"status\": \"ok\", \"engine\": \"rust\"}".to_string(),
             })),

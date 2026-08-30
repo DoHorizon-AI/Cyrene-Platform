@@ -128,6 +128,7 @@ async fn host_completes_generic_hello_configure_invoke_cancel_channel() {
             3,
             Payload::InvokeResult(InvokeResult {
                 payload: b"opaque-result".to_vec(),
+                payload_type_url: String::new(),
                 response: None,
             }),
         )

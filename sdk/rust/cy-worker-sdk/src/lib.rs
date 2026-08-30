@@ -484,6 +484,7 @@ mod tests {
                 assert_eq!(invoke.payload, b"opaque-request");
                 Ok(InvokeResult {
                     payload: b"opaque-result".to_vec(),
+                    payload_type_url: String::new(),
                     response: None,
                 })
             }

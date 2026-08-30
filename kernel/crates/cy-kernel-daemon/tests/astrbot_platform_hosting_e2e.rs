@@ -169,6 +169,7 @@ async fn http_get_text(host: &str, port: u16, path: &str) -> Result<(u16, String
 }
 
 #[tokio::test]
+#[ignore = "requires a prebuilt AstrBot.DotNetHost.dll from the external AstrBot repository"]
 async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
     let (astrbot_dll, working_dir) = find_astrbot_dll();
     let port = get_ephemeral_port().await;

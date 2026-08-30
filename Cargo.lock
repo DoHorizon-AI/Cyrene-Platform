@@ -326,6 +326,7 @@ dependencies = [
  "cy-kernel-api",
  "cy-proto",
  "cy-resource-manager",
+ "libc",
  "nix",
  "prost-types",
  "tempfile",
