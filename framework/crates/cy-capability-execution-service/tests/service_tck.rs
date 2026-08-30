@@ -137,6 +137,15 @@ fn worker_options_for_instance(instance_id: &str) -> WorkerActivationOptions {
     options
 }
 
+fn worker_options_without_embeddings(instance_id: &str) -> WorkerActivationOptions {
+    let mut options = worker_options_for_instance(instance_id);
+    options.environment.insert(
+        "CYRENE_TEST_EMBEDDINGS_SUPPORTED".to_string(),
+        "0".to_string(),
+    );
+    options
+}
+
 fn two_instance_bindings() -> Vec<(String, WorkerActivationOptions)> {
     vec![
         ("main".to_string(), worker_options_for_instance("main")),
@@ -728,11 +737,37 @@ async fn embedding_tck_unknown_binding_is_deterministic() {
         error.code,
         capability_execution_error::Code::CapabilityUnavailable as i32
     );
-    assert!(
-        error
-            .message
-            .contains("unknown configured capability binding: missing")
+    assert!(error
+        .message
+        .contains("unknown configured capability binding: missing"));
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_unsupported_method_is_generic_invalid_request() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "chat-only".to_string(),
+            worker_options_without_embeddings("chat-only"),
+        )],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(Some("chat-only")))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("unsupported embeddings method must fail generically");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::InvalidRequest as i32
     );
+    assert!(error.message.contains("not supported by this binding"));
     server.shutdown().await;
 }
 

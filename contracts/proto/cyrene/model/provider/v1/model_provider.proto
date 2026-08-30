@@ -26,7 +26,9 @@ message EmbeddingsRequest {
   repeated string inputs = 1;
 
   // Optional provider-supported model selector. Omitted means the model
-  // configured by the selected CapabilityBinding. It is not a routing policy.
+  // configured for the embeddings operation by the selected CapabilityBinding.
+  // A provider MUST NOT substitute another operation's default model. This is
+  // not a routing policy.
   optional string model = 2;
 }
 

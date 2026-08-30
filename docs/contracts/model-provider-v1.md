@@ -25,8 +25,11 @@ parallel transport service.
 | Result `Any` type | `type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse` |
 
 The request's optional `model` is only a provider-supported selector. When it
-is omitted, the selected `CapabilityBinding` supplies the configured model.
-It is not a Product routing, fallback, memory, or context-selection policy.
+is omitted, the selected `CapabilityBinding` supplies its configured default
+for the `embeddings` operation. A binding that also serves `chat_completion`
+may configure a different default for that operation; an embedding request
+must never inherit the chat default implicitly. This is not a Product routing,
+fallback, memory, or context-selection policy.
 The response records the provider-resolved model identifier and vector
 dimension as computation facts. Usage metadata is deliberately absent because
 the current canonical model-provider contract has no stable cross-provider
@@ -63,6 +66,14 @@ Errors have two existing layers:
 
 This separation follows the existing CES convention and does not create a
 parallel execution error system.
+
+A `model.provider.v1` binding is not assumed to implement every experimental
+method. If the selected binding does not expose `embeddings`, invocation fails
+as the existing generic CES `INVALID_REQUEST`/unsupported-operation outcome.
+CES must not retry another binding, and the worker must not report
+`MODEL_NOT_AVAILABLE`: that domain code applies only after the embeddings
+method is supported and its requested or configured embeddings model cannot be
+resolved.
 
 ## Binding and runtime identity
 

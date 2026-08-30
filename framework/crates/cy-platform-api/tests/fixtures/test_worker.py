@@ -17,6 +17,7 @@ sys.path.insert(0, str(shim_dir))
 try:
     from cyrene_worker_shim.cyrene_worker import (
         CyreneWorker,
+        PluginErrorPayload,
         TypedCapabilityPayload,
         encode_bytes_field,
         encode_string_field,
@@ -26,6 +27,7 @@ try:
 except ImportError:
     from cyrene_worker import (
         CyreneWorker,
+        PluginErrorPayload,
         TypedCapabilityPayload,
         encode_bytes_field,
         encode_string_field,
@@ -34,9 +36,7 @@ except ImportError:
     )
 
 
-EMBEDDINGS_RESPONSE_TYPE_URL = (
-    "type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse"
-)
+EMBEDDINGS_RESPONSE_TYPE_URL = "type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse"
 
 
 def embedding_response(instance_id: str) -> bytes:
@@ -54,6 +54,7 @@ class GenericTckWorker(CyreneWorker):
     def __init__(self):
         self.cancelled_requests = set()
         self.instance_id = os.environ.get("CYRENE_TEST_INSTANCE_ID", "")
+        self.embeddings_supported = os.environ.get("CYRENE_TEST_EMBEDDINGS_SUPPORTED", "1") != "0"
 
     def scoped_payload(self, value: bytes) -> bytes:
         if not self.instance_id:
@@ -94,16 +95,12 @@ class GenericTckWorker(CyreneWorker):
                 emitter.complete("single event complete")
             elif mode == "ordered":
                 for value in range(1, 4):
-                    if not emitter.emit(
-                        "synthetic", self.scoped_payload(str(value).encode("ascii"))
-                    ):
+                    if not emitter.emit("synthetic", self.scoped_payload(str(value).encode("ascii"))):
                         return
                 emitter.complete("ordered events complete")
             elif mode == "burst":
                 for value in range(1, 128):
-                    if not emitter.emit(
-                        "synthetic", self.scoped_payload(str(value).encode("ascii"))
-                    ):
+                    if not emitter.emit("synthetic", self.scoped_payload(str(value).encode("ascii"))):
                         return
                 emitter.complete("burst complete")
             elif mode == "slow":
@@ -134,6 +131,12 @@ class GenericTckWorker(CyreneWorker):
 
     def on_invoke(self, capability: str, action: str, payload: bytes):
         if capability == "model.provider.v1" and action == "embeddings":
+            if not self.embeddings_supported:
+                return False, PluginErrorPayload(
+                    code=3,
+                    message="embedding method is not supported by this binding",
+                    details="UNKNOWN_OPERATION",
+                )
             return True, TypedCapabilityPayload(
                 value=embedding_response(self.instance_id),
                 type_url=EMBEDDINGS_RESPONSE_TYPE_URL,
