@@ -20,6 +20,14 @@ use cy_proto::capability_v1::{
     invoke_capability_response, CapabilityEventStreamEnd, CapabilityEventStreamEndReason,
     InvokeCapabilityRequest, SubscribeCapabilityEventsRequest,
 };
+use cy_proto::{
+    model_provider::{
+        CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, EMBEDDINGS_METHOD,
+        EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL,
+    },
+    model_provider_v1::{embeddings_response, EmbeddingsRequest, EmbeddingsResponse},
+};
+use prost::Message;
 use prost_types::Any;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -81,6 +89,12 @@ fn fixture_manifest() -> PluginManifest {
             .unwrap(),
             CapabilityDescriptor::new(
                 CapabilityId::new("test.application-events.v1").unwrap(),
+                CapabilityInterfaceVersion::new("1").unwrap(),
+                vec![ExecutionMode::Worker],
+            )
+            .unwrap(),
+            CapabilityDescriptor::new(
+                CapabilityId::new(MODEL_PROVIDER_CAPABILITY_ID).unwrap(),
                 CapabilityInterfaceVersion::new("1").unwrap(),
                 vec![ExecutionMode::Worker],
             )
@@ -256,6 +270,40 @@ fn invoke_request_without_deadline_for_binding(
         request: Some(any_json(payload)),
         binding_id: binding_id.map(str::to_string),
     })
+}
+
+fn embedding_invoke_request(binding_id: Option<&str>) -> Request<InvokeCapabilityRequest> {
+    let payload = EmbeddingsRequest {
+        inputs: vec!["deterministic".to_string()],
+        model: None,
+    };
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
+        interface_version: "1".to_string(),
+        method: EMBEDDINGS_METHOD.to_string(),
+        request: Some(Any {
+            type_url: EMBEDDINGS_REQUEST_TYPE_URL.to_string(),
+            value: payload.encode_to_vec(),
+        }),
+        binding_id: binding_id.map(str::to_string),
+    });
+    request.set_timeout(Duration::from_secs(5));
+    request
+}
+
+fn embedding_model(response: cy_proto::capability_v1::InvokeCapabilityResponse) -> String {
+    let Some(invoke_capability_response::Result::Response(payload)) = response.result else {
+        panic!("expected typed embedding response: {response:?}");
+    };
+    assert_eq!(payload.type_url, EMBEDDINGS_RESPONSE_TYPE_URL);
+    let response = EmbeddingsResponse::decode(payload.value.as_slice()).unwrap();
+    let Some(embeddings_response::Result::Embeddings(batch)) = response.result else {
+        panic!("expected embedding batch");
+    };
+    assert_eq!(batch.vectors.len(), 1);
+    assert_eq!(batch.dimensions, 3);
+    assert_eq!(batch.vectors[0].values, [1.0, 2.0, 3.0]);
+    batch.model
 }
 
 fn subscribe_request(mode: &str) -> Request<SubscribeCapabilityEventsRequest> {
@@ -591,6 +639,100 @@ async fn configured_binding_capability_mismatch_is_deterministic() {
     assert!(error
         .message
         .contains("does not expose capability missing.capability.v1"));
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_single_binding_keeps_implicit_compatibility() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "openai-main".to_string(),
+            worker_options_for_instance("openai-main"),
+        )],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(None))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(embedding_model(response), "openai-main");
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_two_bindings_require_explicit_target_and_are_isolated() {
+    let bindings = vec![
+        (
+            "openai-main".to_string(),
+            worker_options_for_instance("openai-main"),
+        ),
+        (
+            "ollama-local".to_string(),
+            worker_options_for_instance("ollama-local"),
+        ),
+    ];
+    let mut server = TestServer::start_with_bindings(4, worker_options(), bindings).await;
+
+    let ambiguous = server
+        .client
+        .invoke_capability(embedding_invoke_request(None))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = ambiguous.result else {
+        panic!("implicit embedding target must not first-match");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(error.message.contains("ambiguous"));
+
+    for binding_id in ["openai-main", "ollama-local"] {
+        let response = server
+            .client
+            .invoke_capability(embedding_invoke_request(Some(binding_id)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(embedding_model(response), binding_id);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_unknown_binding_is_deterministic() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "openai-main".to_string(),
+            worker_options_for_instance("openai-main"),
+        )],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(Some("missing")))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("unknown embedding binding must fail");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::CapabilityUnavailable as i32
+    );
+    assert!(
+        error
+            .message
+            .contains("unknown configured capability binding: missing")
+    );
     server.shutdown().await;
 }
 

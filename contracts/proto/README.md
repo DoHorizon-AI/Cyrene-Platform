@@ -14,6 +14,10 @@ Capability-specific payloads live under their own packages; the EXPERIMENTAL
 `cyrene/message/connector/v1/` module defines typed message connector payloads
 without declaring another gRPC service.
 
+`cyrene/model/provider/v1/` owns EXPERIMENTAL typed payloads for the
+stateless embedding method of `model.provider.v1`. It also declares no gRPC
+service and contains no Product memory or vector-storage policy.
+
 Core service responses intentionally use the typed domain messages from the
 blueprint, and `Connect` intentionally streams the node/control envelopes;
 Buf's generic RPC Request/Response naming rules are excluded for that reason.

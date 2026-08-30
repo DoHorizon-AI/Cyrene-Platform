@@ -15,6 +15,7 @@
 #![allow(clippy::large_enum_variant)]
 
 pub mod message_connector;
+pub mod model_provider;
 
 pub mod google {
     pub mod rpc {
@@ -44,6 +45,14 @@ pub mod cyrene {
         pub mod connector {
             pub mod v1 {
                 tonic::include_proto!("cyrene.message.connector.v1");
+            }
+        }
+    }
+
+    pub mod model {
+        pub mod provider {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.model.provider.v1");
             }
         }
     }
@@ -83,6 +92,8 @@ pub use cyrene::core::v2 as core_v2;
 pub use cyrene::hardware::v1 as hardware_v1;
 /// EXPERIMENTAL typed payloads for `message.connector.v1`.
 pub use cyrene::message::connector::v1 as message_connector_v1;
+/// EXPERIMENTAL typed payloads for `model.provider.v1`.
+pub use cyrene::model::provider::v1 as model_provider_v1;
 /// Dedicated local Provider lifecycle and reconciliation projection.
 pub use cyrene::provider::v1 as provider_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.

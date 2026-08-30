@@ -3,6 +3,7 @@
 
 import json
 import os
+import struct
 import sys
 import threading
 import time
@@ -14,9 +15,39 @@ shim_dir = manifest_dir / "sdk/python/cyrene_worker_shim"
 sys.path.insert(0, str(shim_dir))
 
 try:
-    from cyrene_worker_shim.cyrene_worker import CyreneWorker, run_worker_stdio
+    from cyrene_worker_shim.cyrene_worker import (
+        CyreneWorker,
+        TypedCapabilityPayload,
+        encode_bytes_field,
+        encode_string_field,
+        encode_uint32_field,
+        run_worker_stdio,
+    )
 except ImportError:
-    from cyrene_worker import CyreneWorker, run_worker_stdio
+    from cyrene_worker import (
+        CyreneWorker,
+        TypedCapabilityPayload,
+        encode_bytes_field,
+        encode_string_field,
+        encode_uint32_field,
+        run_worker_stdio,
+    )
+
+
+EMBEDDINGS_RESPONSE_TYPE_URL = (
+    "type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse"
+)
+
+
+def embedding_response(instance_id: str) -> bytes:
+    """Encode a deterministic valid response without adding generated fixtures."""
+    vector = encode_bytes_field(1, struct.pack("<fff", 1.0, 2.0, 3.0))
+    batch = (
+        encode_bytes_field(1, vector)
+        + encode_uint32_field(2, 3)
+        + encode_string_field(3, instance_id or "default-model")
+    )
+    return encode_bytes_field(1, batch)
 
 
 class GenericTckWorker(CyreneWorker):
@@ -39,7 +70,11 @@ class GenericTckWorker(CyreneWorker):
         return "1.0"
 
     def declared_capabilities(self):
-        return ["test.capability.v1", "test.application-events.v1"]
+        return [
+            "test.capability.v1",
+            "test.application-events.v1",
+            "model.provider.v1",
+        ]
 
     def on_subscribe(self, subscription_id: str, capability: str, filter_payload: bytes):
         if capability != "test.application-events.v1":
@@ -98,6 +133,12 @@ class GenericTckWorker(CyreneWorker):
         self.cancelled_requests.add(target_request_id)
 
     def on_invoke(self, capability: str, action: str, payload: bytes):
+        if capability == "model.provider.v1" and action == "embeddings":
+            return True, TypedCapabilityPayload(
+                value=embedding_response(self.instance_id),
+                type_url=EMBEDDINGS_RESPONSE_TYPE_URL,
+            )
+
         try:
             req = json.loads(payload.decode("utf-8")) if payload else {}
         except Exception as e:

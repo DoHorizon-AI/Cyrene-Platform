@@ -270,6 +270,7 @@ dependencies = [
  "cy-platform-api",
  "cy-proto",
  "futures-core",
+ "prost",
  "prost-types",
  "serde_json",
  "tokio",
