@@ -8,6 +8,6 @@ license = "Apache-2.0"
 [dependencies]
 cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
-prost = "0.12"
-prost-types = "0.12"
-nix = { version = "0.29", features = ["socket", "user", "process"] }
+prost = "0.14"
+prost-types = "0.14"
+nix = { version = "0.31", features = ["socket", "user", "process"] }
