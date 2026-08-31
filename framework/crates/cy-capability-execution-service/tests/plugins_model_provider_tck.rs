@@ -11,28 +11,29 @@ use std::{
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use cy_capability_execution_service::{
-    server, CapabilityExecutionConfig, CapabilityExecutionService,
+    CapabilityExecutionConfig, CapabilityExecutionService, server,
 };
 use cy_manifest::PluginManifest;
-use cy_platform_api::{normalize_official_manifest, CapabilityRegistry, WorkerActivationOptions};
+use cy_platform_api::{CapabilityRegistry, WorkerActivationOptions, normalize_official_manifest};
 use cy_proto::{
     capability_v1::{
+        InvokeCapabilityRequest,
         capability_execution_service_client::CapabilityExecutionServiceClient,
-        invoke_capability_response, InvokeCapabilityRequest,
+        invoke_capability_response,
     },
     model_provider::{
         CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, EMBEDDINGS_METHOD,
         EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL,
     },
-    model_provider_v1::{embeddings_response, EmbeddingsRequest, EmbeddingsResponse},
+    model_provider_v1::{EmbeddingsRequest, EmbeddingsResponse, embeddings_response},
 };
 use prost::Message;
 use prost_types::Any;
@@ -40,8 +41,8 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle as TokioJoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{
-    transport::{Channel, Endpoint, Server},
     Request,
+    transport::{Channel, Endpoint, Server},
 };
 
 #[derive(Clone)]
