@@ -16,11 +16,11 @@ use std::{
 };
 
 use cy_capability_execution_service::{
-    server, CapabilityExecutionConfig, CapabilityExecutionService,
+    CapabilityExecutionConfig, CapabilityExecutionService, server,
 };
 use cy_manifest::PluginManifest;
 use cy_platform_api::{
-    normalize_official_manifest, CapabilityBinding, CapabilityRegistry, WorkerActivationOptions,
+    CapabilityBinding, CapabilityRegistry, WorkerActivationOptions, normalize_official_manifest,
 };
 use tokio::net::TcpListener;
 use tonic::transport::Server;
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         tokio::select! {

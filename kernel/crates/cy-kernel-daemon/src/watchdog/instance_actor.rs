@@ -69,12 +69,17 @@ pub struct WorkerTransportResponse {
     pub payload: Vec<u8>,
 }
 
+type PendingWorkerRequests =
+    Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>;
+type PendingWorkerCancellations =
+    Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>;
+
 #[derive(Clone)]
 pub struct WorkerTransportDispatcher {
     generation: u64,
     fence_token: u64,
-    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
-    pending_cancellations: Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>,
+    pending_requests: PendingWorkerRequests,
+    pending_cancellations: PendingWorkerCancellations,
 }
 
 impl WorkerTransportDispatcher {
@@ -128,8 +133,8 @@ pub struct InstanceActor {
     generation: u64,
     consecutive_timeouts: u32,
     transport_tx: Option<mpsc::Sender<WorkerTransportCommand>>,
-    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
-    pending_cancellations: Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>,
+    pending_requests: PendingWorkerRequests,
+    pending_cancellations: PendingWorkerCancellations,
 }
 
 impl InstanceActor {
@@ -424,8 +429,7 @@ impl InstanceActor {
     }
 
     pub fn cancel(&mut self, target_request_id: String) -> Result<(), ProviderError> {
-        self.request_cancel(target_request_id)
-            .map(|receiver| drop(receiver))
+        self.request_cancel(target_request_id).map(drop)
     }
 
     /// Launch the process inside the privileged sandbox.

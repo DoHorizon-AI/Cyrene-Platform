@@ -31,16 +31,15 @@ pub use plugin::{
     CapabilityBinding, CapabilityRegistry, CapabilityResolutionError, CapabilityResolver,
     ResolvedCapabilityTarget,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 pub use worker::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
-    CapabilityWorkerClient, WorkerApplicationEvent, WorkerActivationOptions,
-    WorkerInvocationResult,
-    WorkerMediaProcessor, WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
-    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
+    CapabilityWorkerClient, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions, WorkerApplicationEvent,
+    WorkerInvocationResult, WorkerMediaProcessor, WorkerTerminalError,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// 规范化插件分类字典枚举 (`kind`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

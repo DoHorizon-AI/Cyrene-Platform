@@ -10,8 +10,8 @@ use std::{
     collections::HashMap,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -22,25 +22,24 @@ use cy_manifest::{
 use cy_platform_api::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
     AtomicCancellationToken, CancellationToken, CapabilityRegistry, CapabilityResolutionError,
-    CapabilityWorkerActivator, WorkerActivationOptions, WorkerApplicationEvent,
-    WorkerInvocationResult, WorkerTerminalError, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
-    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
+    CapabilityWorkerActivator, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions, WorkerApplicationEvent,
+    WorkerInvocationResult, WorkerTerminalError,
 };
 use cy_proto::capability_v1::{
-    capability_event_stream_item, capability_execution_error,
+    CapabilityApplicationEvent, CapabilityEventStreamEnd, CapabilityEventStreamItem,
+    CapabilityExecutionError, InvokeCapabilityRequest, InvokeCapabilityResponse,
+    SubscribeCapabilityEventsRequest, capability_event_stream_item, capability_execution_error,
     capability_execution_service_server::{
         CapabilityExecutionService as CapabilityExecutionServiceTrait,
         CapabilityExecutionServiceServer,
     },
-    CapabilityApplicationEvent, CapabilityEventStreamEnd, CapabilityEventStreamItem,
-    CapabilityExecutionError, InvokeCapabilityRequest, InvokeCapabilityResponse,
-    SubscribeCapabilityEventsRequest,
 };
 use futures_core::Stream;
 use prost_types::Any;
-use tokio::sync::mpsc::{self, error::TrySendError, OwnedPermit, Sender};
+use tokio::sync::mpsc::{self, OwnedPermit, Sender, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{metadata::MetadataMap, Request, Response, Status};
+use tonic::{Request, Response, Status, metadata::MetadataMap};
 use uuid::Uuid;
 
 /// The fixed type URL used when the legacy worker wire has opaque bytes but no
@@ -97,6 +96,17 @@ struct ResolvedExecution {
     worker_options: WorkerActivationOptions,
     source_id: String,
     binding_id: Option<String>,
+}
+
+struct SubscriptionTask {
+    public_subscription_id: String,
+    capability: String,
+    execution: ResolvedExecution,
+    filter_payload: Vec<u8>,
+    ack_timeout: Duration,
+    token: Arc<AtomicCancellationToken>,
+    sender: Sender<Result<CapabilityEventStreamItem, Status>>,
+    terminal_permit: OwnedPermit<Result<CapabilityEventStreamItem, Status>>,
 }
 
 #[derive(Debug)]
@@ -502,20 +512,20 @@ impl CapabilityExecutionService {
                 "capability execution service is shutting down",
             );
         }
-        if let Some(filter) = request.filter.as_ref() {
-            if filter.type_url.trim().is_empty() {
-                return Self::stream_for_terminal(
-                    subscription_id,
-                    request.capability,
-                    String::new(),
-                    String::new(),
-                    ApiError::new(
-                        capability_execution_error::Code::InvalidRequest,
-                        "filter Any.type_url is required when filter is present",
-                    ),
-                    stream_reason::UNSPECIFIED,
-                );
-            }
+        if let Some(filter) = request.filter.as_ref()
+            && filter.type_url.trim().is_empty()
+        {
+            return Self::stream_for_terminal(
+                subscription_id,
+                request.capability,
+                String::new(),
+                String::new(),
+                ApiError::new(
+                    capability_execution_error::Code::InvalidRequest,
+                    "filter Any.type_url is required when filter is present",
+                ),
+                stream_reason::UNSPECIFIED,
+            );
         }
         let binding_id = request
             .binding_id
@@ -598,7 +608,7 @@ impl CapabilityExecutionService {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let _task_guard = task_guard;
-            service.run_subscription(
+            service.run_subscription(SubscriptionTask {
                 public_subscription_id,
                 capability,
                 execution,
@@ -607,22 +617,22 @@ impl CapabilityExecutionService {
                 token,
                 sender,
                 terminal_permit,
-            );
+            });
         });
         Box::pin(ReceiverStream::new(receiver))
     }
 
-    fn run_subscription(
-        &self,
-        public_subscription_id: String,
-        capability: String,
-        execution: ResolvedExecution,
-        filter_payload: Vec<u8>,
-        ack_timeout: Duration,
-        token: Arc<AtomicCancellationToken>,
-        sender: Sender<Result<CapabilityEventStreamItem, Status>>,
-        terminal_permit: OwnedPermit<Result<CapabilityEventStreamItem, Status>>,
-    ) {
+    fn run_subscription(&self, task: SubscriptionTask) {
+        let SubscriptionTask {
+            public_subscription_id,
+            capability,
+            execution,
+            filter_payload,
+            ack_timeout,
+            token,
+            sender,
+            terminal_permit,
+        } = task;
         let mut terminal_permit = Some(terminal_permit);
         let mut client = match CapabilityWorkerActivator::activate_from_manifest(
             &execution.manifest,
@@ -1043,6 +1053,9 @@ fn event_item(
     }
 }
 
+// This constructor deliberately mirrors the flat wire record so callers must
+// provide every authority field explicitly rather than relying on defaults.
+#[allow(clippy::too_many_arguments)]
 fn stream_end_item(
     subscription_id: String,
     capability: String,

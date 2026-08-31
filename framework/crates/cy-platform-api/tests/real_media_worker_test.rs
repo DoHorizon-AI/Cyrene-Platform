@@ -1,18 +1,14 @@
 //! Real cross-repository test: Platform WorkerMediaProcessor -> Official cyrene.tools.media Worker.
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use cy_platform_api::{
+    CapabilityWorkerActivator, WorkerActivationOptions, WorkerMediaProcessor,
     media::{
         ImageFormat, ImageInput, InspectImageRequest, MediaProcessor, MediaProcessorError,
         NeverCancelled, ResizeOptions, TransformImageRequest,
     },
     official_manifest::normalize_official_manifest,
-    CapabilityWorkerActivator, WorkerActivationOptions, WorkerMediaProcessor,
 };
 
 fn platform_root() -> PathBuf {
@@ -70,14 +66,19 @@ fn encode_base64(bytes: &[u8]) -> String {
 #[test]
 fn test_real_media_processor_worker_activation() {
     let Some(plugins_dir) = plugins_root() else {
-        eprintln!("Skipping test_real_media_processor_worker_activation: plugins directory not found");
+        eprintln!(
+            "Skipping test_real_media_processor_worker_activation: plugins directory not found"
+        );
         return;
     };
 
     let media_plugin_dir = plugins_dir.join("plugins/tools/media");
     let manifest_file = media_plugin_dir.join("plugin.manifest.json");
     if !manifest_file.exists() {
-        eprintln!("Skipping test_real_media_processor_worker_activation: manifest not found at {:?}", manifest_file);
+        eprintln!(
+            "Skipping test_real_media_processor_worker_activation: manifest not found at {:?}",
+            manifest_file
+        );
         return;
     }
 
@@ -110,11 +111,11 @@ fn test_real_media_processor_worker_activation() {
 
     // 1. Inspect image with golden vector (1x1 PNG)
     let png_1x1_bytes: Vec<u8> = vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
 
     let inspect_req = InspectImageRequest {

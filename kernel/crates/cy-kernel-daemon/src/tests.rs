@@ -6768,7 +6768,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
 /// - receive B's events
 /// - consume B's authority
 /// - collide with B's object keys
-/// And vice versa for B against A.
+///   And vice versa for B against A.
 #[test]
 fn golden_test_b_full_bidirectional_namespace_isolation() {
     let resources = vec![
