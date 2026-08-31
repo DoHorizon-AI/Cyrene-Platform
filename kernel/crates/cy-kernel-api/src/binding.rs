@@ -179,9 +179,7 @@ fn ordered_unique(values: Vec<String>) -> Vec<String> {
 }
 
 fn join_unique_csv(existing: Option<&str>, incoming: &str) -> String {
-    let mut values = existing
-        .map(split_csv)
-        .unwrap_or_default();
+    let mut values = existing.map(split_csv).unwrap_or_default();
     for value in split_csv(incoming) {
         if !values.iter().any(|existing| existing == &value) {
             values.push(value);

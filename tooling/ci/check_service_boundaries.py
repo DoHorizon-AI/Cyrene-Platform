@@ -29,18 +29,26 @@ class Violation(NamedTuple):
 
 def find_workspace_root(start_path: Path | None = None) -> Path:
     current = (start_path or Path(__file__)).resolve()
-    for parent in [current] + list(current.parents):
+    if current.is_file():
+        current = current.parent
+    parents = [current] + list(current.parents)
+    for parent in parents:
         if (parent / "Cyrene-Platform").exists() and (parent / "services").exists():
             return parent
-    # Fallback to standard location
-    return Path("C:/Users/Baiji/DHDev/Cyrene")
+    for parent in parents:
+        if (parent / "Cargo.toml").is_file() and (parent / "contracts").is_dir():
+            return parent
+    return current
 
 
 def check_service_boundaries(workspace_root: Path) -> List[Violation]:
     violations: List[Violation] = []
+    platform_dir = workspace_root / "Cyrene-Platform"
+    if not platform_dir.is_dir():
+        platform_dir = workspace_root
     services_dir = workspace_root / "services"
     plugins_dir = workspace_root / "plugins"
-    kernel_dir = workspace_root / "Cyrene-Platform" / "kernel" / "crates"
+    kernel_dir = platform_dir / "kernel" / "crates"
 
     ignored_dirs = {
         ".git",
@@ -177,7 +185,7 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                         )
 
     # 4. Check Public Foundation does not import Private Enterprise/Commercial packages
-    public_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
+    public_dirs = [platform_dir, plugins_dir]
     for pdir in public_dirs:
         if not pdir.exists():
             continue
@@ -205,7 +213,7 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                         )
 
     # Rule 5: CI Authority and Public Workflow Alignment
-    repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
+    repo_dirs = [platform_dir, plugins_dir]
     services_dir = workspace_root / "services"
     if services_dir.exists():
         for s in services_dir.iterdir():

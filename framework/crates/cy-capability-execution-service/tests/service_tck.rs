@@ -3,7 +3,7 @@
 //! These tests use only the generated public gRPC client. They deliberately
 //! do not instantiate `CapabilityWorkerClient` or inspect `cy.plugin.v1`.
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, process::Command, time::Duration};
 
 use cy_manifest::{
     CapabilityDescriptor, CapabilityId, CapabilityInterfaceVersion, Edition, ExecutionMode,
@@ -41,6 +41,35 @@ fn platform_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+fn python_executable() -> String {
+    std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    })
+}
+
+fn python_worker_available() -> bool {
+    Command::new(python_executable())
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn skip_without_python() -> bool {
+    if python_worker_available() {
+        return false;
+    }
+
+    eprintln!(
+        "Skipping Python worker TCK: no usable Python interpreter found; set CYRENE_PYTHON to one"
+    );
+    true
 }
 
 fn fixture_manifest() -> PluginManifest {
@@ -91,20 +120,13 @@ fn fixture_manifest() -> PluginManifest {
 
 fn worker_options() -> WorkerActivationOptions {
     let root = platform_root();
-    let python_bin = std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        }
-    });
     WorkerActivationOptions {
         working_dir: Some(root.join("framework/crates/cy-platform-api/tests")),
         python_path: vec![
             root.join("sdk/python"),
             root.join("sdk/python/cyrene_worker_shim"),
         ],
-        python_executable: Some(python_bin),
+        python_executable: Some(python_executable()),
         environment: HashMap::new(),
         handshake_timeout: Duration::from_secs(5),
         default_invoke_timeout: Duration::from_secs(5),
@@ -239,6 +261,10 @@ async fn wait_until_idle(service: &CapabilityExecutionService) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_unary_uses_any_and_maps_invalid_request() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut server = TestServer::start(4).await;
     let response = server
         .client
@@ -281,6 +307,10 @@ async fn service_tck_unary_uses_any_and_maps_invalid_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_streams_single_event_and_normal_end() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut server = TestServer::start(4).await;
     let response = server
         .client
@@ -313,6 +343,10 @@ async fn service_tck_streams_single_event_and_normal_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_streams_ordered_events_and_normal_end() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut server = TestServer::start(4).await;
     let response = server
         .client
@@ -357,6 +391,10 @@ async fn service_tck_streams_ordered_events_and_normal_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_has_bounded_backpressure_and_generation_end() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut server = TestServer::start(2).await;
     let response = server
         .client
@@ -437,6 +475,10 @@ async fn service_tck_pre_cancelled_call_does_not_require_worker_activation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_maps_worker_crash_and_native_deadline_cancellation() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut server = TestServer::start(4).await;
     let crashed = server
         .client
@@ -485,6 +527,10 @@ async fn service_tck_maps_worker_crash_and_native_deadline_cancellation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_uses_platform_timeout_fallback_without_public_timeout_field() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut options = worker_options();
     options.default_invoke_timeout = Duration::from_millis(100);
     let mut server = TestServer::start_with_options(4, options).await;
@@ -507,6 +553,10 @@ async fn service_tck_uses_platform_timeout_fallback_without_public_timeout_field
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_stream_cancellation_and_normal_service_shutdown_cleanup() {
+    if skip_without_python() {
+        return;
+    }
+
     let mut server = TestServer::start(MAX_APPLICATION_EVENT_BUFFER_CAPACITY).await;
     let response = server
         .client

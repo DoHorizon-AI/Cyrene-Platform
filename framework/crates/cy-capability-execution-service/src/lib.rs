@@ -97,6 +97,17 @@ struct ResolvedExecution {
     source_id: String,
 }
 
+struct SubscriptionTask {
+    public_subscription_id: String,
+    capability: String,
+    execution: ResolvedExecution,
+    filter_payload: Vec<u8>,
+    ack_timeout: Duration,
+    token: Arc<AtomicCancellationToken>,
+    sender: Sender<Result<CapabilityEventStreamItem, Status>>,
+    terminal_permit: OwnedPermit<Result<CapabilityEventStreamItem, Status>>,
+}
+
 #[derive(Debug)]
 struct ActiveOperationGuard {
     id: String,
@@ -463,19 +474,19 @@ impl CapabilityExecutionService {
                 "capability execution service is shutting down",
             );
         }
-        if let Some(filter) = request.filter.as_ref() {
-            if filter.type_url.trim().is_empty() {
-                return Self::stream_for_terminal(
-                    subscription_id,
-                    request.capability,
-                    String::new(),
-                    ApiError::new(
-                        capability_execution_error::Code::InvalidRequest,
-                        "filter Any.type_url is required when filter is present",
-                    ),
-                    stream_reason::UNSPECIFIED,
-                );
-            }
+        if let Some(filter) = request.filter.as_ref()
+            && filter.type_url.trim().is_empty()
+        {
+            return Self::stream_for_terminal(
+                subscription_id,
+                request.capability,
+                String::new(),
+                ApiError::new(
+                    capability_execution_error::Code::InvalidRequest,
+                    "filter Any.type_url is required when filter is present",
+                ),
+                stream_reason::UNSPECIFIED,
+            );
         }
         let execution = match self.resolve_worker(&request.capability, &request.interface_version) {
             Ok(execution) => execution,
@@ -546,7 +557,7 @@ impl CapabilityExecutionService {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let _task_guard = task_guard;
-            service.run_subscription(
+            service.run_subscription(SubscriptionTask {
                 public_subscription_id,
                 capability,
                 execution,
@@ -555,22 +566,22 @@ impl CapabilityExecutionService {
                 token,
                 sender,
                 terminal_permit,
-            );
+            });
         });
         Box::pin(ReceiverStream::new(receiver))
     }
 
-    fn run_subscription(
-        &self,
-        public_subscription_id: String,
-        capability: String,
-        execution: ResolvedExecution,
-        filter_payload: Vec<u8>,
-        ack_timeout: Duration,
-        token: Arc<AtomicCancellationToken>,
-        sender: Sender<Result<CapabilityEventStreamItem, Status>>,
-        terminal_permit: OwnedPermit<Result<CapabilityEventStreamItem, Status>>,
-    ) {
+    fn run_subscription(&self, task: SubscriptionTask) {
+        let SubscriptionTask {
+            public_subscription_id,
+            capability,
+            execution,
+            filter_payload,
+            ack_timeout,
+            token,
+            sender,
+            terminal_permit,
+        } = task;
         let mut terminal_permit = Some(terminal_permit);
         let mut client = match CapabilityWorkerActivator::activate_from_manifest(
             &execution.manifest,

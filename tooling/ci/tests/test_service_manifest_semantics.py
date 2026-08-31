@@ -12,15 +12,23 @@ except ImportError:
 
 def find_workspace_root() -> Path:
     current = Path(__file__).resolve().parent
-    while current != current.parent:
-        if (current / "Cyrene-Platform").is_dir() and (current / "services").is_dir():
-            return current
-        current = current.parent
+    parents = [current] + list(current.parents)
+    for parent in parents:
+        if (parent / "Cyrene-Platform").is_dir() and (parent / "services").is_dir():
+            return parent
+    for parent in parents:
+        if (parent / "contracts" / "schemas" / "advanced-service.schema.json").is_file():
+            return parent
     return Path.cwd()
 
 
+def platform_root(workspace_root: Path) -> Path:
+    nested = workspace_root / "Cyrene-Platform"
+    return nested if nested.is_dir() else workspace_root
+
+
 def load_schema(workspace_root: Path) -> dict:
-    schema_path = workspace_root / "Cyrene-Platform" / "contracts" / "schemas" / "advanced-service.schema.json"
+    schema_path = platform_root(workspace_root) / "contracts" / "schemas" / "advanced-service.schema.json"
     assert schema_path.exists(), f"Schema not found at {schema_path}"
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
@@ -28,6 +36,8 @@ def load_schema(workspace_root: Path) -> dict:
 def test_all_product_service_manifests_conform_to_schema():
     """Verify that every product service.json in the workspace strictly conforms to advanced-service.schema.json."""
     root = find_workspace_root()
+    if not (root / "services").is_dir():
+        pytest.skip("product service repositories are not present in a standalone Platform checkout")
     schema = load_schema(root)
 
     services = [
@@ -99,7 +109,7 @@ def test_planned_extension_points_manifest_semantics():
 
     # Resolver query simulation
     available_plugins = {"model.analyzer.v1": "cyrene.models.hf-analyzer", "media.processor.v1": "cyrene.tools.media"}
-    
+
     # Assert all runtime requirements resolve
     for req in runtime_required:
         assert req in available_plugins, f"Runtime requirement {req} should be resolvable"

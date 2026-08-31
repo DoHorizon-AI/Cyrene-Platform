@@ -16,15 +16,15 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
+    process::Command,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use cy_kernel_api::{
-    BackoffConfig, CleanupReport, DeviceBinding, LaunchPlan, NodeCapabilities,
-    ProbeConfig, ProcessHandle, ProcessRuntime, ProviderError, ReadinessProbe,
-    RestartPolicy, SandboxBackend, ServiceEndpointSpec, ServiceSpec, ServiceState,
-    StopRequest,
+    BackoffConfig, CleanupReport, DeviceBinding, LaunchPlan, NodeCapabilities, ProbeConfig,
+    ProcessHandle, ProcessRuntime, ProviderError, ReadinessProbe, RestartPolicy, SandboxBackend,
+    ServiceEndpointSpec, ServiceSpec, ServiceState, StopRequest,
 };
 use cy_kernel_daemon::watchdog::ServiceSupervisor;
 use tokio::{
@@ -32,25 +32,39 @@ use tokio::{
     net::TcpStream,
 };
 
-fn find_astrbot_dll() -> (PathBuf, PathBuf) {
-    let candidates = [
+fn find_astrbot_dll() -> Option<(PathBuf, PathBuf)> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("CYRENE_ASTRBOT_DOTNET_HOST_DLL") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.extend([
         PathBuf::from("../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost/bin/Debug/net10.0/AstrBot.DotNetHost.dll"),
         PathBuf::from("../../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost/bin/Debug/net10.0/AstrBot.DotNetHost.dll"),
         PathBuf::from(r"C:\Users\Baiji\DHDev\Cyrene\services\cyrene-astrbot-rev\src\AstrBot.DotNetHost\bin\Debug\net10.0\AstrBot.DotNetHost.dll"),
-    ];
+    ]);
 
     for candidate in &candidates {
         if candidate.exists() {
             let working_dir = candidate.parent().unwrap().to_path_buf();
-            return (candidate.clone(), working_dir);
+            return Some((candidate.clone(), working_dir));
         }
     }
 
-    panic!("AstrBot.DotNetHost.dll not found in candidate paths. Ensure `dotnet build` was run.");
+    None
+}
+
+fn dotnet_available() -> bool {
+    Command::new("dotnet")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 async fn get_ephemeral_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -145,9 +159,14 @@ impl SandboxBackend for RealAstrBotProcessBackend {
     }
 }
 
-async fn http_get_text(host: &str, port: u16, path: &str) -> Result<(u16, String), Box<dyn std::error::Error>> {
+async fn http_get_text(
+    host: &str,
+    port: u16,
+    path: &str,
+) -> Result<(u16, String), Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(format!("{host}:{port}")).await?;
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     let mut response_buf = Vec::new();
@@ -170,7 +189,17 @@ async fn http_get_text(host: &str, port: u16, path: &str) -> Result<(u16, String
 
 #[tokio::test]
 async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
-    let (astrbot_dll, working_dir) = find_astrbot_dll();
+    let Some((astrbot_dll, working_dir)) = find_astrbot_dll() else {
+        eprintln!(
+            "Skipping AstrBot .NET host E2E: AstrBot.DotNetHost.dll was not found; set CYRENE_ASTRBOT_DOTNET_HOST_DLL or build the sibling service"
+        );
+        return;
+    };
+    if !dotnet_available() {
+        eprintln!("Skipping AstrBot .NET host E2E: dotnet is not available");
+        return;
+    }
+
     let port = get_ephemeral_port().await;
 
     let mut env = BTreeMap::new();
@@ -249,13 +278,20 @@ async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
     // 1. Launch Generation 1 & Probe Readiness
     // ==========================================
     let initial_status = supervisor.start().await.expect("start supervisor");
-    assert_eq!(initial_status.state, ServiceState::Running, "supervisor.start() must evaluate readiness and reach Running");
+    assert_eq!(
+        initial_status.state,
+        ServiceState::Running,
+        "supervisor.start() must evaluate readiness and reach Running"
+    );
     assert_eq!(supervisor.generation(), 1);
 
     // ==========================================
     // 2. Verify Endpoint Publication (Gen 1)
     // ==========================================
-    let ep1 = supervisor.status().published_endpoint.expect("generation 1 endpoint published");
+    let ep1 = supervisor
+        .status()
+        .published_endpoint
+        .expect("generation 1 endpoint published");
     assert_eq!(ep1.identity.generation, 1);
     assert_eq!(ep1.identity.id, "endpoint/cyrene.service.astrbot-rev");
 
@@ -263,24 +299,49 @@ async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
     // 3. Real HTTP Request Path to Running Host:
     // Verify /health/live (process alive) vs /health/ready (dependency gate)
     // ==========================================
-    let (status_live, body_live) = http_get_text("127.0.0.1", port, "/health/live").await.expect("HTTP GET /health/live");
-    assert_eq!(status_live, 200, "expected HTTP 200 from /health/live for process liveness");
-    assert!(body_live.contains("AstrBot.DotNetHost"), "expected body to mention AstrBot.DotNetHost");
+    let (status_live, body_live) = http_get_text("127.0.0.1", port, "/health/live")
+        .await
+        .expect("HTTP GET /health/live");
+    assert_eq!(
+        status_live, 200,
+        "expected HTTP 200 from /health/live for process liveness"
+    );
+    assert!(
+        body_live.contains("AstrBot.DotNetHost"),
+        "expected body to mention AstrBot.DotNetHost"
+    );
 
     // In this standalone test without database connection configured, /health/ready returns 503 not_ready
-    let (status_ready, body_ready) = http_get_text("127.0.0.1", port, "/health/ready").await.expect("HTTP GET /health/ready");
-    assert_eq!(status_ready, 503, "expected HTTP 503 from /health/ready when dependencies (PostgreSQL) are not initialized");
-    assert!(body_ready.contains("not_ready") || body_ready.contains("database_not_configured"),
-        "expected /health/ready to reflect dependency readiness gate");
+    let (status_ready, body_ready) = http_get_text("127.0.0.1", port, "/health/ready")
+        .await
+        .expect("HTTP GET /health/ready");
+    assert_eq!(
+        status_ready, 503,
+        "expected HTTP 503 from /health/ready when dependencies (PostgreSQL) are not initialized"
+    );
+    assert!(
+        body_ready.contains("not_ready") || body_ready.contains("database_not_configured"),
+        "expected /health/ready to reflect dependency readiness gate"
+    );
 
-    let (status_ver, body_ver) = http_get_text("127.0.0.1", port, "/health/version").await.expect("HTTP GET /health/version");
+    let (status_ver, body_ver) = http_get_text("127.0.0.1", port, "/health/version")
+        .await
+        .expect("HTTP GET /health/version");
     assert_eq!(status_ver, 200, "expected HTTP 200 from /health/version");
-    assert!(body_ver.contains("e2e-sha-proof-v1"), "expected body to contain buildSha");
+    assert!(
+        body_ver.contains("e2e-sha-proof-v1"),
+        "expected body to contain buildSha"
+    );
 
     // ==========================================
     // 4. Simulate Unexpected Process Crash
     // ==========================================
-    let gen1_pid = *backend.launched_pids.lock().unwrap().first().expect("gen1 pid");
+    let gen1_pid = *backend
+        .launched_pids
+        .lock()
+        .unwrap()
+        .first()
+        .expect("gen1 pid");
     backend.kill_active_process(gen1_pid);
     tokio::time::sleep(Duration::from_millis(400)).await;
 
@@ -294,13 +355,19 @@ async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
     };
     supervisor.handle_observed_exit(crash_report).await;
     assert_eq!(supervisor.state(), ServiceState::Restarting);
-    assert!(supervisor.status().published_endpoint.is_none(), "endpoint must be revoked immediately upon crash");
+    assert!(
+        supervisor.status().published_endpoint.is_none(),
+        "endpoint must be revoked immediately upon crash"
+    );
 
     // ==========================================
     // 5. Backoff -> Generation 2 Launch & Ready
     // ==========================================
     tokio::time::sleep(Duration::from_millis(300)).await;
-    supervisor.step_supervision().await.expect("step restart backoff");
+    supervisor
+        .step_supervision()
+        .await
+        .expect("step restart backoff");
     assert_eq!(supervisor.generation(), 2);
 
     // Wait for Generation 2 to reach Running via /health/live
@@ -313,14 +380,22 @@ async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(gen2_ready, "Generation 2 AstrBot host failed to reach Running state");
+    assert!(
+        gen2_ready,
+        "Generation 2 AstrBot host failed to reach Running state"
+    );
 
-    let ep2 = supervisor.status().published_endpoint.expect("generation 2 endpoint published");
+    let ep2 = supervisor
+        .status()
+        .published_endpoint
+        .expect("generation 2 endpoint published");
     assert_eq!(ep2.identity.generation, 2);
     assert_ne!(ep2.identity.generation, ep1.identity.generation);
 
     // Verify Generation 2 handles real HTTP requests
-    let (status_gen2, body_gen2) = http_get_text("127.0.0.1", port, "/health/live").await.expect("HTTP GET gen2");
+    let (status_gen2, body_gen2) = http_get_text("127.0.0.1", port, "/health/live")
+        .await
+        .expect("HTTP GET gen2");
     assert_eq!(status_gen2, 200);
     assert!(body_gen2.contains("AstrBot.DotNetHost"));
 
@@ -336,5 +411,8 @@ async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
 
     // Verify HTTP connection is closed
     let probe_after_stop = TcpStream::connect(format!("127.0.0.1:{port}")).await;
-    assert!(probe_after_stop.is_err(), "port must be closed after supervisor stop");
+    assert!(
+        probe_after_stop.is_err(),
+        "port must be closed after supervisor stop"
+    );
 }

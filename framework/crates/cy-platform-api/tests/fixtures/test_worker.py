@@ -7,8 +7,9 @@ import threading
 import time
 from pathlib import Path
 
-# Add cyrene_worker_shim to sys.path
-manifest_dir = Path(__file__).resolve().parents[4]
+# Add cyrene_worker_shim to sys.path when this fixture is run directly. The
+# fixture lives below <repo>/framework/crates/cy-platform-api/tests/fixtures.
+manifest_dir = Path(__file__).resolve().parents[5]
 shim_dir = manifest_dir / "sdk/python/cyrene_worker_shim"
 sys.path.insert(0, str(shim_dir))
 

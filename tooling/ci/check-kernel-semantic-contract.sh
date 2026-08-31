@@ -98,8 +98,10 @@ fi
 
 breaking_baseline="$descriptor"
 if [[ -n "${GITHUB_BASE_REF:-}" ]] \
-  && git cat-file -e "origin/${GITHUB_BASE_REF}:${stable_descriptor}" 2>/dev/null; then
-  git show "origin/${GITHUB_BASE_REF}:${stable_descriptor}" > "$tmp_base_descriptor"
+  && git cat-file -e "origin/${GITHUB_BASE_REF}:${descriptor}" 2>/dev/null; then
+  # Buf breaking requires source_code_info; use the source-aware descriptor
+  # from the target branch rather than the deterministic stable descriptor.
+  git show "origin/${GITHUB_BASE_REF}:${descriptor}" > "$tmp_base_descriptor"
   breaking_baseline="$tmp_base_descriptor"
 fi
 "$buf_bin" breaking contracts/proto --against "$breaking_baseline#format=binpb"

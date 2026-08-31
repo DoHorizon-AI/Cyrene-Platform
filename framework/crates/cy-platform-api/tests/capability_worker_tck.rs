@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, process::Command, time::Duration};
 
 use cy_manifest::{
     CapabilityDescriptor, CapabilityId, CapabilityInterfaceVersion, Edition, ExecutionMode,
@@ -24,6 +20,35 @@ fn root_dir() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+fn python_executable() -> String {
+    std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    })
+}
+
+fn python_worker_available() -> bool {
+    Command::new(python_executable())
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn skip_without_python() -> bool {
+    if python_worker_available() {
+        return false;
+    }
+
+    eprintln!(
+        "Skipping Python worker TCK: no usable Python interpreter found; set CYRENE_PYTHON to one"
+    );
+    true
 }
 
 fn fixture_manifest() -> PluginManifest {
@@ -54,17 +79,20 @@ fn fixture_manifest() -> PluginManifest {
         permissions: None,
         resources: None,
         package: None,
-        capability_descriptors: vec![CapabilityDescriptor::new(
-            CapabilityId::new("test.capability.v1").unwrap(),
-            CapabilityInterfaceVersion::new("1").unwrap(),
-            vec![ExecutionMode::Worker],
-        )
-        .unwrap(), CapabilityDescriptor::new(
-            CapabilityId::new("test.application-events.v1").unwrap(),
-            CapabilityInterfaceVersion::new("1").unwrap(),
-            vec![ExecutionMode::Worker],
-        )
-        .unwrap()],
+        capability_descriptors: vec![
+            CapabilityDescriptor::new(
+                CapabilityId::new("test.capability.v1").unwrap(),
+                CapabilityInterfaceVersion::new("1").unwrap(),
+                vec![ExecutionMode::Worker],
+            )
+            .unwrap(),
+            CapabilityDescriptor::new(
+                CapabilityId::new("test.application-events.v1").unwrap(),
+                CapabilityInterfaceVersion::new("1").unwrap(),
+                vec![ExecutionMode::Worker],
+            )
+            .unwrap(),
+        ],
         artifact: None,
     }
 }
@@ -75,18 +103,10 @@ fn worker_options() -> WorkerActivationOptions {
     let shim_dir = root.join("sdk/python/cyrene_worker_shim");
     let tests_dir = root.join("framework/crates/cy-platform-api/tests");
 
-    let python_bin = std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        }
-    });
-
     WorkerActivationOptions {
         working_dir: Some(tests_dir),
         python_path: vec![python_sdk_dir, shim_dir],
-        python_executable: Some(python_bin),
+        python_executable: Some(python_executable()),
         environment: HashMap::new(),
         handshake_timeout: Duration::from_secs(5),
         default_invoke_timeout: Duration::from_secs(5),
@@ -97,6 +117,10 @@ fn worker_options() -> WorkerActivationOptions {
 
 #[test]
 fn test_capability_worker_activation_and_handshake() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
 
@@ -106,9 +130,15 @@ fn test_capability_worker_activation_and_handshake() {
     assert_eq!(client.plugin_id(), "com.cyrene.tck.generic-worker");
     assert_eq!(client.plugin_version(), "1.0.0");
     assert_eq!(client.api_version(), "1.0");
-    assert!(client.declared_capabilities().contains(&"test.capability.v1".to_string()));
+    assert!(
+        client
+            .declared_capabilities()
+            .contains(&"test.capability.v1".to_string())
+    );
 
-    client.shutdown(Duration::from_secs(1)).expect("shutdown should succeed");
+    client
+        .shutdown(Duration::from_secs(1))
+        .expect("shutdown should succeed");
 }
 
 fn event_filter(mode: &str) -> Vec<u8> {
@@ -117,9 +147,14 @@ fn event_filter(mode: &str) -> Vec<u8> {
 
 #[test]
 fn test_capability_worker_application_events_single_and_ordered() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let single = client
         .subscribe_application_events_with_buffer(
@@ -152,7 +187,12 @@ fn test_capability_worker_application_events_single_and_ordered() {
         .collect::<Vec<_>>();
     assert_eq!(values, vec!["1", "2", "3"]);
     assert_eq!(
-        ordered.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        ordered
+            .next(Duration::from_secs(2))
+            .unwrap_err()
+            .termination()
+            .unwrap()
+            .reason,
         ApplicationEventStreamEndReason::NormalCompletion
     );
 
@@ -161,9 +201,14 @@ fn test_capability_worker_application_events_single_and_ordered() {
 
 #[test]
 fn test_capability_worker_application_events_bounded_backpressure_and_slow_consumer() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let burst = client
         .subscribe_application_events_with_buffer(
@@ -173,8 +218,14 @@ fn test_capability_worker_application_events_bounded_backpressure_and_slow_consu
             Duration::from_secs(2),
         )
         .unwrap();
-    assert_eq!(burst.next(Duration::from_secs(2)).unwrap().event_sequence, 1);
-    assert_eq!(burst.next(Duration::from_secs(2)).unwrap().event_sequence, 2);
+    assert_eq!(
+        burst.next(Duration::from_secs(2)).unwrap().event_sequence,
+        1
+    );
+    assert_eq!(
+        burst.next(Duration::from_secs(2)).unwrap().event_sequence,
+        2
+    );
     let terminal = burst.next(Duration::from_secs(2)).unwrap_err();
     assert_eq!(
         terminal.termination().unwrap().reason,
@@ -191,7 +242,11 @@ fn test_capability_worker_application_events_bounded_backpressure_and_slow_consu
         .unwrap();
     assert_eq!(slow.next(Duration::from_secs(2)).unwrap().payload, b"slow");
     assert_eq!(
-        slow.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        slow.next(Duration::from_secs(2))
+            .unwrap_err()
+            .termination()
+            .unwrap()
+            .reason,
         ApplicationEventStreamEndReason::NormalCompletion
     );
 
@@ -200,9 +255,14 @@ fn test_capability_worker_application_events_bounded_backpressure_and_slow_consu
 
 #[test]
 fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let cancellation = AtomicCancellationToken::new();
     cancellation.cancel();
@@ -213,7 +273,10 @@ fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
         Duration::from_secs(2),
         &cancellation,
     );
-    assert!(matches!(pre_cancelled, Err(WorkerTerminalError::Cancelled(_))));
+    assert!(matches!(
+        pre_cancelled,
+        Err(WorkerTerminalError::Cancelled(_))
+    ));
 
     let subscription = client
         .subscribe_application_events_with_buffer(
@@ -223,7 +286,9 @@ fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
             Duration::from_secs(2),
         )
         .unwrap();
-    subscription.unsubscribe(&mut client, Duration::from_secs(2)).unwrap();
+    subscription
+        .unsubscribe(&mut client, Duration::from_secs(2))
+        .unwrap();
     let terminal = subscription.next(Duration::from_secs(2)).unwrap_err();
     assert_eq!(
         terminal.termination().unwrap().reason,
@@ -240,9 +305,16 @@ fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
             Duration::from_secs(2),
         )
         .unwrap();
-    in_flight.unsubscribe(&mut client, Duration::from_secs(2)).unwrap();
+    in_flight
+        .unsubscribe(&mut client, Duration::from_secs(2))
+        .unwrap();
     assert_eq!(
-        in_flight.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        in_flight
+            .next(Duration::from_secs(2))
+            .unwrap_err()
+            .termination()
+            .unwrap()
+            .reason,
         ApplicationEventStreamEndReason::Cancelled
     );
 
@@ -251,9 +323,14 @@ fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
 
 #[test]
 fn test_capability_worker_application_events_generation_and_worker_crash() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let generation = client
         .subscribe_application_events_with_buffer(
@@ -264,7 +341,12 @@ fn test_capability_worker_application_events_generation_and_worker_crash() {
         )
         .unwrap();
     assert_eq!(
-        generation.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        generation
+            .next(Duration::from_secs(2))
+            .unwrap_err()
+            .termination()
+            .unwrap()
+            .reason,
         ApplicationEventStreamEndReason::GenerationTerminated
     );
 
@@ -283,18 +365,31 @@ fn test_capability_worker_application_events_generation_and_worker_crash() {
         Duration::from_secs(2),
         &NeverCancelled,
     );
-    assert!(matches!(invoke_error, Err(WorkerTerminalError::WorkerCrashed(_))));
+    assert!(matches!(
+        invoke_error,
+        Err(WorkerTerminalError::WorkerCrashed(_))
+    ));
     assert_eq!(
-        crash.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        crash
+            .next(Duration::from_secs(2))
+            .unwrap_err()
+            .termination()
+            .unwrap()
+            .reason,
         ApplicationEventStreamEndReason::WorkerCrash
     );
 }
 
 #[test]
 fn test_capability_worker_application_events_normal_shutdown() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
     let subscription = client
         .subscribe_application_events_with_buffer(
             "test.application-events.v1",
@@ -306,16 +401,26 @@ fn test_capability_worker_application_events_normal_shutdown() {
 
     client.shutdown(Duration::from_secs(1)).unwrap();
     assert_eq!(
-        subscription.next(Duration::from_secs(2)).unwrap_err().termination().unwrap().reason,
+        subscription
+            .next(Duration::from_secs(2))
+            .unwrap_err()
+            .termination()
+            .unwrap()
+            .reason,
         ApplicationEventStreamEndReason::NormalCompletion
     );
 }
 
 #[test]
 fn test_capability_worker_typed_invocation() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let req_payload = serde_json::to_vec(&json!({"message": "ping"})).unwrap();
     let resp_bytes = client
@@ -351,9 +456,14 @@ fn test_capability_worker_typed_invocation() {
 
 #[test]
 fn test_capability_worker_invalid_request_error() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let invalid_payload = serde_json::to_vec(&json!({"value": -5})).unwrap();
     let err = client
@@ -374,9 +484,14 @@ fn test_capability_worker_invalid_request_error() {
 
 #[test]
 fn test_capability_worker_execution_failure_error() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let err = client
         .invoke(
@@ -388,7 +503,10 @@ fn test_capability_worker_execution_failure_error() {
         )
         .expect_err("fail operation must return execution failure error");
 
-    assert!(matches!(err, WorkerTerminalError::CapabilityExecutionFailure(_)));
+    assert!(matches!(
+        err,
+        WorkerTerminalError::CapabilityExecutionFailure(_)
+    ));
     assert!(err.message().contains("EXECUTION_FAILED"));
 
     client.shutdown(Duration::from_secs(1)).unwrap();
@@ -396,9 +514,14 @@ fn test_capability_worker_execution_failure_error() {
 
 #[test]
 fn test_capability_worker_pre_cancellation() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let cancellation = AtomicCancellationToken::new();
     cancellation.cancel(); // Pre-cancel
@@ -420,9 +543,14 @@ fn test_capability_worker_pre_cancellation() {
 
 #[test]
 fn test_capability_worker_inflight_cancellation() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let cancellation = AtomicCancellationToken::new();
     let cancel_token_clone = cancellation.clone();
@@ -451,9 +579,14 @@ fn test_capability_worker_inflight_cancellation() {
 
 #[test]
 fn test_capability_worker_timeout() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let slow_payload = serde_json::to_vec(&json!({"delay_ms": 1000})).unwrap();
     let err = client
@@ -473,9 +606,14 @@ fn test_capability_worker_timeout() {
 
 #[test]
 fn test_capability_worker_crash_detection() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
-    let mut client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
 
     let err = client
         .invoke(
@@ -492,6 +630,10 @@ fn test_capability_worker_crash_detection() {
 
 #[test]
 fn test_capability_worker_drop_cleanup() {
+    if skip_without_python() {
+        return;
+    }
+
     let manifest = fixture_manifest();
     let options = worker_options();
     let client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();

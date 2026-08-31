@@ -5,13 +5,17 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    thread,
+    sync::Mutex,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::{
@@ -871,7 +875,7 @@ impl ProcessRuntime for CgroupV2Runtime {
                 Ok(())
             });
         }
-        let mut child = match command.spawn() {
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 if let Some(path) = plan.transport_socket.as_ref() {
@@ -886,6 +890,8 @@ impl ProcessRuntime for CgroupV2Runtime {
                 ));
             }
         };
+        #[cfg(unix)]
+        let mut child = child;
         #[cfg(unix)]
         let transport = if let Some(listener) = transport_listener {
             let stdin = match child.stdin.take() {

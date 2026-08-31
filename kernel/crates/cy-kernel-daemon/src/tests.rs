@@ -6409,6 +6409,21 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
 // Cy Kernel Phase 10: Failure-Domain Golden Tests
 // =========================================================================
 
+fn spawn_long_running_test_process() -> std::io::Result<std::process::Child> {
+    if cfg!(windows) {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ])
+            .spawn()
+    } else {
+        std::process::Command::new("sleep").arg("60").spawn()
+    }
+}
+
 /// Golden Test A — Real Worker Lost
 ///
 /// End-to-end failure domain behavior:
@@ -6454,12 +6469,9 @@ fn golden_test_a_real_worker_lost_end_to_end() {
             plan: &LaunchPlan,
             _binding: &DeviceBinding,
         ) -> Result<ProcessHandle, ProviderError> {
-            let child = std::process::Command::new("sleep")
-                .arg("60")
-                .spawn()
-                .map_err(|e| {
-                    ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string())
-                })?;
+            let child = spawn_long_running_test_process().map_err(|e| {
+                ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string())
+            })?;
             let pid = child.id();
             self.children.lock().unwrap().insert(pid, child);
             self.launched_pids.lock().unwrap().push(pid);
@@ -6768,7 +6780,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
 /// - receive B's events
 /// - consume B's authority
 /// - collide with B's object keys
-/// And vice versa for B against A.
+///   And vice versa for B against A.
 #[test]
 fn golden_test_b_full_bidirectional_namespace_isolation() {
     let resources = vec![
@@ -7189,12 +7201,9 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
             plan: &LaunchPlan,
             _binding: &DeviceBinding,
         ) -> Result<ProcessHandle, ProviderError> {
-            let child = std::process::Command::new("sleep")
-                .arg("60")
-                .spawn()
-                .map_err(|e| {
-                    ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string())
-                })?;
+            let child = spawn_long_running_test_process().map_err(|e| {
+                ProviderError::new("controlled-sandbox", "SPAWN_FAILED", &e.to_string())
+            })?;
             let pid = child.id();
             self.children.lock().unwrap().insert(pid, child);
             self.launched_pids.lock().unwrap().push(pid);

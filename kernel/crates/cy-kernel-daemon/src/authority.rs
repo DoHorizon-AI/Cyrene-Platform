@@ -583,7 +583,7 @@ impl LocalKernelAuthority {
                     grace_period: std::time::Duration::ZERO,
                     immediate: true,
                 })
-                .map(Clone::clone)
+                .cloned()
                 .ok()
         };
 

@@ -7,6 +7,7 @@
 //! trusted peer UID/GID (fail-closed at startup), and the authority socket also
 //! authenticates the calling Principal from the peer credential.
 
+#[cfg(unix)]
 mod runtime_journal;
 
 #[cfg(not(unix))]

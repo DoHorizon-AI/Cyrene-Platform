@@ -10,6 +10,7 @@ _spec.loader.exec_module(_module)
 find_workspace_root = _module.find_workspace_root
 verify_workspace_api_docs = _module.verify_workspace_api_docs
 verify_single_repo = _module.verify_single_repo
+platform_root = _module.platform_root
 verify_capability_index = _module.verify_capability_index
 verify_plugin_docs = _module.verify_plugin_docs
 
@@ -22,7 +23,7 @@ def test_workspace_api_documentation_guard():
 
 def test_standalone_repo_guard():
     root = find_workspace_root()
-    platform_dir = root / "Cyrene-Platform"
+    platform_dir = platform_root(root)
     errors = verify_single_repo(platform_dir, "Cyrene-Platform", "ACTIVE_PLATFORM")
     assert not errors, f"Standalone platform guard errors: {errors}"
 
