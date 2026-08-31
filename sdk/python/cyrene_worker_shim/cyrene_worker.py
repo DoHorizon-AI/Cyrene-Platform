@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 from collections import deque
 from enum import IntEnum
+import os
 import struct
 import sys
 import threading
@@ -1034,6 +1035,25 @@ class CyreneWorker:
         """Return (success, response_payload_bytes)."""
         return False, b"on_invoke not implemented"
 
+    def _start_invocation(self, request_id: str) -> None:
+        """Prepare an invocation before it is dispatched to a worker thread."""
+        del request_id
+
+    def _invoke_request(
+        self,
+        request_id: str,
+        capability: str,
+        action: str,
+        payload: bytes,
+    ) -> Tuple[bool, Any]:
+        """Invoke one correlated request while preserving the public hook API."""
+        del request_id
+        return self.on_invoke(capability, action, payload)
+
+    def _finish_invocation(self, request_id: str) -> None:
+        """Release invocation state after its response has been emitted."""
+        del request_id
+
     def on_subscribe(
         self,
         subscription_id: str,
@@ -1159,21 +1179,37 @@ class CyreneWorker:
             stream.terminate(reason, message)
 
 
+def _read_exact(stream: BinaryIO, size: int) -> Optional[bytes]:
+    """Read exactly ``size`` bytes, tolerating short pipe/socket reads."""
+    if size == 0:
+        return b""
+
+    data = bytearray()
+    while len(data) < size:
+        chunk = stream.read(size - len(data))
+        if not chunk:
+            if not data:
+                return None
+            raise IOError(f"Unexpected EOF reading {size} bytes, got {len(data)}")
+        data.extend(chunk)
+    return bytes(data)
+
+
 def read_frame(stream: Optional[BinaryIO] = None, max_bytes: int = DEFAULT_MAX_MESSAGE_BYTES) -> Optional[bytes]:
     if stream is None:
         stream = sys.stdin.buffer
 
-    len_bytes = stream.read(4)
-    if not len_bytes or len(len_bytes) < 4:
+    len_bytes = _read_exact(stream, 4)
+    if len_bytes is None:
         return None
 
     (payload_len,) = struct.unpack(">I", len_bytes)
     if payload_len > max_bytes:
         raise ValueError(f"Frame length {payload_len} exceeds maximum allowed {max_bytes}")
 
-    payload = stream.read(payload_len)
-    if len(payload) < payload_len:
-        raise IOError(f"Unexpected EOF reading payload: expected {payload_len}, got {len(payload)}")
+    payload = _read_exact(stream, payload_len)
+    if payload is None:
+        raise IOError(f"Unexpected EOF reading payload: expected {payload_len}, got 0")
 
     return payload
 
@@ -1269,6 +1305,64 @@ def _subscription_error(result: object) -> Optional[str]:
     return str(result)
 
 
+def _exception_response_payload(error: Exception) -> PluginErrorPayload:
+    """Convert a worker callback exception into the canonical error payload."""
+    err_code = getattr(error, "code", None)
+    err_msg = getattr(error, "message", str(error))
+    code_val = 8
+    code_str = (
+        err_code.value
+        if hasattr(err_code, "value")
+        else str(err_code)
+        if err_code
+        else ""
+    )
+    if code_str in ("INVALID_INPUT", "UNSUPPORTED_INPUT"):
+        code_val = 3
+    elif code_str == "CANCELLED":
+        code_val = 6
+    elif "CANCELLED" in str(error):
+        code_val = 6
+    elif "INVALID_INPUT" in str(error) or "UNSUPPORTED_INPUT" in str(error):
+        code_val = 3
+    elif isinstance(error, (ValueError, TypeError, KeyError)):
+        code_val = 3
+
+    formatted_msg = f"{code_str}: {err_msg}".strip(": ") if code_str else err_msg
+    return PluginErrorPayload(
+        code=code_val,
+        message=formatted_msg,
+        details=str(error),
+    )
+
+
+def _invoke_response_payload(ok: bool, result: object) -> object:
+    """Map one invocation result to its wire-level payload."""
+    if ok:
+        if isinstance(result, TypedCapabilityPayload):
+            return InvokeResult(
+                payload=result.value,
+                payload_type_url=result.type_url,
+            )
+        return InvokeResult(
+            payload=result if isinstance(result, bytes) else bytes(result),
+        )
+    if isinstance(result, PluginErrorPayload):
+        return result
+
+    message = (
+        result.decode("utf-8", "replace")
+        if isinstance(result, bytes)
+        else str(result)
+    )
+    code = 8
+    if "INVALID_INPUT" in message or "UNSUPPORTED_INPUT" in message:
+        code = 3
+    elif "CANCELLED" in message:
+        code = 6
+    return PluginErrorPayload(code=code, message=message)
+
+
 def run_worker_stream(
     reader: BinaryIO,
     writer: BinaryIO,
@@ -1320,6 +1414,116 @@ def run_worker_stream(
     )
     event_thread.start()
 
+    invocation_lock = threading.Lock()
+    active_invocations: Dict[str, threading.Thread] = {}
+
+    def cancel_active_invocations(reason: str) -> None:
+        with invocation_lock:
+            request_ids = list(active_invocations)
+        for request_id in request_ids:
+            try:
+                worker.on_cancel(request_id, reason)
+            except Exception as error:
+                # Cancellation must not prevent the reader from acknowledging
+                # the control frame or cancelling another active request.
+                log(f"Cancellation hook failed for {request_id}: {error}")
+
+    def wait_for_active_invocations() -> None:
+        """Join every invocation thread so the worker never returns with orphans."""
+        while True:
+            with invocation_lock:
+                active = list(active_invocations.items())
+            if not active:
+                return
+            for request_id, thread in active:
+                thread.join()
+                with invocation_lock:
+                    if active_invocations.get(request_id) is thread:
+                        active_invocations.pop(request_id, None)
+
+    def dispatch_invocation(req_env: Envelope, inv: Invoke) -> Optional[object]:
+        """Register and start one invocation without blocking the frame reader."""
+        request_id = req_env.request_id
+        with invocation_lock:
+            if request_id in active_invocations:
+                return PluginErrorPayload(
+                    code=9,
+                    message=f"duplicate active invocation request id {request_id}",
+                    details="DUPLICATE_REQUEST_ID",
+                )
+
+        try:
+            # The GenericCapabilityWorker registers its cancellation token here,
+            # before the thread starts, so a Cancel frame cannot race setup.
+            worker._start_invocation(request_id)
+        except Exception as error:
+            return _exception_response_payload(error)
+
+        def invoke_target() -> None:
+            try:
+                ok, result = worker._invoke_request(
+                    request_id,
+                    inv.capability,
+                    inv.action,
+                    inv.payload,
+                )
+                response_payload = _invoke_response_payload(ok, result)
+                output.send(
+                    req_env.request_id,
+                    req_env.trace_id,
+                    req_env.generation,
+                    req_env.fence_token,
+                    response_payload,
+                )
+            except SystemExit as error:
+                # A plugin explicitly exiting is a worker crash. Threads cannot
+                # propagate SystemExit to the process, so preserve subprocess
+                # crash semantics explicitly.
+                exit_code = error.code if isinstance(error.code, int) else 1
+                os._exit(exit_code & 0xFF)
+            except Exception as error:
+                try:
+                    output.send(
+                        req_env.request_id,
+                        req_env.trace_id,
+                        req_env.generation,
+                        req_env.fence_token,
+                        _exception_response_payload(error),
+                    )
+                except Exception as output_error:
+                    log(
+                        f"Invocation output stopped for {request_id}: "
+                        f"{output_error}"
+                    )
+                    stop_event.set()
+            finally:
+                try:
+                    worker._finish_invocation(request_id)
+                except Exception as error:
+                    log(f"Invocation cleanup failed for {request_id}: {error}")
+                with invocation_lock:
+                    if active_invocations.get(request_id) is thread:
+                        active_invocations.pop(request_id, None)
+
+        thread = threading.Thread(
+            target=invoke_target,
+            name=f"cyrene-invocation-{request_id}",
+            daemon=False,
+        )
+        with invocation_lock:
+            active_invocations[request_id] = thread
+        try:
+            thread.start()
+        except Exception as error:
+            with invocation_lock:
+                active_invocations.pop(request_id, None)
+            try:
+                worker._finish_invocation(request_id)
+            except Exception as cleanup_error:
+                log(f"Invocation cleanup failed for {request_id}: {cleanup_error}")
+            return _exception_response_payload(error)
+        return None
+
     active_generation = 0
     active_fence_token = 0
     has_request_sequence = False
@@ -1337,6 +1541,7 @@ def run_worker_stream(
                 req_id = req_env.request_id
                 trace_id = req_env.trace_id
                 shutdown_requested = False
+                send_response = True
 
                 is_stale = req_env.generation < active_generation or (
                     req_env.generation == active_generation
@@ -1500,75 +1705,72 @@ def run_worker_stream(
                             if isinstance(req_env.payload, Cancel)
                             else Cancel()
                         )
-                        if worker._has_application_event_stream(cancel.target_request_id):
-                            worker.on_unsubscribe(
-                                cancel.target_request_id,
-                                cancel.reason,
+                        try:
+                            if worker._has_application_event_stream(cancel.target_request_id):
+                                worker.on_unsubscribe(
+                                    cancel.target_request_id,
+                                    cancel.reason,
+                                )
+                                worker.terminate_application_event_stream(
+                                    cancel.target_request_id,
+                                    int(ApplicationEventStreamEndReason.CANCELLED),
+                                    cancel.reason or "subscription cancelled",
+                                )
+                            worker.on_cancel(cancel.target_request_id, cancel.reason)
+                        except Exception as error:
+                            log(
+                                f"Cancellation hook failed for "
+                                f"{cancel.target_request_id}: {error}"
                             )
-                            worker.terminate_application_event_stream(
-                                cancel.target_request_id,
-                                int(ApplicationEventStreamEndReason.CANCELLED),
-                                cancel.reason or "subscription cancelled",
-                            )
-                        worker.on_cancel(cancel.target_request_id, cancel.reason)
                         resp_payload = CancelAck(target_request_id=cancel.target_request_id)
                     elif req_env.payload_tag == 20:  # Invoke
                         inv = req_env.payload if isinstance(req_env.payload, Invoke) else Invoke()
-                        ok, res = worker.on_invoke(inv.capability, inv.action, inv.payload)
-                        if ok:
-                            if isinstance(res, TypedCapabilityPayload):
-                                resp_payload = InvokeResult(
-                                    payload=res.value,
-                                    payload_type_url=res.type_url,
-                                )
-                            else:
-                                resp_payload = InvokeResult(
-                                    payload=res if isinstance(res, bytes) else bytes(res)
-                                )
-                        elif isinstance(res, PluginErrorPayload):
-                            resp_payload = res
-                        else:
-                            msg = (
-                                res.decode("utf-8", "replace")
-                                if isinstance(res, bytes)
-                                else str(res)
-                            )
-                            code = 8
-                            if "INVALID_INPUT" in msg or "UNSUPPORTED_INPUT" in msg:
-                                code = 3
-                            elif "CANCELLED" in msg:
-                                code = 6
-                            resp_payload = PluginErrorPayload(code=code, message=msg)
+                        resp_payload = dispatch_invocation(req_env, inv)
+                        if resp_payload is None:
+                            send_response = False
                     elif req_env.payload_tag == 16:  # Shutdown
                         shut = (
                             req_env.payload
                             if isinstance(req_env.payload, Shutdown)
                             else Shutdown()
                         )
+                        shutdown_error: Optional[PluginErrorPayload] = None
+                        cancel_active_invocations("worker shutdown")
                         worker._terminate_application_event_streams(
                             int(ApplicationEventStreamEndReason.NORMAL_COMPLETION),
                             "worker shutdown",
                         )
-                        worker.on_shutdown(shut.grace_period_ms)
-                        resp_payload = HealthStatus(status=0, message="Shutdown ACK")
+                        try:
+                            worker.on_shutdown(shut.grace_period_ms)
+                        except Exception as error:
+                            shutdown_error = _exception_response_payload(error)
+                            log(f"Shutdown hook failed: {error}")
+                        wait_for_active_invocations()
+                        resp_payload = shutdown_error or HealthStatus(
+                            status=0,
+                            message="Shutdown ACK",
+                        )
                         shutdown_requested = True
                     else:
                         resp_payload = PluginErrorPayload(
                             code=9, message="Unsupported payload"
                         )
 
-                output.send(
-                    req_id,
-                    trace_id,
-                    req_env.generation,
-                    req_env.fence_token,
-                    resp_payload,
-                )
+                if send_response:
+                    output.send(
+                        req_id,
+                        trace_id,
+                        req_env.generation,
+                        req_env.fence_token,
+                        resp_payload,
+                    )
                 if shutdown_requested:
                     break
             except Exception as error:
                 log(f"Unhandled error in worker loop: {error}")
     finally:
+        cancel_active_invocations("worker input closed")
+        wait_for_active_invocations()
         stop_event.set()
         worker._notify_application_events()
         event_thread.join(timeout=1.0)

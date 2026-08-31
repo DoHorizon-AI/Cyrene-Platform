@@ -29,14 +29,14 @@ try:
     )
 except ImportError:
     try:
-        from cyrene_worker_shim.cyrene_worker import (
+        from cyrene_worker import (
             CyreneWorker,
             PluginErrorPayload,
             TypedCapabilityPayload,
             run_worker_stdio,
         )
     except ImportError:
-        from cyrene_worker import (
+        from cyrene_worker_shim.cyrene_worker import (
             CyreneWorker,
             PluginErrorPayload,
             TypedCapabilityPayload,
@@ -88,6 +88,32 @@ class GenericCapabilityWorker(CyreneWorker):
     def declared_capabilities(self) -> List[str]:
         return self._capabilities
 
+    def _start_invocation(self, request_id: str) -> None:
+        """Register a token before the invocation thread starts running."""
+        with self._lock:
+            if request_id in self._active_tokens:
+                raise ValueError(f"duplicate active invocation request id {request_id}")
+            self._active_tokens[request_id] = WorkerCancellationToken()
+
+    def _finish_invocation(self, request_id: str) -> None:
+        with self._lock:
+            self._active_tokens.pop(request_id, None)
+
+    def _invoke_request(
+        self,
+        request_id: str,
+        capability: str,
+        action: str,
+        payload: bytes,
+    ) -> Tuple[bool, Any]:
+        with self._lock:
+            token = self._active_tokens.get(request_id)
+        if token is None:
+            # Direct callers of the wrapper are not associated with a wire
+            # request, so retain the old non-correlated behaviour for them.
+            token = WorkerCancellationToken()
+        return self._invoke_with_token(capability, action, payload, token)
+
     def on_subscribe(
         self,
         subscription_id: str,
@@ -137,11 +163,52 @@ class GenericCapabilityWorker(CyreneWorker):
             if token:
                 token.cancel()
 
+        handler = getattr(self._instance, "on_cancel", None)
+        if handler is not None:
+            handler(target_request_id, reason)
+
+    def on_shutdown(self, grace_period_ms: int) -> None:
+        handler = getattr(self._instance, "on_shutdown", None)
+        if handler is not None:
+            handler(grace_period_ms)
+
     def on_invoke(
         self, capability: str, action: str, payload: bytes
     ) -> Tuple[bool, Any]:
+        return self._invoke_with_token(
+            capability,
+            action,
+            payload,
+            WorkerCancellationToken(),
+        )
+
+    def _invoke_with_token(
+        self,
+        capability: str,
+        action: str,
+        payload: bytes,
+        token: WorkerCancellationToken,
+    ) -> Tuple[bool, Any]:
         if hasattr(self._instance, "on_invoke"):
-            return self._instance.on_invoke(capability, action, payload)
+            handler = self._instance.on_invoke
+            try:
+                signature = inspect.signature(handler)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None:
+                cancellation = signature.parameters.get("cancellation")
+                accepts_kwargs = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                )
+                if cancellation is not None and cancellation.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                ):
+                    return handler(capability, action, payload, token)
+                if cancellation is not None or accepts_kwargs:
+                    return handler(capability, action, payload, cancellation=token)
+            return handler(capability, action, payload)
 
         handler = getattr(self._instance, action, None)
         if handler is None:
@@ -151,7 +218,6 @@ class GenericCapabilityWorker(CyreneWorker):
                 details="UNKNOWN_OPERATION",
             )
 
-        token = WorkerCancellationToken()
         try:
             raw_req = json.loads(payload.decode("utf-8")) if payload else {}
         except Exception as e:
@@ -195,6 +261,7 @@ class GenericCapabilityWorker(CyreneWorker):
         except Exception as err:
             err_code = getattr(err, "code", None)
             err_msg = getattr(err, "message", str(err))
+            err_text = str(err)
 
             code_val = 8
             if err_code:
@@ -205,6 +272,10 @@ class GenericCapabilityWorker(CyreneWorker):
                     code_val = 6
                 elif code_str == "EXECUTION_FAILED":
                     code_val = 8
+            elif "CANCELLED" in err_text:
+                code_val = 6
+            elif "INVALID_INPUT" in err_text or "UNSUPPORTED_INPUT" in err_text:
+                code_val = 3
             elif isinstance(err, (ValueError, TypeError, KeyError)):
                 code_val = 3
 
