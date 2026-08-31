@@ -12,15 +12,23 @@ import sys
 import yaml
 from pathlib import Path
 
-def find_workspace_root() -> Path:
+def find_platform_root() -> Path:
     curr = Path.cwd().resolve()
     for parent in [curr] + list(curr.parents):
-        if (parent / "Cyrene-Platform").exists():
+        if (parent / "tooling" / "workspace" / "repos.yaml").is_file():
             return parent
+        candidate = parent / "Cyrene-Platform"
+        if (candidate / "tooling" / "workspace" / "repos.yaml").is_file():
+            return candidate
     return curr
 
-def load_catalog(workspace_root: Path) -> dict:
-    cat_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "repos.yaml"
+
+def find_workspace_root(platform_root: Path) -> Path:
+    return platform_root.parent
+
+
+def load_catalog(platform_root: Path) -> dict:
+    cat_file = platform_root / "tooling" / "workspace" / "repos.yaml"
     if not cat_file.exists():
         return {"profiles": {}, "repositories": {}}
     try:
@@ -28,8 +36,8 @@ def load_catalog(workspace_root: Path) -> dict:
     except Exception:
         return {"profiles": {}, "repositories": {}}
 
-def load_baseline(workspace_root: Path) -> dict:
-    base_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "workspace-baseline.yaml"
+def load_baseline(platform_root: Path) -> dict:
+    base_file = platform_root / "tooling" / "workspace" / "workspace-baseline.yaml"
     if not base_file.exists():
         return {}
     try:
@@ -55,9 +63,10 @@ def resolve_dependency_closure(catalog: dict, target_repos: list) -> set:
     return closure
 
 def cmd_status(args):
-    root = find_workspace_root()
-    catalog = load_catalog(root)
-    baseline = load_baseline(root)
+    platform_root = find_platform_root()
+    root = find_workspace_root(platform_root)
+    catalog = load_catalog(platform_root)
+    baseline = load_baseline(platform_root)
     repos = catalog.get("repositories", {})
 
     print(f"=== Cyrene Workspace Status ===")
@@ -69,7 +78,7 @@ def cmd_status(args):
     for key, info in repos.items():
         name = info.get("logical_name", key)
         rel_path = info.get("canonical_path", key)
-        target_path = root / rel_path
+        target_path = platform_root if key == "platform" else root / rel_path
         present = target_path.exists()
         host = info.get("source_host", "unknown")
         vis = info.get("visibility", "public")
@@ -89,8 +98,9 @@ def cmd_status(args):
         print(f"{name:<20} | {str(present):<7} | {host:<10} | {vis:<8} | {branch:<26} | {dirty:<5} | {base_ref:<10}")
 
 def cmd_doctor(args):
-    root = find_workspace_root()
-    catalog = load_catalog(root)
+    platform_root = find_platform_root()
+    root = find_workspace_root(platform_root)
+    catalog = load_catalog(platform_root)
     print(f"=== Cyrene Workspace Doctor ===")
     print(f"Checking workspace at: {root}\n")
 
@@ -113,7 +123,7 @@ def cmd_doctor(args):
     # 4. Repository layout and policy check
     for key, info in catalog.get("repositories", {}).items():
         rel = info.get("canonical_path", key)
-        p = root / rel
+        p = platform_root if key == "platform" else root / rel
         if p.exists():
             if not (p / ".git").exists():
                 issues.append(f"[ERROR] {rel} exists but is not a Git repository!")
@@ -129,9 +139,10 @@ def cmd_doctor(args):
         print(" [OK] All workspace structure and policies are fully healthy!")
 
 def cmd_hydrate(args):
-    root = find_workspace_root()
-    catalog = load_catalog(root)
-    baseline = load_baseline(root)
+    platform_root = find_platform_root()
+    root = find_workspace_root(platform_root)
+    catalog = load_catalog(platform_root)
+    baseline = load_baseline(platform_root)
 
     profile = args.profile
     profile_info = catalog.get("profiles", {}).get(profile)
@@ -154,7 +165,7 @@ def cmd_hydrate(args):
         name = info.get("logical_name", key)
         rel_path = info.get("canonical_path", key)
         remote = info.get("remote")
-        target_path = root / rel_path
+        target_path = platform_root if key == "platform" else root / rel_path
 
         if target_path.exists():
             print(f"  [EXISTS] {name:<20} at {rel_path} (Untouched)")

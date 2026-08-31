@@ -13,21 +13,25 @@ import sys
 import yaml
 from pathlib import Path
 
-def find_workspace_root() -> Path:
+def find_platform_root() -> Path:
     curr = Path.cwd().resolve()
     for parent in [curr] + list(curr.parents):
-        if (parent / "Cyrene-Platform").exists():
+        if (parent / "tooling" / "workspace" / "repos.yaml").is_file():
             return parent
+        candidate = parent / "Cyrene-Platform"
+        if (candidate / "tooling" / "workspace" / "repos.yaml").is_file():
+            return candidate
     return curr
 
-def load_catalog(workspace_root: Path) -> dict:
-    cat_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "repos.yaml"
+
+def load_catalog(platform_root: Path) -> dict:
+    cat_file = platform_root / "tooling" / "workspace" / "repos.yaml"
     if not cat_file.exists():
         return {}
     return yaml.safe_load(cat_file.read_text(encoding="utf-8")) or {}
 
-def load_baseline(workspace_root: Path) -> dict:
-    base_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "workspace-baseline.yaml"
+def load_baseline(platform_root: Path) -> dict:
+    base_file = platform_root / "tooling" / "workspace" / "workspace-baseline.yaml"
     if not base_file.exists():
         return {}
     return yaml.safe_load(base_file.read_text(encoding="utf-8")) or {}
@@ -44,9 +48,15 @@ def resolve_dependency_closure(catalog: dict, target_repos: list) -> set:
                     stack.append(d)
     return closure
 
-def plan_integration(workspace_root: Path, profile: str, overrides: dict = None, mode: str = "local") -> dict:
-    catalog = load_catalog(workspace_root)
-    baseline_data = load_baseline(workspace_root)
+def plan_integration(
+    workspace_root: Path,
+    platform_root: Path,
+    profile: str,
+    overrides: dict = None,
+    mode: str = "local",
+) -> dict:
+    catalog = load_catalog(platform_root)
+    baseline_data = load_baseline(platform_root)
     baseline = baseline_data.get("repositories", {})
 
     profile_repos = catalog.get("profiles", {}).get(profile, {}).get("repositories", [])
@@ -60,7 +70,7 @@ def plan_integration(workspace_root: Path, profile: str, overrides: dict = None,
     for r in sorted(list(closure)):
         info = catalog.get("repositories", {}).get(r, {})
         rel_path = info.get("canonical_path", r)
-        p = workspace_root / rel_path
+        p = platform_root if r == "platform" else workspace_root / rel_path
 
         # Determine ref based on mode
         ref = (overrides or {}).get(r)
@@ -94,6 +104,7 @@ def plan_integration(workspace_root: Path, profile: str, overrides: dict = None,
             "ref": ref,
             "ref_source": ref_source,
             "present": p.exists(),
+            "local_path": str(p),
             "test_cmds": test_cmds,
         }
 
@@ -138,7 +149,11 @@ def execute_integration(workspace_root: Path, plan: dict, ci_workspace: Path = N
 
     # Run tests
     for r_key, item in plan.items():
-        repo_dir = target_root / item["canonical_path"]
+        repo_dir = (
+            target_root / item["canonical_path"]
+            if ci_workspace
+            else Path(item["local_path"])
+        )
         if not repo_dir.exists():
             print(f"  [ERROR] Required dependency {item['logical_name']} is missing at {repo_dir}!")
             report["repositories"][r_key] = {"status": "FAILED", "error": "Missing repository"}
@@ -190,7 +205,8 @@ def main():
     parser.add_argument("--current-ref", help="Exact SHA/ref of current repository")
 
     args = parser.parse_args()
-    root = find_workspace_root()
+    platform_root = find_platform_root()
+    root = platform_root.parent
 
     overrides = {}
     if args.override:
@@ -199,7 +215,7 @@ def main():
                 k, v = ov.split("=", 1)
                 overrides[k.strip()] = v.strip()
 
-    plan = plan_integration(root, args.profile, overrides, mode=args.mode)
+    plan = plan_integration(root, platform_root, args.profile, overrides, mode=args.mode)
 
     if args.plan or not args.execute:
         print(f"=== Cyrene Integration Plan (Profile: {args.profile}, Mode: {args.mode}) ===")

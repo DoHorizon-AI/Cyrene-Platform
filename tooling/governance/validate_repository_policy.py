@@ -11,8 +11,14 @@ from pathlib import Path
 
 def find_workspace_root() -> Path:
     curr = Path.cwd().resolve()
-    for parent in [curr] + list(curr.parents):
+    parents = [curr] + list(curr.parents)
+    for parent in parents:
         if (parent / "Cyrene-Platform").exists() and (parent / "plugins").exists():
+            return parent
+    for parent in parents:
+        if (parent / "repository-policy.yaml").is_file() and (
+            parent / "docs" / "REPOSITORY-LIFECYCLE.md"
+        ).is_file():
             return parent
     return curr
 
@@ -36,7 +42,13 @@ def validate_all_repository_policies(workspace_root: Path) -> list:
     errors = []
     
     # Discover repos
-    repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
+    platform_dir = workspace_root / "Cyrene-Platform"
+    if not platform_dir.is_dir():
+        platform_dir = workspace_root
+    repo_dirs = [platform_dir]
+    plugins_dir = workspace_root / "plugins"
+    if plugins_dir.is_dir():
+        repo_dirs.append(plugins_dir)
     services_dir = workspace_root / "services"
     if services_dir.exists():
         for s in services_dir.iterdir():

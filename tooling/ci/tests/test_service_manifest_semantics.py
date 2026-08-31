@@ -12,15 +12,23 @@ except ImportError:
 
 def find_workspace_root() -> Path:
     current = Path(__file__).resolve().parent
-    while current != current.parent:
-        if (current / "Cyrene-Platform").is_dir() and (current / "services").is_dir():
-            return current
-        current = current.parent
+    parents = [current] + list(current.parents)
+    for parent in parents:
+        if (parent / "Cyrene-Platform").is_dir() and (parent / "services").is_dir():
+            return parent
+    for parent in parents:
+        if (parent / "contracts" / "schemas" / "advanced-service.schema.json").is_file():
+            return parent
     return Path.cwd()
 
 
+def platform_root(workspace_root: Path) -> Path:
+    nested = workspace_root / "Cyrene-Platform"
+    return nested if nested.is_dir() else workspace_root
+
+
 def load_schema(workspace_root: Path) -> dict:
-    schema_path = workspace_root / "Cyrene-Platform" / "contracts" / "schemas" / "advanced-service.schema.json"
+    schema_path = platform_root(workspace_root) / "contracts" / "schemas" / "advanced-service.schema.json"
     assert schema_path.exists(), f"Schema not found at {schema_path}"
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
@@ -30,7 +38,7 @@ def test_all_product_service_manifests_conform_to_schema():
     root = find_workspace_root()
     schema = load_schema(root)
 
-    services = [
+    service_names = [
         "cyrene-catalyst",
         "Cyrene-Yield",
         "cyrene-reactor",
@@ -39,9 +47,12 @@ def test_all_product_service_manifests_conform_to_schema():
         "cyrene-echo",
     ]
 
-    for sname in services:
-        manifest_path = root / "services" / sname / "service.json"
-        assert manifest_path.exists(), f"Missing service.json in {sname}"
+    manifests = [root / "services" / name / "service.json" for name in service_names]
+    if not (root / "services").is_dir():
+        manifests = [platform_root(root) / "examples" / "advanced-service" / "service.json"]
+
+    for manifest_path in manifests:
+        assert manifest_path.exists(), f"Missing service manifest at {manifest_path}"
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         if jsonschema is not None:
