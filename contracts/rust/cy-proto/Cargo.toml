@@ -10,10 +10,10 @@ name = "cy_proto"
 path = "src/lib.rs"
 
 [dependencies]
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.14"
+prost-types = "0.14"
 tonic = "0.11"
 
 [build-dependencies]
 protoc-bin-vendored = "3"
-tonic-build = "0.11"
+tonic-build = "0.14"
