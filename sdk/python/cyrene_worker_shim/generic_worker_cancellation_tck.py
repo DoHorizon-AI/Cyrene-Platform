@@ -41,15 +41,37 @@ class BlockingSocketService:
         self.invoke_finished = threading.Event()
         self.shutdown_seen = threading.Event()
         self.next_invocation_seen = threading.Event()
+        self.cancellation_token_seen = threading.Event()
+        self.race_started = threading.Event()
+        self.race_release = threading.Event()
+        self.race_cancelled = threading.Event()
+        self.race_finished = threading.Event()
         self._socket_lock = threading.Lock()
         self._upstream_socket: socket.socket | None = None
         self._upstream_peer: socket.socket | None = None
 
-    def on_invoke(self, capability: str, action: str, payload: bytes):
+    def on_invoke(
+        self,
+        capability: str,
+        action: str,
+        payload: bytes,
+        cancellation=None,
+    ):
         del capability, payload
         if action == "echo":
             self.next_invocation_seen.set()
             return True, b"next-request-completed"
+        if action == "race":
+            self.race_started.set()
+            try:
+                self.race_release.wait(timeout=3.0)
+                if self.race_cancelled.is_set() or (
+                    cancellation is not None and cancellation.is_cancelled()
+                ):
+                    return False, b"CANCELLED: race cancellation won"
+                return True, b"race-completed"
+            finally:
+                self.race_finished.set()
         if action != "block":
             return False, b"INVALID_INPUT: unknown operation"
 
@@ -62,6 +84,8 @@ class BlockingSocketService:
             # The peer is the stand-in for the upstream HTTP connection. The
             # cancellation hook closes it, waking this blocking recv.
             upstream.recv(1)
+            if cancellation is not None and cancellation.is_cancelled():
+                self.cancellation_token_seen.set()
             self.upstream_eof.set()
             self.return_gate.wait(timeout=3.0)
             return False, b"CANCELLED: upstream socket closed"
@@ -71,7 +95,9 @@ class BlockingSocketService:
             self.invoke_finished.set()
 
     def on_cancel(self, target_request_id: str, reason: str) -> None:
-        del target_request_id, reason
+        del reason
+        if target_request_id == "race-invoke":
+            self.race_cancelled.set()
         if not self.invoke_finished.is_set():
             self.cancel_seen_while_running.set()
         self.cancel_seen.set()
@@ -203,6 +229,7 @@ def test_generic_worker_cancel_is_read_during_blocking_invoke() -> None:
         assert service.cancel_seen.wait(timeout=3.0)
         assert service.cancel_seen_while_running.is_set()
         assert service.upstream_eof.wait(timeout=3.0)
+        assert service.cancellation_token_seen.is_set()
         assert not service.invoke_finished.is_set()
 
         # The reader must remain live while the cancelled invocation is still
@@ -229,9 +256,71 @@ def test_generic_worker_cancel_is_read_during_blocking_invoke() -> None:
         assert service.next_invocation_seen.is_set()
         assert not service.invoke_finished.is_set()
 
+        # An unknown Cancel is acknowledged without disturbing the worker.
+        write_frame(
+            _request(
+                "cancel-unknown",
+                5,
+                Cancel(target_request_id="unknown-request", reason="no such request"),
+            ).encode(),
+            ces_writer,
+        )
+        unknown_cancel_ack = _wait_for_frame(
+            frames,
+            frame_queue,
+            lambda frame: frame.request_id == "cancel-unknown",
+        )
+        assert isinstance(unknown_cancel_ack.payload, CancelAck)
+
+        # Race normal completion against Cancel. Either outcome is valid, but
+        # the invocation may only emit one correlated result and must clean up.
+        write_frame(
+            _request(
+                "race-invoke",
+                6,
+                Invoke(
+                    capability="test.cancellation.v1",
+                    action="race",
+                    payload=b"{}",
+                ),
+            ).encode(),
+            ces_writer,
+        )
+        assert service.race_started.wait(timeout=3.0)
+        write_frame(
+            _request(
+                "race-cancel",
+                7,
+                Cancel(target_request_id="race-invoke", reason="completion race"),
+            ).encode(),
+            ces_writer,
+        )
+        service.race_release.set()
+        race_cancel_ack = _wait_for_frame(
+            frames,
+            frame_queue,
+            lambda frame: frame.request_id == "race-cancel",
+        )
+        assert isinstance(race_cancel_ack.payload, CancelAck)
+        race_result = _wait_for_frame(
+            frames,
+            frame_queue,
+            lambda frame: frame.request_id == "race-invoke",
+        )
+        race_results = [
+            frame for frame in frames if frame.request_id == "race-invoke"
+        ]
+        assert len(race_results) == 1
+        if isinstance(race_result.payload, PluginErrorPayload):
+            assert race_result.payload.code == 6
+        else:
+            assert isinstance(race_result.payload, InvokeResult)
+            assert race_result.payload.payload == b"race-completed"
+        assert service.race_finished.wait(timeout=3.0)
+
         # Shutdown also has to drain the active invocation before returning.
         write_frame(
-            _request("shutdown", 5, Shutdown(grace_period_ms=500)).encode(),
+            _request("shutdown", 8, Shutdown(grace_period_ms=500)).encode(),
             ces_writer,
         )
         assert service.shutdown_seen.wait(timeout=3.0)
@@ -274,6 +363,7 @@ def test_generic_worker_cancel_is_read_during_blocking_invoke() -> None:
         thread.is_alive() and thread.name.startswith("cyrene-invocation-")
         for thread in threading.enumerate()
     )
+    assert not worker._active_tokens
     assert not runner_error, runner_error
 
 

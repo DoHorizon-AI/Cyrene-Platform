@@ -206,6 +206,11 @@ fn parse_runtime(value: &str) -> Result<Runtime, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "python" => Ok(Runtime::SubprocessPython),
         "java" => Ok(Runtime::SubprocessJvm),
+        // Official ASP.NET gateway manifests are independently hosted
+        // services. Platform has no separate .NET worker runtime, so this
+        // normalization preserves the service lifecycle without pretending
+        // that a C# assembly is a Python/JVM stdio worker.
+        "csharp" => Ok(Runtime::Service),
         "service" => Ok(Runtime::Service),
         unsupported => Err(format!(
             "Official Plugins runtime language `{unsupported}` is not supported by the Platform resolver"
@@ -278,5 +283,28 @@ mod tests {
         manifest["methods"][0]["executionMode"] = json!("job");
         let error = normalize_official_manifest(manifest).unwrap_err();
         assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn normalizes_csharp_gateway_as_an_independent_service_runtime() {
+        let manifest = json!({
+            "schemaVersion": 1,
+            "id": "cyrene.gateway.aspnetcore",
+            "name": "ASP.NET gateway",
+            "version": "0.1.0",
+            "kind": "gateway-runtime",
+            "capabilities": ["gateway.runtime.v1"],
+            "methods": [
+                {"name": "start_server", "interfaceVersion": "1", "executionMode": "service"}
+            ],
+            "runtime": {"language": "csharp", "entrypoint": "Gateway.dll"}
+        });
+        assert_eq!(
+            normalize_official_manifest(manifest)
+                .unwrap()
+                .plugin
+                .runtime,
+            Some(Runtime::Service)
+        );
     }
 }

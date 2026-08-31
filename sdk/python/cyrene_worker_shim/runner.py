@@ -112,7 +112,9 @@ class GenericCapabilityWorker(CyreneWorker):
             # Direct callers of the wrapper are not associated with a wire
             # request, so retain the old non-correlated behaviour for them.
             token = WorkerCancellationToken()
-        return self._invoke_with_token(capability, action, payload, token)
+        return self._invoke_with_token(
+            capability, action, payload, token, request_id=request_id
+        )
 
     def on_subscribe(
         self,
@@ -173,13 +175,18 @@ class GenericCapabilityWorker(CyreneWorker):
             handler(grace_period_ms)
 
     def on_invoke(
-        self, capability: str, action: str, payload: bytes
+        self,
+        capability: str,
+        action: str,
+        payload: bytes,
+        request_id: Optional[str] = None,
     ) -> Tuple[bool, Any]:
         return self._invoke_with_token(
             capability,
             action,
             payload,
             WorkerCancellationToken(),
+            request_id=request_id,
         )
 
     def _invoke_with_token(
@@ -188,6 +195,7 @@ class GenericCapabilityWorker(CyreneWorker):
         action: str,
         payload: bytes,
         token: WorkerCancellationToken,
+        request_id: Optional[str] = None,
     ) -> Tuple[bool, Any]:
         if hasattr(self._instance, "on_invoke"):
             handler = self._instance.on_invoke
@@ -197,17 +205,29 @@ class GenericCapabilityWorker(CyreneWorker):
                 signature = None
             if signature is not None:
                 cancellation = signature.parameters.get("cancellation")
+                request = signature.parameters.get("request_id")
                 accepts_kwargs = any(
                     parameter.kind == inspect.Parameter.VAR_KEYWORD
                     for parameter in signature.parameters.values()
                 )
+                keyword_args: Dict[str, Any] = {}
                 if cancellation is not None and cancellation.kind in (
-                    inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
                 ):
+                    keyword_args["cancellation"] = token
+                if request is not None and request.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    keyword_args["request_id"] = request_id
+                if accepts_kwargs:
+                    keyword_args.setdefault("cancellation", token)
+                    keyword_args.setdefault("request_id", request_id)
+                if keyword_args:
+                    return handler(capability, action, payload, **keyword_args)
+                if cancellation is not None and cancellation.kind == inspect.Parameter.POSITIONAL_ONLY:
                     return handler(capability, action, payload, token)
-                if cancellation is not None or accepts_kwargs:
-                    return handler(capability, action, payload, cancellation=token)
             return handler(capability, action, payload)
 
         handler = getattr(self._instance, action, None)
@@ -266,7 +286,11 @@ class GenericCapabilityWorker(CyreneWorker):
             code_val = 8
             if err_code:
                 code_str = err_code.value if hasattr(err_code, "value") else str(err_code)
-                if code_str in ("INVALID_INPUT", "UNSUPPORTED_INPUT"):
+                if code_str in (
+                    "INVALID_INPUT",
+                    "UNSUPPORTED_INPUT",
+                    "METHOD_NOT_SUPPORTED",
+                ):
                     code_val = 3
                 elif code_str == "CANCELLED":
                     code_val = 6
@@ -274,7 +298,11 @@ class GenericCapabilityWorker(CyreneWorker):
                     code_val = 8
             elif "CANCELLED" in err_text:
                 code_val = 6
-            elif "INVALID_INPUT" in err_text or "UNSUPPORTED_INPUT" in err_text:
+            elif (
+                "INVALID_INPUT" in err_text
+                or "UNSUPPORTED_INPUT" in err_text
+                or "METHOD_NOT_SUPPORTED" in err_text
+            ):
                 code_val = 3
             elif isinstance(err, (ValueError, TypeError, KeyError)):
                 code_val = 3

@@ -1317,7 +1317,7 @@ def _exception_response_payload(error: Exception) -> PluginErrorPayload:
         if err_code
         else ""
     )
-    if code_str in ("INVALID_INPUT", "UNSUPPORTED_INPUT"):
+    if code_str in ("INVALID_INPUT", "UNSUPPORTED_INPUT", "METHOD_NOT_SUPPORTED"):
         code_val = 3
     elif code_str == "CANCELLED":
         code_val = 6
@@ -1356,7 +1356,11 @@ def _invoke_response_payload(ok: bool, result: object) -> object:
         else str(result)
     )
     code = 8
-    if "INVALID_INPUT" in message or "UNSUPPORTED_INPUT" in message:
+    if (
+        "INVALID_INPUT" in message
+        or "UNSUPPORTED_INPUT" in message
+        or "METHOD_NOT_SUPPORTED" in message
+    ):
         code = 3
     elif "CANCELLED" in message:
         code = 6
