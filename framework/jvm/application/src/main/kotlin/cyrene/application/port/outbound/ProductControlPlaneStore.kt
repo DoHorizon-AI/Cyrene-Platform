@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/jvm/application/src/main/kotlin/cyrene/application/port/outbound/ProductControlPlaneStore.kt
+// ║ Module: CYRENE Platform
+// ║ Role: Kotlin Framework implementation or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Kotlin Framework 实现或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.application.port.outbound
 
 import cyrene.domain.control.ExecutionPlan

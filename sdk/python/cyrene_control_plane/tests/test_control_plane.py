@@ -1,3 +1,11 @@
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: sdk/python/cyrene_control_plane/tests/test_control_plane.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 import pytest
 
 from cyrene_control_plane import AttemptStatus, ExecutionPlan, IdempotencyKey, JsonFileControlPlaneStore, PlanStatus, PlanStep, ProductControlPlane, ReconcileActionKind, RetryPolicy, StaleGenerationError, StepDependency

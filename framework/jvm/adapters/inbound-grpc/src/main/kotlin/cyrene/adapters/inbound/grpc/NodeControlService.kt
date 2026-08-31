@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/jvm/adapters/inbound-grpc/src/main/kotlin/cyrene/adapters/inbound/grpc/NodeControlService.kt
+// ║ Module: CYRENE Platform
+// ║ Role: Kotlin Framework implementation or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Kotlin Framework 实现或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.adapters.inbound.grpc
 
 import cyrene.application.port.inbound.NodeHelloCommand
