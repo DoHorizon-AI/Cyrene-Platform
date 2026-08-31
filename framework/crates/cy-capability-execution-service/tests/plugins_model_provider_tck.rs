@@ -415,6 +415,12 @@ fn chat_request(model: Option<&str>) -> Request<InvokeCapabilityRequest> {
     request
 }
 
+fn unknown_action_request() -> Request<InvokeCapabilityRequest> {
+    let mut request = chat_request(None);
+    request.get_mut().method = "unknown_action".to_string();
+    request
+}
+
 fn assert_embedding_success(
     response: cy_proto::capability_v1::InvokeCapabilityResponse,
     model: &str,
@@ -472,6 +478,26 @@ async fn real_ces_provider_cancellation_chat_and_typed_method_support() {
         .unwrap()
         .into_inner();
     assert_embedding_success(embedding, "embedding-default-model");
+
+    // CES keeps unknown operations distinct from a known method that this
+    // provider binding does not support: the typed category is
+    // ExecutionFailure vs InvalidRequest, and each carries its stable domain
+    // discriminator in the message.
+    let unknown = server
+        .client
+        .invoke_capability(unknown_action_request())
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = unknown.result else {
+        panic!("unknown provider action must return a typed CES error");
+    };
+    assert_eq!(
+        error.code,
+        cy_proto::capability_v1::capability_execution_error::Code::ExecutionFailure as i32
+    );
+    assert!(error.message.contains("UNKNOWN_OPERATION"));
+    assert!(!error.message.contains("METHOD_NOT_SUPPORTED"));
 
     upstream
         .signals

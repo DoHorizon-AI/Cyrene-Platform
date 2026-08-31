@@ -146,6 +146,9 @@ impl OfficialPluginManifest {
             ));
         }
 
+        let has_explicit_service_semantics = descriptor_modes
+            .values()
+            .any(|modes| modes.contains(&ExecutionMode::Service));
         let capability_descriptors = descriptor_modes
             .into_iter()
             .map(|((capability, interface_version), modes)| {
@@ -157,7 +160,11 @@ impl OfficialPluginManifest {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        let runtime = parse_runtime(&self.runtime.language)?;
+        let runtime = parse_runtime(
+            &self.runtime.language,
+            &self.kind,
+            has_explicit_service_semantics,
+        )?;
         Ok(PluginManifest {
             plugin: PluginMetadata {
                 id: plugin_id,
@@ -202,7 +209,11 @@ fn parse_execution_mode(value: &str) -> Result<ExecutionMode, String> {
     }
 }
 
-fn parse_runtime(value: &str) -> Result<Runtime, String> {
+fn parse_runtime(
+    value: &str,
+    kind: &str,
+    has_explicit_service_semantics: bool,
+) -> Result<Runtime, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "python" => Ok(Runtime::SubprocessPython),
         "java" => Ok(Runtime::SubprocessJvm),
@@ -210,7 +221,16 @@ fn parse_runtime(value: &str) -> Result<Runtime, String> {
         // services. Platform has no separate .NET worker runtime, so this
         // normalization preserves the service lifecycle without pretending
         // that a C# assembly is a Python/JVM stdio worker.
-        "csharp" => Ok(Runtime::Service),
+        "csharp"
+            if kind.trim().eq_ignore_ascii_case("gateway-runtime")
+                && has_explicit_service_semantics =>
+        {
+            Ok(Runtime::Service)
+        }
+        "csharp" => Err(
+            "Official Plugins C# runtime requires `gateway-runtime` kind with an explicit `service` method; C# worker/inline runtimes have no Platform runtime mapping"
+                .into(),
+        ),
         "service" => Ok(Runtime::Service),
         unsupported => Err(format!(
             "Official Plugins runtime language `{unsupported}` is not supported by the Platform resolver"
@@ -286,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_csharp_gateway_as_an_independent_service_runtime() {
+    fn normalizes_csharp_gateway_with_explicit_service_semantics() {
         let manifest = json!({
             "schemaVersion": 1,
             "id": "cyrene.gateway.aspnetcore",
@@ -306,5 +326,25 @@ mod tests {
                 .runtime,
             Some(Runtime::Service)
         );
+    }
+
+    #[test]
+    fn rejects_csharp_worker_without_service_manifest_semantics() {
+        let manifest = json!({
+            "schemaVersion": 1,
+            "id": "cyrene.example.csharp-worker",
+            "name": "C# worker",
+            "version": "0.1.0",
+            "kind": "capability-plugin",
+            "capabilities": ["example.capability.v1"],
+            "methods": [
+                {"name": "invoke", "interfaceVersion": "1", "executionMode": "worker"}
+            ],
+            "runtime": {"language": "csharp", "entrypoint": "Worker.dll"}
+        });
+        let error = normalize_official_manifest(manifest).unwrap_err();
+        assert!(error.contains("C# runtime"));
+        assert!(error.contains("gateway-runtime"));
+        assert!(error.contains("service"));
     }
 }
