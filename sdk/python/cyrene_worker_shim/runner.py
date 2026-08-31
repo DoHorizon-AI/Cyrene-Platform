@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: sdk/python/cyrene_worker_shim/runner.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 """Generic Python Capability Worker Runner.
 
 CLI entry point to launch any CYRENE capability plugin in WORKER execution mode.
@@ -54,6 +62,14 @@ class WorkerCancellationToken:
         self._cancelled.set()
 
 
+###############################################################################
+# FUNCTION / CLASS: GenericCapabilityWorker
+#
+# Wraps a product-neutral Python implementation with the Worker lifecycle,
+# cancellation, subscription, and application-event protocol.
+#
+# 将无产品语义的 Python 实现接入 Worker 生命周期、取消、订阅和应用事件协议。
+###############################################################################
 class GenericCapabilityWorker(CyreneWorker):
     """Product-neutral wrapper around a Python capability implementation."""
 

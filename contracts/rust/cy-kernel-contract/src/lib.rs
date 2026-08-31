@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/rust/cy-kernel-contract/src/lib.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Pure, transport-independent projection of CYRENE Kernel Semantic Contract v1.
 //!
 //! This crate contains no I/O, operating-system handles, serialization or

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/src/worker.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic capability worker activation, supervision, lifecycle framing, and RPC client.
 //!
 //! This module provides a Product-neutral, capability-agnostic worker activation layer
@@ -1062,6 +1070,15 @@ impl CapabilityWorkerClient {
     }
 
     /// Invoke a typed capability RPC method on the worker.
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: CapabilityWorkerClient::invoke
+    //
+    //   Sends one request, observes the response, and cooperates with the
+    //   cancellation channel while preserving the worker session state.
+    //
+    //   发送一次请求、等待响应，并在保持 Worker 会话状态的同时协作处理取消通道。
+    //   取消只改变本次调用的生命周期证据，不伪造 Worker 已完成状态。
+    // ════════════════════════════════════════════════════════════════════════
     pub fn invoke(
         &mut self,
         capability: &str,

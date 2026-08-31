@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: sdk/rust/cy-worker-sdk/examples/echo_worker.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 use cy_worker_sdk::{
     pb::{
         invoke_result::Response as InvokeResp, DetectHardwareResponse, Invoke, InvokeResult,

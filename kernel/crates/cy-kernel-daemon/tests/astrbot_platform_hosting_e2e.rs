@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/tests/astrbot_platform_hosting_e2e.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Real Cross-Repository End-to-End Test: Platform Service Supervision of AstrBot .NET Host.
 //!
 //! Proves that the canonical AstrBot .NET Host (AstrBot.DotNetHost.dll) is reliably

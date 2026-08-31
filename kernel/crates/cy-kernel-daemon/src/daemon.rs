@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/daemon.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! 节点内核守护进程核心结构与组合根实现。
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -132,6 +140,15 @@ impl KernelDaemon {
         Ok(snapshot)
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: KernelDaemon::reserve
+    //
+    //   Reserves from the last durable inventory ledger only after readiness
+    //   has been established; it does not probe hardware inline.
+    //
+    //   仅在确认资源就绪后从最近一次持久化清单账本中申请租约，不在申请路径内
+    //   临时探测硬件，避免事实刷新与分配发生竞态。
+    // ════════════════════════════════════════════════════════════════════════
     /// 申请预留硬件资源租约
     ///
     /// Transport authentication is enforced at the `KernelAuthority` boundary.

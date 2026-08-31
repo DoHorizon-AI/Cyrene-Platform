@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/provider/v1/kernel_provider.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
 syntax = "proto3";
 
 package cyrene.provider.v1;

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/jvm/domain/src/test/kotlin/cyrene/domain/control/ControlPlaneConformanceTest.kt
+// ║ Module: CYRENE Platform
+// ║ Role: Kotlin Framework implementation or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Kotlin Framework 实现或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.domain.control
 
 import java.nio.file.Files

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/jvm/application/src/main/kotlin/cyrene/application/service/ProductReconciler.kt
+// ║ Module: CYRENE Platform
+// ║ Role: Kotlin Framework implementation or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Kotlin Framework 实现或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.application.service
 
 import cyrene.domain.control.AttemptStatus
@@ -22,6 +30,15 @@ data class ReconcileAction(
 
 /** Pure reconciliation policy. Adapters execute actions; this does not own Kernel semantics. */
 class ProductReconciler {
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: ProductReconciler.nextAction
+    //
+    //   Computes the next product-level action from desired state and observed
+    //   evidence; execution remains in adapters and Kernel semantics stay below.
+    //
+    //   根据期望状态与观测证据计算下一项产品动作；动作由适配器执行，Kernel 语义
+    //   仍由下层拥有。
+    // ════════════════════════════════════════════════════════════════════════
     fun nextAction(plan: ExecutionPlan, run: ProductRun): ReconcileAction {
         if (run.terminal) return ReconcileAction(ReconcileActionKind.NOOP, run.runId, reason = "ProductRun is terminal")
         val latest = run.latestAttempt

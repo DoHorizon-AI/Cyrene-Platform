@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/jvm/adapters/inbound-grpc/src/test/kotlin/cyrene/adapters/inbound/grpc/NodeControlServiceTest.kt
+// ║ Module: CYRENE Platform
+// ║ Role: Kotlin Framework implementation or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Kotlin Framework 实现或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.adapters.inbound.grpc
 
 import io.grpc.stub.StreamObserver

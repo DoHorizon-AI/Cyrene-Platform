@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/rust/cy-manifest/src/manifest/hardware.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! 硬件契约数据结构定义。
 //!
 //! 包含操作系统、CPU、GPU、互联通信拓扑及节点硬件清单等物理计算资源模型。

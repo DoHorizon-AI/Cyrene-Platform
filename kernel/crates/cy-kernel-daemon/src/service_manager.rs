@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/service_manager.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic Service Supervision Manager & gRPC Service Provider.
 //!
 //! Provides the external wire boundary for clients and Product adapters
@@ -79,6 +87,14 @@ impl ServiceSupervisionManager {
     }
 
     /// Convert a Protobuf wire ServiceSpec into a domain ServiceSpec.
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: ServiceSupervisionManager::proto_spec_to_domain
+    //
+    //   Converts the transport request into the domain launch model and keeps
+    //   validation at the wire-to-domain boundary.
+    //
+    //   将传输层请求转换为领域启动模型，并把输入校验集中在协议到领域的边界。
+    // ════════════════════════════════════════════════════════════════════════
     pub fn proto_spec_to_domain(spec: ProtoServiceSpec) -> Result<DomainServiceSpec, Status> {
         if spec.name.trim().is_empty() {
             return Err(Status::invalid_argument("service name must not be empty"));

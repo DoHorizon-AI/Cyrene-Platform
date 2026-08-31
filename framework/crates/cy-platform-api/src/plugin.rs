@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/src/plugin.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Canonical Platform plugin capability registry and deterministic resolver.
 //!
 //! The manifest data model lives in `cy-manifest`, the Platform-owned contract
@@ -211,6 +219,15 @@ impl<'a> CapabilityResolver<'a> {
         Self { registry }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: CapabilityResolver::resolve
+    //
+    //   Resolves one typed capability requirement against the registered
+    //   manifests and returns a deterministic compatibility result.
+    //
+    //   将一个强类型能力需求与已注册 Manifest 进行匹配，返回确定性的兼容结果。
+    //   具体匹配由硬件、精度、量化、流式能力和接口约束共同决定。
+    // ════════════════════════════════════════════════════════════════════════
     pub fn resolve(
         &self,
         requirement: &PluginRequirement,
