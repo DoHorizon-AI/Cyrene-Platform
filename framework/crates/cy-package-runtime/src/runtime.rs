@@ -698,7 +698,7 @@ impl FilesystemPackageRuntime {
         }
         options.environment.extend(request.environment.clone());
         options.environment.insert(
-            "CYRENE_BINDING_ID".to_string(),
+            "CYRENE_CAPABILITY_BINDING_ID".to_string(),
             request.binding_id.to_string(),
         );
         options

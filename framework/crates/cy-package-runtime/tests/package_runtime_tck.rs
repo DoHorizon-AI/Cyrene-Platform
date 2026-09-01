@@ -50,7 +50,7 @@ class PackageWorker(CyreneWorker):
     def on_invoke(self, capability, action, payload):
         request = json.loads(payload.decode("utf-8")) if payload else {}
         return True, json.dumps({
-            "binding_id": os.environ.get("CYRENE_BINDING_ID"),
+            "binding_id": os.environ.get("CYRENE_CAPABILITY_BINDING_ID"),
             "version": "__VERSION__",
             "value": request.get("value"),
         }).encode("utf-8")
