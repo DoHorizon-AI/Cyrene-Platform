@@ -13,6 +13,7 @@ adapters cooperate without moving product semantics into the Kernel.
 | `kernel-vs-platform.md` | Kernel/platform responsibility boundary. | Kernel 与 Platform 的职责边界 |
 | `capability-and-plugin.md` | Capability vocabulary and plugin composition. | 能力词汇与插件组合 |
 | `execution-lifecycle.md` | Lifecycle from admission to completion. | 从准入到完成的生命周期 |
+| `distributed-execution-fabric-v1.md` | Frozen host, container-only, and provider-managed execution contract plus implementation map. | 冻结的主机、纯容器和 Provider-managed 执行契约及实现映射 |
 | `artifact-and-environment.md` | Artifact and environment authority. | 产物与环境权威 |
 | `product-controller-adapter.md` | Product controller and adapter placement. | 产品控制器与适配器归属 |
 | `public-private-boundary.md` | Public Core versus private service boundary. | 公共 Core 与私有服务边界 |
@@ -22,8 +23,9 @@ adapters cooperate without moving product semantics into the Kernel.
 ## Suggested reading | 推荐顺序
 
 Read `overview.md`, then `kernel-vs-platform.md`, `capability-and-plugin.md`,
-and finally `execution-lifecycle.md` before opening implementation crates.
+`execution-lifecycle.md`, and `distributed-execution-fabric-v1.md` before
+opening implementation crates.
 
 先读 `overview.md`，再读 `kernel-vs-platform.md`、`capability-and-plugin.md`，
-最后读 `execution-lifecycle.md`，之后再进入实现 crate。
-
+然后读 `execution-lifecycle.md` 与 `distributed-execution-fabric-v1.md`，
+之后再进入实现 crate。
