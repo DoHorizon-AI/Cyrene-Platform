@@ -165,9 +165,9 @@ impl ProcessRuntime for OsSubprocessBackend {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
-        let child = cmd.spawn().map_err(|e| {
-            ProviderError::new("os-subprocess", "SPAWN_FAILED", &e.to_string())
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| ProviderError::new("os-subprocess", "SPAWN_FAILED", &e.to_string()))?;
 
         let pid = child.id();
         Ok(ProcessHandle {
@@ -268,7 +268,9 @@ async fn test_generic_service_launch_and_process_alive_readiness() {
 #[tokio::test]
 async fn test_generic_service_tcp_readiness_probe_success() {
     // Start a mock TCP listener to simulate the service socket opening
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp listener");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind tcp listener");
     let port = listener.local_addr().unwrap().port();
 
     let backend = Arc::new(MockExecutionBackend::new());
@@ -289,7 +291,10 @@ async fn test_generic_service_tcp_readiness_probe_success() {
     );
 
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
-    let status = supervisor.start().await.expect("service must become ready via TCP");
+    let status = supervisor
+        .start()
+        .await
+        .expect("service must become ready via TCP");
     assert_eq!(status.state, ServiceState::Running);
     assert_eq!(supervisor.state(), ServiceState::Running);
 }
@@ -297,7 +302,9 @@ async fn test_generic_service_tcp_readiness_probe_success() {
 #[tokio::test]
 async fn test_generic_service_http_get_readiness_probe_success() {
     // Start a mock HTTP listener responding with 200 OK
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind http listener");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind http listener");
     let port = listener.local_addr().unwrap().port();
 
     tokio::spawn(async move {
@@ -332,7 +339,10 @@ async fn test_generic_service_http_get_readiness_probe_success() {
     );
 
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
-    let status = supervisor.start().await.expect("service must become ready via HTTP probe");
+    let status = supervisor
+        .start()
+        .await
+        .expect("service must become ready via HTTP probe");
     assert_eq!(status.state, ServiceState::Running);
 }
 
@@ -402,18 +412,29 @@ async fn test_generic_service_endpoint_lifecycle() {
     supervisor.start().await.expect("start must succeed");
     let status = supervisor.status();
     assert_eq!(status.state, ServiceState::Running);
-    let ep = status.published_endpoint.expect("endpoint must be published on ready");
+    let ep = status
+        .published_endpoint
+        .expect("endpoint must be published on ready");
     assert_eq!(ep.identity.id, "endpoint/endpoint-svc");
     assert_eq!(ep.transport, "http");
     assert_eq!(ep.schema_id, "test.service.http.v1");
     assert_eq!(ep.public_attributes.get("port"), Some(&"15031".to_string()));
-    assert_eq!(ep.public_attributes.get("path"), Some(&"/api/v1".to_string()));
-    assert_eq!(ep.public_attributes.get("protocol"), Some(&"http1.1".to_string()));
+    assert_eq!(
+        ep.public_attributes.get("path"),
+        Some(&"/api/v1".to_string())
+    );
+    assert_eq!(
+        ep.public_attributes.get("protocol"),
+        Some(&"http1.1".to_string())
+    );
 
     // 3. Stop service -> endpoint unpublished
     supervisor.stop().await.expect("stop must succeed");
     assert_eq!(supervisor.state(), ServiceState::Stopped);
-    assert!(supervisor.status().published_endpoint.is_none(), "endpoint must be revoked on stop");
+    assert!(
+        supervisor.status().published_endpoint.is_none(),
+        "endpoint must be revoked on stop"
+    );
 }
 
 #[tokio::test]
@@ -489,7 +510,9 @@ async fn test_generic_service_unexpected_crash_exit_code_reporting() {
 
     let status = supervisor.handle_observed_exit(crash_report).await;
     assert_eq!(status.state, ServiceState::Failed);
-    let report = status.last_exit_report.expect("exit report must be preserved");
+    let report = status
+        .last_exit_report
+        .expect("exit report must be preserved");
     assert_eq!(report.exit_code, Some(137));
     assert!(report.oom_killed);
     assert_eq!(report.reason_code, "OOM_KILLED");
@@ -529,7 +552,10 @@ async fn test_generic_service_restart_policy_on_failure_with_deterministic_backo
     let status_1 = supervisor.handle_observed_exit(crash_1).await;
     assert_eq!(status_1.state, ServiceState::Restarting);
     assert_eq!(supervisor.restart_count(), 1);
-    assert!(start_t.elapsed() >= Duration::from_millis(18), "must respect 20ms backoff delay");
+    assert!(
+        start_t.elapsed() >= Duration::from_millis(18),
+        "must respect 20ms backoff delay"
+    );
 
     // Step supervisor -> launches generation 2
     supervisor.step_supervision().await.expect("restart start");
@@ -548,7 +574,10 @@ async fn test_generic_service_restart_policy_on_failure_with_deterministic_backo
     let status_2 = supervisor.handle_observed_exit(crash_2).await;
     assert_eq!(status_2.state, ServiceState::Restarting);
     assert_eq!(supervisor.restart_count(), 2);
-    assert!(start_t2.elapsed() >= Duration::from_millis(35), "must respect 40ms backoff delay");
+    assert!(
+        start_t2.elapsed() >= Duration::from_millis(35),
+        "must respect 40ms backoff delay"
+    );
 
     supervisor.step_supervision().await.expect("restart start");
     assert_eq!(supervisor.state(), ServiceState::Running);
@@ -565,12 +594,11 @@ async fn test_generic_service_restart_exhaustion_quarantine() {
         multiplier: 2.0,
         reset_after: Duration::from_secs(60),
     };
-    let spec = ServiceSpec::new("exhaust-svc", plan).with_restart_policy(
-        RestartPolicy::OnFailure {
+    let spec =
+        ServiceSpec::new("exhaust-svc", plan).with_restart_policy(RestartPolicy::OnFailure {
             max_retries: Some(2),
             backoff,
-        },
-    );
+        });
 
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
     supervisor.start().await.expect("start");
@@ -602,12 +630,11 @@ async fn test_generic_service_restart_exhaustion_quarantine() {
 async fn test_generic_service_clean_exit_does_not_restart_on_failure_policy() {
     let backend = Arc::new(MockExecutionBackend::new());
     let plan = sample_plan("clean-exit-svc");
-    let spec = ServiceSpec::new("clean-exit-svc", plan).with_restart_policy(
-        RestartPolicy::OnFailure {
+    let spec =
+        ServiceSpec::new("clean-exit-svc", plan).with_restart_policy(RestartPolicy::OnFailure {
             max_retries: Some(5),
             backoff: BackoffConfig::default(),
-        },
-    );
+        });
 
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
     supervisor.start().await.expect("start");
@@ -622,7 +649,11 @@ async fn test_generic_service_clean_exit_does_not_restart_on_failure_policy() {
     };
 
     let status = supervisor.handle_observed_exit(clean_exit).await;
-    assert_eq!(status.state, ServiceState::Stopped, "clean exit must transition to Stopped without restarting");
+    assert_eq!(
+        status.state,
+        ServiceState::Stopped,
+        "clean exit must transition to Stopped without restarting"
+    );
     assert_eq!(supervisor.restart_count(), 0);
 }
 
@@ -630,7 +661,10 @@ async fn test_generic_service_clean_exit_does_not_restart_on_failure_policy() {
 async fn test_generic_service_real_os_child_process_lifecycle_and_cleanup() {
     let backend = Arc::new(OsSubprocessBackend);
     #[cfg(windows)]
-    let (exe, args) = ("cmd.exe", vec!["/c".to_string(), "ping -n 10 127.0.0.1 > nul".to_string()]);
+    let (exe, args) = (
+        "cmd.exe",
+        vec!["/c".to_string(), "ping -n 10 127.0.0.1 > nul".to_string()],
+    );
     #[cfg(not(windows))]
     let (exe, args) = ("sleep", vec!["10".to_string()]);
 
@@ -696,9 +730,17 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     assert_eq!(supervisor.generation(), 1);
     assert_eq!(supervisor.restart_count(), 0);
     assert_eq!(backend.launched_count.load(Ordering::SeqCst), 1);
-    assert!(supervisor.handle().is_some(), "exactly one active process handle");
+    assert!(
+        supervisor.handle().is_some(),
+        "exactly one active process handle"
+    );
     assert_eq!(
-        supervisor.status().published_endpoint.unwrap().identity.generation,
+        supervisor
+            .status()
+            .published_endpoint
+            .unwrap()
+            .identity
+            .generation,
         1
     );
 
@@ -717,27 +759,49 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     let status_restarting = supervisor.handle_observed_exit(crash_report).await;
     assert_eq!(status_restarting.state, ServiceState::Restarting);
     assert_eq!(supervisor.restart_count(), 1);
-    assert!(supervisor.status().published_endpoint.is_none(), "endpoint revoked immediately on crash");
+    assert!(
+        supervisor.status().published_endpoint.is_none(),
+        "endpoint revoked immediately on crash"
+    );
 
     // 3. Step supervisor -> Exactly one replacement generation launches
-    let status_gen2 = supervisor.step_supervision().await.expect("restart succeeds");
+    let status_gen2 = supervisor
+        .step_supervision()
+        .await
+        .expect("restart succeeds");
     assert_eq!(status_gen2.state, ServiceState::Running);
     assert_eq!(supervisor.generation(), 2);
     assert_eq!(supervisor.restart_count(), 1);
-    assert_eq!(backend.launched_count.load(Ordering::SeqCst), 2, "exactly one replacement launched (total 2)");
+    assert_eq!(
+        backend.launched_count.load(Ordering::SeqCst),
+        2,
+        "exactly one replacement launched (total 2)"
+    );
 
     // 4. Exactly one process and exactly one endpoint remain active
-    let handle = supervisor.handle().expect("exactly one active process handle");
+    let handle = supervisor
+        .handle()
+        .expect("exactly one active process handle");
     assert_eq!(handle.pid, 1002);
-    let ep = supervisor.status().published_endpoint.expect("exactly one endpoint published");
+    let ep = supervisor
+        .status()
+        .published_endpoint
+        .expect("exactly one endpoint published");
     assert_eq!(ep.identity.generation, 2);
     assert_eq!(ep.owner.generation, 2);
 
     // 5. Subsequent step_supervision on healthy running service does NOT cause duplicate restarts
-    let status_noop = supervisor.step_supervision().await.expect("noop supervision");
+    let status_noop = supervisor
+        .step_supervision()
+        .await
+        .expect("noop supervision");
     assert_eq!(status_noop.state, ServiceState::Running);
     assert_eq!(supervisor.generation(), 2);
-    assert_eq!(backend.launched_count.load(Ordering::SeqCst), 2, "no duplicate launch occurred");
+    assert_eq!(
+        backend.launched_count.load(Ordering::SeqCst),
+        2,
+        "no duplicate launch occurred"
+    );
 }
 
 #[tokio::test]
@@ -768,7 +832,10 @@ async fn test_generic_service_stale_endpoint_protection_across_generations() {
 
     // 1. Generation N (1) ready -> Endpoint published with generation 1
     supervisor.start().await.expect("start");
-    let ep_gen1 = supervisor.status().published_endpoint.expect("endpoint published");
+    let ep_gen1 = supervisor
+        .status()
+        .published_endpoint
+        .expect("endpoint published");
     assert_eq!(ep_gen1.identity.generation, 1);
     assert_eq!(ep_gen1.identity.id, "endpoint/stale-endpoint-svc");
 
@@ -782,14 +849,20 @@ async fn test_generic_service_stale_endpoint_protection_across_generations() {
     };
     supervisor.handle_observed_exit(crash).await;
     assert_eq!(supervisor.state(), ServiceState::Restarting);
-    assert!(supervisor.status().published_endpoint.is_none(), "endpoint must be None during Restarting");
+    assert!(
+        supervisor.status().published_endpoint.is_none(),
+        "endpoint must be None during Restarting"
+    );
 
     // 3. Generation N+1 (2) launches -> Endpoint is NOT published until ready
     supervisor.step_supervision().await.expect("restart");
     assert_eq!(supervisor.state(), ServiceState::Running);
 
     // 4. Endpoint is published with Generation 2, old Generation 1 endpoint NEVER reappears
-    let ep_gen2 = supervisor.status().published_endpoint.expect("generation 2 endpoint published");
+    let ep_gen2 = supervisor
+        .status()
+        .published_endpoint
+        .expect("generation 2 endpoint published");
     assert_eq!(ep_gen2.identity.generation, 2);
     assert_ne!(ep_gen2.identity.generation, ep_gen1.identity.generation);
     assert_eq!(ep_gen2.owner.generation, 2);

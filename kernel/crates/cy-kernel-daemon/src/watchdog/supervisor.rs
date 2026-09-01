@@ -128,7 +128,11 @@ impl ServiceSupervisor {
             );
             return Err(err);
         }
-        self.transition_state(ServiceState::Starting, "PROCESS_SPAWNED", "Service process spawned");
+        self.transition_state(
+            ServiceState::Starting,
+            "PROCESS_SPAWNED",
+            "Service process spawned",
+        );
 
         match self.probe_readiness().await {
             Ok(()) => {
@@ -273,7 +277,10 @@ impl ServiceSupervisor {
         Ok(())
     }
 
-    fn cleanup_current_process(&mut self, grace_period: Duration) -> Result<CleanupReport, ProviderError> {
+    fn cleanup_current_process(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<CleanupReport, ProviderError> {
         if let Some(mut process) = self.process.take() {
             let immediate = grace_period == Duration::ZERO;
             let report = process
@@ -437,14 +444,16 @@ impl ServiceSupervisor {
                 backoff,
             } => {
                 if !clean_exit {
-                    self.execute_restart_or_quarantine(max_retries, &backoff).await;
+                    self.execute_restart_or_quarantine(max_retries, &backoff)
+                        .await;
                 }
             }
             RestartPolicy::Always {
                 max_retries,
                 backoff,
             } => {
-                self.execute_restart_or_quarantine(max_retries, &backoff).await;
+                self.execute_restart_or_quarantine(max_retries, &backoff)
+                    .await;
             }
         }
     }
