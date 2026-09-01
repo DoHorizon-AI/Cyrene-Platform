@@ -507,6 +507,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-runtime-agent"
+version = "0.1.0"
+dependencies = [
+ "cy-artifact-transfer",
+ "cy-execution-fabric",
+ "cy-kernel-contract",
+ "cy-proto",
+ "nix",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
 name = "cy-sandbox-client"
 version = "0.1.0"
 dependencies = [
