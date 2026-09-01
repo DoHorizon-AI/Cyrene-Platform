@@ -76,6 +76,14 @@ def find_workspace_root() -> Path:
     return current
 
 
+def is_full_workspace(workspace_root: Path) -> bool:
+    """Return whether all sibling roots needed by workspace mode are present."""
+    return all(
+        (workspace_root / name).is_dir()
+        for name in ("Cyrene-Platform", "plugins", "services")
+    )
+
+
 def check_markdown_links_and_paths(file_path: Path, repo_root: Path) -> List[str]:
     """Scan a markdown file for machine-local paths and cross-repo escaping relative links."""
     errors = []
@@ -164,6 +172,13 @@ def verify_single_repo(repo_dir: Path, rel_path: str, repo_type: str) -> List[st
 
 def verify_workspace_api_docs(workspace_root: Path) -> List[str]:
     """Verify all 10 active repositories and workspace tooling."""
+    if not is_full_workspace(workspace_root):
+        # Platform's public CI checks out one repository, not the private
+        # umbrella workspace.  Keep the standalone guard strict for this
+        # checkout while reserving the ten-repository inventory for workspace
+        # mode where every sibling is actually available.
+        return verify_single_repo(workspace_root, workspace_root.name, "STANDALONE_REPO")
+
     errors = []
     # Verify 10 standalone git repositories
     for rel_path, repo_type in ACTIVE_REPOSITORIES:
@@ -181,7 +196,12 @@ def verify_workspace_api_docs(workspace_root: Path) -> List[str]:
 def verify_capability_index(workspace_root: Path) -> List[str]:
     """Verify validity of CAPABILITY_INDEX.md in Platform."""
     errors = []
-    index_path = workspace_root / "Cyrene-Platform" / "docs" / "api" / "CAPABILITY_INDEX.md"
+    platform_root = (
+        workspace_root
+        if (workspace_root / "docs" / "api").is_dir()
+        else workspace_root / "Cyrene-Platform"
+    )
+    index_path = platform_root / "docs" / "api" / "CAPABILITY_INDEX.md"
     if not index_path.exists():
         return [f"Central Capability Index not found at {index_path}"]
 
@@ -200,6 +220,8 @@ def verify_capability_index(workspace_root: Path) -> List[str]:
 def verify_plugin_docs(workspace_root: Path) -> List[str]:
     """Verify that all active plugins have manifest and readme documentation."""
     errors = []
+    if not is_full_workspace(workspace_root):
+        return errors
     plugins_dir = workspace_root / "plugins" / "plugins"
     if not plugins_dir.exists():
         return [f"Plugins directory not found at {plugins_dir}"]
