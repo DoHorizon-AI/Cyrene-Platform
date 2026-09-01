@@ -314,6 +314,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "welcome-1".to_string(),
         sequence_number: 1,
         session_id: "sess-12345".to_string(),
+        ack_sequence_number: 0,
         body: Some(control_plane_to_node::Body::Welcome(NodeWelcome {
             session_id: "sess-12345".to_string(),
             selected_protocol_version: 1,
@@ -338,6 +339,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "frame-cmd-1".to_string(),
         sequence_number: 2,
         session_id: "sess-12345".to_string(),
+        ack_sequence_number: 0,
         body: Some(control_plane_to_node::Body::Command(KernelCommand {
             command_id: "cmd-res-1".to_string(),
             request: Some(kernel_command::Request::ReserveResources(
@@ -376,6 +378,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "frame-cmd-2".to_string(),
         sequence_number: 3,
         session_id: "sess-12345".to_string(),
+        ack_sequence_number: 0,
         body: Some(control_plane_to_node::Body::Command(KernelCommand {
             command_id: "cmd-start-worker-1".to_string(),
             request: Some(kernel_command::Request::Authority(KernelAuthorityCommand {
@@ -425,6 +428,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
         frame_id: "frame-stale".to_string(),
         sequence_number: 2, // sequence already consumed!
         session_id: "sess-12345".to_string(),
+        ack_sequence_number: 0,
         body: Some(control_plane_to_node::Body::Command(KernelCommand {
             command_id: "cmd-stale".to_string(),
             request: None,

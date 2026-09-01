@@ -252,6 +252,7 @@ impl NodeControlSession {
             frame_id: format!("{}-{}", self.node.node_id, sequence_number),
             sequence_number,
             session_id: self.session_id().unwrap_or_default().to_string(),
+            ack_sequence_number: 0,
             body: Some(body),
         }
     }
@@ -277,6 +278,7 @@ mod tests {
         ControlPlaneToNode {
             frame_id: "welcome-1".into(),
             sequence_number: 1,
+            ack_sequence_number: 0,
             body: Some(control_plane_to_node::Body::Welcome(NodeWelcome {
                 session_id: "session-1".into(),
                 selected_protocol_version: 1,
@@ -344,6 +346,7 @@ mod tests {
                 frame_id: "command-1".into(),
                 sequence_number: 2,
                 session_id: "session-1".into(),
+                ack_sequence_number: 0,
                 body: Some(control_plane_to_node::Body::Command(KernelCommand {
                     command_id: "op-1".into(),
                     request: None,
@@ -363,6 +366,7 @@ mod tests {
             frame_id: "replay".into(),
             sequence_number: 1,
             session_id: "session-1".into(),
+            ack_sequence_number: 0,
             body: Some(control_plane_to_node::Body::Command(KernelCommand {
                 command_id: "op-1".into(),
                 request: None,
@@ -377,6 +381,7 @@ mod tests {
             frame_id: "old-session".into(),
             sequence_number: 2,
             session_id: "session-old".into(),
+            ack_sequence_number: 0,
             body: Some(control_plane_to_node::Body::Command(KernelCommand {
                 command_id: "op-2".into(),
                 request: None,

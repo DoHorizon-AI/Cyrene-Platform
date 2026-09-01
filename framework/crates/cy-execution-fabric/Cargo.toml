@@ -1,0 +1,12 @@
+[package]
+name = "cy-execution-fabric"
+version = "0.1.0"
+edition = "2021"
+description = "Product-neutral execution attachment admission and reconciliation."
+license = "Apache-2.0"
+
+[dependencies]
+cy-kernel-contract = { path = "../../../contracts/rust/cy-kernel-contract" }
+cy-proto = { path = "../../../contracts/rust/cy-proto" }
+prost-types = "0.12"
+thiserror = "1.0"

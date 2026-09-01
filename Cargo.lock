@@ -310,6 +310,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-execution-fabric"
+version = "0.1.0"
+dependencies = [
+ "cy-kernel-contract",
+ "cy-proto",
+ "prost-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cy-extension-registry"
 version = "0.1.0"
 dependencies = [

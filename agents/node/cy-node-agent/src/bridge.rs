@@ -373,6 +373,7 @@ mod tests {
                 frame_id: "welcome".to_string(),
                 sequence_number: 1,
                 session_id: "session-1".to_string(),
+                ack_sequence_number: 0,
                 body: Some(control_plane_to_node::Body::Welcome(NodeWelcome {
                     session_id: "session-1".to_string(),
                     selected_protocol_version: 1,
@@ -403,6 +404,7 @@ mod tests {
                     frame_id: "command-1".to_string(),
                     sequence_number: 2,
                     session_id: "session-1".to_string(),
+                    ack_sequence_number: 0,
                     body: Some(control_plane_to_node::Body::Command(KernelCommand {
                         command_id: "command-1".to_string(),
                         request: None,
