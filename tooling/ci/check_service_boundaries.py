@@ -28,12 +28,22 @@ class Violation(NamedTuple):
 
 
 def find_workspace_root(start_path: Path | None = None) -> Path:
+    """Locate the umbrella workspace or fall back to this Platform checkout.
+
+    The guard also runs in standalone GitHub checkouts.  A machine-local
+    Windows fallback made those runs inspect a path that cannot exist on the
+    runner, so standalone validation must remain rooted at the checked-out
+    repository instead.
+    """
     current = (start_path or Path(__file__)).resolve()
     for parent in [current] + list(current.parents):
         if (parent / "Cyrene-Platform").exists() and (parent / "services").exists():
             return parent
-    # Fallback to standard location
-    return Path("C:/Users/Baiji/DHDev/Cyrene")
+        if (parent / "tooling" / "ci" / "check_service_boundaries.py").exists() and (
+            (parent / "kernel").is_dir() or (parent / "Cargo.toml").is_file()
+        ):
+            return parent
+    return current.parent.parent
 
 
 def check_service_boundaries(workspace_root: Path) -> List[Violation]:

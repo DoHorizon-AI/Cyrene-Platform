@@ -52,6 +52,9 @@ pub struct WorkerCancelAck {
     pub target_request_id: String,
 }
 
+type PendingCancellation = (String, oneshot::Sender<WorkerCancelAck>);
+type PendingCancellations = Arc<Mutex<HashMap<String, PendingCancellation>>>;
+
 #[derive(Debug)]
 pub struct WorkerTransportRequest {
     pub request_id: String,
@@ -74,7 +77,7 @@ pub struct WorkerTransportDispatcher {
     generation: u64,
     fence_token: u64,
     pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
-    pending_cancellations: Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>,
+    pending_cancellations: PendingCancellations,
 }
 
 impl WorkerTransportDispatcher {
@@ -129,7 +132,7 @@ pub struct InstanceActor {
     consecutive_timeouts: u32,
     transport_tx: Option<mpsc::Sender<WorkerTransportCommand>>,
     pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
-    pending_cancellations: Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>,
+    pending_cancellations: PendingCancellations,
 }
 
 impl InstanceActor {
@@ -424,8 +427,7 @@ impl InstanceActor {
     }
 
     pub fn cancel(&mut self, target_request_id: String) -> Result<(), ProviderError> {
-        self.request_cancel(target_request_id)
-            .map(|receiver| drop(receiver))
+        self.request_cancel(target_request_id).map(drop)
     }
 
     /// Launch the process inside the privileged sandbox.

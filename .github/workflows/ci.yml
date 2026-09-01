@@ -52,7 +52,7 @@ jobs:
           python-version: "3.12"
       - name: Install Python SDKs and dependencies
         run: |
-          python -m pip install --upgrade pip pytest hypothesis
+          python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0"
           python -m pip install -e sdk/python/cyrene_artifacts
           python -m pip install -e sdk/python/cyrene_environment
           python -m pip install -e sdk/python/cyrene_preflight
@@ -73,6 +73,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout exact Plugins runtime for cross-repository TCK
+        uses: actions/checkout@v4
+        with:
+          repository: DoHorizon-AI/Cyrene-Plugins-Official
+          ref: 7906f2672a1b80620a32840bd95c81a9cc38352c
+          path: .ci/plugins
+          token: ${{ secrets.CYRENE_CROSS_REPO_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -83,4 +90,6 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Run Rust unit tests (--locked)
+        env:
+          CYRENE_PLUGINS_WORKTREE: ${{ github.workspace }}/.ci/plugins
         run: cargo test --locked --workspace
