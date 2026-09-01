@@ -27,6 +27,7 @@ pub trait DependencyPreparer: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct PythonVenvDependencyPreparer {
     python_executable: PathBuf,
+    uv_executable: PathBuf,
     offline: bool,
     wheelhouse: Option<PathBuf>,
 }
@@ -35,9 +36,15 @@ impl PythonVenvDependencyPreparer {
     pub fn new(python_executable: impl Into<PathBuf>) -> Self {
         Self {
             python_executable: python_executable.into(),
+            uv_executable: PathBuf::from("uv"),
             offline: false,
             wheelhouse: None,
         }
+    }
+
+    pub fn with_uv_executable(mut self, uv_executable: impl Into<PathBuf>) -> Self {
+        self.uv_executable = uv_executable.into();
+        self
     }
 
     pub fn offline(mut self, wheelhouse: impl Into<PathBuf>) -> Self {
@@ -74,18 +81,22 @@ impl DependencyPreparer for PythonVenvDependencyPreparer {
                 format!("could not create runtime root: {error}"),
             )
         })?;
-        let output = Command::new(&self.python_executable)
-            .args(["-m", "venv"])
+        let output = Command::new(&self.uv_executable)
+            .env("UV_CACHE_DIR", runtime_root.join(".uv-cache"))
+            .arg("venv")
+            .arg("--allow-existing")
+            .arg("--python")
+            .arg(&self.python_executable)
             .arg(runtime_root)
             .output()
             .map_err(|error| {
                 PackageRuntimeError::new(
                     "DEPENDENCY_PREPARE_FAILED",
-                    format!("could not start Python virtualenv preparation: {error}"),
+                    format!("could not start uv virtualenv preparation: {error}"),
                 )
             })?;
         if !output.status.success() {
-            return Err(command_failure("virtualenv", &output.stderr));
+            return Err(command_failure("uv venv", &output));
         }
 
         let relative_python = if cfg!(windows) {
@@ -94,15 +105,11 @@ impl DependencyPreparer for PythonVenvDependencyPreparer {
             PathBuf::from("bin/python")
         };
         let runtime_python = runtime_root.join(&relative_python);
-        let mut command = Command::new(&runtime_python);
-        command.args([
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-deps",
-            "--requirement",
-        ]);
+        let mut command = Command::new(&self.uv_executable);
+        command.env("UV_CACHE_DIR", runtime_root.join(".uv-cache"));
+        command.args(["pip", "install", "--python"]);
+        command.arg(&runtime_python);
+        command.args(["--no-deps", "--requirement"]);
         command.arg(&lock);
         if self.offline {
             command.arg("--no-index");
@@ -121,13 +128,13 @@ impl DependencyPreparer for PythonVenvDependencyPreparer {
             )
         })?;
         if !output.status.success() {
-            return Err(command_failure("pip install", &output.stderr));
+            return Err(command_failure("uv pip install", &output));
         }
 
         let runtime_digest =
             digest_bytes(format!("python-venv-v1\n{}\n", lock_digest.as_str()).as_bytes());
         Ok(DependencyPreparationEvidence {
-            preparer: "python-venv-v1".to_string(),
+            preparer: "python-uv-venv-v1".to_string(),
             prepared_at_unix_ms: unix_ms(),
             lock_digest: lock_digest.clone(),
             runtime_digest,
@@ -169,8 +176,10 @@ fn validate_exact_requirements(content: &[u8]) -> Result<(), PackageRuntimeError
     Ok(())
 }
 
-fn command_failure(operation: &str, stderr: &[u8]) -> PackageRuntimeError {
-    let detail = String::from_utf8_lossy(stderr);
+fn command_failure(operation: &str, output: &std::process::Output) -> PackageRuntimeError {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = format!("{} {}", stdout.trim(), stderr.trim());
     PackageRuntimeError::new(
         "DEPENDENCY_PREPARE_FAILED",
         format!("{operation} failed: {}", detail.trim()),
