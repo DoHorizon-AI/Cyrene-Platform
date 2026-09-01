@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-api/src/lease.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! 资源租约、配额上限与分配模型.
 
 use std::collections::BTreeMap;

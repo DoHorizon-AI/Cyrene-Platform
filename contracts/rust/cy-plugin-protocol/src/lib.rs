@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/rust/cy-plugin-protocol/src/lib.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! CYRENE 插件零端口 IPC 有线协议编解码器 (Plugin Protocol & Length-Prefixed Codec).
 //!
 //! 【零端口通信与二进制封包】

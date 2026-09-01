@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/src/builtin.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! 内置默认插件实现 (Built-in Plugins).
 //!
 //! 提供仅供开发和测试使用的非硬件基础实现：

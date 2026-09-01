@@ -1,29 +1,31 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/service_manager.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic Service Supervision Manager & gRPC Service Provider.
 //!
 //! Provides the external wire boundary for clients and Product adapters
 //! to submit, observe, stop, cancel, and stream events for long-running
 //! generic service workloads.
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use cy_kernel_api::{
-    BackoffConfig, CgroupLimits, DeviceBinding, LaunchPlan, ProbeConfig,
-    ReadinessProbe, RestartPolicy, SandboxBackend, ServiceEndpointSpec,
-    ServiceSpec as DomainServiceSpec, ServiceState as DomainServiceState,
-    ServiceStatus as DomainServiceStatus,
+    BackoffConfig, CgroupLimits, DeviceBinding, LaunchPlan, ProbeConfig, ReadinessProbe,
+    RestartPolicy, SandboxBackend, ServiceEndpointSpec, ServiceSpec as DomainServiceSpec,
+    ServiceState as DomainServiceState, ServiceStatus as DomainServiceStatus,
 };
 use cy_proto::core_v1::{
     readiness_probe::Probe, restart_policy::Policy,
     service_supervision_service_server::ServiceSupervisionService, CancelServiceRequest,
     GetServiceStatusRequest, HttpGetProbe, RestartPolicyAlways, RestartPolicyOnFailure,
     ServiceEvent as ProtoServiceEvent, ServiceSpec as ProtoServiceSpec,
-    ServiceState as ProtoServiceState, ServiceStatus as ProtoServiceStatus,
-    StartServiceRequest, StopServiceRequest, TcpSocketProbe, WatchServiceEventsRequest,
+    ServiceState as ProtoServiceState, ServiceStatus as ProtoServiceStatus, StartServiceRequest,
+    StopServiceRequest, TcpSocketProbe, WatchServiceEventsRequest,
 };
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
@@ -51,7 +53,11 @@ impl ServiceSupervisionManager {
     /// Convert a domain ServiceStatus into its Protobuf wire representation.
     pub fn domain_status_to_proto(status: DomainServiceStatus) -> ProtoServiceStatus {
         let (exit_code, oom_killed, reason_code) = if let Some(report) = &status.last_exit_report {
-            (report.exit_code, report.oom_killed, report.reason_code.clone())
+            (
+                report.exit_code,
+                report.oom_killed,
+                report.reason_code.clone(),
+            )
         } else {
             (None, false, status.state.as_reason_code().to_string())
         };
@@ -72,12 +78,23 @@ impl ServiceSupervisionManager {
             exit_code,
             oom_killed,
             reason_code,
-            published_endpoint: status.published_endpoint.as_ref().map(crate::convert::to_semantic_proto_endpoint),
+            published_endpoint: status
+                .published_endpoint
+                .as_ref()
+                .map(crate::convert::to_semantic_proto_endpoint),
             last_error: status.last_error,
         }
     }
 
     /// Convert a Protobuf wire ServiceSpec into a domain ServiceSpec.
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: ServiceSupervisionManager::proto_spec_to_domain
+    //
+    //   Converts the transport request into the domain launch model and keeps
+    //   validation at the wire-to-domain boundary.
+    //
+    //   将传输层请求转换为领域启动模型，并把输入校验集中在协议到领域的边界。
+    // ════════════════════════════════════════════════════════════════════════
     pub fn proto_spec_to_domain(spec: ProtoServiceSpec) -> Result<DomainServiceSpec, Status> {
         if spec.name.trim().is_empty() {
             return Err(Status::invalid_argument("service name must not be empty"));
@@ -97,16 +114,31 @@ impl ServiceSupervisionManager {
                 spec.cgroup_name
             },
             limits: CgroupLimits::default(),
-            working_dir: spec.working_dir.filter(|s| !s.is_empty()).map(PathBuf::from),
-            transport_socket: spec.transport_socket.filter(|s| !s.is_empty()).map(PathBuf::from),
+            working_dir: spec
+                .working_dir
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+            transport_socket: spec
+                .transport_socket
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
         };
 
         let probe = if let Some(proto_probe) = spec.readiness_probe {
             let config = if let Some(c) = spec.probe_config {
                 ProbeConfig {
-                    initial_delay: c.initial_delay.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or_default(),
-                    period: c.period.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_millis(50)),
-                    timeout: c.timeout.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_millis(500)),
+                    initial_delay: c
+                        .initial_delay
+                        .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                        .unwrap_or_default(),
+                    period: c
+                        .period
+                        .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                        .unwrap_or(Duration::from_millis(50)),
+                    timeout: c
+                        .timeout
+                        .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                        .unwrap_or(Duration::from_millis(500)),
                     success_threshold: c.success_threshold.max(1),
                     failure_threshold: c.failure_threshold.max(1),
                 }
@@ -117,16 +149,22 @@ impl ServiceSupervisionManager {
             let domain_probe = match proto_probe.probe {
                 Some(Probe::ProcessAlive(_)) => ReadinessProbe::ProcessAlive,
                 Some(Probe::TcpSocket(TcpSocketProbe { host, port })) => {
-                    ReadinessProbe::TcpSocket { host, port: port as u16 }
-                }
-                Some(Probe::HttpGet(HttpGetProbe { host, port, path, expected_status })) => {
-                    ReadinessProbe::HttpGet {
+                    ReadinessProbe::TcpSocket {
                         host,
                         port: port as u16,
-                        path,
-                        expected_status: expected_status.map(|s| s as u16),
                     }
                 }
+                Some(Probe::HttpGet(HttpGetProbe {
+                    host,
+                    port,
+                    path,
+                    expected_status,
+                })) => ReadinessProbe::HttpGet {
+                    host,
+                    port: port as u16,
+                    path,
+                    expected_status: expected_status.map(|s| s as u16),
+                },
                 Some(Probe::WorkerControl(_)) => ReadinessProbe::WorkerControl,
                 None => ReadinessProbe::ProcessAlive,
             };
@@ -138,13 +176,29 @@ impl ServiceSupervisionManager {
         let restart_policy = if let Some(p) = spec.restart_policy {
             match p.policy {
                 Some(Policy::Never(_)) => RestartPolicy::Never,
-                Some(Policy::OnFailure(RestartPolicyOnFailure { max_retries, backoff })) => {
+                Some(Policy::OnFailure(RestartPolicyOnFailure {
+                    max_retries,
+                    backoff,
+                })) => {
                     let backoff_cfg = backoff
                         .map(|b| BackoffConfig {
-                            initial_delay: b.initial_delay.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_millis(100)),
-                            max_delay: b.max_delay.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_secs(30)),
-                            multiplier: if b.multiplier > 0.0 { b.multiplier } else { 2.0 },
-                            reset_after: b.reset_after.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_secs(60)),
+                            initial_delay: b
+                                .initial_delay
+                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                                .unwrap_or(Duration::from_millis(100)),
+                            max_delay: b
+                                .max_delay
+                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                                .unwrap_or(Duration::from_secs(30)),
+                            multiplier: if b.multiplier > 0.0 {
+                                b.multiplier
+                            } else {
+                                2.0
+                            },
+                            reset_after: b
+                                .reset_after
+                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                                .unwrap_or(Duration::from_secs(60)),
                         })
                         .unwrap_or_default();
                     RestartPolicy::OnFailure {
@@ -152,13 +206,29 @@ impl ServiceSupervisionManager {
                         backoff: backoff_cfg,
                     }
                 }
-                Some(Policy::Always(RestartPolicyAlways { max_retries, backoff })) => {
+                Some(Policy::Always(RestartPolicyAlways {
+                    max_retries,
+                    backoff,
+                })) => {
                     let backoff_cfg = backoff
                         .map(|b| BackoffConfig {
-                            initial_delay: b.initial_delay.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_millis(100)),
-                            max_delay: b.max_delay.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_secs(30)),
-                            multiplier: if b.multiplier > 0.0 { b.multiplier } else { 2.0 },
-                            reset_after: b.reset_after.map(|d| Duration::new(d.seconds as u64, d.nanos as u32)).unwrap_or(Duration::from_secs(60)),
+                            initial_delay: b
+                                .initial_delay
+                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                                .unwrap_or(Duration::from_millis(100)),
+                            max_delay: b
+                                .max_delay
+                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                                .unwrap_or(Duration::from_secs(30)),
+                            multiplier: if b.multiplier > 0.0 {
+                                b.multiplier
+                            } else {
+                                2.0
+                            },
+                            reset_after: b
+                                .reset_after
+                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                                .unwrap_or(Duration::from_secs(60)),
                         })
                         .unwrap_or_default();
                     RestartPolicy::Always {
@@ -245,7 +315,9 @@ impl ServiceSupervisionService for ServiceSupervisionManager {
             .ok_or_else(|| Status::not_found(format!("service {} not found", req.service_name)))?;
 
         let supervisor = supervisor_arc.lock().await;
-        Ok(Response::new(Self::domain_status_to_proto(supervisor.status())))
+        Ok(Response::new(Self::domain_status_to_proto(
+            supervisor.status(),
+        )))
     }
 
     async fn stop_service(
@@ -255,16 +327,15 @@ impl ServiceSupervisionService for ServiceSupervisionManager {
         let req = request.into_inner();
         let supervisor_arc = {
             let map = self.supervisors.read().await;
-            map.get(&req.service_name)
-                .cloned()
-                .ok_or_else(|| Status::not_found(format!("service {} not found", req.service_name)))?
+            map.get(&req.service_name).cloned().ok_or_else(|| {
+                Status::not_found(format!("service {} not found", req.service_name))
+            })?
         };
 
         let mut supervisor = supervisor_arc.lock().await;
-        let status = supervisor
-            .stop()
-            .await
-            .map_err(|e| Status::internal(format!("failed to stop service {}: {e}", req.service_name)))?;
+        let status = supervisor.stop().await.map_err(|e| {
+            Status::internal(format!("failed to stop service {}: {e}", req.service_name))
+        })?;
 
         Ok(Response::new(Self::domain_status_to_proto(status)))
     }
@@ -276,16 +347,18 @@ impl ServiceSupervisionService for ServiceSupervisionManager {
         let req = request.into_inner();
         let supervisor_arc = {
             let map = self.supervisors.read().await;
-            map.get(&req.service_name)
-                .cloned()
-                .ok_or_else(|| Status::not_found(format!("service {} not found", req.service_name)))?
+            map.get(&req.service_name).cloned().ok_or_else(|| {
+                Status::not_found(format!("service {} not found", req.service_name))
+            })?
         };
 
         let mut supervisor = supervisor_arc.lock().await;
-        let status = supervisor
-            .cancel()
-            .await
-            .map_err(|e| Status::internal(format!("failed to cancel service {}: {e}", req.service_name)))?;
+        let status = supervisor.cancel().await.map_err(|e| {
+            Status::internal(format!(
+                "failed to cancel service {}: {e}",
+                req.service_name
+            ))
+        })?;
 
         Ok(Response::new(Self::domain_status_to_proto(status)))
     }
@@ -301,9 +374,9 @@ impl ServiceSupervisionService for ServiceSupervisionManager {
         let req = request.into_inner();
         let rx = {
             let map = self.supervisors.read().await;
-            let supervisor_arc = map
-                .get(&req.service_name)
-                .ok_or_else(|| Status::not_found(format!("service {} not found", req.service_name)))?;
+            let supervisor_arc = map.get(&req.service_name).ok_or_else(|| {
+                Status::not_found(format!("service {} not found", req.service_name))
+            })?;
             let supervisor = supervisor_arc.lock().await;
             supervisor.subscribe_events()
         };

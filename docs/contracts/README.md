@@ -1,0 +1,22 @@
+# Contracts | 契约
+
+This directory contains normative semantic, wire, and cross-repository
+contract documents.
+
+本目录存放规范语义契约、线协议契约和跨仓库契约文档。
+
+| File | Responsibility | 文件职责 |
+| --- | --- | --- |
+| `kernel-semantic-contract-v1.md` | Normative Kernel semantic authority. | Kernel 规范语义权威 |
+| `platform-component-boundary-v1.md` | Platform component ownership. | Platform 组件归属 |
+| `astrbot-capability-worker-transition-v1.md` | Worker transition compatibility. | Worker 迁移兼容性 |
+| `media-processor-v1.md` | Media capability contract. | 媒体能力契约 |
+| `message-connector-v1.md` | Message connector contract. | 消息连接器契约 |
+
+## Suggested reading | 推荐顺序
+
+Read the Kernel semantic contract first, then the component boundary and the
+capability-specific contracts.
+
+先读 Kernel 语义契约，再读组件边界和具体能力契约。
+

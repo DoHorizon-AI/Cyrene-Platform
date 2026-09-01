@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/watchdog/supervisor.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic Service and Workload Supervisor Implementation.
 //!
 //! Provides deterministic lifecycle management, asynchronous readiness probing,
@@ -128,7 +136,11 @@ impl ServiceSupervisor {
             );
             return Err(err);
         }
-        self.transition_state(ServiceState::Starting, "PROCESS_SPAWNED", "Service process spawned");
+        self.transition_state(
+            ServiceState::Starting,
+            "PROCESS_SPAWNED",
+            "Service process spawned",
+        );
 
         match self.probe_readiness().await {
             Ok(()) => {
@@ -273,7 +285,10 @@ impl ServiceSupervisor {
         Ok(())
     }
 
-    fn cleanup_current_process(&mut self, grace_period: Duration) -> Result<CleanupReport, ProviderError> {
+    fn cleanup_current_process(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<CleanupReport, ProviderError> {
         if let Some(mut process) = self.process.take() {
             let immediate = grace_period == Duration::ZERO;
             let report = process
@@ -281,7 +296,7 @@ impl ServiceSupervisor {
                     grace_period,
                     immediate,
                 })
-                .map(Clone::clone)?;
+                .cloned()?;
             self.last_exit_report = Some(report.clone());
             Ok(report)
         } else {
@@ -437,14 +452,16 @@ impl ServiceSupervisor {
                 backoff,
             } => {
                 if !clean_exit {
-                    self.execute_restart_or_quarantine(max_retries, &backoff).await;
+                    self.execute_restart_or_quarantine(max_retries, &backoff)
+                        .await;
                 }
             }
             RestartPolicy::Always {
                 max_retries,
                 backoff,
             } => {
-                self.execute_restart_or_quarantine(max_retries, &backoff).await;
+                self.execute_restart_or_quarantine(max_retries, &backoff)
+                    .await;
             }
         }
     }

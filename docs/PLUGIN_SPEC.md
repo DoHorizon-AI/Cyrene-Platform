@@ -8,7 +8,7 @@ This document is the single source of truth for the shape of a CYRENE
 `plugin.toml`, the controlled taxonomy of plugin **kinds**, **editions**,
 **runtimes**, and the controlled **capability vocabulary** the host uses to match
 plugins against a workload. If the JSON Schema, the Rust model
-(`contracts/rust/cy-manifest/src/manifest.rs`), or a checked-in manifest disagree
+(`contracts/rust/cy-manifest/src/manifest/plugin.rs`), or a checked-in manifest disagree
 with this document, this document wins and the other has a bug.
 
 ---

@@ -1,3 +1,11 @@
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: sdk/python/cyrene_control_plane/src/cyrene_control_plane/store.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 """Persistence ports and a small crash-safe local reference store."""
 
 from __future__ import annotations

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-resource-manager/src/lib.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! CYRENE 本地硬件资源租约与并发围栏管理器 (Resource Lease Manager).
 //!
 //! 【核心设计：乐观代数版本 + 围栏令牌 (Generations & Fencing)】

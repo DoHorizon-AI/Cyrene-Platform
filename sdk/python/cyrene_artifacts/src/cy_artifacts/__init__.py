@@ -1,3 +1,11 @@
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: sdk/python/cyrene_artifacts/src/cy_artifacts/__init__.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 """Provider-neutral Artifact Plane MVP."""
 
 from .contracts import (

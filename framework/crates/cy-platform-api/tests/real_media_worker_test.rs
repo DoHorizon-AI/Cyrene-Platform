@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/tests/real_media_worker_test.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Real cross-repository test: Platform WorkerMediaProcessor -> Official cyrene.tools.media Worker.
 
 use std::{collections::HashMap, path::PathBuf, time::Duration};

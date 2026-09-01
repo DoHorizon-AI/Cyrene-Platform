@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: runtime/cyrene-kernel/src/runtime_journal.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Durable restart evidence for the outer Kernel composition root.
 //!
 //! It records only node epochs, fence tokens, instance names and terminal
@@ -2015,8 +2023,10 @@ mod tests {
         // 4. Verify classification:
         // - Live reused process is classified as Foreign (NOT Stale!)
         // - Stale journal record is classified as Unknown
-        let candidates =
-            FileRuntimeJournal::classify_recovery(&epoch_2, &[reused_pid_evidence.clone()]);
+        let candidates = FileRuntimeJournal::classify_recovery(
+            &epoch_2,
+            std::slice::from_ref(&reused_pid_evidence),
+        );
         assert_eq!(candidates.len(), 2);
         let foreign_cand = candidates
             .iter()

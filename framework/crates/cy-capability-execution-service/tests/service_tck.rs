@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-capability-execution-service/tests/service_tck.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic Capability Execution Service TCK.
 //!
 //! These tests use only the generated public gRPC client. They deliberately
@@ -11,21 +19,21 @@ use cy_manifest::{
     Runtime,
 };
 use cy_platform_api::{
-    CapabilityBinding, CapabilityRegistry, WorkerActivationOptions,
-    MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
+    CapabilityBinding, CapabilityRegistry, MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
+    WorkerActivationOptions,
 };
 use cy_proto::capability_v1::{
-    capability_event_stream_item, capability_execution_error,
+    CapabilityEventStreamEnd, CapabilityEventStreamEndReason, InvokeCapabilityRequest,
+    SubscribeCapabilityEventsRequest, capability_event_stream_item, capability_execution_error,
     capability_execution_service_client::CapabilityExecutionServiceClient,
-    invoke_capability_response, CapabilityEventStreamEnd, CapabilityEventStreamEndReason,
-    InvokeCapabilityRequest, SubscribeCapabilityEventsRequest,
+    invoke_capability_response,
 };
 use cy_proto::{
     model_provider::{
         CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, EMBEDDINGS_METHOD,
         EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL,
     },
-    model_provider_v1::{embeddings_response, EmbeddingsRequest, EmbeddingsResponse},
+    model_provider_v1::{EmbeddingsRequest, EmbeddingsResponse, embeddings_response},
 };
 use prost::Message;
 use prost_types::Any;
@@ -33,12 +41,12 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{
-    transport::{Channel, Endpoint, Server},
     Request,
+    transport::{Channel, Endpoint, Server},
 };
 
 use cy_capability_execution_service::{
-    server, CapabilityExecutionConfig, CapabilityExecutionService,
+    CapabilityExecutionConfig, CapabilityExecutionService, server,
 };
 
 fn platform_root() -> PathBuf {
@@ -655,9 +663,11 @@ async fn configured_binding_unknown_target_is_deterministic() {
         error.code,
         capability_execution_error::Code::CapabilityUnavailable as i32
     );
-    assert!(error
-        .message
-        .contains("unknown configured capability binding: missing"));
+    assert!(
+        error
+            .message
+            .contains("unknown configured capability binding: missing")
+    );
     server.shutdown().await;
 }
 
@@ -686,9 +696,11 @@ async fn configured_binding_capability_mismatch_is_deterministic() {
         error.code,
         capability_execution_error::Code::InvalidRequest as i32
     );
-    assert!(error
-        .message
-        .contains("does not expose capability missing.capability.v1"));
+    assert!(
+        error
+            .message
+            .contains("does not expose capability missing.capability.v1")
+    );
     server.shutdown().await;
 }
 
@@ -778,9 +790,11 @@ async fn embedding_tck_unknown_binding_is_deterministic() {
         error.code,
         capability_execution_error::Code::CapabilityUnavailable as i32
     );
-    assert!(error
-        .message
-        .contains("unknown configured capability binding: missing"));
+    assert!(
+        error
+            .message
+            .contains("unknown configured capability binding: missing")
+    );
     server.shutdown().await;
 }
 

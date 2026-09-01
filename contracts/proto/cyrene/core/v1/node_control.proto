@@ -1,11 +1,11 @@
-// ┌─────────────────────────────────────────────────────────────────────┐
-// │  📄 node_control.proto                                              │
-// │  Package: cyrene.core.v1                                            │
-// │  Role: One outbound Host/Runtime Agent control stream.              │
-// │                                                                     │
-// │  协议职责：统一 Host Agent 与容器内 Runtime Agent 的出站控制通道。      │
-// │  · v1 tags remain compatible; protocol v2 adds Execution Agent.     │
-// └─────────────────────────────────────────────────────────────────────┘
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/core/v1/node_control.proto
+// ║ Module: CYRENE Platform
+// ║ Role: One outbound Host/Runtime Agent control stream.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：统一 Host Agent 与容器内 Runtime Agent 的出站控制通道。
+// ╚══════════════════════════════════════════════════════════════════════╝
 syntax = "proto3";
 
 package cyrene.core.v1;

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-api/src/binding.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! 设备绑定配置与环境隔离保护.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -179,9 +187,7 @@ fn ordered_unique(values: Vec<String>) -> Vec<String> {
 }
 
 fn join_unique_csv(existing: Option<&str>, incoming: &str) -> String {
-    let mut values = existing
-        .map(split_csv)
-        .unwrap_or_default();
+    let mut values = existing.map(split_csv).unwrap_or_default();
     for value in split_csv(incoming) {
         if !values.iter().any(|existing| existing == &value) {
             values.push(value);

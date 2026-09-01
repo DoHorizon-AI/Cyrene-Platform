@@ -34,9 +34,19 @@ VALID_ROLES = {
 
 def validate_all_repository_policies(workspace_root: Path) -> list:
     errors = []
-    
+
+    # A public repository CI checkout has only its own policy file; validate
+    # that repository directly instead of inventing missing sibling roots.
+    # 公共仓库 CI checkout 只包含当前仓库的 policy 文件，应直接校验当前仓库，
+    # 不要把不存在的兄弟目录伪装成 workspace 仓库。
+    if (workspace_root / "repository-policy.yaml").is_file() and not (
+        workspace_root / "Cyrene-Platform"
+    ).is_dir():
+        repo_dirs = [workspace_root]
+    else:
+        repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
+
     # Discover repos
-    repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
     services_dir = workspace_root / "services"
     if services_dir.exists():
         for s in services_dir.iterdir():

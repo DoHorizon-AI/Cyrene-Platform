@@ -1,3 +1,11 @@
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: sdk/python/cyrene_worker_shim/test_runner.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 """Tests for cyrene_worker_shim.runner GenericCapabilityWorker."""
 
 from __future__ import annotations

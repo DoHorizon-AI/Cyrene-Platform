@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: adapters/hardware/nvidia/src/discovery.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! CYRENE 硬件拓扑与加速卡探测适配器 (Hardware Discovery Adapters).
 //!
 //! 【进程外无侵入式硬件探测设计】
@@ -175,6 +183,14 @@ impl ResourceProvider for NvidiaSmiProvider {
         "nvidia-smi"
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: NvidiaSmiProvider::probe_resources
+    //
+    //   Converts observed nvidia-smi rows into typed resource facts without
+    //   fabricating topology or device identity.
+    //
+    //   将 nvidia-smi 观测行转换为强类型资源事实，不虚构拓扑或设备身份。
+    // ════════════════════════════════════════════════════════════════════════
     fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
         self.query().map(|gpus| {
             gpus.into_iter()
@@ -387,7 +403,10 @@ pub(crate) fn nvidia_visibility_join_keys() -> BTreeSet<String> {
 pub(crate) fn nvidia_visibility_environment(resource_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("CUDA_VISIBLE_DEVICES".to_string(), resource_id.to_string()),
-        ("NVIDIA_VISIBLE_DEVICES".to_string(), resource_id.to_string()),
+        (
+            "NVIDIA_VISIBLE_DEVICES".to_string(),
+            resource_id.to_string(),
+        ),
     ])
 }
 

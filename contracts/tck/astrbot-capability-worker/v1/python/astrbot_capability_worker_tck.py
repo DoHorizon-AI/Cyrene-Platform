@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: contracts/tck/astrbot-capability-worker/v1/python/astrbot_capability_worker_tck.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 """Verify static admission vectors for the AstrBot worker transition seam."""
 
 from __future__ import annotations

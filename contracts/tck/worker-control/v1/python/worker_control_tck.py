@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ 📄 File: contracts/tck/worker-control/v1/python/worker_control_tck.py
+# ║ Module: CYRENE Platform
+# ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║
+# ║ 模块：CYRENE Platform
+# ║ 职责：Python SDK、TCK 或测试模块。
+# ╚══════════════════════════════════════════════════════════════════════╝
 """Dependency-free Core v1 Worker-control conformance runner for Python."""
 
 from __future__ import annotations

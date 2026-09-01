@@ -22,7 +22,11 @@ def test_workspace_api_documentation_guard():
 
 def test_standalone_repo_guard():
     root = find_workspace_root()
-    platform_dir = root / "Cyrene-Platform"
+    platform_dir = (
+        root
+        if (root / "docs" / "API.md").exists()
+        else root / "Cyrene-Platform"
+    )
     errors = verify_single_repo(platform_dir, "Cyrene-Platform", "ACTIVE_PLATFORM")
     assert not errors, f"Standalone platform guard errors: {errors}"
 

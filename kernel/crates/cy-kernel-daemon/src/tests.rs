@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/tests.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! cy-kernel-daemon 单元测试与集成测试套件。
 
 #![allow(deprecated)]
@@ -6768,7 +6776,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
 /// - receive B's events
 /// - consume B's authority
 /// - collide with B's object keys
-/// And vice versa for B against A.
+///   And vice versa for B against A.
 #[test]
 fn golden_test_b_full_bidirectional_namespace_isolation() {
     let resources = vec![
