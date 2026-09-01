@@ -52,7 +52,7 @@ jobs:
           python-version: "3.12"
       - name: Install Python SDKs and dependencies
         run: |
-          python -m pip install --upgrade pip pytest hypothesis
+          python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0"
           python -m pip install -e sdk/python/cyrene_artifacts
           python -m pip install -e sdk/python/cyrene_environment
           python -m pip install -e sdk/python/cyrene_preflight
