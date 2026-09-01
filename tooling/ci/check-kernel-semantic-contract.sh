@@ -96,10 +96,17 @@ fi
 
 "$buf_bin" lint contracts/proto
 
+# Buf's breaking checker requires source_code_info in the against image.  The
+# stable descriptor is intentionally source-info-free for deterministic
+# runtime hashing, so compare against the full descriptor from the target
+# branch and keep the stable descriptor for the drift/hash check below.
+# Buf 的 breaking 检查要求 against 镜像包含 source_code_info；stable descriptor
+# 为确定性运行时哈希而刻意去掉 source info，因此这里使用目标分支的完整
+# descriptor 做兼容性基线，并继续用 stable descriptor 做漂移/哈希校验。
 breaking_baseline="$descriptor"
 if [[ -n "${GITHUB_BASE_REF:-}" ]] \
-  && git cat-file -e "origin/${GITHUB_BASE_REF}:${stable_descriptor}" 2>/dev/null; then
-  git show "origin/${GITHUB_BASE_REF}:${stable_descriptor}" > "$tmp_base_descriptor"
+  && git cat-file -e "origin/${GITHUB_BASE_REF}:${descriptor}" 2>/dev/null; then
+  git show "origin/${GITHUB_BASE_REF}:${descriptor}" > "$tmp_base_descriptor"
   breaking_baseline="$tmp_base_descriptor"
 fi
 "$buf_bin" breaking contracts/proto --against "$breaking_baseline#format=binpb"
