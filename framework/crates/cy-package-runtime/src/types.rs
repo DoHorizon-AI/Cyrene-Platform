@@ -214,6 +214,24 @@ pub struct RuntimeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeInvocationResult {
+    pub payload: Vec<u8>,
+    pub payload_type_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeApplicationEvent {
+    pub subscription_id: String,
+    pub capability: String,
+    pub event_sequence: u64,
+    pub event_type: String,
+    pub payload: Vec<u8>,
+    pub payload_type_url: String,
+    pub generation: u64,
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupReport {
     pub staging_entries_removed: usize,
     pub cached_archives_removed: usize,

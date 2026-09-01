@@ -416,6 +416,7 @@ dependencies = [
 name = "cy-package-runtime"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "cy-manifest",
  "cy-platform-api",
  "serde",

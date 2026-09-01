@@ -55,6 +55,14 @@ class PackageWorker(CyreneWorker):
             "value": request.get("value"),
         }).encode("utf-8")
 
+    def on_subscribe(self, subscription_id, capability, filter_payload):
+        emitter = self.application_event_emitter(subscription_id)
+        emitter.emit("synthetic", json.dumps({
+            "binding_id": os.environ.get("CYRENE_CAPABILITY_BINDING_ID"),
+            "filter": filter_payload.decode("utf-8"),
+        }).encode("utf-8"))
+        return None
+
 
 if __name__ == "__main__":
     run_worker_stdio(PackageWorker())
@@ -383,6 +391,20 @@ fn generic_package_runtime_tck() {
     assert_eq!(main_result["value"], "main");
     assert_eq!(secondary_result["binding_id"], "generic-secondary");
     assert_eq!(secondary_result["value"], "secondary");
+    let subscription_id = runtime
+        .subscribe(&main, CAPABILITY_ID, b"main-filter", Duration::from_secs(2))
+        .unwrap();
+    let event = runtime
+        .next_event(&main, &subscription_id, Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    let event_payload: serde_json::Value = serde_json::from_slice(&event.payload).unwrap();
+    assert_eq!(event.event_type, "synthetic");
+    assert_eq!(event_payload["binding_id"], "generic-main");
+    assert_eq!(event_payload["filter"], "main-filter");
+    runtime
+        .unsubscribe(&main, &subscription_id, Duration::from_secs(2))
+        .unwrap();
 
     let upgraded = runtime
         .upgrade(&main, &installation_v2.installation_id, BTreeMap::new())

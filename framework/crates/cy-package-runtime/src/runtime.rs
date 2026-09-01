@@ -303,6 +303,49 @@ impl FilesystemPackageRuntime {
             .invoke(binding_id, capability, method, payload, timeout)
     }
 
+    pub fn invoke_typed(
+        &self,
+        binding_id: &BindingId,
+        capability: &str,
+        method: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<crate::RuntimeInvocationResult, PackageRuntimeError> {
+        self.supervisor()?
+            .invoke_typed(binding_id, capability, method, payload, timeout)
+    }
+
+    pub fn subscribe(
+        &self,
+        binding_id: &BindingId,
+        capability: &str,
+        filter_payload: &[u8],
+        timeout: Duration,
+    ) -> Result<String, PackageRuntimeError> {
+        self.supervisor()?
+            .subscribe(binding_id, capability, filter_payload, timeout)
+    }
+
+    pub fn next_event(
+        &self,
+        binding_id: &BindingId,
+        subscription_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<crate::RuntimeApplicationEvent>, PackageRuntimeError> {
+        self.supervisor()?
+            .next_event(binding_id, subscription_id, timeout)
+    }
+
+    pub fn unsubscribe(
+        &self,
+        binding_id: &BindingId,
+        subscription_id: &str,
+        timeout: Duration,
+    ) -> Result<(), PackageRuntimeError> {
+        self.supervisor()?
+            .unsubscribe(binding_id, subscription_id, timeout)
+    }
+
     pub fn upgrade(
         &self,
         binding_id: &BindingId,

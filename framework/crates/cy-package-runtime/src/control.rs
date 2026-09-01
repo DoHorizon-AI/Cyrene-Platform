@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -92,7 +93,27 @@ pub enum ControlCommand {
         binding_id: String,
         capability: String,
         method: String,
-        payload: Value,
+        payload_base64: String,
+        #[serde(default = "default_timeout_ms")]
+        timeout_ms: u64,
+    },
+    Subscribe {
+        binding_id: String,
+        capability: String,
+        #[serde(default)]
+        filter_payload_base64: String,
+        #[serde(default = "default_timeout_ms")]
+        timeout_ms: u64,
+    },
+    NextEvent {
+        binding_id: String,
+        subscription_id: String,
+        #[serde(default = "default_event_poll_timeout_ms")]
+        timeout_ms: u64,
+    },
+    Unsubscribe {
+        binding_id: String,
+        subscription_id: String,
         #[serde(default = "default_timeout_ms")]
         timeout_ms: u64,
     },
@@ -283,23 +304,69 @@ impl PackageRuntimeControlServer {
                 binding_id,
                 capability,
                 method,
-                payload,
+                payload_base64,
                 timeout_ms,
             } => {
-                let payload = serde_json::to_vec(&payload).map_err(json_error)?;
-                let result = self.runtime.invoke(
+                let payload = decode_payload(&payload_base64)?;
+                let result = self.runtime.invoke_typed(
                     &BindingId::new(binding_id)?,
                     &capability,
                     &method,
                     &payload,
                     Duration::from_millis(timeout_ms),
                 )?;
-                serde_json::from_slice(&result).map_err(|error| {
-                    PackageRuntimeError::new(
-                        "WORKER_RESPONSE_INVALID",
-                        format!("worker response is not JSON: {error}"),
-                    )
-                })
+                Ok(json!({
+                    "payload_base64": BASE64.encode(result.payload),
+                    "payload_type_url": result.payload_type_url,
+                }))
+            }
+            ControlCommand::Subscribe {
+                binding_id,
+                capability,
+                filter_payload_base64,
+                timeout_ms,
+            } => {
+                let filter = decode_payload(&filter_payload_base64)?;
+                let subscription_id = self.runtime.subscribe(
+                    &BindingId::new(binding_id)?,
+                    &capability,
+                    &filter,
+                    Duration::from_millis(timeout_ms),
+                )?;
+                Ok(json!({ "subscription_id": subscription_id }))
+            }
+            ControlCommand::NextEvent {
+                binding_id,
+                subscription_id,
+                timeout_ms,
+            } => match self.runtime.next_event(
+                &BindingId::new(binding_id)?,
+                &subscription_id,
+                Duration::from_millis(timeout_ms),
+            )? {
+                Some(event) => Ok(json!({
+                    "subscription_id": event.subscription_id,
+                    "capability": event.capability,
+                    "event_sequence": event.event_sequence,
+                    "event_type": event.event_type,
+                    "payload_base64": BASE64.encode(event.payload),
+                    "payload_type_url": event.payload_type_url,
+                    "generation": event.generation,
+                    "source_id": event.source_id,
+                })),
+                None => Ok(Value::Null),
+            },
+            ControlCommand::Unsubscribe {
+                binding_id,
+                subscription_id,
+                timeout_ms,
+            } => {
+                self.runtime.unsubscribe(
+                    &BindingId::new(binding_id)?,
+                    &subscription_id,
+                    Duration::from_millis(timeout_ms),
+                )?;
+                Ok(json!({ "unsubscribed": true }))
             }
             ControlCommand::Shutdown => Ok(json!({ "shutdown": true })),
         }
@@ -364,6 +431,19 @@ fn remediation(code: &str) -> &'static str {
 
 fn default_timeout_ms() -> u64 {
     30_000
+}
+
+fn default_event_poll_timeout_ms() -> u64 {
+    250
+}
+
+fn decode_payload(encoded: &str) -> Result<Vec<u8>, PackageRuntimeError> {
+    BASE64.decode(encoded).map_err(|error| {
+        PackageRuntimeError::new(
+            "CONTROL_PAYLOAD_INVALID",
+            format!("payload is not valid base64: {error}"),
+        )
+    })
 }
 
 fn json_error(error: serde_json::Error) -> PackageRuntimeError {
