@@ -8,8 +8,9 @@ use std::{
 
 use cy_platform_api::{
     media::{
-        ImageFormat, ImageInput, InspectImageRequest, MediaProcessor, MediaProcessorError,
-        NeverCancelled, ResizeOptions, TransformImageRequest,
+        AudioInput, CanonicalAudioProfile, ImageFormat, ImageInput, InspectImageRequest,
+        MediaProcessor, MediaProcessorError, NeverCancelled, NormalizeAudioRequest, ResizeOptions,
+        TransformImageRequest,
     },
     official_manifest::normalize_official_manifest,
     CapabilityWorkerActivator, WorkerActivationOptions, WorkerMediaProcessor,
@@ -65,6 +66,28 @@ fn encode_base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+fn pcm_wav_fixture() -> Vec<u8> {
+    let samples = vec![0_i16; 800];
+    let data_len = (samples.len() * 2) as u32;
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&8000_u32.to_le_bytes());
+    wav.extend_from_slice(&16000_u32.to_le_bytes());
+    wav.extend_from_slice(&2_u16.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    wav
 }
 
 #[test]
@@ -155,7 +178,28 @@ fn test_real_media_processor_worker_activation() {
     assert_eq!(transformed.width, 2);
     assert_eq!(transformed.height, 2);
 
-    // 3. Error reporting: invalid input
+    // 3. Normalize audio to the one bounded canonical WAV profile.
+    let normalized = processor
+        .normalize_audio(
+            &NormalizeAudioRequest {
+                input: AudioInput::Bytes {
+                    data_base64: encode_base64(&pcm_wav_fixture()),
+                    media_type: Some("audio/wav".to_string()),
+                },
+                target_profile: CanonicalAudioProfile::WavPcmS16leMono16000,
+            },
+            &NeverCancelled,
+        )
+        .expect("normalize_audio on real worker must succeed");
+    assert_eq!(normalized.content.media_type, "audio/wav");
+    assert_eq!(normalized.format, "wav");
+    assert_eq!(normalized.codec, "pcm_s16le");
+    assert_eq!(normalized.sample_rate_hz, 16000);
+    assert_eq!(normalized.channels, 1);
+    assert_eq!(normalized.duration_ms, 100);
+    assert!(!normalized.content.data_base64.is_empty());
+
+    // 4. Error reporting: invalid input
     let invalid_req = InspectImageRequest {
         input: ImageInput::Bytes {
             data_base64: encode_base64(b"not-an-image"),
