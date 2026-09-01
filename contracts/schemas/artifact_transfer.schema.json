@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/artifact_transfer.schema.json",
+  "title": "ArtifactTransferContractV1",
+  "description": "Provider-private replica and resumable transfer records around the canonical ArtifactRef. Artifact identity never includes a URL or path. 围绕 canonical ArtifactRef 的 Provider 私有副本与断点续传记录，地址和路径不属于 Artifact 身份。",
+  "oneOf": [
+    { "$ref": "#/$defs/artifactReplica" },
+    { "$ref": "#/$defs/transferSession" },
+    { "$ref": "#/$defs/transferPart" },
+    { "$ref": "#/$defs/transferCheckpoint" },
+    { "$ref": "#/$defs/externalSource" },
+    { "$ref": "#/$defs/sourceImportJob" },
+    { "$ref": "#/$defs/sourceSnapshot" }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifactIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "digest", "size_bytes"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^artifact://sha256/[0-9a-f]{64}$"
+        },
+        "digest": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "artifactReplica": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "replica_id", "artifact", "protocol", "locator", "priority"],
+      "properties": {
+        "record_type": { "const": "artifact_replica" },
+        "replica_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "protocol": { "enum": ["https"] },
+        "locator": { "type": "string", "format": "uri" },
+        "region": { "type": "string" },
+        "priority": { "type": "integer", "minimum": 0 },
+        "expires_at_unix_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "transferPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "index", "start", "end_exclusive", "digest"],
+      "properties": {
+        "record_type": { "const": "transfer_part" },
+        "index": { "type": "integer", "minimum": 0 },
+        "start": { "type": "integer", "minimum": 0 },
+        "end_exclusive": { "type": "integer", "minimum": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "transferSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "session_id", "artifact", "replica_id", "part_size_bytes"],
+      "properties": {
+        "record_type": { "const": "transfer_session" },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "replica_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "part_size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "transferCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "session_id", "artifact", "completed_parts"],
+      "properties": {
+        "record_type": { "const": "transfer_checkpoint" },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "completed_parts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/transferPart" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "externalSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "provider", "locator"],
+      "properties": {
+        "record_type": { "const": "external_source" },
+        "provider": { "type": "string", "minLength": 1 },
+        "locator": { "type": "string", "minLength": 1 },
+        "revision": { "type": "string" }
+      }
+    },
+    "sourceImportJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "operation_id", "source"],
+      "properties": {
+        "record_type": { "const": "source_import_job" },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/externalSource" }
+      }
+    },
+    "sourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "source", "artifact"],
+      "properties": {
+        "record_type": { "const": "source_snapshot" },
+        "source": { "$ref": "#/$defs/externalSource" },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" }
+      }
+    }
+  }
+}
