@@ -136,6 +136,9 @@ wait_for 'Lease renewal' "grep -q 'LEASE_RENEWED generation=2' '${proof_root}/co
 touch "${proof_root}/commands/stop-2"
 wait_for 'StopAck' "grep -q 'STOP_ACK generation=2' '${proof_root}/control.trace'"
 wait_for 'graceful terminal observation' "grep -q 'generation=2.*reason=GRACEFUL_TERMINATION' '${proof_root}/control.trace'"
+stop_ack_line=$(grep -n -m1 'STOP_ACK generation=2' "${proof_root}/control.trace" | cut -d: -f1)
+terminal_line=$(grep -n -m1 'generation=2.*reason=GRACEFUL_TERMINATION' "${proof_root}/control.trace" | cut -d: -f1)
+test "${stop_ack_line}" -lt "${terminal_line}"
 docker wait "${container_prefix}-g2" >/dev/null
 
 source_digest=$(sha256sum "${proof_root}/artifact.bin" | cut -d ' ' -f 1)

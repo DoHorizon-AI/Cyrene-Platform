@@ -99,6 +99,11 @@ enum ConnectionOutcome {
     Completed,
 }
 
+enum ControlAction {
+    Continue,
+    Stop(Duration),
+}
+
 /// Run one unprivileged Runtime Agent until its workload reaches a terminal state.
 pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), RuntimeAgentError> {
     config.validate()?;
@@ -112,24 +117,28 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
     let mut terminate = termination_signal()?;
 
     loop {
-        tokio::select! {
-            result = connect_once(&config, &mut state, &resume_token) => match result {
-                Ok(ConnectionOutcome::Reconnect(token)) => {
-                    resume_token = token;
-                    delay = config.reconnect_min;
+        match connect_once(&config, &mut state, &resume_token, &mut terminate).await {
+            Ok(ConnectionOutcome::Reconnect(token)) => {
+                resume_token = token;
+                delay = config.reconnect_min;
+            }
+            Ok(ConnectionOutcome::Completed) => return Ok(()),
+            Err(error) => {
+                if state.assignment.is_none()
+                    && matches!(
+                        error,
+                        RuntimeAgentError::Configuration(_) | RuntimeAgentError::EmptyCredential(_)
+                    )
+                {
+                    return Err(error);
                 }
-                Ok(ConnectionOutcome::Completed) => return Ok(()),
-                Err(error) => {
-                    if state.assignment.is_none() && matches!(error, RuntimeAgentError::Configuration(_) | RuntimeAgentError::EmptyCredential(_)) {
-                        return Err(error);
+                tokio::select! {
+                    _ = time::sleep(delay) => delay = backoff(delay, config.reconnect_max),
+                    _ = terminate.recv() => {
+                        stop_for_local_signal(&config, &mut state).await?;
+                        return Ok(());
                     }
-                    time::sleep(delay).await;
-                    delay = backoff(delay, config.reconnect_max);
                 }
-            },
-            _ = terminate.recv() => {
-                stop_for_local_signal(&config, &mut state).await?;
-                return Ok(());
             }
         }
     }
@@ -139,6 +148,7 @@ async fn connect_once(
     config: &RuntimeAgentConfig,
     state: &mut AgentState,
     resume_token: &str,
+    terminate: &mut tokio::signal::unix::Signal,
 ) -> Result<ConnectionOutcome, RuntimeAgentError> {
     let channel = control_plane_channel(config).await?;
     let mut client = NodeControlServiceClient::new(channel);
@@ -205,7 +215,13 @@ async fn connect_once(
                 match control_cursor.admit(&frame.frame_id, frame.sequence_number)? {
                     AdmissionDisposition::Duplicate => {}
                     AdmissionDisposition::Accepted => {
-                        if handle_control_frame(config, state, frame).await? {
+                        let action = handle_control_frame(config, state, frame).await?;
+                        flush_outbox(&outbound, state, &session_id, control_cursor.last_sequence()).await?;
+                        if let ControlAction::Stop(grace) = action {
+                            // Give tonic's request stream a scheduling turn so StopAck is
+                            // observable before local child termination begins.
+                            time::sleep(Duration::from_millis(50)).await;
+                            finish_control_stop(config, state, grace).await?;
                             flush_outbox(&outbound, state, &session_id, control_cursor.last_sequence()).await?;
                             time::sleep(Duration::from_millis(100)).await;
                             return Ok(ConnectionOutcome::Completed);
@@ -224,6 +240,12 @@ async fn connect_once(
                     time::sleep(Duration::from_millis(100)).await;
                     return Ok(ConnectionOutcome::Completed);
                 }
+            }
+            _ = terminate.recv() => {
+                stop_for_local_signal(config, state).await?;
+                flush_outbox(&outbound, state, &session_id, control_cursor.last_sequence()).await?;
+                time::sleep(Duration::from_millis(100)).await;
+                return Ok(ConnectionOutcome::Completed);
             }
         }
     }
@@ -291,19 +313,18 @@ async fn handle_control_frame(
     config: &RuntimeAgentConfig,
     state: &mut AgentState,
     frame: ControlPlaneToNode,
-) -> Result<bool, RuntimeAgentError> {
+) -> Result<ControlAction, RuntimeAgentError> {
     match frame.body {
         Some(control_plane_to_node::Body::RuntimeAssignment(assignment)) => {
             handle_assignment(config, state, assignment).await?;
-            Ok(false)
+            Ok(ControlAction::Continue)
         }
         Some(control_plane_to_node::Body::LeaseRenewalResult(result)) => {
             handle_renewal(state, result)?;
-            Ok(false)
+            Ok(ControlAction::Continue)
         }
         Some(control_plane_to_node::Body::StopCommand(command)) => {
-            handle_stop(config, state, command).await?;
-            Ok(true)
+            prepare_control_stop(config, state, command)
         }
         _ => Err(RuntimeAgentError::Transport(
             "unsupported protocol-v2 control frame".to_string(),
@@ -545,13 +566,13 @@ fn handle_renewal(
     }
 }
 
-async fn handle_stop(
+fn prepare_control_stop(
     config: &RuntimeAgentConfig,
     state: &mut AgentState,
     command: core_v1::StopCommand,
-) -> Result<(), RuntimeAgentError> {
+) -> Result<ControlAction, RuntimeAgentError> {
     if !runtime_matches(config, command.runtime.as_ref()) {
-        return Ok(());
+        return Ok(ControlAction::Continue);
     }
     if state.accepted_stops.insert(command.command_id.clone()) {
         state.outbox.enqueue(
@@ -565,9 +586,17 @@ async fn handle_stop(
     }
     state.observed_state = RuntimeObservedState::Stopping;
     enqueue_observation(config, state, "STOP_ACCEPTED", "graceful stop accepted")?;
+    let grace =
+        proto_duration(command.grace_period.as_ref()).unwrap_or_else(|| Duration::from_secs(10));
+    Ok(ControlAction::Stop(grace))
+}
+
+async fn finish_control_stop(
+    config: &RuntimeAgentConfig,
+    state: &mut AgentState,
+    grace: Duration,
+) -> Result<(), RuntimeAgentError> {
     if state.child.is_running() {
-        let grace = proto_duration(command.grace_period.as_ref())
-            .unwrap_or_else(|| Duration::from_secs(10));
         state
             .child
             .stop(grace)
@@ -684,6 +713,13 @@ async fn stop_for_local_signal(
     config: &RuntimeAgentConfig,
     state: &mut AgentState,
 ) -> Result<(), RuntimeAgentError> {
+    state.observed_state = RuntimeObservedState::Stopping;
+    enqueue_observation(
+        config,
+        state,
+        "LOCAL_TERMINATION_SIGNAL",
+        "container or process manager requested graceful termination",
+    )?;
     if state.child.is_running() {
         state
             .child
@@ -692,6 +728,13 @@ async fn stop_for_local_signal(
             .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
     }
     state.observed_state = RuntimeObservedState::Stopped;
+    enqueue_terminal(
+        config,
+        state,
+        TerminationClassification::Graceful,
+        "GRACEFUL_TERMINATION",
+        "workload exited after local termination signal",
+    )?;
     persist_local_terminal(&config.state_dir, "GRACEFUL_TERMINATION")
 }
 
@@ -762,6 +805,7 @@ async fn control_plane_channel(config: &RuntimeAgentConfig) -> Result<Channel, R
         .identity(Identity::from_pem(certificate, key));
     Endpoint::from_shared(config.control_plane_endpoint.clone())
         .map_err(|error| RuntimeAgentError::Configuration(error.to_string()))?
+        .connect_timeout(config.reconnect_max)
         .tls_config(tls)
         .map_err(|error| RuntimeAgentError::Configuration(error.to_string()))?
         .connect()
