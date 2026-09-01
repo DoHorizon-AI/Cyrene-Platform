@@ -57,8 +57,9 @@ never silently split or truncated. Product chunking remains outside Platform.
 Errors have two existing layers:
 
 - `EmbeddingError` is a typed domain result and distinguishes
-  `INVALID_INPUT`, `MODEL_NOT_AVAILABLE`, `DIMENSION_MISMATCH`,
-  `PROVIDER_ERROR`, and `RATE_LIMITED`. `retry_after` is present only when the
+  `CODE_INVALID_INPUT`, `CODE_MODEL_NOT_AVAILABLE`, `CODE_DIMENSION_MISMATCH`,
+  `CODE_PROVIDER_ERROR`, and `CODE_RATE_LIMITED`. `retry_after` is present only
+  when the
   provider supplied a meaningful duration.
 - `CapabilityExecutionError` remains the generic CES execution authority for
   `TIMEOUT`, `CANCELLED`, activation/protocol failures, unavailable bindings,

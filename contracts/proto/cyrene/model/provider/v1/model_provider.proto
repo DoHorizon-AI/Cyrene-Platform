@@ -62,11 +62,11 @@ message EmbeddingVector {
 message EmbeddingError {
   enum Code {
     CODE_UNSPECIFIED = 0;
-    INVALID_INPUT = 1;
-    MODEL_NOT_AVAILABLE = 2;
-    DIMENSION_MISMATCH = 3;
-    PROVIDER_ERROR = 4;
-    RATE_LIMITED = 5;
+    CODE_INVALID_INPUT = 1;
+    CODE_MODEL_NOT_AVAILABLE = 2;
+    CODE_DIMENSION_MISMATCH = 3;
+    CODE_PROVIDER_ERROR = 4;
+    CODE_RATE_LIMITED = 5;
   }
 
   Code code = 1;
