@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use crate::media::{
     ImageInspection, InspectImageRequest, MediaProcessor, MediaProcessorError,
-    TransformImageRequest, TransformedImage,
+    NormalizeAudioRequest, NormalizedAudio, TransformImageRequest, TransformedImage,
 };
 
 /// Cooperative cancellation token passed to worker operations.
@@ -1539,6 +1539,34 @@ impl MediaProcessor for WorkerMediaProcessor {
         serde_json::from_slice::<TransformedImage>(&response_bytes).map_err(|e| {
             MediaProcessorError::ExecutionFailed(format!(
                 "failed to deserialize TransformedImage response: {e}"
+            ))
+        })
+    }
+
+    fn normalize_audio(
+        &self,
+        request: &NormalizeAudioRequest,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<NormalizedAudio, MediaProcessorError> {
+        let payload = serde_json::to_vec(request).map_err(|error| {
+            MediaProcessorError::invalid_input(format!("failed to serialize request: {error}"))
+        })?;
+        let mut client = self.client.lock().map_err(|_| {
+            MediaProcessorError::ExecutionFailed("worker client lock poisoned".into())
+        })?;
+        let timeout = client.options.default_invoke_timeout;
+        let response_bytes = client
+            .invoke(
+                "media.processor.v1",
+                "normalize_audio",
+                &payload,
+                timeout,
+                cancellation,
+            )
+            .map_err(map_worker_error_to_media)?;
+        serde_json::from_slice::<NormalizedAudio>(&response_bytes).map_err(|error| {
+            MediaProcessorError::ExecutionFailed(format!(
+                "failed to deserialize NormalizedAudio response: {error}"
             ))
         })
     }

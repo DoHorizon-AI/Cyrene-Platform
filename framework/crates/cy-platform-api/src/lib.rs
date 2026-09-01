@@ -21,10 +21,12 @@ pub mod worker;
 use async_trait::async_trait;
 pub use cy_manifest::*;
 pub use media::{
-    CancellationToken, EncodedImage, INSPECT_IMAGE_OPERATION, ImageFormat, ImageInput,
-    ImageInspection, ImageOrientation, InspectImageRequest, MEDIA_PROCESSOR_INTERFACE_V1,
-    MEDIA_PROCESSOR_V1, MediaProcessor, MediaProcessorError, NeverCancelled, ResizeOptions,
-    TRANSFORM_IMAGE_OPERATION, TransformImageRequest, TransformedImage,
+    AudioInput, CancellationToken, CanonicalAudioProfile, EncodedAudio, EncodedImage,
+    INSPECT_IMAGE_OPERATION, ImageFormat, ImageInput, ImageInspection, ImageOrientation,
+    InspectImageRequest, MEDIA_PROCESSOR_INTERFACE_V1, MEDIA_PROCESSOR_V1, MediaProcessor,
+    MediaProcessorError, NORMALIZE_AUDIO_OPERATION, NeverCancelled, NormalizeAudioRequest,
+    NormalizedAudio, ResizeOptions, TRANSFORM_IMAGE_OPERATION, TransformImageRequest,
+    TransformedImage,
 };
 pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
 pub use plugin::{
