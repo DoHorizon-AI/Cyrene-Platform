@@ -9,13 +9,14 @@
 use cy_kernel_contract::Identity;
 use serde::{Deserialize, Serialize};
 
-use crate::{ArtifactIdentity, TransferError};
+use crate::{ArtifactRef, TransferError};
 
 /// Provider-specific mutable source request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalSource {
     pub provider: String,
     pub locator: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub revision: Option<String>,
 }
 
@@ -30,7 +31,7 @@ pub struct SourceImportJob {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSnapshot {
     pub source: ExternalSource,
-    pub artifact: ArtifactIdentity,
+    pub artifact: ArtifactRef,
 }
 
 /// Replaceable GitHub, Hugging Face, mirror, or cloud acquisition boundary.

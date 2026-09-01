@@ -328,15 +328,17 @@ fn part_path(root: &Path, index: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArtifactIdentity, ArtifactReplica, TransferManifest};
+    use crate::{ArtifactKind, ArtifactRef, ArtifactReplica, TransferManifest, TransferProtocol};
 
     fn existing_session(root: &Path, bytes: &[u8], digest: String) -> TransferSession {
         let destination = root.join("published-artifact");
         fs::write(&destination, bytes).unwrap();
-        let artifact = ArtifactIdentity {
+        let artifact = ArtifactRef {
             uri: format!("artifact://sha256/{}", &digest[7..]),
             digest: digest.clone(),
             size_bytes: bytes.len() as u64,
+            kind: ArtifactKind::Generic,
+            manifest_digest: None,
         };
         TransferSession {
             session_id: "session-1".to_string(),
@@ -353,6 +355,7 @@ mod tests {
             replica: ArtifactReplica {
                 replica_id: "replica-1".to_string(),
                 artifact,
+                protocol: TransferProtocol::HttpsRangeV1,
                 locator: "https://unused.example.test/artifact".to_string(),
                 region: None,
                 priority: 0,

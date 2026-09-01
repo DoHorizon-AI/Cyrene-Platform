@@ -9,50 +9,39 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use cy_manifest::ArtifactRef;
 use serde::{Deserialize, Serialize};
 
 use crate::TransferError;
 
-/// Provider-neutral Artifact identity projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactIdentity {
-    pub uri: String,
-    pub digest: String,
-    pub size_bytes: u64,
-}
-
-impl ArtifactIdentity {
-    pub fn validate(&self) -> Result<(), TransferError> {
-        validate_digest(&self.digest)?;
-        if self.uri != format!("artifact://sha256/{}", &self.digest[7..]) {
-            return Err(TransferError::Contract(
-                "Artifact URI does not match its digest".to_string(),
-            ));
-        }
-        if self.size_bytes == 0 {
-            return Err(TransferError::Contract(
-                "Artifact size must be positive for range transfer".to_string(),
-            ));
-        }
-        Ok(())
-    }
+/// Transfer provider selected for one Replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferProtocol {
+    HttpsRangeV1,
 }
 
 /// One provider-private location for an existing Artifact identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactReplica {
     pub replica_id: String,
-    pub artifact: ArtifactIdentity,
+    pub artifact: ArtifactRef,
+    pub protocol: TransferProtocol,
     pub locator: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub region: Option<String>,
     pub priority: u32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub expires_at_unix_ms: Option<u64>,
 }
 
 impl ArtifactReplica {
     pub fn validate(&self) -> Result<(), TransferError> {
-        self.artifact.validate()?;
-        if self.replica_id.is_empty() || !self.locator.starts_with("https://") {
+        validate_artifact_ref(&self.artifact)?;
+        if self.replica_id.is_empty()
+            || self.protocol != TransferProtocol::HttpsRangeV1
+            || !self.locator.starts_with("https://")
+        {
             return Err(TransferError::Contract(
                 "Artifact replica requires an identity and HTTPS locator".to_string(),
             ));
@@ -88,14 +77,14 @@ impl TransferPart {
 /// Immutable expected parts for one Artifact transfer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferManifest {
-    pub artifact: ArtifactIdentity,
+    pub artifact: ArtifactRef,
     pub part_size_bytes: u64,
     pub parts: Vec<TransferPart>,
 }
 
 impl TransferManifest {
     pub fn validate(&self) -> Result<(), TransferError> {
-        self.artifact.validate()?;
+        validate_artifact_ref(&self.artifact)?;
         if self.part_size_bytes == 0 || self.parts.is_empty() {
             return Err(TransferError::Contract(
                 "Transfer manifest requires a positive part size and parts".to_string(),
@@ -124,7 +113,7 @@ impl TransferManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferCheckpoint {
     pub session_id: String,
-    pub artifact: ArtifactIdentity,
+    pub artifact: ArtifactRef,
     pub completed_parts: BTreeSet<TransferPart>,
 }
 
@@ -176,15 +165,35 @@ pub(crate) fn validate_digest(value: &str) -> Result<(), TransferError> {
     }
 }
 
+fn validate_artifact_ref(artifact: &ArtifactRef) -> Result<(), TransferError> {
+    validate_digest(&artifact.digest)?;
+    if artifact.uri != format!("artifact://sha256/{}", &artifact.digest[7..]) {
+        return Err(TransferError::Contract(
+            "Artifact URI does not match its canonical digest".to_string(),
+        ));
+    }
+    if artifact.size_bytes == 0 {
+        return Err(TransferError::Contract(
+            "Artifact size must be positive for range transfer".to_string(),
+        ));
+    }
+    if let Some(manifest_digest) = &artifact.manifest_digest {
+        validate_digest(manifest_digest)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn identity(size_bytes: u64) -> ArtifactIdentity {
-        ArtifactIdentity {
+    fn identity(size_bytes: u64) -> ArtifactRef {
+        ArtifactRef {
             uri: format!("artifact://sha256/{}", "0".repeat(64)),
             digest: format!("sha256:{}", "0".repeat(64)),
             size_bytes,
+            kind: cy_manifest::ArtifactKind::Generic,
+            manifest_digest: None,
         }
     }
 
@@ -193,7 +202,7 @@ mod tests {
         let mut artifact = identity(4);
         artifact.uri = "/mnt/private/model.bin".to_string();
         assert!(matches!(
-            artifact.validate(),
+            validate_artifact_ref(&artifact),
             Err(TransferError::Contract(_))
         ));
     }
@@ -222,5 +231,29 @@ mod tests {
             manifest.validate(),
             Err(TransferError::Contract(_))
         ));
+    }
+
+    #[test]
+    fn replica_serialization_matches_the_frozen_schema() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/schemas/artifact_transfer.schema.json"
+        ))
+        .unwrap();
+        let compiled = jsonschema::JSONSchema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .compile(&schema)
+            .unwrap();
+        let replica = ArtifactReplica {
+            replica_id: "replica-1".to_string(),
+            artifact: identity(4),
+            protocol: TransferProtocol::HttpsRangeV1,
+            locator: "https://artifact.example.test/value".to_string(),
+            region: None,
+            priority: 0,
+            expires_at_unix_ms: None,
+        };
+        let serialized = serde_json::to_value(replica).unwrap();
+        assert!(compiled.validate(&serialized).is_ok());
+        assert!(serialized.get("region").is_none());
     }
 }

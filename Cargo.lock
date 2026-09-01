@@ -307,6 +307,8 @@ name = "cy-artifact-transfer"
 version = "0.1.0"
 dependencies = [
  "cy-kernel-contract",
+ "cy-manifest",
+ "jsonschema",
  "reqwest",
  "serde",
  "serde_json",

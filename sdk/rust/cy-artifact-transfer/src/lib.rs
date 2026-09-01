@@ -14,7 +14,8 @@ mod http;
 
 pub use acquisition::{AcquisitionProvider, ExternalSource, SourceImportJob, SourceSnapshot};
 pub use contract::{
-    ArtifactIdentity, ArtifactReplica, TransferCheckpoint, TransferManifest, TransferPart,
+    ArtifactReplica, TransferCheckpoint, TransferManifest, TransferPart, TransferProtocol,
     TransferSession,
 };
+pub use cy_manifest::{ArtifactKind, ArtifactRef};
 pub use http::{HttpRangeTransfer, TransferError, TransferResult};

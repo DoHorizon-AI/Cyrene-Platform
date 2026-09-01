@@ -20,25 +20,28 @@
     "artifactIdentity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["uri", "digest", "size_bytes"],
+      "required": ["uri", "digest", "size_bytes", "kind"],
       "properties": {
         "uri": {
           "type": "string",
           "pattern": "^artifact://sha256/[0-9a-f]{64}$"
         },
         "digest": { "$ref": "#/$defs/digest" },
-        "size_bytes": { "type": "integer", "minimum": 0 }
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "kind": {
+          "enum": ["generic", "model", "dataset", "checkpoint", "training_spec", "metrics", "merged", "quantized", "report"]
+        },
+        "manifest_digest": { "$ref": "#/$defs/digest" }
       }
     },
     "artifactReplica": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "replica_id", "artifact", "protocol", "locator", "priority"],
+      "required": ["replica_id", "artifact", "protocol", "locator", "priority"],
       "properties": {
-        "record_type": { "const": "artifact_replica" },
         "replica_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "artifact": { "$ref": "#/$defs/artifactIdentity" },
-        "protocol": { "enum": ["https"] },
+        "protocol": { "enum": ["https_range_v1"] },
         "locator": { "type": "string", "format": "uri" },
         "region": { "type": "string" },
         "priority": { "type": "integer", "minimum": 0 },
@@ -48,9 +51,8 @@
     "transferPart": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "index", "start", "end_exclusive", "digest"],
+      "required": ["index", "start", "end_exclusive", "digest"],
       "properties": {
-        "record_type": { "const": "transfer_part" },
         "index": { "type": "integer", "minimum": 0 },
         "start": { "type": "integer", "minimum": 0 },
         "end_exclusive": { "type": "integer", "minimum": 1 },
@@ -60,9 +62,8 @@
     "transferSession": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "session_id", "artifact", "replica_id", "part_size_bytes"],
+      "required": ["session_id", "artifact", "replica_id", "part_size_bytes"],
       "properties": {
-        "record_type": { "const": "transfer_session" },
         "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "artifact": { "$ref": "#/$defs/artifactIdentity" },
         "replica_id": { "type": "string", "minLength": 1, "maxLength": 256 },
@@ -72,9 +73,8 @@
     "transferCheckpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "session_id", "artifact", "completed_parts"],
+      "required": ["session_id", "artifact", "completed_parts"],
       "properties": {
-        "record_type": { "const": "transfer_checkpoint" },
         "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "artifact": { "$ref": "#/$defs/artifactIdentity" },
         "completed_parts": {
@@ -87,9 +87,8 @@
     "externalSource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "provider", "locator"],
+      "required": ["provider", "locator"],
       "properties": {
-        "record_type": { "const": "external_source" },
         "provider": { "type": "string", "minLength": 1 },
         "locator": { "type": "string", "minLength": 1 },
         "revision": { "type": "string" }
@@ -98,9 +97,8 @@
     "sourceImportJob": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "operation_id", "source"],
+      "required": ["operation_id", "source"],
       "properties": {
-        "record_type": { "const": "source_import_job" },
         "operation_id": { "type": "string", "minLength": 1 },
         "source": { "$ref": "#/$defs/externalSource" }
       }
@@ -108,9 +106,8 @@
     "sourceSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "source", "artifact"],
+      "required": ["source", "artifact"],
       "properties": {
-        "record_type": { "const": "source_snapshot" },
         "source": { "$ref": "#/$defs/externalSource" },
         "artifact": { "$ref": "#/$defs/artifactIdentity" }
       }

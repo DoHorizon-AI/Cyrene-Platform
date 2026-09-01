@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_artifact_transfer::{
-    ArtifactIdentity, ArtifactReplica, HttpRangeTransfer, TransferManifest, TransferPart,
-    TransferSession,
+    ArtifactKind, ArtifactRef, ArtifactReplica, HttpRangeTransfer, TransferManifest, TransferPart,
+    TransferProtocol, TransferSession,
 };
 use cy_execution_fabric::{
     validate_assignment, validate_renewal, AdmissionDisposition, FabricContractError,
@@ -468,10 +468,13 @@ async fn stage_artifacts(
             .digest
             .strip_prefix("sha256:")
             .ok_or_else(|| RuntimeAgentError::Artifact("invalid Artifact digest".to_string()))?;
-        let artifact = ArtifactIdentity {
+        let artifact = ArtifactRef {
             uri: spec.artifact_uri.clone(),
             digest: spec.digest.clone(),
             size_bytes: spec.size_bytes,
+            kind: ArtifactKind::Generic,
+            manifest_digest: (!spec.manifest_digest.is_empty())
+                .then(|| spec.manifest_digest.clone()),
         };
         let parts = build_parts(spec)?;
         let manifest = TransferManifest {
@@ -489,6 +492,7 @@ async fn stage_artifacts(
             replica: ArtifactReplica {
                 replica_id: format!("{}-primary", spec.artifact_uri),
                 artifact,
+                protocol: TransferProtocol::HttpsRangeV1,
                 locator: spec.replica_uri.clone(),
                 region: None,
                 priority: 0,

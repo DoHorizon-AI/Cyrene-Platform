@@ -37,6 +37,12 @@ if rg -n -i 'container_id|docker_ip|host_ip|tailscale_ip' "${core_root}/node_con
     printf 'Fabric identity depends on deployment-local addressing\n' >&2
     exit 1
 fi
+if rg -n 'struct (ArtifactIdentity|Lease|Capability|Worker|Operation)' framework/crates/cy-execution-fabric sdk/rust/cy-artifact-transfer; then
+    printf 'Fabric implementation duplicates an existing canonical authority type\n' >&2
+    exit 1
+fi
+rg -q 'cy-manifest' sdk/rust/cy-artifact-transfer/Cargo.toml
+rg -q 'pub use cy_manifest::\{ArtifactKind, ArtifactRef\}' sdk/rust/cy-artifact-transfer/src/lib.rs
 
 python3 -c 'import json, pathlib; json.loads(pathlib.Path("contracts/schemas/artifact_transfer.schema.json").read_text())'
 bash -n tooling/acceptance/distributed-execution-fabric/run-container-proof.sh
