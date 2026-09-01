@@ -849,6 +849,25 @@ impl CapabilityWorkerClient {
         &self.declared_capabilities
     }
 
+    /// Poll the owned child process without inferring runtime state from
+    /// package or binding metadata.
+    pub fn is_running(&mut self) -> Result<bool, WorkerTerminalError> {
+        if self.is_shut_down {
+            return Ok(false);
+        }
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+        child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| {
+                WorkerTerminalError::WorkerUnavailable(format!(
+                    "failed to poll worker process: {error}"
+                ))
+            })
+    }
+
     fn next_sequence(&self) -> u64 {
         self.transport.next_sequence()
     }
