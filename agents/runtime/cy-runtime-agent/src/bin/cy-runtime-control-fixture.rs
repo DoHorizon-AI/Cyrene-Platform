@@ -108,7 +108,7 @@ impl NodeControlService for Fixture {
                 );
                 return Err(Status::failed_precondition("STALE_GENERATION"));
             }
-            authenticate(&mut state, &hello, &runtime)?;
+            authenticate(&mut state, &hello, &runtime).map_err(Status::unauthenticated)?;
             state.authority_generation = state.authority_generation.max(runtime.generation);
             fs::write(
                 state.command_dir.join("authority-generation"),
@@ -335,12 +335,12 @@ fn authenticate(
     state: &mut FixtureState,
     hello: &core_v1::ExecutionAgentHello,
     runtime: &semantic_v1::Identity,
-) -> Result<(), Status> {
+) -> Result<(), String> {
     let expected_resume = format!("resume-{}-{}", runtime.id, runtime.generation);
     if !hello.resume_token.is_empty() {
         return (hello.resume_token == expected_resume)
             .then_some(())
-            .ok_or_else(|| Status::unauthenticated("resume token mismatch"));
+            .ok_or_else(|| "resume token mismatch".to_string());
     }
     let scope = RuntimeScope {
         organization_id: state.organization_id.clone(),
@@ -353,7 +353,7 @@ fn authenticate(
     state
         .enrollment
         .enroll(&hello.enrollment_proof, scope, now_unix_ms())
-        .map_err(|error| Status::unauthenticated(error.to_string()))?;
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

@@ -230,10 +230,11 @@ async fn connect_once(
 }
 
 fn hello_frame(config: &RuntimeAgentConfig, resume_token: &str) -> NodeToControlPlane {
-    let enrollment_proof = resume_token
-        .is_empty()
-        .then(|| config.enrollment_proof.clone())
-        .unwrap_or_default();
+    let enrollment_proof = if resume_token.is_empty() {
+        config.enrollment_proof.clone()
+    } else {
+        String::new()
+    };
     NodeToControlPlane {
         frame_id: format!("{}-hello", config.runtime.id),
         sequence_number: 1,

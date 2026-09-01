@@ -42,7 +42,7 @@ chmod 600 "${proof_root}/certs/client.key" "${proof_root}/certs/server.key"
 
 cd "${repo_root}"
 cargo build --locked --release -p cy-runtime-agent --bins
-if ! docker image inspect "${base_image}" >/dev/null 2>&1; then
+if ! docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -Fxq "${base_image}"; then
     if [[ "${CYRENE_ACCEPTANCE_PULL_IMAGE:-0}" != "1" ]]; then
         printf 'base image is not local: %s; set CYRENE_ACCEPTANCE_PULL_IMAGE=1 to pull it\n' "${base_image}" >&2
         exit 1
