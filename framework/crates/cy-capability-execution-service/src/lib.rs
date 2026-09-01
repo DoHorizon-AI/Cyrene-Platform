@@ -98,6 +98,31 @@ struct ResolvedExecution {
     binding_id: Option<String>,
 }
 
+/// Stable public identity carried by every terminal stream item.
+///
+/// Keeping this context together prevents the terminal-item constructor from
+/// growing a long, order-sensitive argument list as new runtime facts are
+/// added.
+#[derive(Debug, Clone)]
+struct StreamEndContext {
+    subscription_id: String,
+    capability: String,
+    source_id: String,
+    binding_id: String,
+}
+
+#[derive(Debug)]
+struct SubscriptionTask {
+    public_subscription_id: String,
+    capability: String,
+    execution: ResolvedExecution,
+    filter_payload: Vec<u8>,
+    ack_timeout: Duration,
+    token: Arc<AtomicCancellationToken>,
+    sender: Sender<Result<CapabilityEventStreamItem, Status>>,
+    terminal_permit: OwnedPermit<Result<CapabilityEventStreamItem, Status>>,
+}
+
 #[derive(Debug)]
 struct ActiveOperationGuard {
     id: String,
@@ -344,16 +369,13 @@ impl CapabilityExecutionService {
         reason: i32,
     ) -> CapabilityEventStream {
         let (sender, receiver) = mpsc::channel(1);
-        let item = stream_end_item(
+        let context = StreamEndContext {
             subscription_id,
             capability,
-            0,
             source_id,
             binding_id,
-            reason,
-            error.message.clone(),
-            Some(error.into_wire()),
-        );
+        };
+        let item = context.item(0, reason, error.message.clone(), Some(error.into_wire()));
         let _ = sender.try_send(Ok(item));
         Box::pin(ReceiverStream::new(receiver))
     }
@@ -365,16 +387,13 @@ impl CapabilityExecutionService {
         message: impl Into<String>,
     ) -> CapabilityEventStream {
         let (sender, receiver) = mpsc::channel(1);
-        let item = stream_end_item(
+        let context = StreamEndContext {
             subscription_id,
             capability,
-            0,
-            String::new(),
-            String::new(),
-            reason,
-            message,
-            None,
-        );
+            source_id: String::new(),
+            binding_id: String::new(),
+        };
+        let item = context.item(0, reason, message, None);
         let _ = sender.try_send(Ok(item));
         Box::pin(ReceiverStream::new(receiver))
     }
@@ -501,20 +520,20 @@ impl CapabilityExecutionService {
                 "capability execution service is shutting down",
             );
         }
-        if let Some(filter) = request.filter.as_ref() {
-            if filter.type_url.trim().is_empty() {
-                return Self::stream_for_terminal(
-                    subscription_id,
-                    request.capability,
-                    String::new(),
-                    String::new(),
-                    ApiError::new(
-                        capability_execution_error::Code::InvalidRequest,
-                        "filter Any.type_url is required when filter is present",
-                    ),
-                    stream_reason::UNSPECIFIED,
-                );
-            }
+        if let Some(filter) = request.filter.as_ref()
+            && filter.type_url.trim().is_empty()
+        {
+            return Self::stream_for_terminal(
+                subscription_id,
+                request.capability,
+                String::new(),
+                String::new(),
+                ApiError::new(
+                    capability_execution_error::Code::InvalidRequest,
+                    "filter Any.type_url is required when filter is present",
+                ),
+                stream_reason::UNSPECIFIED,
+            );
         }
         let binding_id = request
             .binding_id
@@ -597,7 +616,7 @@ impl CapabilityExecutionService {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let _task_guard = task_guard;
-            service.run_subscription(
+            service.run_subscription(SubscriptionTask {
                 public_subscription_id,
                 capability,
                 execution,
@@ -606,23 +625,29 @@ impl CapabilityExecutionService {
                 token,
                 sender,
                 terminal_permit,
-            );
+            });
         });
         Box::pin(ReceiverStream::new(receiver))
     }
 
-    fn run_subscription(
-        &self,
-        public_subscription_id: String,
-        capability: String,
-        execution: ResolvedExecution,
-        filter_payload: Vec<u8>,
-        ack_timeout: Duration,
-        token: Arc<AtomicCancellationToken>,
-        sender: Sender<Result<CapabilityEventStreamItem, Status>>,
-        terminal_permit: OwnedPermit<Result<CapabilityEventStreamItem, Status>>,
-    ) {
+    fn run_subscription(&self, task: SubscriptionTask) {
+        let SubscriptionTask {
+            public_subscription_id,
+            capability,
+            execution,
+            filter_payload,
+            ack_timeout,
+            token,
+            sender,
+            terminal_permit,
+        } = task;
         let mut terminal_permit = Some(terminal_permit);
+        let stream_context = StreamEndContext {
+            subscription_id: public_subscription_id.clone(),
+            capability: capability.clone(),
+            source_id: execution.source_id.clone(),
+            binding_id: execution.binding_id.clone().unwrap_or_default(),
+        };
         let mut client = match CapabilityWorkerActivator::activate_from_manifest(
             &execution.manifest,
             &execution.worker_options,
@@ -633,12 +658,8 @@ impl CapabilityExecutionService {
                 let reason = stream_reason_for_error(api_error.code);
                 send_terminal(
                     &mut terminal_permit,
-                    stream_end_item(
-                        public_subscription_id,
-                        capability,
+                    stream_context.item(
                         0,
-                        execution.source_id.clone(),
-                        execution.binding_id.clone().unwrap_or_default(),
                         reason,
                         api_error.message.clone(),
                         Some(api_error.into_wire()),
@@ -657,12 +678,8 @@ impl CapabilityExecutionService {
             }
             send_terminal(
                 &mut terminal_permit,
-                stream_end_item(
-                    public_subscription_id,
-                    capability,
+                stream_context.item(
                     1,
-                    execution.source_id.clone(),
-                    execution.binding_id.clone().unwrap_or_default(),
                     if stopping {
                         stream_reason::NORMAL_COMPLETION
                     } else {
@@ -704,12 +721,8 @@ impl CapabilityExecutionService {
                     stopping && api_error.code == capability_execution_error::Code::Cancelled;
                 send_terminal(
                     &mut terminal_permit,
-                    stream_end_item(
-                        public_subscription_id,
-                        capability,
+                    stream_context.item(
                         if service_shutdown { 1 } else { 0 },
-                        execution.source_id.clone(),
-                        execution.binding_id.clone().unwrap_or_default(),
                         if service_shutdown {
                             stream_reason::NORMAL_COMPLETION
                         } else {
@@ -746,12 +759,8 @@ impl CapabilityExecutionService {
                     let _ = client.shutdown(execution.worker_options.shutdown_grace_period);
                     send_terminal(
                         &mut terminal_permit,
-                        stream_end_item(
-                            public_subscription_id,
-                            capability,
+                        stream_context.item(
                             last_generation,
-                            execution.source_id.clone(),
-                            execution.binding_id.clone().unwrap_or_default(),
                             stream_reason::NORMAL_COMPLETION,
                             "capability execution service shutting down",
                             None,
@@ -763,12 +772,8 @@ impl CapabilityExecutionService {
                     let _ = client.shutdown(execution.worker_options.shutdown_grace_period);
                     send_terminal(
                         &mut terminal_permit,
-                        stream_end_item(
-                            public_subscription_id,
-                            capability,
+                        stream_context.item(
                             last_generation,
-                            execution.source_id.clone(),
-                            execution.binding_id.clone().unwrap_or_default(),
                             stream_reason::CANCELLED,
                             "subscription cancelled by the gRPC caller",
                             Some(
@@ -800,12 +805,8 @@ impl CapabilityExecutionService {
                             let _ = client.shutdown(execution.worker_options.shutdown_grace_period);
                             send_terminal(
                                 &mut terminal_permit,
-                                stream_end_item(
-                                    public_subscription_id,
-                                    capability,
+                                stream_context.item(
                                     last_generation,
-                                    execution.source_id.clone(),
-                                    execution.binding_id.clone().unwrap_or_default(),
                                     stream_reason::BACKPRESSURE,
                                     "bounded capability-event stream buffer is full",
                                     Some(
@@ -847,16 +848,7 @@ impl CapabilityExecutionService {
                         };
                     send_terminal(
                         &mut terminal_permit,
-                        stream_end_item(
-                            public_subscription_id,
-                            capability,
-                            generation,
-                            execution.source_id.clone(),
-                            execution.binding_id.clone().unwrap_or_default(),
-                            reason,
-                            message,
-                            error,
-                        ),
+                        stream_context.item(generation, reason, message, error),
                     );
                     let _ = client.shutdown(execution.worker_options.shutdown_grace_period);
                     return;
@@ -1042,29 +1034,28 @@ fn event_item(
     }
 }
 
-fn stream_end_item(
-    subscription_id: String,
-    capability: String,
-    generation: u64,
-    source_id: String,
-    binding_id: String,
-    reason: i32,
-    message: impl Into<String>,
-    error: Option<CapabilityExecutionError>,
-) -> CapabilityEventStreamItem {
-    CapabilityEventStreamItem {
-        item: Some(capability_event_stream_item::Item::StreamEnd(
-            CapabilityEventStreamEnd {
-                subscription_id,
-                capability,
-                generation,
-                source_id,
-                binding_id,
-                reason,
-                message: message.into(),
-                error,
-            },
-        )),
+impl StreamEndContext {
+    fn item(
+        &self,
+        generation: u64,
+        reason: i32,
+        message: impl Into<String>,
+        error: Option<CapabilityExecutionError>,
+    ) -> CapabilityEventStreamItem {
+        CapabilityEventStreamItem {
+            item: Some(capability_event_stream_item::Item::StreamEnd(
+                CapabilityEventStreamEnd {
+                    subscription_id: self.subscription_id.clone(),
+                    capability: self.capability.clone(),
+                    generation,
+                    source_id: self.source_id.clone(),
+                    binding_id: self.binding_id.clone(),
+                    reason,
+                    message: message.into(),
+                    error,
+                },
+            )),
+        }
     }
 }
 
@@ -1163,12 +1154,14 @@ mod tests {
 
     #[test]
     fn event_end_is_a_distinct_oneof_item() {
-        let item = stream_end_item(
-            "subscription".into(),
-            "capability".into(),
+        let context = StreamEndContext {
+            subscription_id: "subscription".into(),
+            capability: "capability".into(),
+            source_id: "source".into(),
+            binding_id: "binding".into(),
+        };
+        let item = context.item(
             4,
-            "source".into(),
-            "binding".into(),
             stream_reason::GENERATION_TERMINATED,
             "generation changed",
             None,

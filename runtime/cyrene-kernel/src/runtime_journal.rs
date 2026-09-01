@@ -2015,8 +2015,10 @@ mod tests {
         // 4. Verify classification:
         // - Live reused process is classified as Foreign (NOT Stale!)
         // - Stale journal record is classified as Unknown
-        let candidates =
-            FileRuntimeJournal::classify_recovery(&epoch_2, &[reused_pid_evidence.clone()]);
+        let candidates = FileRuntimeJournal::classify_recovery(
+            &epoch_2,
+            std::slice::from_ref(&reused_pid_evidence),
+        );
         assert_eq!(candidates.len(), 2);
         let foreign_cand = candidates
             .iter()

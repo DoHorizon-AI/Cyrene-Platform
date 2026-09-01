@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -323,7 +323,7 @@ fn plugins_root() -> PathBuf {
         })
 }
 
-fn provider_manifest(root: &PathBuf) -> PluginManifest {
+fn provider_manifest(root: &Path) -> PluginManifest {
     let path = root.join("plugins/providers/model-api-connector/plugin.manifest.json");
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -331,7 +331,7 @@ fn provider_manifest(root: &PathBuf) -> PluginManifest {
 }
 
 fn worker_options(
-    root: &PathBuf,
+    root: &Path,
     upstream: &FakeUpstream,
     embeddings_supported: bool,
 ) -> WorkerActivationOptions {

@@ -273,9 +273,9 @@ impl KernelServiceAdapter {
             if snapshot_regressed || state_requires_new_session {
                 tracker.advance_session()?;
             }
-            let publish_snapshot = tracker.last_snapshot_generation.map_or(true, |generation| {
-                observation.snapshot.generation > generation
-            });
+            let publish_snapshot = tracker
+                .last_snapshot_generation
+                .is_none_or(|generation| observation.snapshot.generation > generation);
             if publish_snapshot {
                 tracker.last_snapshot_generation = Some(observation.snapshot.generation);
             }

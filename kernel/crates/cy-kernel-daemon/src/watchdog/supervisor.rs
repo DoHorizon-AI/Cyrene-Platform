@@ -288,7 +288,7 @@ impl ServiceSupervisor {
                     grace_period,
                     immediate,
                 })
-                .map(Clone::clone)?;
+                .cloned()?;
             self.last_exit_report = Some(report.clone());
             Ok(report)
         } else {
