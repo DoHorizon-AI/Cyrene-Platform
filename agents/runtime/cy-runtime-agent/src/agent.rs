@@ -117,13 +117,14 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
     let mut terminate = termination_signal()?;
 
     loop {
-        match connect_once(&config, &mut state, &resume_token, &mut terminate).await {
+        match connect_once(&config, &mut state, &mut resume_token, &mut terminate).await {
             Ok(ConnectionOutcome::Reconnect(token)) => {
                 resume_token = token;
                 delay = config.reconnect_min;
             }
             Ok(ConnectionOutcome::Completed) => return Ok(()),
             Err(error) => {
+                eprintln!("runtime-agent connection failed: {error}");
                 if state.assignment.is_none()
                     && matches!(
                         error,
@@ -147,7 +148,7 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
 async fn connect_once(
     config: &RuntimeAgentConfig,
     state: &mut AgentState,
-    resume_token: &str,
+    resume_token: &mut String,
     terminate: &mut tokio::signal::unix::Signal,
 ) -> Result<ConnectionOutcome, RuntimeAgentError> {
     let channel = control_plane_channel(config).await?;
@@ -172,6 +173,10 @@ async fn connect_once(
             RuntimeAgentError::Transport("control plane closed before welcome".to_string())
         })?;
     let welcome = accept_welcome(&welcome_frame)?;
+    // A Welcome consumes a single-use enrollment proof. Preserve its resume
+    // token before any local staging work can fail and force a reconnect.
+    // Welcome 会消耗一次性 enrollment proof；本地 staging 前先保存 resume token。
+    *resume_token = welcome.resume_token.clone();
     let session_id = welcome.session_id.clone();
     let mut control_cursor = ObservationCursor::default();
     control_cursor.admit(&welcome_frame.frame_id, welcome_frame.sequence_number)?;
@@ -396,9 +401,6 @@ async fn handle_assignment(
         AssignmentAckDisposition::Accepted,
         None,
     )?;
-    state
-        .accepted_assignments
-        .insert(assignment.assignment_id.clone());
     state.observed_state = RuntimeObservedState::Staging;
     enqueue_observation(
         config,
@@ -427,6 +429,9 @@ async fn handle_assignment(
         .start(None, &Default::default())
         .await
         .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
+    state
+        .accepted_assignments
+        .insert(assignment.assignment_id.clone());
     state.assignment = Some(ActiveAssignment {
         assignment_id: assignment.assignment_id,
         lease,

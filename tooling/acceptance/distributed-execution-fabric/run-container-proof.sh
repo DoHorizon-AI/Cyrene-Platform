@@ -78,6 +78,13 @@ wait_for() {
         sleep 0.1
     done
     printf 'timed out waiting for %s\n' "${description}" >&2
+    printf '%s\n' '--- runtime Agent logs ---' >&2
+    for generation in 1 2 3 4; do
+        if docker inspect "${container_prefix}-g${generation}" >/dev/null 2>&1; then
+            printf '%s\n' "--- generation ${generation} ---" >&2
+            docker logs "${container_prefix}-g${generation}" >&2 || true
+        fi
+    done
     printf '%s\n' '--- control trace ---' >&2
     tail -100 "${proof_root}/control.trace" >&2 || true
     printf '%s\n' '--- artifact trace ---' >&2
