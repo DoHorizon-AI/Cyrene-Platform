@@ -221,6 +221,9 @@ struct EventRegistry {
     fence_token: u64,
 }
 
+type EventReceiver = Receiver<Result<WorkerApplicationEvent, ApplicationEventStreamTermination>>;
+type EventRegistration = (EventReceiver, Arc<AtomicUsize>);
+
 impl EventRegistry {
     fn new(plugin_id: String, generation: u64, fence_token: u64) -> Self {
         Self {
@@ -236,13 +239,7 @@ impl EventRegistry {
         subscription_id: String,
         capability: String,
         buffer_capacity: usize,
-    ) -> Result<
-        (
-            Receiver<Result<WorkerApplicationEvent, ApplicationEventStreamTermination>>,
-            Arc<AtomicUsize>,
-        ),
-        WorkerTerminalError,
-    > {
+    ) -> Result<EventRegistration, WorkerTerminalError> {
         let (sender, receiver) = mpsc::sync_channel(buffer_capacity + 1);
         let queued_events = Arc::new(AtomicUsize::new(0));
         let state = EventSubscriptionState {
@@ -513,10 +510,10 @@ impl ApplicationEventSubscription {
     /// Read the next event. Every terminal condition is returned as a typed
     /// stream termination; no terminal state is silently converted to EOF.
     pub fn next(&self, timeout: Duration) -> Result<WorkerApplicationEvent, ApplicationEventError> {
-        if let Ok(terminal) = self.terminal.lock() {
-            if let Some(terminal) = terminal.clone() {
-                return Err(ApplicationEventError::Terminated(terminal));
-            }
+        if let Ok(terminal) = self.terminal.lock()
+            && let Some(terminal) = terminal.clone()
+        {
+            return Err(ApplicationEventError::Terminated(terminal));
         }
         match self.receiver.recv_timeout(timeout) {
             Ok(Ok(event)) => {
@@ -1179,12 +1176,11 @@ impl CapabilityWorkerClient {
                 // Drain until we get CancelAck or terminal response or timeout
                 let cancel_deadline = Instant::now() + Duration::from_millis(500);
                 while Instant::now() < cancel_deadline {
-                    if let Ok(Ok(resp)) = self.reader_rx.recv_timeout(Duration::from_millis(50)) {
-                        if resp.request_id == request_id
-                            || resp.request_id == format!("cancel-{request_id}")
-                        {
-                            break;
-                        }
+                    if let Ok(Ok(resp)) = self.reader_rx.recv_timeout(Duration::from_millis(50))
+                        && (resp.request_id == request_id
+                            || resp.request_id == format!("cancel-{request_id}"))
+                    {
+                        break;
                     }
                 }
 
