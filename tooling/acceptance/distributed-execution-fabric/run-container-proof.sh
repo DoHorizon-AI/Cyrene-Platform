@@ -120,7 +120,7 @@ run_agent() {
         --enrollment-proof "${token}" \
         --state-dir /state \
         --artifact-root /artifacts \
-        -- /fixture/fake-workload.sh /state >/dev/null
+        -- /bin/sh /fixture/fake-workload.sh /state >/dev/null
 }
 
 wait_for 'fixture startup' "grep -q FIXTURE_STARTED '${proof_root}/control.trace'"
