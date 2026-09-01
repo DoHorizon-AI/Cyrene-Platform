@@ -1,0 +1,14 @@
+scenario	input	observation	expected
+attachment_host	HOST_AGENT+PERSISTENT	valid contract	ADMITTED
+attachment_container	CONTAINER_AGENT+EPHEMERAL	valid contract	ADMITTED
+attachment_provider	PROVIDER_MANAGED+EPHEMERAL	provider snapshot	ADMITTED
+reconnect	active Lease+stream loss	new authenticated session	ACTIVE
+sequence_gap	sequence 1 then 3	missing sequence 2	SEQUENCE_GAP
+duplicate_frame	same frame id replayed	bounded replay cursor	DUPLICATE
+lease_expiry	desired RUNNING+expired Lease	no provider running evidence	UNEXPECTED_LOSS
+graceful_stop	desired STOPPED+StopAck	Lease disappears	EXPECTED_TERMINATION
+provider_stop	desired RUNNING+provider terminated	provider observation	EXTERNAL_TERMINATION
+generation_fence	runtime generation 2+assignment generation 1	admission	STALE_GENERATION
+artifact_resume	verified completed parts+checkpoint	restarted Agent	REUSE_VERIFIED_PARTS
+artifact_atomic_publish	all parts+whole digest	publish rename	PUBLISHED
+artifact_corruption	wrong part or whole digest	verification	REJECTED

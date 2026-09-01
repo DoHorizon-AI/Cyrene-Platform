@@ -1,0 +1,19 @@
+#!/bin/sh
+# Product-neutral long-running fixture with observable SIGTERM handling.
+# 产品无关长任务 fixture：记录 SIGTERM 是否完成优雅退出。
+
+set -eu
+
+state_dir=$1
+generation=${CYRENE_RUNTIME_GENERATION:?CYRENE_RUNTIME_GENERATION is required}
+printf '%s\n' "running" > "${state_dir}/workload-running-${generation}"
+
+graceful_exit() {
+    printf '%s\n' "graceful" > "${state_dir}/workload-graceful-${generation}"
+    exit 0
+}
+
+trap graceful_exit TERM INT
+while :; do
+    sleep 1
+done
