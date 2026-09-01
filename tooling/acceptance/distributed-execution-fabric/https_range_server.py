@@ -55,7 +55,7 @@ class RangeHandler(http.server.BaseHTTPRequestHandler):
                     remaining -= len(chunk)
                     time.sleep(self.delay_seconds)
             self._trace(f"RANGE_COMPLETE start={start} end={end}")
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
             self._trace(f"RANGE_INTERRUPTED start={start} end={end}")
 
     def log_message(self, _format: str, *_args: object) -> None:

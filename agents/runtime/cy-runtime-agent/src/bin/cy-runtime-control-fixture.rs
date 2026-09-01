@@ -137,6 +137,13 @@ impl NodeControlService for Fixture {
             let disconnect = runtime.generation == state.disconnect_generation
                 && !state.disconnected_generations.contains(&runtime.generation);
             trace(&state.trace_path, &format!("ENROLLED runtime={} generation={} attachment={} persistence={} capabilities={}", runtime.id, runtime.generation, hello.attachment_type, hello.persistence_class, hello.capabilities.len()));
+            trace(
+                &state.trace_path,
+                &format!(
+                    "ASSIGNMENT generation={} logical_run=logical-run-1 attempt=attempt-{}",
+                    runtime.generation, runtime.generation
+                ),
+            );
             (
                 session_id,
                 resume_token,
@@ -294,13 +301,6 @@ fn observe_agent_frame(
                 &format!(
                     "HEARTBEAT generation={} fence={} state={}",
                     runtime.generation, heartbeat.fence_token, heartbeat.observed_state
-                ),
-            );
-            trace(
-                &state.trace_path,
-                &format!(
-                    "ASSIGNMENT generation={} logical_run=logical-run-1 attempt=attempt-{}",
-                    runtime.generation, runtime.generation
                 ),
             );
         }
