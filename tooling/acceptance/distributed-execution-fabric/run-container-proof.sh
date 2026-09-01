@@ -9,7 +9,7 @@ proof_root=$(mktemp -d /tmp/cyrene-def-v1.XXXXXX)
 container_prefix="cyrene-def-v1-$$"
 control_port=$((40000 + ($$ % 10000)))
 artifact_port=$((control_port + 1))
-base_image=${CYRENE_ACCEPTANCE_BASE_IMAGE:-pgvector/pgvector:pg17}
+base_image=${CYRENE_ACCEPTANCE_BASE_IMAGE:-ubuntu:24.04}
 control_pid=""
 artifact_pid=""
 
@@ -121,6 +121,7 @@ wait_for 'fixture startup' "grep -q FIXTURE_STARTED '${proof_root}/control.trace
 # Interrupt a real multipart transfer by killing the first Agent container.
 # 通过 kill 第一代 Agent 容器中断真实 multipart 传输。
 run_agent 1 development-token-1
+wait_for 'capability and inventory advertisement' "grep -q 'generation=1.*capabilities=2' '${proof_root}/control.trace' && grep -q 'INVENTORY generation=1' '${proof_root}/control.trace'"
 wait_for 'durable Artifact checkpoint' "grep -q '\"index\"' '${proof_root}/state/'*.checkpoint.json"
 docker kill "${container_prefix}-g1" >/dev/null
 docker wait "${container_prefix}-g1" >/dev/null
@@ -129,6 +130,7 @@ docker wait "${container_prefix}-g1" >/dev/null
 # 新 Runtime generation 恢复已验证 part，随后完成重连、续约与优雅停止。
 run_agent 2 development-token-2
 wait_for 'Artifact resume evidence' "grep -q 'generation=2.*reason=ARTIFACT_RESUMED' '${proof_root}/control.trace'"
+wait_for 'replacement Attempt identity' "grep -q 'ASSIGNMENT generation=1 logical_run=logical-run-1 attempt=attempt-1' '${proof_root}/control.trace' && grep -q 'ASSIGNMENT generation=2 logical_run=logical-run-1 attempt=attempt-2' '${proof_root}/control.trace'"
 wait_for 'running observation' "grep -q 'generation=2.*reason=WORKLOAD_RUNNING' '${proof_root}/control.trace'"
 wait_for 'forced control disconnect' "grep -q 'CONTROL_CHANNEL_FORCED_DISCONNECT generation=2' '${proof_root}/control.trace'"
 wait_for 'authenticated reconnect' "test \$(grep -c 'ENROLLED runtime=runtime-fixture generation=2' '${proof_root}/control.trace') -ge 2"

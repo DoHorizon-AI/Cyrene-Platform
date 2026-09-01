@@ -185,6 +185,16 @@ async fn connect_once(
         "SESSION_ESTABLISHED",
         "execution session established",
     )?;
+    state.outbox.enqueue(
+        &config.runtime.id,
+        node_to_control_plane::Body::ExecutionInventory(core_v1::ExecutionInventory {
+            runtime: Some(runtime_ref(config)),
+            // Container attachments advertise semantic Capabilities in Hello;
+            // Provider-managed inventory arrives through the existing snapshot authority.
+            // 容器 Capability 位于 Hello；Provider inventory 复用现有 snapshot 权威。
+            provider_snapshot: None,
+        }),
+    )?;
     flush_outbox(
         &outbound,
         state,
@@ -487,7 +497,10 @@ async fn stage_artifacts(
             .state_dir
             .join(format!("artifact-{digest_hex}.checkpoint.json"));
         let session = TransferSession {
-            session_id: format!("{}-{digest_hex}", assignment.assignment_id),
+            // Artifact resume identity is content-scoped, not Attempt- or
+            // Runtime-generation-scoped, so replacement Attempts reuse parts.
+            // Artifact 恢复身份按内容定域，不随 Attempt/Runtime generation 改变。
+            session_id: format!("artifact-{digest_hex}"),
             manifest,
             replica: ArtifactReplica {
                 replica_id: format!("{}-primary", spec.artifact_uri),

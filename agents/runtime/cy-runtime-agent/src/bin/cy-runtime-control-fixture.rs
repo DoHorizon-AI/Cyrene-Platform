@@ -118,7 +118,7 @@ impl NodeControlService for Fixture {
             state.next_session += 1;
             let session_id = format!("session-{}-{}", runtime.generation, state.next_session);
             let resume_token = format!("resume-{}-{}", runtime.id, runtime.generation);
-            let lease = new_lease(&runtime, now_unix_ms().saturating_add(5_000));
+            let lease = new_lease(&runtime, now_unix_ms().saturating_add(10_000));
             state
                 .leases
                 .entry(runtime.generation)
@@ -296,6 +296,13 @@ fn observe_agent_frame(
                     runtime.generation, heartbeat.fence_token, heartbeat.observed_state
                 ),
             );
+            trace(
+                &state.trace_path,
+                &format!(
+                    "ASSIGNMENT generation={} logical_run=logical-run-1 attempt=attempt-{}",
+                    runtime.generation, runtime.generation
+                ),
+            );
         }
         Some(node_to_control_plane::Body::RuntimeObservation(observation)) => trace(
             &state.trace_path,
@@ -306,6 +313,10 @@ fn observe_agent_frame(
                 observation.termination,
                 observation.reason_code
             ),
+        ),
+        Some(node_to_control_plane::Body::ExecutionInventory(_)) => trace(
+            &state.trace_path,
+            &format!("INVENTORY generation={}", runtime.generation),
         ),
         Some(node_to_control_plane::Body::LeaseRenewal(request)) => {
             trace(
@@ -363,13 +374,13 @@ fn make_assignment(
     lease: semantic_v1::Lease,
 ) -> RuntimeAssignment {
     RuntimeAssignment {
-        assignment_id: "logical-run-1-attempt-1".to_string(),
+        assignment_id: format!("logical-run-1-attempt-{}", runtime.generation),
         runtime: Some(runtime_ref(runtime)),
         operation: Some(semantic_v1::Identity {
             id: "operation-1".to_string(),
             generation: 1,
         }),
-        attempt_id: "attempt-1".to_string(),
+        attempt_id: format!("attempt-{}", runtime.generation),
         lease: Some(lease),
         workload_identity: Some(core_v1::WorkloadIdentity {
             identity: Some(semantic_v1::Identity {
