@@ -1,0 +1,183 @@
+{
+  "schema_version": "1",
+  "repository": "Cyrene-Platform",
+  "historical_baseline": {
+    "sha": "4c092fcb7fdb44bc9c0e3e54ecdb9b13bc316b47",
+    "label": "original compilable bootstrap",
+    "selection_evidence": [
+      "first repository commit",
+      "contains the initial contracts, manifest model, local transport and node-agent crates",
+      "precedes the 142280f embedded-runtime removal and all kernel decomposition milestones"
+    ]
+  },
+  "pre_major_refactor_checkpoint": {
+    "sha": "142280f79fe497301b5f8fe7121f19d2bf922a2f",
+    "label": "pre-split core after embedded Python/container removal"
+  },
+  "current_develop": {
+    "sha": "dae212db419ac1e5706b0a69f429cb05d534392a",
+    "branch": "origin/develop"
+  },
+  "migration_map": [
+    {
+      "old": "kernel/crates/cy-node-agent/src/probe.rs",
+      "status": "EXTRACTED",
+      "new": [
+        "adapters/hardware/nvidia/src/discovery.rs",
+        "adapters/hardware/linux_sys/src/probe.rs",
+        "agents/node/cy-node-agent/src/bridge.rs"
+      ],
+      "evidence": ["07d723e", "ef0099c"],
+      "responsibility": "vendor discovery and node bridge moved out of Kernel; Kernel receives generic resource facts"
+    },
+    {
+      "old": "kernel/crates/cy-node-agent/src/{journal.rs,lib.rs,upgrade.rs}",
+      "status": "MOVED",
+      "new": [
+        "agents/node/cy-node-agent/src/journal.rs",
+        "agents/node/cy-node-agent/src/lib.rs",
+        "agents/node/cy-node-agent/src/upgrade.rs"
+      ],
+      "evidence": ["ef0099c"],
+      "responsibility": "node-local journal, session bridge and self-upgrade remain in the Node Agent"
+    },
+    {
+      "old": "kernel/crates/cy-local-transport/src/lib.rs",
+      "status": "MOVED",
+      "new": ["framework/crates/cy-local-transport/src/lib.rs"],
+      "evidence": ["ef0099c"],
+      "responsibility": "generic language-facing local transport is Framework infrastructure, not Kernel authority"
+    },
+    {
+      "old": "kernel/crates/cy-plugin-supervisor/src/lib.rs",
+      "status": "REPLACED",
+      "new": [
+        "kernel/crates/cy-kernel-daemon/src/watchdog/instance_actor.rs",
+        "kernel/crates/cy-kernel-daemon/src/watchdog/supervisor.rs",
+        "framework/crates/cy-capability-execution-service/src/lib.rs"
+      ],
+      "evidence": ["ef0099c", "30b3d40", "e69f74f", "64d6a32"],
+      "responsibility": "generic worker supervision and request execution use the InstanceActor/CES path; the deprecated duplicate supervisor was removed"
+    },
+    {
+      "old": "kernel/crates/cy-plugin-supervisor/src/instance.rs",
+      "status": "MOVED",
+      "new": [
+        "kernel/crates/cy-kernel-daemon/src/sandboxed_process.rs",
+        "kernel/crates/cy-kernel-daemon/src/watchdog/instance_actor.rs"
+      ],
+      "evidence": ["ef0099c", "f1c76e4", "e69f74f"],
+      "responsibility": "process handle and instance state are split between Kernel lifecycle decisions and the sandbox adapter"
+    },
+    {
+      "old": "kernel/crates/cy-sandbox/src/lib.rs",
+      "status": "MOVED",
+      "new": ["adapters/execution/sandboxd/src/lib.rs", "kernel/crates/cy-sandbox-client/src/lib.rs"],
+      "evidence": ["f1c76e4"],
+      "responsibility": "privileged process/cgroup implementation is Sandbox Adapter; Kernel retains only a generic client and decision port"
+    },
+    {
+      "old": "kernel/crates/cy-sandbox/src/managed_process.rs",
+      "status": "MOVED",
+      "new": ["kernel/crates/cy-kernel-daemon/src/sandboxed_process.rs"],
+      "evidence": ["f1c76e4"],
+      "responsibility": "managed-process lifecycle metadata remains under Kernel daemon supervision"
+    },
+    {
+      "old": "kernel/crates/cy-hardware-discovery/src/lib.rs",
+      "status": "MOVED",
+      "new": ["adapters/hardware/nvidia/src/discovery.rs", "kernel/crates/cy-adapter-client/src/lib.rs"],
+      "evidence": ["07d723e", "ef0099c"],
+      "responsibility": "vendor probing is an external adapter; Kernel consumes generic adapter protocol facts"
+    },
+    {
+      "old": "contracts/rust/cy-manifest/src/manifest.rs",
+      "status": "SPLIT",
+      "new": [
+        "contracts/rust/cy-manifest/src/manifest/plugin.rs",
+        "contracts/rust/cy-manifest/src/manifest/artifact.rs",
+        "contracts/rust/cy-manifest/src/manifest/hardware.rs",
+        "contracts/rust/cy-manifest/src/manifest/model.rs",
+        "contracts/rust/cy-manifest/src/manifest/runtime.rs",
+        "contracts/rust/cy-manifest/src/manifest/training.rs"
+      ],
+      "evidence": ["a7c0e66"],
+      "responsibility": "manifest contract domains are modularized while the cy-manifest crate remains the single Rust mirror of the schema"
+    },
+    {
+      "old": "contracts/rust/cy-proto/src/lib.rs (embedded semantic definitions)",
+      "status": "EXTRACTED",
+      "new": ["contracts/rust/cy-kernel-contract/src/{endpoint,event,identity,lease,operation,resource,revision,snapshot,validation,worker}.rs"],
+      "evidence": ["a235432", "207eae0", "a7c0e66"],
+      "responsibility": "versioned Kernel semantic contract is explicit and independently tested"
+    },
+    {
+      "old": "kernel/crates/cy-kernel-api/src/lib.rs",
+      "status": "SPLIT",
+      "new": ["kernel/crates/cy-kernel-api/src/{authority,binding,capability,error,inventory,journal,launch,lease,ports,runtime,service}.rs"],
+      "evidence": ["dc5f073"],
+      "responsibility": "stable Kernel ports and lifecycle domain types are separated without changing authority ownership"
+    },
+    {
+      "old": "kernel/crates/cy-kernel-daemon/src/lib.rs",
+      "status": "SPLIT",
+      "new": ["kernel/crates/cy-kernel-daemon/src/{authority,convert,rpc,service_manager,watchdog,session}.rs"],
+      "evidence": ["a7c0e66", "03d0911", "1e83ce7"],
+      "responsibility": "daemon authority, protocol conversion, RPC projection, service supervision and recovery are explicit modules"
+    },
+    {
+      "old": "contracts/proto/{ai_service.proto,agent_service.proto}",
+      "status": "DELETED_OBSOLETE",
+      "new": [
+        "contracts/proto/cyrene/core/v1/*.proto",
+        "contracts/proto/cyrene/semantic/v1/kernel_contract.proto",
+        "contracts/proto/cyrene/provider/v1/kernel_provider.proto",
+        "contracts/proto/cyrene/capability/v1/capability_execution.proto"
+      ],
+      "evidence": ["142280f", "a235432", "207eae0", "440f0ef"],
+      "responsibility": "untyped legacy AgentService/AI RPC was replaced by typed, versioned Kernel and capability contracts"
+    },
+    {
+      "old": "kernel/crates/cy-plugin-supervisor (entire crate)",
+      "status": "DELETED_OBSOLETE",
+      "new": ["kernel/crates/cy-kernel-daemon/src/watchdog", "framework/crates/cy-capability-execution-service"],
+      "evidence": ["30b3d40", "e69f74f", "64d6a32"],
+      "responsibility": "the old duplicate supervisor was decommissioned after all proxies moved to InstanceActor"
+    }
+  ],
+  "correctness_capabilities": {
+    "principal": "kernel/crates/cy-kernel-daemon/src/peer_cred.rs and authority.rs derive and require authenticated semantic Principal",
+    "worker": "kernel/crates/cy-kernel-api/src/authority.rs plus cy-kernel-daemon watchdog/instance_actor.rs and rpc/worker_control.rs",
+    "operation": "cy-kernel-api authority operation ports and cy-kernel-daemon operation conversion/RPC lifecycle",
+    "resource": "cy-resource-manager/src/lib.rs and semantic resource contract; inventory generations are checked before allocation",
+    "lease_fence": "cy-kernel-api/src/lease.rs, cy-resource-manager fencing, daemon authority lease transitions, and release/revocation tests",
+    "capability": "framework/crates/cy-platform-api and cy-capability-execution-service resolve and activate generic capability interfaces",
+    "endpoint": "cy-kernel-api authority endpoint/grant ports and daemon purge_endpoint_authority enforce lease-bound endpoint grants",
+    "event": "cy-kernel-daemon authority event store/history plus RPC SubscribeEvents projections",
+    "replay_live_handoff": "authority snapshot captures cursor before state read; events_after and both v1/v2 SubscribeEvents use ordered replay then notifier handoff",
+    "cleanup_recovery": "service_manager, watchdog, sandboxed_process and runtime journal require confirmed physical cleanup; startup recovery tests cover stale processes and epoch-scoped cursors"
+  },
+  "lost_suspected": [],
+  "kernel_correctness_capabilities_lost": 0,
+  "business_semantics_remaining_in_kernel": [],
+  "business_semantics_audit": {
+    "forbidden_kernel_terms_checked": [
+      "Dataset", "DatasetVersion", "TrainingJob", "TrainingRecipe", "TrainingAttempt",
+      "ModelVersion", "EvaluationRun", "Deployment", "LoRA", "Tokenizer", "quality score",
+      "Model Card", "Product auth/policy", "connector Product policy"
+    ],
+    "result": "no production Rust source matches"
+  },
+  "ownership": {
+    "Kernel": "authenticated authority, leases/fences, lifecycle decisions, generic protocol validation and recovery policy",
+    "Resource Manager": "resource inventory, allocation, lease state and cleanup-confirmed release",
+    "Platform API": "language-neutral capability and worker activation projections",
+    "Capability Execution Service": "generic request-scoped activation/invocation/event streaming",
+    "Package Runtime": "immutable package installation/dependency preparation and worker-runtime composition",
+    "Worker activation/supervision": "Kernel InstanceActor/watchdog with existing CES worker activator",
+    "Artifact contracts": "contracts and manifest schemas; artifact bytes are external to Kernel",
+    "Framework": "public API, registry and adapters; no first-party product implementation",
+    "Plugins": "official package/artifact implementations and plugin protocol consumers",
+    "Product": "product policy, bindings, auth/UI, domain semantics and connector policy"
+  }
+}
