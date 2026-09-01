@@ -373,6 +373,35 @@ class GenericCapabilityWorker(CyreneWorker):
                 normalize_orientation=req_dict.get("normalize_orientation", False),
             )
 
+        if action == "normalize_audio" and "input" in req_dict:
+            from media_processor import (
+                CallerOwnedAudioFile,
+                CanonicalAudioProfile,
+                InlineAudioBytes,
+                NormalizeAudioRequest,
+            )
+
+            raw_input = req_dict["input"]
+            if raw_input.get("kind") == "bytes":
+                data = base64.b64decode(raw_input.get("data_base64", ""))
+                inp = InlineAudioBytes(data=data, media_type=raw_input.get("media_type"))
+            elif raw_input.get("kind") == "file":
+                inp = CallerOwnedAudioFile(
+                    path=Path(raw_input.get("path", "")),
+                    media_type=raw_input.get("media_type"),
+                )
+            else:
+                return None
+            try:
+                profile = CanonicalAudioProfile(req_dict.get("target_profile", ""))
+            except ValueError as error:
+                from media_processor import MediaProcessorError
+
+                raise MediaProcessorError.unsupported_input(
+                    "unsupported canonical audio profile"
+                ) from error
+            return NormalizeAudioRequest(input=inp, target_profile=profile)
+
         return None
 
 
