@@ -17,6 +17,7 @@ members = [
     # 3. 框架层与 SDK (Framework & SDK Crates)
     "framework/crates/cy-extension-registry",
     "framework/crates/cy-installation-resolver",
+    "framework/crates/cy-package-runtime",
     "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
     "framework/crates/cy-capability-execution-service",
