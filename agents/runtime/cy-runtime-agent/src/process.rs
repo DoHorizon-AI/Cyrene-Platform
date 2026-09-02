@@ -9,13 +9,15 @@
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 
 /// Child process supervision failure.
 #[derive(Debug, Error)]
@@ -44,10 +46,25 @@ pub struct StopOutcome {
     pub forced: bool,
 }
 
+/// Child output channel consumed by the Runtime Agent event forwarder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// One complete UTF-8-lossy workload output line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadOutput {
+    pub stream: WorkloadOutputStream,
+    pub line: String,
+}
+
 /// Single-child process-group supervisor used inside an ordinary container.
 pub struct ChildSupervisor {
     command: Vec<String>,
     child: Option<Child>,
+    output: Option<mpsc::Receiver<WorkloadOutput>>,
 }
 
 impl ChildSupervisor {
@@ -55,6 +72,7 @@ impl ChildSupervisor {
         Self {
             command,
             child: None,
+            output: None,
         }
     }
 
@@ -74,12 +92,45 @@ impl ChildSupervisor {
         let mut command = Command::new(&self.command[0]);
         command.args(&self.command[1..]);
         command.envs(additions);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(path) = working_directory {
             command.current_dir(path);
         }
         command.as_std_mut().process_group(0);
-        self.child = Some(command.spawn()?);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ChildSupervisorError::Io(std::io::Error::other("child stdout pipe unavailable"))
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            ChildSupervisorError::Io(std::io::Error::other("child stderr pipe unavailable"))
+        })?;
+        let (sender, receiver) = mpsc::channel(1024);
+        tokio::spawn(capture_output(
+            stdout,
+            WorkloadOutputStream::Stdout,
+            sender.clone(),
+        ));
+        tokio::spawn(capture_output(stderr, WorkloadOutputStream::Stderr, sender));
+        self.output = Some(receiver);
+        self.child = Some(child);
         Ok(())
+    }
+
+    /// Drain up to `limit` captured lines without blocking process supervision.
+    pub fn drain_output(&mut self, limit: usize) -> Vec<WorkloadOutput> {
+        let mut output = Vec::new();
+        let Some(receiver) = self.output.as_mut() else {
+            return output;
+        };
+        while output.len() < limit {
+            match receiver.try_recv() {
+                Ok(line) => output.push(line),
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+        output
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ChildExit>, ChildSupervisorError> {
@@ -119,6 +170,25 @@ impl ChildSupervisor {
                     forced: true,
                 })
             }
+        }
+    }
+}
+
+async fn capture_output<R>(
+    stream: R,
+    kind: WorkloadOutputStream,
+    sender: mpsc::Sender<WorkloadOutput>,
+) where
+    R: AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(stream).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if sender
+            .send(WorkloadOutput { stream: kind, line })
+            .await
+            .is_err()
+        {
+            break;
         }
     }
 }

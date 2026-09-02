@@ -12,8 +12,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cy_artifact_transfer::{ArtifactKind, ArtifactRef, TransferTicket};
 use cy_execution_fabric::{
-    validate_hello, DevelopmentEnrollmentProvider, EnrollmentProvider, RuntimeScope,
+    validate_hello, DevelopmentEnrollmentProvider, EnrollmentProvider, NodeLifecycleProjection,
+    RuntimeScope,
 };
 use cy_kernel_contract::Identity as ContractIdentity;
 use cy_proto::core_v1::{
@@ -48,6 +50,7 @@ struct FixtureState {
     disconnected_generations: BTreeSet<u64>,
     stop_sent_generations: BTreeSet<u64>,
     leases: BTreeMap<u64, LeaseRecord>,
+    nodes: BTreeMap<String, NodeLifecycleProjection>,
     artifact: ArtifactFixture,
 }
 
@@ -58,6 +61,7 @@ struct LeaseRecord {
     desired_stopped: bool,
     stop_ack: bool,
     loss_reported: bool,
+    node_id: String,
 }
 
 #[derive(Clone)]
@@ -93,6 +97,17 @@ impl NodeControlService for Fixture {
             .and_then(|runtime| runtime.identity.as_ref())
             .ok_or_else(|| Status::invalid_argument("missing Runtime identity"))?
             .clone();
+        let descriptor = hello
+            .node
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing Node identity"))?
+            .clone();
+        let node_id = descriptor
+            .node
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing NodeRef"))?
+            .node_id
+            .clone();
         let (session_id, resume_token, assignment, disconnect_this_session) = {
             let mut state = self
                 .shared
@@ -118,6 +133,18 @@ impl NodeControlService for Fixture {
             state.next_session += 1;
             let session_id = format!("session-{}-{}", runtime.generation, state.next_session);
             let resume_token = format!("resume-{}-{}", runtime.id, runtime.generation);
+            let reconnected = if let Some(node) = state.nodes.get_mut(&node_id) {
+                node.reconnect(&descriptor, session_id.clone())
+                    .map_err(|error| Status::failed_precondition(error.to_string()))?;
+                true
+            } else {
+                state.nodes.insert(
+                    node_id.clone(),
+                    NodeLifecycleProjection::enroll(&hello, session_id.clone())
+                        .map_err(|error| Status::invalid_argument(error.to_string()))?,
+                );
+                false
+            };
             let lease = new_lease(&runtime, now_unix_ms().saturating_add(10_000));
             state
                 .leases
@@ -133,10 +160,25 @@ impl NodeControlService for Fixture {
                     desired_stopped: false,
                     stop_ack: false,
                     loss_reported: false,
+                    node_id: node_id.clone(),
                 });
             let disconnect = runtime.generation == state.disconnect_generation
                 && !state.disconnected_generations.contains(&runtime.generation);
-            trace(&state.trace_path, &format!("ENROLLED runtime={} generation={} attachment={} persistence={} capabilities={}", runtime.id, runtime.generation, hello.attachment_type, hello.persistence_class, hello.capabilities.len()));
+            trace(&state.trace_path, &format!("ENROLLED runtime={} generation={} node={} attachment={} persistent={} restart={} capabilities={}", runtime.id, runtime.generation, node_id, hello.attachment_type, descriptor.persistent.unwrap_or(false), hello.restart_capability, hello.capabilities.len()));
+            if reconnected {
+                trace(
+                    &state.trace_path,
+                    &format!("PERSISTENT_NODE_RECONNECTED node={node_id} state=ONLINE"),
+                );
+            } else {
+                trace(
+                    &state.trace_path,
+                    &format!(
+                        "NODE_ENROLLED node={node_id} persistent={}",
+                        descriptor.persistent.unwrap_or(false)
+                    ),
+                );
+            }
             trace(
                 &state.trace_path,
                 &format!(
@@ -154,6 +196,7 @@ impl NodeControlService for Fixture {
 
         let (outbound, receiver) = mpsc::channel(64);
         let shared = Arc::clone(&self.shared);
+        let connection_node_id = node_id.clone();
         tokio::spawn(async move {
             let mut sequence = 1_u64;
             if send_control(
@@ -250,9 +293,15 @@ impl NodeControlService for Fixture {
                 if let Some(lease) = state.leases.get_mut(&runtime.generation) {
                     lease.connected = false;
                 }
+                if let Some(node) = state.nodes.get_mut(&connection_node_id) {
+                    node.disconnect(true);
+                }
                 trace(
                     &state.trace_path,
-                    &format!("CONTROL_CHANNEL_CLOSED generation={}", runtime.generation),
+                    &format!(
+                        "CONTROL_CHANNEL_CLOSED generation={} node={} node_state=OFFLINE",
+                        runtime.generation, connection_node_id
+                    ),
                 );
             }
         });
@@ -281,6 +330,19 @@ fn observe_agent_frame(
         record.last_seen_unix_ms = now_unix_ms();
     }
     match frame.body.as_ref() {
+        Some(node_to_control_plane::Body::Heartbeat(heartbeat)) => trace(
+            &state.trace_path,
+            &format!(
+                "NODE_HEARTBEAT generation={} node={} epoch={}",
+                runtime.generation,
+                heartbeat
+                    .node
+                    .as_ref()
+                    .map(|node| node.node_id.as_str())
+                    .unwrap_or(""),
+                heartbeat.observed_generation
+            ),
+        ),
         Some(node_to_control_plane::Body::AssignmentAck(ack)) => trace(
             &state.trace_path,
             &format!(
@@ -307,11 +369,33 @@ fn observe_agent_frame(
         Some(node_to_control_plane::Body::RuntimeObservation(observation)) => trace(
             &state.trace_path,
             &format!(
-                "OBSERVATION generation={} state={} termination={} reason={}",
+                "OBSERVATION generation={} state={} termination={} reason={} summary={}",
                 runtime.generation,
                 observation.observed_state,
                 observation.termination,
-                observation.reason_code
+                observation.reason_code,
+                observation.summary
+            ),
+        ),
+        Some(node_to_control_plane::Body::RuntimeProgress(progress)) => trace(
+            &state.trace_path,
+            &format!(
+                "PROGRESS generation={} completed={} total={} unit={}",
+                runtime.generation, progress.completed_units, progress.total_units, progress.unit
+            ),
+        ),
+        Some(node_to_control_plane::Body::StructuredEvent(event)) => trace(
+            &state.trace_path,
+            &format!(
+                "STRUCTURED_EVENT generation={} kind={} schema={}",
+                runtime.generation, event.kind, event.schema_id
+            ),
+        ),
+        Some(node_to_control_plane::Body::LogReference(reference)) => trace(
+            &state.trace_path,
+            &format!(
+                "LOG_REFERENCE generation={} artifact={} digest={} size={}",
+                runtime.generation, reference.artifact_uri, reference.digest, reference.size_bytes
             ),
         ),
         Some(node_to_control_plane::Body::ExecutionInventory(_)) => trace(
@@ -368,6 +452,7 @@ fn authenticate(
     Ok(())
 }
 
+#[allow(deprecated)]
 fn make_assignment(
     state: &FixtureState,
     runtime: &semantic_v1::Identity,
@@ -406,11 +491,51 @@ fn make_assignment(
             digest: state.artifact.digest.clone(),
             size_bytes: state.artifact.size_bytes,
             manifest_digest: String::new(),
-            replica_uri: state.artifact.replica_uri.clone(),
+            replica_uri: String::new(),
             part_size_bytes: state.artifact.part_size_bytes,
             part_digests: state.artifact.part_digests.clone(),
+            sources: vec![core_v1::ArtifactTransferSource {
+                peer_id: "seed-peer-1".to_string(),
+                replica_id: "seed-replica-1".to_string(),
+                locator: state.artifact.replica_uri.clone(),
+                transfer_ticket: transfer_ticket_json(state, runtime),
+            }],
+            part_sources: state
+                .artifact
+                .part_digests
+                .iter()
+                .enumerate()
+                .map(|(index, _)| core_v1::ArtifactPartSource {
+                    part_index: u32::try_from(index).unwrap_or(u32::MAX),
+                    peer_id: "seed-peer-1".to_string(),
+                    replica_id: "seed-replica-1".to_string(),
+                })
+                .collect(),
+            destination_peer_id: format!("node-cache-{}", runtime.generation),
         }],
     }
+}
+
+fn transfer_ticket_json(state: &FixtureState, runtime: &semantic_v1::Identity) -> String {
+    serde_json::to_string(&TransferTicket {
+        ticket_id: format!("ticket-{}", runtime.generation),
+        artifact: ArtifactRef {
+            uri: state.artifact.uri.clone(),
+            digest: state.artifact.digest.clone(),
+            size_bytes: state.artifact.size_bytes,
+            kind: ArtifactKind::Generic,
+            manifest_digest: None,
+        },
+        source_peer_id: "seed-peer-1".to_string(),
+        destination_peer_id: format!("node-cache-{}", runtime.generation),
+        allowed_parts: (0..state.artifact.part_digests.len())
+            .filter_map(|index| u32::try_from(index).ok())
+            .collect(),
+        expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+        max_bytes: state.artifact.size_bytes,
+        signature: "fixture-ticket-signature".to_string(),
+    })
+    .expect("fixture TransferTicket serialization")
 }
 
 fn new_lease(runtime: &semantic_v1::Identity, expiry: u64) -> semantic_v1::Lease {
@@ -527,6 +652,7 @@ async fn loss_monitor(shared: Arc<Mutex<FixtureState>>) {
         };
         let now = now_unix_ms();
         let trace_path = state.trace_path.clone();
+        let mut closed_nodes = Vec::new();
         for (generation, record) in &mut state.leases {
             let expiry = record
                 .proto
@@ -547,6 +673,23 @@ async fn loss_monitor(shared: Arc<Mutex<FixtureState>>) {
                         "LEASE_EXPIRED generation={} classification={classification}",
                         generation
                     ),
+                );
+                closed_nodes.push(record.node_id.clone());
+            }
+        }
+        for node_id in closed_nodes {
+            let mut terminal_state = None;
+            if let Some(node) = state.nodes.get_mut(&node_id) {
+                node.lease_expired();
+                if !node.persistent() {
+                    let _ = node.terminate();
+                    terminal_state = Some("TERMINATED");
+                }
+            }
+            if let Some(terminal_state) = terminal_state {
+                trace(
+                    &trace_path,
+                    &format!("EPHEMERAL_NODE_TERMINATED node={node_id} state={terminal_state}"),
                 );
             }
         }
@@ -584,6 +727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         disconnected_generations: BTreeSet::new(),
         stop_sent_generations: BTreeSet::new(),
         leases: BTreeMap::new(),
+        nodes: BTreeMap::new(),
         artifact,
     };
     let shared = Arc::new(Mutex::new(state));

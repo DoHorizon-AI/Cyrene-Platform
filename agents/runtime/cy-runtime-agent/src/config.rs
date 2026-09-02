@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use cy_kernel_contract::Identity;
+use cy_proto::core_v1::NodeRef;
 
 use crate::RuntimeAgentError;
 
@@ -24,6 +25,9 @@ pub struct RuntimeAgentConfig {
     pub artifact_ca: PathBuf,
     pub organization_id: String,
     pub workspace_id: String,
+    pub node: NodeRef,
+    pub node_type: String,
+    pub persistent: bool,
     pub runtime: Identity,
     pub agent_version: String,
     pub enrollment_proof: String,
@@ -40,6 +44,11 @@ impl RuntimeAgentConfig {
         self.runtime.validate().map_err(|error| {
             RuntimeAgentError::Configuration(format!("{}: {}", error.reason_code, error.message))
         })?;
+        if self.node.node_id.is_empty() || self.node.node_epoch == 0 || self.node_type.is_empty() {
+            return Err(RuntimeAgentError::Configuration(
+                "NodeId, positive Node epoch, and node type are required".to_string(),
+            ));
+        }
         if !self.control_plane_endpoint.starts_with("https://")
             || self.control_plane_server_name.is_empty()
         {

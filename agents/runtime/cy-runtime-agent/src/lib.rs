@@ -15,4 +15,4 @@ mod process;
 
 pub use agent::{run_runtime_agent, RuntimeAgentError};
 pub use config::RuntimeAgentConfig;
-pub use process::{ChildExit, ChildSupervisor, StopOutcome};
+pub use process::{ChildExit, ChildSupervisor, StopOutcome, WorkloadOutput, WorkloadOutputStream};

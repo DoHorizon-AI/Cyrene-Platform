@@ -7,17 +7,19 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_artifact_transfer::{
-    ArtifactKind, ArtifactRef, ArtifactReplica, HttpRangeTransfer, TransferManifest, TransferPart,
-    TransferProtocol, TransferSession,
+    ArtifactKind, ArtifactPeer, ArtifactPeerKind, ArtifactRef, ArtifactReplica, HttpRangeTransfer,
+    TransferManifest, TransferPart, TransferPartSource, TransferPlan, TransferProtocol,
+    TransferSession, TransferSource, TransferTicket,
 };
 use cy_execution_fabric::{
-    validate_assignment, validate_renewal, AdmissionDisposition, FabricContractError,
-    ObservationCursor,
+    artifact_transfer_capability, execution_capability, validate_assignment, validate_renewal,
+    AdmissionDisposition, FabricContractError, ObservationCursor,
 };
 use cy_kernel_contract::Lease as SemanticLease;
 use cy_proto::core_v1::{
@@ -27,6 +29,7 @@ use cy_proto::core_v1::{
     RuntimeHeartbeat, RuntimeObservation, RuntimeObservedState, StopAck, TerminationClassification,
 };
 use cy_proto::semantic_v1;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -35,7 +38,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use tonic::Request;
 
 use crate::outbox::AgentOutbox;
-use crate::{ChildSupervisor, RuntimeAgentConfig};
+use crate::{ChildSupervisor, RuntimeAgentConfig, WorkloadOutputStream};
 
 const PROTOCOL_VERSION: u32 = 2;
 
@@ -78,6 +81,8 @@ struct AgentState {
     accepted_assignments: BTreeSet<String>,
     accepted_stops: BTreeSet<String>,
     renewal_counter: u64,
+    event_counter: u64,
+    log_reference_published: bool,
 }
 
 impl AgentState {
@@ -90,6 +95,8 @@ impl AgentState {
             accepted_assignments: BTreeSet::new(),
             accepted_stops: BTreeSet::new(),
             renewal_counter: 0,
+            event_counter: 0,
+            log_reference_published: false,
         }
     }
 }
@@ -250,7 +257,11 @@ async fn connect_once(
                 flush_outbox(&outbound, state, &session_id, control_cursor.last_sequence()).await?;
             }
             _ = process_poll.tick() => {
+                forward_workload_output(config, state)?;
                 if check_process_and_lease(config, state).await? {
+                    time::sleep(Duration::from_millis(20)).await;
+                    forward_workload_output(config, state)?;
+                    publish_log_reference(config, state)?;
                     flush_outbox(&outbound, state, &session_id, control_cursor.last_sequence()).await?;
                     time::sleep(Duration::from_millis(100)).await;
                     return Ok(ConnectionOutcome::Completed);
@@ -286,16 +297,30 @@ fn hello_frame(config: &RuntimeAgentConfig, resume_token: &str) -> NodeToControl
                     workspace_id: config.workspace_id.clone(),
                 }),
                 attachment_type: core_v1::ExecutionAttachmentType::ContainerAgent as i32,
-                persistence_class: core_v1::PersistenceClass::Ephemeral as i32,
+                persistence_class: if config.persistent {
+                    core_v1::PersistenceClass::Persistent as i32
+                } else {
+                    core_v1::PersistenceClass::Ephemeral as i32
+                },
                 agent_version: config.agent_version.clone(),
                 min_protocol_version: PROTOCOL_VERSION,
                 max_protocol_version: PROTOCOL_VERSION,
                 resume_token: resume_token.to_string(),
                 capabilities: vec![
-                    capability("cyrene.execution.child-process"),
-                    capability("cyrene.artifact.https-range"),
+                    execution_capability(
+                        core_v1::ExecutionAttachmentType::ContainerAgent,
+                        config.persistent,
+                        core_v1::RestartCapability::None,
+                    ),
+                    artifact_transfer_capability(),
                 ],
                 enrollment_proof,
+                node: Some(core_v1::ExecutionNodeDescriptor {
+                    node: Some(config.node.clone()),
+                    node_type: config.node_type.clone(),
+                    persistent: Some(config.persistent),
+                }),
+                restart_capability: core_v1::RestartCapability::None as i32,
             },
         )),
     }
@@ -424,6 +449,11 @@ async fn handle_assignment(
         "WORKLOAD_STARTING",
         "starting fixed workload command",
     )?;
+    let log_path = workload_log_path(config);
+    if log_path.exists() {
+        fs::remove_file(&log_path).map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
+    }
+    state.log_reference_published = false;
     state
         .child
         .start(None, &Default::default())
@@ -501,20 +531,47 @@ async fn stage_artifacts(
         let checkpoint_path = config
             .state_dir
             .join(format!("artifact-{digest_hex}.checkpoint.json"));
+        let destination_peer_id = if spec.destination_peer_id.is_empty() {
+            format!("node-cache-{}", config.node.node_id)
+        } else {
+            spec.destination_peer_id.clone()
+        };
+        let sources = build_transfer_sources(spec, &artifact, &destination_peer_id, &manifest)?;
+        let part_sources = if spec.part_sources.is_empty() {
+            let source = sources.first().ok_or_else(|| {
+                RuntimeAgentError::Artifact("TransferPlan has no source Peer".to_string())
+            })?;
+            manifest
+                .parts
+                .iter()
+                .map(|part| TransferPartSource {
+                    part_index: part.index,
+                    peer_id: source.peer.peer_id.clone(),
+                    replica_id: source.replica.replica_id.clone(),
+                })
+                .collect()
+        } else {
+            spec.part_sources
+                .iter()
+                .map(|route| TransferPartSource {
+                    part_index: route.part_index,
+                    peer_id: route.peer_id.clone(),
+                    replica_id: route.replica_id.clone(),
+                })
+                .collect()
+        };
         let session = TransferSession {
             // Artifact resume identity is content-scoped, not Attempt- or
             // Runtime-generation-scoped, so replacement Attempts reuse parts.
             // Artifact 恢复身份按内容定域，不随 Attempt/Runtime generation 改变。
             session_id: format!("artifact-{digest_hex}"),
             manifest,
-            replica: ArtifactReplica {
-                replica_id: format!("{}-primary", spec.artifact_uri),
+            plan: TransferPlan {
+                plan_id: format!("plan-{digest_hex}"),
                 artifact,
-                protocol: TransferProtocol::HttpsRangeV1,
-                locator: spec.replica_uri.clone(),
-                region: None,
-                priority: 0,
-                expires_at_unix_ms: None,
+                destination_peer_id,
+                sources,
+                part_sources,
             },
             destination,
             checkpoint_path,
@@ -531,6 +588,99 @@ async fn stage_artifacts(
         reused_parts += result.reused_parts;
     }
     Ok((downloaded_parts, reused_parts))
+}
+
+fn build_transfer_sources(
+    spec: &core_v1::ArtifactTransferSpec,
+    artifact: &ArtifactRef,
+    destination_peer_id: &str,
+    manifest: &TransferManifest,
+) -> Result<Vec<TransferSource>, RuntimeAgentError> {
+    if spec.sources.is_empty() {
+        return legacy_transfer_source(spec, artifact, destination_peer_id, manifest);
+    }
+    spec.sources
+        .iter()
+        .map(|source| {
+            let ticket: TransferTicket = serde_json::from_str(&source.transfer_ticket)
+                .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+            Ok(TransferSource {
+                peer: ArtifactPeer {
+                    peer_id: source.peer_id.clone(),
+                    kind: ArtifactPeerKind::Generic,
+                    authorized: true,
+                    residency: "control-plane-authorized".to_string(),
+                    trust_domain: "workspace".to_string(),
+                    classifications: BTreeSet::from(["assigned".to_string()]),
+                    policy_tags: BTreeSet::new(),
+                    healthy: true,
+                    latency_ms: 0,
+                    bandwidth_mbps: 0,
+                    cost_microunits: 0,
+                },
+                replica: ArtifactReplica {
+                    replica_id: source.replica_id.clone(),
+                    artifact: artifact.clone(),
+                    peer_id: source.peer_id.clone(),
+                    protocol: TransferProtocol::HttpsRangeV1,
+                    locator: source.locator.clone(),
+                    region: None,
+                    priority: 0,
+                    expires_at_unix_ms: Some(ticket.expires_at_unix_ms),
+                },
+                ticket,
+            })
+        })
+        .collect()
+}
+
+#[allow(deprecated)]
+fn legacy_transfer_source(
+    spec: &core_v1::ArtifactTransferSpec,
+    artifact: &ArtifactRef,
+    destination_peer_id: &str,
+    manifest: &TransferManifest,
+) -> Result<Vec<TransferSource>, RuntimeAgentError> {
+    if spec.replica_uri.is_empty() {
+        return Err(RuntimeAgentError::Artifact(
+            "TransferPlan has no source Peer".to_string(),
+        ));
+    }
+    Ok(vec![TransferSource {
+        peer: ArtifactPeer {
+            peer_id: "legacy-seed-peer".to_string(),
+            kind: ArtifactPeerKind::CentralSeed,
+            authorized: true,
+            residency: "legacy".to_string(),
+            trust_domain: "workspace".to_string(),
+            classifications: BTreeSet::from(["assigned".to_string()]),
+            policy_tags: BTreeSet::new(),
+            healthy: true,
+            latency_ms: 0,
+            bandwidth_mbps: 0,
+            cost_microunits: 0,
+        },
+        replica: ArtifactReplica {
+            replica_id: format!("{}-primary", spec.artifact_uri),
+            artifact: artifact.clone(),
+            peer_id: "legacy-seed-peer".to_string(),
+            protocol: TransferProtocol::HttpsRangeV1,
+            locator: spec.replica_uri.clone(),
+            region: None,
+            priority: 0,
+            expires_at_unix_ms: None,
+        },
+        ticket: TransferTicket {
+            ticket_id: "legacy-local-ticket".to_string(),
+            artifact: artifact.clone(),
+            source_peer_id: "legacy-seed-peer".to_string(),
+            destination_peer_id: destination_peer_id.to_string(),
+            allowed_parts: manifest.parts.iter().map(|part| part.index).collect(),
+            expires_at_unix_ms: u64::MAX,
+            max_bytes: artifact.size_bytes,
+            signature: "legacy-local-compatibility".to_string(),
+        },
+    }])
 }
 
 fn build_parts(
@@ -625,6 +775,9 @@ async fn finish_control_stop(
             .await
             .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
     }
+    time::sleep(Duration::from_millis(20)).await;
+    forward_workload_output(config, state)?;
+    publish_log_reference(config, state)?;
     state.observed_state = RuntimeObservedState::Stopped;
     enqueue_terminal(
         config,
@@ -641,6 +794,14 @@ fn heartbeat_and_renew(
     state: &mut AgentState,
     heartbeat_every: Duration,
 ) -> Result<(), RuntimeAgentError> {
+    state.outbox.enqueue(
+        &config.runtime.id,
+        node_to_control_plane::Body::Heartbeat(core_v1::NodeHeartbeat {
+            node: Some(config.node.clone()),
+            observed_generation: config.node.node_epoch,
+            observed_at: Some(now_timestamp()),
+        }),
+    )?;
     let Some(active) = state.assignment.as_mut() else {
         return Ok(());
     };
@@ -749,6 +910,9 @@ async fn stop_for_local_signal(
             .await
             .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
     }
+    time::sleep(Duration::from_millis(20)).await;
+    forward_workload_output(config, state)?;
+    publish_log_reference(config, state)?;
     state.observed_state = RuntimeObservedState::Stopped;
     enqueue_terminal(
         config,
@@ -801,6 +965,151 @@ fn enqueue_terminal(
             operation: None,
         }),
     )
+}
+
+fn forward_workload_output(
+    config: &RuntimeAgentConfig,
+    state: &mut AgentState,
+) -> Result<(), RuntimeAgentError> {
+    let output = state.child.drain_output(256);
+    if output.is_empty() {
+        return Ok(());
+    }
+    let log_path = workload_log_path(config);
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
+    for line in output {
+        let stream = match line.stream {
+            WorkloadOutputStream::Stdout => "stdout",
+            WorkloadOutputStream::Stderr => "stderr",
+        };
+        writeln!(log, "{stream}: {}", line.line)
+            .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
+        state.event_counter = state.event_counter.saturating_add(1);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "stream": stream,
+            "line": line.line,
+        }))
+        .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
+        state.outbox.enqueue(
+            &config.runtime.id,
+            node_to_control_plane::Body::StructuredEvent(core_v1::StructuredAgentEvent {
+                runtime: Some(runtime_ref(config)),
+                event_id: format!(
+                    "{}-{}-{}",
+                    config.runtime.id, config.runtime.generation, state.event_counter
+                ),
+                kind: "workload.log".to_string(),
+                schema_id: "cyrene.workload.log.v1".to_string(),
+                body,
+                observed_at: Some(now_timestamp()),
+            }),
+        )?;
+        if let Some((completed, total, unit)) = parse_progress_line(&line.line) {
+            state.outbox.enqueue(
+                &config.runtime.id,
+                node_to_control_plane::Body::RuntimeProgress(core_v1::RuntimeProgress {
+                    runtime: Some(runtime_ref(config)),
+                    completed_units: completed,
+                    total_units: total,
+                    unit,
+                    observed_at: Some(now_timestamp()),
+                }),
+            )?;
+        }
+    }
+    log.flush()
+        .map_err(|error| RuntimeAgentError::Child(error.to_string()))
+}
+
+fn parse_progress_line(line: &str) -> Option<(u64, u64, String)> {
+    let remainder = line.strip_prefix("CYRENE_PROGRESS ")?;
+    let mut fields = remainder.splitn(2, ' ');
+    let mut counts = fields.next()?.splitn(2, '/');
+    let completed = counts.next()?.parse().ok()?;
+    let total = counts.next()?.parse().ok()?;
+    let unit = fields.next().unwrap_or("units").trim().to_string();
+    (completed <= total && total > 0 && !unit.is_empty()).then_some((completed, total, unit))
+}
+
+fn publish_log_reference(
+    config: &RuntimeAgentConfig,
+    state: &mut AgentState,
+) -> Result<(), RuntimeAgentError> {
+    if state.log_reference_published {
+        return Ok(());
+    }
+    let log_path = workload_log_path(config);
+    if !log_path.exists() || fs::metadata(&log_path).is_ok_and(|metadata| metadata.len() == 0) {
+        return Ok(());
+    }
+    let (digest, size_bytes) = digest_file(&log_path)?;
+    let digest_hex = digest
+        .strip_prefix("sha256:")
+        .expect("generated SHA-256 digest");
+    let destination = config.artifact_destination_root.join(digest_hex);
+    if destination.exists() {
+        let (existing_digest, existing_size) = digest_file(&destination)?;
+        if existing_digest != digest || existing_size != size_bytes {
+            return Err(RuntimeAgentError::Artifact(
+                "existing log Artifact does not match its digest path".to_string(),
+            ));
+        }
+    } else {
+        let temporary = config.artifact_destination_root.join(format!(
+            ".log-publish-{}-{}",
+            config.runtime.id, config.runtime.generation
+        ));
+        fs::copy(&log_path, &temporary)
+            .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+        File::open(&temporary)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+        fs::rename(&temporary, &destination)
+            .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+    }
+    state.outbox.enqueue(
+        &config.runtime.id,
+        node_to_control_plane::Body::LogReference(core_v1::LogReference {
+            runtime: Some(runtime_ref(config)),
+            artifact_uri: format!("artifact://sha256/{digest_hex}"),
+            digest,
+            size_bytes,
+        }),
+    )?;
+    state.log_reference_published = true;
+    Ok(())
+}
+
+fn digest_file(path: &Path) -> Result<(String, u64), RuntimeAgentError> {
+    let mut input =
+        File::open(path).map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+    let size = input
+        .metadata()
+        .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?
+        .len();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok((format!("sha256:{:x}", hasher.finalize()), size))
+}
+
+fn workload_log_path(config: &RuntimeAgentConfig) -> PathBuf {
+    config.state_dir.join(format!(
+        "workload-{}-{}.log",
+        config.runtime.id, config.runtime.generation
+    ))
 }
 
 async fn flush_outbox(
@@ -888,14 +1197,6 @@ fn runtime_matches(config: &RuntimeAgentConfig, runtime: Option<&core_v1::Runtim
         .is_some_and(|identity| {
             identity.id == config.runtime.id && identity.generation == config.runtime.generation
         })
-}
-
-fn capability(id: &str) -> semantic_v1::Capability {
-    semantic_v1::Capability {
-        id: id.to_string(),
-        revision: 1,
-        properties: Default::default(),
-    }
 }
 
 fn now_unix_ms() -> u64 {

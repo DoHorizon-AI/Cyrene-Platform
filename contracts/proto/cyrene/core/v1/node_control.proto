@@ -67,6 +67,40 @@ enum PersistenceClass {
   PERSISTENCE_CLASS_EPHEMERAL = 2;
 }
 
+enum RestartCapability {
+  RESTART_CAPABILITY_UNSPECIFIED = 0;
+  RESTART_CAPABILITY_NONE = 1;
+  RESTART_CAPABILITY_HOST_SUPERVISED = 2;
+  RESTART_CAPABILITY_PROVIDER_SUPERVISED = 3;
+}
+
+enum NodeLifecycleState {
+  NODE_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  NODE_LIFECYCLE_STATE_ONLINE = 1;
+  NODE_LIFECYCLE_STATE_OFFLINE = 2;
+  NODE_LIFECYCLE_STATE_LOST = 3;
+  NODE_LIFECYCLE_STATE_TERMINATED = 4;
+}
+
+enum ConnectivityMode {
+  CONNECTIVITY_MODE_UNSPECIFIED = 0;
+  CONNECTIVITY_MODE_LOCAL = 1;
+  CONNECTIVITY_MODE_LAN_DIRECT = 2;
+  CONNECTIVITY_MODE_DIRECT = 3;
+  CONNECTIVITY_MODE_OVERLAY = 4;
+  CONNECTIVITY_MODE_RELAY = 5;
+}
+
+message ExecutionNodeDescriptor {
+  // Reuses the existing NodeRef identity; addresses and container ids are not identities.
+  // 复用既有 NodeRef，网络地址和容器 ID 都不属于 Node 身份。
+  NodeRef node = 1;
+  string node_type = 2;
+  // Explicit presence prevents an omitted value from silently becoming ephemeral.
+  // 显式 presence 避免未填写时被静默解释为临时节点。
+  optional bool persistent = 3;
+}
+
 enum DesiredRuntimeState {
   DESIRED_RUNTIME_STATE_UNSPECIFIED = 0;
   DESIRED_RUNTIME_STATE_RUNNING = 1;
@@ -134,6 +168,8 @@ message ExecutionAgentHello {
   // Development bootstrap proof. It is consumed once and never journaled.
   // 开发引导凭证只消费一次，禁止写入 journal。
   string enrollment_proof = 10;
+  ExecutionNodeDescriptor node = 11;
+  RestartCapability restart_capability = 12;
 }
 
 message ExecutionAgentWelcome {
@@ -146,14 +182,32 @@ message ExecutionAgentWelcome {
   cyrene.semantic.v1.ContractRevision selected_contract = 7;
 }
 
+message ArtifactTransferSource {
+  string peer_id = 1;
+  string replica_id = 2;
+  string locator = 3;
+  // Opaque, short-lived Artifact-plane ticket presented to the source Peer.
+  // 向 source Peer 出示的短期 Artifact Plane ticket。
+  string transfer_ticket = 4;
+}
+
+message ArtifactPartSource {
+  uint32 part_index = 1;
+  string peer_id = 2;
+  string replica_id = 3;
+}
+
 message ArtifactTransferSpec {
   string artifact_uri = 1;
   string digest = 2;
   uint64 size_bytes = 3;
   string manifest_digest = 4;
-  string replica_uri = 5;
+  string replica_uri = 5 [deprecated = true];
   uint64 part_size_bytes = 6;
   repeated string part_digests = 7;
+  repeated ArtifactTransferSource sources = 8;
+  repeated ArtifactPartSource part_sources = 9;
+  string destination_peer_id = 10;
 }
 
 message RuntimeAssignment {
@@ -185,6 +239,22 @@ message AssignmentAck {
 message ExecutionInventory {
   RuntimeRef runtime = 1;
   cyrene.semantic.v1.ProviderSnapshot provider_snapshot = 2;
+}
+
+enum ProviderRuntimeState {
+  PROVIDER_RUNTIME_STATE_UNSPECIFIED = 0;
+  PROVIDER_RUNTIME_STATE_RUNNING = 1;
+  PROVIDER_RUNTIME_STATE_PREEMPTED = 2;
+  PROVIDER_RUNTIME_STATE_TERMINATED = 3;
+  PROVIDER_RUNTIME_STATE_UNAVAILABLE = 4;
+}
+
+message ProviderRuntimeObservation {
+  cyrene.semantic.v1.Identity provider = 1;
+  RuntimeRef runtime = 2;
+  ProviderRuntimeState state = 3;
+  string reason_code = 4;
+  google.protobuf.Timestamp observed_at = 5;
 }
 
 message RuntimeHeartbeat {

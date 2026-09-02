@@ -19,6 +19,7 @@ pub enum DesiredRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderObservation {
     Running,
+    Preempted,
     Terminated,
     Unavailable,
     Unknown,
@@ -47,6 +48,7 @@ pub struct ReconcileEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeDisposition {
     Active,
+    NetworkPartitionCandidate,
     ExpectedTermination,
     GracefulTermination,
     UnexpectedLoss,
@@ -61,7 +63,10 @@ pub fn reconcile_runtime(evidence: ReconcileEvidence) -> RuntimeDisposition {
     {
         return RuntimeDisposition::GracefulTermination;
     }
-    if evidence.provider == ProviderObservation::Terminated {
+    if matches!(
+        evidence.provider,
+        ProviderObservation::Preempted | ProviderObservation::Terminated
+    ) {
         return if evidence.desired == DesiredRuntime::Stopped || evidence.stop_acknowledged {
             RuntimeDisposition::ExpectedTermination
         } else {
@@ -76,8 +81,12 @@ pub fn reconcile_runtime(evidence: ReconcileEvidence) -> RuntimeDisposition {
             return RuntimeDisposition::ExpectedTermination;
         }
         if evidence.desired == DesiredRuntime::Running
-            && evidence.provider != ProviderObservation::Running
+            && evidence.provider == ProviderObservation::Running
+            && evidence.agent_state.is_none()
         {
+            return RuntimeDisposition::NetworkPartitionCandidate;
+        }
+        if evidence.desired == DesiredRuntime::Running {
             return RuntimeDisposition::UnexpectedLoss;
         }
         return RuntimeDisposition::UnknownLoss;
@@ -126,5 +135,18 @@ mod tests {
             stop_acknowledged: false,
         });
         assert_eq!(disposition, RuntimeDisposition::UnexpectedLoss);
+    }
+
+    #[test]
+    fn provider_running_without_agent_is_network_partition_candidate() {
+        let disposition = reconcile_runtime(ReconcileEvidence {
+            desired: DesiredRuntime::Running,
+            agent_state: None,
+            agent_termination: None,
+            provider: ProviderObservation::Running,
+            lease: LeaseObservation::Expired,
+            stop_acknowledged: false,
+        });
+        assert_eq!(disposition, RuntimeDisposition::NetworkPartitionCandidate);
     }
 }

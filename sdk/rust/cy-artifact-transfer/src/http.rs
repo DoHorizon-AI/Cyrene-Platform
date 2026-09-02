@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use reqwest::blocking::Client;
-use reqwest::header::RANGE;
+use reqwest::header::{AUTHORIZATION, RANGE};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -34,6 +34,10 @@ pub enum TransferError {
     PartDigest(String),
     #[error("ARTIFACT_DIGEST_MISMATCH: {0}")]
     ArtifactDigest(String),
+    #[error("TRANSFER_AUTHORIZATION_FAILED: {0}")]
+    Authorization(String),
+    #[error("TRANSFER_POLICY_DENIED: {0}")]
+    Policy(String),
 }
 
 /// Exact resume evidence returned by a successful transfer.
@@ -97,7 +101,21 @@ impl HttpRangeTransfer {
                     .map(|checkpoint| checkpoint.completed_parts.contains(part))
                     .unwrap_or(false)
             })
-            .cloned()
+            .map(|part| {
+                let route = session
+                    .plan
+                    .route(part.index)
+                    .expect("validated transfer plan");
+                let source = session
+                    .plan
+                    .source(route)
+                    .expect("validated transfer source");
+                (
+                    part.clone(),
+                    source.replica.locator.clone(),
+                    source.ticket.signature.clone(),
+                )
+            })
             .collect::<VecDeque<_>>();
         let reused_parts = session.manifest.parts.len() - pending.len();
         let downloaded_parts = pending.len();
@@ -110,7 +128,6 @@ impl HttpRangeTransfer {
                 let completed = Arc::clone(&completed);
                 let first_error = Arc::clone(&first_error);
                 let client = self.client.clone();
-                let locator = session.replica.locator.clone();
                 let checkpoint_path = session.checkpoint_path.clone();
                 let part_root = part_root.clone();
                 scope.spawn(move || loop {
@@ -121,11 +138,11 @@ impl HttpRangeTransfer {
                         .lock()
                         .ok()
                         .and_then(|mut values| values.pop_front());
-                    let Some(part) = part else {
+                    let Some((part, locator, ticket)) = part else {
                         return;
                     };
-                    let result =
-                        download_part(&client, &locator, &part, &part_root).and_then(|_| {
+                    let result = download_part(&client, &locator, &ticket, &part, &part_root)
+                        .and_then(|_| {
                             let mut checkpoint = completed.lock().map_err(|_| {
                                 TransferError::Checkpoint("checkpoint lock is poisoned".to_string())
                             })?;
@@ -158,6 +175,7 @@ impl HttpRangeTransfer {
 fn download_part(
     client: &Client,
     locator: &str,
+    ticket: &str,
     part: &TransferPart,
     part_root: &Path,
 ) -> Result<(), TransferError> {
@@ -168,6 +186,7 @@ fn download_part(
     }
     let response = client
         .get(locator)
+        .header(AUTHORIZATION, format!("Bearer {ticket}"))
         .header(
             RANGE,
             format!("bytes={}-{}", part.start, part.end_exclusive - 1),
@@ -327,8 +346,14 @@ fn part_path(root: &Path, index: u32) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
-    use crate::{ArtifactKind, ArtifactRef, ArtifactReplica, TransferManifest, TransferProtocol};
+    use crate::{
+        ArtifactKind, ArtifactPeer, ArtifactPeerKind, ArtifactRef, ArtifactReplica,
+        TransferManifest, TransferPartSource, TransferPlan, TransferProtocol, TransferSource,
+        TransferTicket,
+    };
 
     fn existing_session(root: &Path, bytes: &[u8], digest: String) -> TransferSession {
         let destination = root.join("published-artifact");
@@ -340,26 +365,64 @@ mod tests {
             kind: ArtifactKind::Generic,
             manifest_digest: None,
         };
-        TransferSession {
-            session_id: "session-1".to_string(),
-            manifest: TransferManifest {
-                artifact: artifact.clone(),
-                part_size_bytes: bytes.len() as u64,
-                parts: vec![TransferPart {
-                    index: 0,
-                    start: 0,
-                    end_exclusive: bytes.len() as u64,
-                    digest,
-                }],
+        let manifest = TransferManifest {
+            artifact: artifact.clone(),
+            part_size_bytes: bytes.len() as u64,
+            parts: vec![TransferPart {
+                index: 0,
+                start: 0,
+                end_exclusive: bytes.len() as u64,
+                digest,
+            }],
+        };
+        let source = TransferSource {
+            peer: ArtifactPeer {
+                peer_id: "seed-peer-1".to_string(),
+                kind: ArtifactPeerKind::CentralSeed,
+                authorized: true,
+                residency: "fixture".to_string(),
+                trust_domain: "fixture".to_string(),
+                classifications: BTreeSet::from(["fixture".to_string()]),
+                policy_tags: BTreeSet::new(),
+                healthy: true,
+                latency_ms: 0,
+                bandwidth_mbps: 0,
+                cost_microunits: 0,
             },
             replica: ArtifactReplica {
                 replica_id: "replica-1".to_string(),
-                artifact,
+                artifact: artifact.clone(),
+                peer_id: "seed-peer-1".to_string(),
                 protocol: TransferProtocol::HttpsRangeV1,
                 locator: "https://unused.example.test/artifact".to_string(),
                 region: None,
                 priority: 0,
                 expires_at_unix_ms: None,
+            },
+            ticket: TransferTicket {
+                ticket_id: "ticket-1".to_string(),
+                artifact: artifact.clone(),
+                source_peer_id: "seed-peer-1".to_string(),
+                destination_peer_id: "destination-peer".to_string(),
+                allowed_parts: BTreeSet::from([0]),
+                expires_at_unix_ms: u64::MAX,
+                max_bytes: artifact.size_bytes,
+                signature: "fixture".to_string(),
+            },
+        };
+        TransferSession {
+            session_id: "session-1".to_string(),
+            manifest,
+            plan: TransferPlan {
+                plan_id: "plan-1".to_string(),
+                artifact,
+                destination_peer_id: "destination-peer".to_string(),
+                sources: vec![source],
+                part_sources: vec![TransferPartSource {
+                    part_index: 0,
+                    peer_id: "seed-peer-1".to_string(),
+                    replica_id: "replica-1".to_string(),
+                }],
             },
             destination,
             checkpoint_path: root.join("checkpoint.json"),

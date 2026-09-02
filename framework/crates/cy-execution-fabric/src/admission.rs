@@ -25,7 +25,7 @@ pub struct FabricContractError {
 }
 
 impl FabricContractError {
-    fn new(reason_code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(reason_code: &'static str, message: impl Into<String>) -> Self {
         Self {
             reason_code,
             message: message.into(),
@@ -95,6 +95,10 @@ impl ObservationCursor {
 /// Validate an Execution Agent hello without persisting its bootstrap proof.
 pub fn validate_hello(hello: &core_v1::ExecutionAgentHello) -> Result<(), FabricContractError> {
     validate_runtime(hello.runtime.as_ref())?;
+    let node = hello.node.as_ref().ok_or_else(|| {
+        FabricContractError::new("NODE_IDENTITY_REQUIRED", "Node descriptor is required")
+    })?;
+    crate::node::validate_node_descriptor(node)?;
     let attachment = core_v1::ExecutionAttachmentType::try_from(hello.attachment_type)
         .map_err(|_| FabricContractError::new("UNKNOWN_ENUM_VALUE", "unknown attachment type"))?;
     if attachment == core_v1::ExecutionAttachmentType::Unspecified {
@@ -111,8 +115,43 @@ pub fn validate_hello(hello: &core_v1::ExecutionAgentHello) -> Result<(), Fabric
             "persistence class is required",
         ));
     }
-    if hello.min_protocol_version < 2
-        || hello.max_protocol_version < hello.min_protocol_version
+    let persistent = node.persistent.expect("validated Node persistence");
+    let expected_persistence = if persistent {
+        core_v1::PersistenceClass::Persistent
+    } else {
+        core_v1::PersistenceClass::Ephemeral
+    };
+    if persistence != expected_persistence {
+        return Err(FabricContractError::new(
+            "NODE_PERSISTENCE_MISMATCH",
+            "persistent disagrees with the compatibility persistence_class",
+        ));
+    }
+    let restart = core_v1::RestartCapability::try_from(hello.restart_capability).map_err(|_| {
+        FabricContractError::new("UNKNOWN_ENUM_VALUE", "unknown restart capability")
+    })?;
+    let restart_matches_attachment = matches!(
+        (attachment, restart),
+        (
+            core_v1::ExecutionAttachmentType::ContainerAgent,
+            core_v1::RestartCapability::None
+        ) | (
+            core_v1::ExecutionAttachmentType::HostAgent,
+            core_v1::RestartCapability::HostSupervised
+        ) | (
+            core_v1::ExecutionAttachmentType::ProviderManaged,
+            core_v1::RestartCapability::ProviderSupervised
+        )
+    );
+    if !restart_matches_attachment {
+        return Err(FabricContractError::new(
+            "RESTART_CAPABILITY_INVALID",
+            "restart capability is not provided by this attachment type",
+        ));
+    }
+    if hello.min_protocol_version == 0
+        || hello.min_protocol_version > 2
+        || hello.max_protocol_version < 2
         || hello.agent_version.is_empty()
     {
         return Err(FabricContractError::new(
@@ -136,6 +175,12 @@ pub fn validate_hello(hello: &core_v1::ExecutionAgentHello) -> Result<(), Fabric
             "workspace identity is required",
         ));
     }
+    crate::capability::validate_execution_capability(
+        &hello.capabilities,
+        attachment,
+        persistent,
+        restart,
+    )?;
     Ok(())
 }
 
@@ -228,7 +273,7 @@ pub fn validate_assignment(
         if artifact.artifact_uri != format!("artifact://sha256/{}", &artifact.digest[7..])
             || artifact.size_bytes == 0
             || artifact.part_size_bytes == 0
-            || artifact.replica_uri.is_empty()
+            || (artifact.sources.is_empty() && legacy_replica_missing(artifact))
         {
             return Err(FabricContractError::new(
                 "ARTIFACT_TRANSFER_INVALID",
@@ -238,8 +283,46 @@ pub fn validate_assignment(
         if !artifact.manifest_digest.is_empty() {
             validate_sha256(&artifact.manifest_digest, "Artifact manifest digest")?;
         }
+        if !artifact.sources.is_empty() {
+            if artifact.destination_peer_id.is_empty()
+                || artifact.part_sources.len() != artifact.part_digests.len()
+                || artifact.sources.iter().any(|source| {
+                    source.peer_id.is_empty()
+                        || source.replica_id.is_empty()
+                        || !source.locator.starts_with("https://")
+                        || source.transfer_ticket.is_empty()
+                })
+            {
+                return Err(FabricContractError::new(
+                    "ARTIFACT_TRANSFER_PLAN_INVALID",
+                    "source Peers, destination Peer, tickets, and per-part routes are required",
+                ));
+            }
+            let expected_parts = artifact.part_digests.len();
+            let routed = artifact
+                .part_sources
+                .iter()
+                .map(|route| route.part_index)
+                .collect::<BTreeSet<_>>();
+            if routed.len() != expected_parts
+                || routed
+                    .iter()
+                    .enumerate()
+                    .any(|(index, part)| usize::try_from(*part).ok() != Some(index))
+            {
+                return Err(FabricContractError::new(
+                    "ARTIFACT_PART_ROUTING_INVALID",
+                    "every Artifact part must have exactly one source route",
+                ));
+            }
+        }
     }
     Ok(lease)
+}
+
+#[allow(deprecated)]
+fn legacy_replica_missing(artifact: &core_v1::ArtifactTransferSpec) -> bool {
+    artifact.replica_uri.is_empty()
 }
 
 /// Validate a renewed Lease using the canonical Lease transition rules.
@@ -451,6 +534,44 @@ mod tests {
         }
     }
 
+    fn hello(
+        attachment: core_v1::ExecutionAttachmentType,
+        persistent: bool,
+        restart: core_v1::RestartCapability,
+    ) -> core_v1::ExecutionAgentHello {
+        core_v1::ExecutionAgentHello {
+            runtime: Some(core_v1::RuntimeRef {
+                identity: Some(identity("runtime-1", 1)),
+            }),
+            scope: Some(core_v1::AccountScope {
+                user_id: String::new(),
+                organization_id: "organization-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+            }),
+            attachment_type: attachment as i32,
+            persistence_class: if persistent {
+                core_v1::PersistenceClass::Persistent as i32
+            } else {
+                core_v1::PersistenceClass::Ephemeral as i32
+            },
+            agent_version: "test".to_string(),
+            min_protocol_version: 2,
+            max_protocol_version: 2,
+            resume_token: "opaque-resume".to_string(),
+            capabilities: vec![crate::execution_capability(attachment, persistent, restart)],
+            enrollment_proof: String::new(),
+            node: Some(core_v1::ExecutionNodeDescriptor {
+                node: Some(core_v1::NodeRef {
+                    node_id: "node-1".to_string(),
+                    node_epoch: 1,
+                }),
+                node_type: "fixture".to_string(),
+                persistent: Some(persistent),
+            }),
+            restart_capability: restart as i32,
+        }
+    }
+
     #[test]
     fn cursor_accepts_identical_replay_and_rejects_gaps() {
         let mut cursor = ObservationCursor::default();
@@ -470,25 +591,40 @@ mod tests {
 
     #[test]
     fn resume_token_is_a_valid_reconnect_proof() {
-        let hello = core_v1::ExecutionAgentHello {
-            runtime: Some(core_v1::RuntimeRef {
-                identity: Some(identity("runtime-1", 1)),
-            }),
-            scope: Some(core_v1::AccountScope {
-                user_id: String::new(),
-                organization_id: "organization-1".to_string(),
-                workspace_id: "workspace-1".to_string(),
-            }),
-            attachment_type: core_v1::ExecutionAttachmentType::ContainerAgent as i32,
-            persistence_class: core_v1::PersistenceClass::Ephemeral as i32,
-            agent_version: "test".to_string(),
-            min_protocol_version: 2,
-            max_protocol_version: 2,
-            resume_token: "opaque-resume".to_string(),
-            capabilities: vec![],
-            enrollment_proof: String::new(),
-        };
+        let hello = hello(
+            core_v1::ExecutionAttachmentType::ContainerAgent,
+            false,
+            core_v1::RestartCapability::None,
+        );
         assert_eq!(validate_hello(&hello), Ok(()));
+
+        let mut incompatible = hello;
+        incompatible.min_protocol_version = 3;
+        incompatible.max_protocol_version = 3;
+        assert_eq!(
+            validate_hello(&incompatible).unwrap_err().reason_code,
+            "PROTOCOL_INCOMPATIBLE"
+        );
+    }
+
+    #[test]
+    fn host_and_provider_managed_restart_contracts_are_admitted() {
+        assert_eq!(
+            validate_hello(&hello(
+                core_v1::ExecutionAttachmentType::HostAgent,
+                true,
+                core_v1::RestartCapability::HostSupervised,
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            validate_hello(&hello(
+                core_v1::ExecutionAttachmentType::ProviderManaged,
+                false,
+                core_v1::RestartCapability::ProviderSupervised,
+            )),
+            Ok(())
+        );
     }
 
     #[test]
