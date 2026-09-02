@@ -1,6 +1,6 @@
 # Distributed Execution Fabric v1
 
-Status: **FROZEN FOR V1 IMPLEMENTATION**
+Status: **V1 REFERENCE VERTICAL IMPLEMENTED**
 
 Scope: Cyrene-Platform contracts, generic control-plane orchestration, execution
 agents, and Artifact transfer.
@@ -8,7 +8,7 @@ agents, and Artifact transfer.
 Non-goal: Product semantics, global scheduling, a production SaaS identity
 system, or a global data-delivery network.
 
-状态：**已冻结，供 v1 实现使用**。本文只约束 Platform 的通用执行 Contract、
+状态：**v1 reference vertical 已实现**。本文只约束 Platform 的通用执行 Contract、
 控制面编排、Execution Agent 与 Artifact 传输；不定义 Product 语义、全球调度、
 生产级 SaaS 身份系统或全球数据分发网络。
 
@@ -90,7 +90,13 @@ The frozen logical attachment types are:
 | `CONTAINER_AGENT` | Runtime Agent runs inside the assigned container, dials out, stages artifacts, and supervises one child workload without host privileges. | `EPHEMERAL` |
 | `PROVIDER_MANAGED` | A provider adapter creates/stops the workload and contributes provider observations; a Runtime Agent may still run inside the workload when available. | provider-defined, normally `EPHEMERAL` |
 
-`PersistenceClass` is frozen as `PERSISTENT` or `EPHEMERAL`. Examples:
+Every Node carries an explicit `persistent: bool`, orthogonal to `node_type`.
+The older `PersistenceClass` wire field remains only as a compatibility
+projection and admission rejects disagreement with the boolean. A persistent
+Node transitions `ONLINE -> OFFLINE -> ONLINE` under the same `NodeId` and a
+new `NodeSessionId`; an ephemeral Node may close as
+`ONLINE -> LOST -> TERMINATED` and its replacement receives a new `NodeId`.
+Examples:
 
 - local WSL or Linux: `HOST_AGENT + PERSISTENT`;
 - owned GPU workstation: `HOST_AGENT + PERSISTENT`;
@@ -101,6 +107,12 @@ The frozen logical attachment types are:
 `ExecutionAttachment` 描述控制面如何到达执行权威，不创造新的 Kernel 实体。
 `HOST_AGENT` 复用现有 Node Agent；`CONTAINER_AGENT` 是容器内主动出站的无特权
 Runtime Agent；`PROVIDER_MANAGED` 由 Provider Adapter 创建、停止并观察 workload。
+`node_type` 与显式 `persistent` 正交，后者直接驱动断线、Lease 过期和重连行为。
+
+Restart is also explicit: `NONE` for an unsupervised container,
+`HOST_SUPERVISED` for a Host Agent, and `PROVIDER_SUPERVISED` for a Provider
+Adapter. The contract never promises that a destroyed container can restart
+itself.
 
 ## 4. Identity model / 身份模型
 
@@ -212,6 +224,10 @@ classifies terminal observations as:
 - `EXTERNAL_TERMINATION`: the provider confirms stop/preemption/host action;
 - `UNKNOWN_LOSS`: evidence is contradictory or insufficient.
 
+If the Agent and Lease disappear while an independent Provider still reports
+`RUNNING`, reconciliation yields a network-partition candidate rather than a
+crash classification.
+
 Runtime generation and Lease fence are both checked. A stale generation,
 expired Lease, wrong holder, or wrong fence is rejected before any child
 mutation. Newer observations are not overwritten by duplicate or out-of-order
@@ -258,10 +274,17 @@ Runtime 更新只能创建更高 generation，并在 readiness 后切换，再 d
 ## 9. Artifact model / Artifact 模型
 
 The Artifact Plane remains separate from control. Existing `ArtifactRef` and
-`ArtifactManifest` retain identity authority. v1 adds these transport records:
+`ArtifactManifest` retain identity authority. `Node != ArtifactPeer`; a Node
+may advertise a Peer capability, while an object-store gateway can be a Peer
+without being a Node. v1 adds these transport records:
 
+- `ArtifactPeer`: one policy/health-bearing transfer endpoint;
 - `ArtifactReplica`: one provider/private acquisition location for an existing
   Artifact identity, with region, protocol, priority, expiry, and capabilities;
+- `TransferPlan`: per-part source routing, permitting different Peers for
+  different chunks from the first contract version;
+- `TransferTicket`: short-lived Artifact/source/destination/chunk/expiry/byte
+  scoped authorization issued after policy selection;
 - `TransferSession`: one resumable transfer of one Artifact to one target;
 - `TransferPart`: bounded byte range and expected per-part SHA-256;
 - `TransferCheckpoint`: durably completed parts and manifest/session identity.
@@ -282,9 +305,14 @@ retry, whole-Artifact digest verification, and atomic publish by rename/link
 only after complete verification. A partial destination is never published as
 the Artifact path.
 
-The contract permits later replica selection, regional mirrors, LAN peers,
-P2P, Dragonfly, or cloud-native providers. v1 does not implement a global CDN,
-P2P discovery, BitTorrent-like exchange, or a Dragonfly scheduler.
+`ArtifactSourceResolver -> TransferPlanner -> TransferPlan` is owned by one
+Artifact-plane coordinator. It filters authorization, residency, trust domain,
+classification, and policy before considering health, latency, bandwidth, or
+cost. The MVP planner routes all chunks to one selected seed, while the wire
+and Rust plan accept per-chunk multi-Peer routes. The contract permits later
+regional mirrors, LAN peers, P2P, Dragonfly, or cloud-native providers. v1 does
+not implement a global CDN, P2P discovery, BitTorrent-like exchange, or a
+Dragonfly scheduler.
 
 第一版只实现 HTTPS Range、多 part 有界并发、part/full digest、checkpoint resume 和
 atomic publish。区域副本与 P2P 是 provider extension，不进入 Artifact identity。
@@ -301,8 +329,10 @@ ExternalSource -> AcquisitionProvider -> SourceImportJob
 
 `ExternalSource` is a provider-specific requested source; `SourceSnapshot` is
 an immutable, digest-bound result; `SourceImportJob` is a generic operation
-reference; `AcquisitionProvider` is a replaceable port. The MVP freezes the
-contract and fake fixture only. It does not claim China/US regional mirrors.
+reference; `AcquisitionProvider` is a replaceable port. The reference HTTP
+provider streams an HTTP/HF-like fixture into a temporary file, verifies its
+digest, and atomically publishes a canonical internal Artifact. It does not
+claim China/US regional mirrors.
 
 Runtime 启动只消费内部 Artifact。GitHub/Hugging Face 等外部来源先由可替换
 AcquisitionProvider 导入并冻结为 SourceSnapshot，再进入 Artifact/Replica 流程。
@@ -334,10 +364,11 @@ credentials.
 optionally, direct Artifact/Endpoint connectivity. Identity never depends on a
 Tailscale IP, container IP, host IP, relay address, or cloud-private address.
 
-The MVP provider is outbound TLS/gRPC plus ordinary HTTPS. Future providers may
-be relay-only, Tailscale-integrated, native direct, or cloud-private-network
-implementations. v1 does not implement WireGuard, STUN, ICE, NAT traversal, or
-a global relay network.
+The contract modes are `LOCAL`, `LAN_DIRECT`, `DIRECT`, `OVERLAY`, and `RELAY`.
+The MVP implements outbound-only `LOCAL` and relay-first `RELAY` providers over
+TLS/gRPC plus ordinary HTTPS. Future providers may be Tailscale-integrated,
+native direct, or cloud-private-network implementations. v1 does not implement
+WireGuard, STUN, ICE, NAT traversal, or a global relay network.
 
 ## 14. Reliability invariants / 可靠性不变量
 

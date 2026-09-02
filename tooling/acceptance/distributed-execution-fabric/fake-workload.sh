@@ -7,8 +7,12 @@ set -eu
 state_dir=$1
 generation=${CYRENE_RUNTIME_GENERATION:?CYRENE_RUNTIME_GENERATION is required}
 printf '%s\n' "running" > "${state_dir}/workload-running-${generation}"
+printf '%s\n' "fixture workload generation ${generation} started"
+printf '%s\n' "CYRENE_PROGRESS 1/10 steps"
 
 graceful_exit() {
+    printf '%s\n' "fixture workload generation ${generation} stopping"
+    printf '%s\n' "CYRENE_PROGRESS 10/10 steps"
     printf '%s\n' "graceful" > "${state_dir}/workload-graceful-${generation}"
     exit 0
 }
