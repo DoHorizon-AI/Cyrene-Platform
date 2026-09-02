@@ -22,6 +22,7 @@ members = [
     "framework/crates/cy-platform-api",
     "framework/crates/cy-capability-execution-service",
     "framework/crates/cy-execution-fabric",
+    "framework/crates/cy-workspace-fabric",
     "sdk/rust/cy-worker-sdk",
     "sdk/rust/cy-artifact-transfer",
 

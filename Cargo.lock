@@ -554,6 +554,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-workspace-fabric"
+version = "0.1.0"
+dependencies = [
+ "cy-execution-fabric",
+ "cy-proto",
+ "prost-types",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
 name = "cyrene-kernel"
 version = "0.1.0"
 dependencies = [

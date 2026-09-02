@@ -20,6 +20,8 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `astrbot-capability-worker/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `distributed-execution-fabric/` | Execution attachment, Runtime Agent, and Artifact transfer scenarios. | Execution attachment、Runtime Agent 与 Artifact transfer 场景。 |
+| `distributed-workspace-fabric/` | Identity discovery and relay connectivity scenarios. | 身份发现与 Relay 连接场景。 |
 | `kernel-semantic/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `worker-control/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 

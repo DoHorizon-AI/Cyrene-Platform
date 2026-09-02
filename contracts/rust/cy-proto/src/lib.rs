@@ -88,6 +88,12 @@ pub mod cyrene {
             tonic::include_proto!("cyrene.provider.v1");
         }
     }
+
+    pub mod workspace {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.workspace.v1");
+        }
+    }
 }
 
 /// Product-facing language-neutral capability execution service.
@@ -108,6 +114,8 @@ pub use cyrene::provider::v1 as provider_v1;
 pub use cyrene::sandbox::v1 as sandbox_v1;
 /// Transport projection of the Kernel Semantic Contract v1 nouns.
 pub use cyrene::semantic::v1 as semantic_v1;
+/// Transport-neutral Workspace discovery and relay API projection.
+pub use cyrene::workspace::v1 as workspace_v1;
 
 #[cfg(test)]
 #[allow(deprecated)]
