@@ -27,12 +27,26 @@ done
 runtime_control_port=19443
 
 cleanup() {
+  local exit_code=$?
+  if [[ "${exit_code}" -ne 0 ]]; then
+    printf '%s\n' '--- Workspace container ---' >&2
+    docker logs "${container_name}" >&2 || true
+    printf '%s\n' '--- Relay log ---' >&2
+    tail -100 "${proof_root}/relay.log" >&2 || true
+    printf '%s\n' '--- Runtime control trace ---' >&2
+    tail -100 "${proof_root}/state/runtime-control.trace" >&2 || true
+    printf '%s\n' '--- Workspace connector trace ---' >&2
+    tail -100 "${proof_root}/state/workspace-connector.trace" >&2 || true
+    printf '%s\n' '--- Artifact trace ---' >&2
+    tail -100 "${proof_root}/artifact.trace" >&2 || true
+  fi
   docker rm -f "${container_name}" >/dev/null 2>&1 || true
   if [[ -n "${relay_pid}" ]]; then kill "${relay_pid}" >/dev/null 2>&1 || true; fi
   if [[ -n "${artifact_pid}" ]]; then kill "${artifact_pid}" >/dev/null 2>&1 || true; fi
   if [[ "${proof_root}" = /tmp/cyrene-dwf-v1.* ]]; then rm -rf "${proof_root}"; fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 for command in cargo docker grep openssl python3 sha256sum; do
   command -v "${command}" >/dev/null || {

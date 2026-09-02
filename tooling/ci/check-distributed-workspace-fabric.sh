@@ -63,6 +63,8 @@ rg -q 'trait WorkspaceApi' "${workspace_crate}/src/api.rs"
 rg -q 'LocalWorkspaceClient' "${workspace_crate}/src/api.rs"
 rg -q 'RelayConnectivityProvider' "${workspace_crate}/src/bin/cy-workspace-fabric-fixture.rs"
 rg -q 'cy-execution-fabric' "${workspace_crate}/Cargo.toml"
+rg -q 'env -u CYRENE_WORKSPACE_SESSION_CREDENTIAL CYRENE_RUNTIME_GENERATION=1' \
+  "${acceptance_root}/workspace-entrypoint.sh"
 
 if rg -n -i 'host_ip|docker_ip|tailscale_ip|container_id|local_path|artifact_peer' "${workspace_proto}"; then
   printf 'Workspace contract exposes deployment-local addressing or transfer details\n' >&2

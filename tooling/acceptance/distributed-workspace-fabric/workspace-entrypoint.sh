@@ -72,7 +72,7 @@ connector_pid=$!
 # The Runtime Agent receives only its Node/workload enrollment scope. It does
 # not inherit the frontend or Workspace relay session credentials.
 # Runtime Agent 只接收 Node/workload enrollment scope，不继承用户会话凭证。
-env -u CYRENE_WORKSPACE_SESSION_CREDENTIAL \
+env -u CYRENE_WORKSPACE_SESSION_CREDENTIAL CYRENE_RUNTIME_GENERATION=1 \
   /runtime/cy-runtime-agent run \
   --control-plane "https://cyrene-control.test:${CYRENE_RUNTIME_CONTROL_PORT}" \
   --control-plane-server-name cyrene-control.test \
