@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in cargo docker openssl python3 rg sha256sum; do
+for command in cargo docker grep openssl python3 sha256sum; do
   command -v "${command}" >/dev/null || {
     printf 'required command is missing: %s\n' "${command}" >&2
     exit 1
@@ -66,7 +66,7 @@ chmod 600 "${proof_root}/certs/"*.key
 
 cd "${repo_root}"
 cargo build --locked --release -p cy-workspace-fabric --bin cy-workspace-fabric-fixture -p cy-runtime-agent --bins
-if ! docker image ls --format '{{.Repository}}:{{.Tag}}' | rg -Fxq "${base_image}"; then
+if ! docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -Fxq "${base_image}"; then
   if [[ "${CYRENE_ACCEPTANCE_PULL_IMAGE:-0}" != "1" ]]; then
     printf 'base image is not local: %s; set CYRENE_ACCEPTANCE_PULL_IMAGE=1 to pull it\n' "${base_image}" >&2
     exit 1
@@ -132,7 +132,7 @@ run_frontend() {
 }
 
 start_relay
-wait_for 'relay startup' "kill -0 '${relay_pid}' && rg -q RELAY_STARTED '${proof_root}/relay.trace'"
+wait_for 'relay startup' "kill -0 '${relay_pid}' && grep -q RELAY_STARTED '${proof_root}/relay.trace'"
 
 docker run -d --name "${container_name}" \
   --user "$(id -u):$(id -g)" \
@@ -161,28 +161,28 @@ docker run -d --name "${container_name}" \
   --entrypoint /bin/bash \
   "${base_image}" /fixture/workspace-entrypoint.sh >/dev/null
 
-wait_for 'outbound Workspace relay registration' "rg -q WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace'"
+wait_for 'outbound Workspace relay registration' "grep -q WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace'"
 run_frontend frontend-start > "${proof_root}/frontend-start.out"
-rg -q WORKSPACE_DISCOVERED_BY_IDENTITY=PASS "${proof_root}/frontend-start.out"
-rg -q REMOTE_FRONTEND_OPERATION=operation-1@1 "${proof_root}/frontend-start.out"
+grep -q WORKSPACE_DISCOVERED_BY_IDENTITY=PASS "${proof_root}/frontend-start.out"
+grep -q REMOTE_FRONTEND_OPERATION=operation-1@1 "${proof_root}/frontend-start.out"
 
-wait_for 'Execution Fabric assignment release' "rg -q 'ASSIGNMENT_RELEASED generation=1' '${proof_root}/state/runtime-control.trace'"
-wait_for 'Artifact Plane transfer' "test -f '${published_path}' && rg -q RANGE_COMPLETE '${proof_root}/artifact.trace'"
-wait_for 'Runtime Agent progress' "rg -q 'PROGRESS generation=1 completed=1 total=10 unit=steps' '${proof_root}/state/runtime-control.trace'"
-wait_for 'Runtime Agent control reconnect' "test \$(rg -c 'ENROLLED runtime=runtime-workspace-fixture generation=1' '${proof_root}/state/runtime-control.trace') -ge 2"
+wait_for 'Execution Fabric assignment release' "grep -q 'ASSIGNMENT_RELEASED generation=1' '${proof_root}/state/runtime-control.trace'"
+wait_for 'Artifact Plane transfer' "test -f '${published_path}' && grep -q RANGE_COMPLETE '${proof_root}/artifact.trace'"
+wait_for 'Runtime Agent progress' "grep -q 'PROGRESS generation=1 completed=1 total=10 unit=steps' '${proof_root}/state/runtime-control.trace'"
+wait_for 'Runtime Agent control reconnect' "test \$(grep -c 'ENROLLED runtime=runtime-workspace-fixture generation=1' '${proof_root}/state/runtime-control.trace') -ge 2"
 
 kill "${relay_pid}"
 wait "${relay_pid}" 2>/dev/null || true
 relay_pid=""
-wait_for 'Workspace connector detects relay loss' "rg -q WORKSPACE_RELAY_DISCONNECTED '${proof_root}/state/workspace-connector.trace'"
+wait_for 'Workspace connector detects relay loss' "grep -q WORKSPACE_RELAY_DISCONNECTED '${proof_root}/state/workspace-connector.trace'"
 start_relay
-wait_for 'relay restart' "kill -0 '${relay_pid}' && test \$(rg -c RELAY_STARTED '${proof_root}/relay.trace') -ge 2"
-wait_for 'Workspace connector reconnect' "test \$(rg -c WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace') -ge 2"
+wait_for 'relay restart' "kill -0 '${relay_pid}' && test \$(grep -c RELAY_STARTED '${proof_root}/relay.trace') -ge 2"
+wait_for 'Workspace connector reconnect' "test \$(grep -c WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace') -ge 2"
 
 run_frontend frontend-observe > "${proof_root}/frontend-observe.out"
-rg -q RELAY_DISCONNECT_RECONNECT=PASS "${proof_root}/frontend-observe.out"
-rg -q WORKSPACE_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-observe.out"
-rg -q REMOTE_FRONTEND_ARTIFACT="${artifact_uri}" "${proof_root}/frontend-observe.out"
+grep -q RELAY_DISCONNECT_RECONNECT=PASS "${proof_root}/frontend-observe.out"
+grep -q WORKSPACE_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-observe.out"
+grep -q REMOTE_FRONTEND_ARTIFACT="${artifact_uri}" "${proof_root}/frontend-observe.out"
 
 test "$(sha256sum "${published_path}" | cut -d ' ' -f 1)" = "${source_digest}"
 test "$(docker inspect -f '{{.HostConfig.Privileged}}' "${container_name}")" = false
