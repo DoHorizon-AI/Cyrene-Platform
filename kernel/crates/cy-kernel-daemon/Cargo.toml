@@ -33,5 +33,5 @@ nix = { version = "0.31", features = ["socket"] }
 
 [dev-dependencies]
 libc = "0.2"
-tower = "0.4"
+tower = "0.5"
 tempfile = "3.8"

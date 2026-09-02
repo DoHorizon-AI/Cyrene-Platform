@@ -22,4 +22,4 @@ sha2 = "0.11"
 
 [dev-dependencies]
 jsonschema = { version = "0.18", default-features = false, features = ["draft202012"] }
-toml = "0.8"
+toml = "1.1"
