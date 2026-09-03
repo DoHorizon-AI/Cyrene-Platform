@@ -318,9 +318,12 @@ fn platform_root() -> PathBuf {
 fn plugins_root() -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("CYRENE_PLUGINS_WORKTREE") {
         let p = PathBuf::from(raw);
-        if p.exists() {
-            return Some(p);
-        }
+        assert!(
+            p.exists(),
+            "CYRENE_PLUGINS_WORKTREE points to a missing checkout: {}",
+            p.display()
+        );
+        return Some(p);
     }
     let sibling = platform_root()
         .parent()
@@ -339,14 +342,14 @@ fn plugins_root() -> Option<PathBuf> {
     None
 }
 
-fn provider_manifest(root: &Path) -> Option<PluginManifest> {
+fn provider_manifest(root: &Path) -> PluginManifest {
     let path = root.join("plugins/providers/model-api-connector/plugin.manifest.json");
-    if !path.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    normalize_official_manifest(value).ok()
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    normalize_official_manifest(value)
+        .unwrap_or_else(|error| panic!("failed to normalize {}: {error}", path.display()))
 }
 
 fn worker_options(
@@ -475,16 +478,11 @@ async fn wait_for(flag: &AtomicBool) {
 async fn real_ces_provider_cancellation_chat_and_typed_method_support() {
     let Some(plugins) = plugins_root() else {
         eprintln!(
-            "Skipping real_ces_provider_cancellation_chat_and_typed_method_support: CYRENE_PLUGINS_WORKTREE is not set and sibling plugins checkout was not found. This cross-repository TCK requires the Cyrene-Plugins-Official worktree."
+            "Skipping real_ces_provider_cancellation_chat_and_typed_method_support: no Plugins checkout was configured or discovered. This cross-repository TCK requires the Cyrene-Plugins-Official worktree."
         );
         return;
     };
-    let Some(manifest) = provider_manifest(&plugins) else {
-        eprintln!(
-            "Skipping real_ces_provider_cancellation_chat_and_typed_method_support: plugin.manifest.json not found in plugins worktree."
-        );
-        return;
-    };
+    let manifest = provider_manifest(&plugins);
     let upstream = FakeUpstream::start();
     let mut server =
         TestServer::start(manifest.clone(), worker_options(&plugins, &upstream, true)).await;

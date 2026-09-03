@@ -33,10 +33,14 @@ class RangeHandler(http.server.BaseHTTPRequestHandler):
         if not header.startswith("bytes=") or "," in header:
             self.send_error(416)
             return
-        start_text, end_text = header[6:].split("-", 1)
         size = self.artifact.stat().st_size
-        start = int(start_text)
-        end = min(int(end_text), size - 1)
+        try:
+            start_text, end_text = header[6:].split("-", 1)
+            start = int(start_text)
+            end = size - 1 if not end_text else min(int(end_text), size - 1)
+        except ValueError:
+            self.send_error(416)
+            return
         if start < 0 or start > end:
             self.send_error(416)
             return
