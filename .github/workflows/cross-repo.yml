@@ -25,7 +25,7 @@ jobs:
     env:
       CROSS_REPO_REQUIRED: ${{ github.event.inputs.cross_repo_required || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check cross-repo credentials
         id: infra-check
@@ -40,7 +40,7 @@ jobs:
       - name: Checkout exact Plugins runtime for cross-repository TCK
         id: checkout-plugins
         continue-on-error: true
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Plugins-Official
           ref: 7906f2672a1b80620a32840bd95c81a9cc38352c
