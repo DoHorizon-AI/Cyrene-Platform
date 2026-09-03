@@ -18,16 +18,29 @@ def find_workspace_root() -> Path:
     for parent in [curr] + list(curr.parents):
         if (parent / "Cyrene-Platform").exists():
             return parent
+        if (parent / "tooling" / "workspace" / "repos.yaml").is_file():
+            # Public CI checks out Platform alone; treat that checkout as the
+            # local root while preserving the umbrella layout when present.
+            # 公共 CI 只 checkout Platform 时，将该 checkout 视为本地根目录；
+            # 若存在 umbrella layout，则仍按多仓 workspace 处理。
+            return parent
     return curr
 
+
+def platform_root(workspace_root: Path) -> Path:
+    """Resolve Platform in either umbrella or standalone checkout layout."""
+    candidate = workspace_root / "Cyrene-Platform"
+    return candidate if (candidate / "tooling" / "workspace" / "repos.yaml").is_file() else workspace_root
+
+
 def load_catalog(workspace_root: Path) -> dict:
-    cat_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "repos.yaml"
+    cat_file = platform_root(workspace_root) / "tooling" / "workspace" / "repos.yaml"
     if not cat_file.exists():
         return {}
     return yaml.safe_load(cat_file.read_text(encoding="utf-8")) or {}
 
 def load_baseline(workspace_root: Path) -> dict:
-    base_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "workspace-baseline.yaml"
+    base_file = platform_root(workspace_root) / "tooling" / "workspace" / "workspace-baseline.yaml"
     if not base_file.exists():
         return {}
     return yaml.safe_load(base_file.read_text(encoding="utf-8")) or {}
@@ -60,7 +73,11 @@ def plan_integration(workspace_root: Path, profile: str, overrides: dict = None,
     for r in sorted(list(closure)):
         info = catalog.get("repositories", {}).get(r, {})
         rel_path = info.get("canonical_path", r)
-        p = workspace_root / rel_path
+        p = (
+            workspace_root
+            if r == "platform" and platform_root(workspace_root) == workspace_root
+            else workspace_root / rel_path
+        )
 
         # Determine ref based on mode
         ref = (overrides or {}).get(r)
@@ -125,7 +142,7 @@ def execute_integration(workspace_root: Path, plan: dict, ci_workspace: Path = N
                 subprocess.run(["git", "-C", str(dest), "checkout", item["ref"]], capture_output=True, text=True)
 
     # Build unified PYTHONPATH containing Platform SDKs and target repo sources
-    plat_dir = target_root / "Cyrene-Platform"
+    plat_dir = platform_root(target_root)
     python_paths = [
         str(plat_dir / "sdk/python/cyrene_control_plane/src"),
         str(plat_dir / "sdk/python/cyrene_artifacts/src"),

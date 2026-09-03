@@ -2,26 +2,111 @@
 """Deterministic generic capability worker for Platform TCK."""
 
 import json
+import os
+import struct
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Dict, List
 
-# Add cyrene_worker_shim to sys.path when this fixture is run directly. The
-# fixture lives below <repo>/framework/crates/cy-platform-api/tests/fixtures.
-manifest_dir = Path(__file__).resolve().parents[5]
+# Add cyrene_worker_shim to sys.path
+manifest_dir = Path(__file__).resolve().parents[4]
 shim_dir = manifest_dir / "sdk/python/cyrene_worker_shim"
 sys.path.insert(0, str(shim_dir))
 
 try:
-    from cyrene_worker_shim.cyrene_worker import CyreneWorker, run_worker_stdio
+    from cyrene_worker_shim.cyrene_worker import (
+        CyreneWorker,
+        PluginErrorPayload,
+        TypedCapabilityPayload,
+        decode_varint,
+        encode_bytes_field,
+        encode_string_field,
+        encode_uint32_field,
+        run_worker_stdio,
+    )
 except ImportError:
-    from cyrene_worker import CyreneWorker, run_worker_stdio
+    from cyrene_worker import (
+        CyreneWorker,
+        PluginErrorPayload,
+        TypedCapabilityPayload,
+        decode_varint,
+        encode_bytes_field,
+        encode_string_field,
+        encode_uint32_field,
+        run_worker_stdio,
+    )
+
+
+def decode_string_fields(payload: bytes) -> Dict[int, List[str]]:
+    """Read the length-delimited string fields of a request payload.
+
+    The TCK fixture stays dependency-free, so this does the minimum protobuf
+    scan needed to observe ``EmbeddingsRequest.model`` instead of relying on a
+    generated decoder.
+    """
+    fields: Dict[int, List[str]] = {}
+    offset = 0
+    while offset < len(payload):
+        tag, offset = decode_varint(payload, offset)
+        field_number, wire_type = tag >> 3, tag & 0x07
+        if wire_type != 2:
+            raise ValueError(f"unsupported wire type {wire_type}")
+        length, offset = decode_varint(payload, offset)
+        value = payload[offset : offset + length]
+        offset += length
+        fields.setdefault(field_number, []).append(value.decode("utf-8"))
+    return fields
+
+
+EMBEDDINGS_RESPONSE_TYPE_URL = "type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse"
+
+
+def embedding_response(instance_id: str) -> bytes:
+    """Encode a deterministic valid response without adding generated fixtures."""
+    vector = encode_bytes_field(1, struct.pack("<fff", 1.0, 2.0, 3.0))
+    batch = (
+        encode_bytes_field(1, vector)
+        + encode_uint32_field(2, 3)
+        + encode_string_field(3, instance_id or "default-model")
+    )
+    return encode_bytes_field(1, batch)
 
 
 class GenericTckWorker(CyreneWorker):
     def __init__(self):
         self.cancelled_requests = set()
+        self.instance_id = os.environ.get("CYRENE_TEST_INSTANCE_ID", "")
+        self.embeddings_supported = os.environ.get("CYRENE_TEST_EMBEDDINGS_SUPPORTED", "1") != "0"
+
+    def operation_default_models(self) -> Dict[str, str]:
+        """The single authority for per-operation default models.
+
+        One binding may serve both ``chat_completion`` and ``embeddings`` with
+        a different default per operation. Every default resolution goes
+        through this table, so an operation can never inherit another
+        operation's default. Unset in the harness, the binding identity is the
+        default, which preserves the pre-existing TCK expectations.
+        """
+        fallback = self.instance_id or "default-model"
+        return {
+            "chat_completion": os.environ.get("CYRENE_TEST_CHAT_DEFAULT_MODEL") or fallback,
+            "embeddings": os.environ.get("CYRENE_TEST_EMBEDDINGS_DEFAULT_MODEL") or fallback,
+        }
+
+    def resolve_model(self, operation: str, payload: bytes) -> str:
+        """Resolve the model for one operation: explicit selector wins."""
+        if payload:
+            requested = decode_string_fields(payload).get(2)
+            if requested:
+                return requested[-1]
+        return self.operation_default_models()[operation]
+
+    def scoped_payload(self, value: bytes) -> bytes:
+        if not self.instance_id:
+            return value
+        return self.instance_id.encode("utf-8") + b":" + value
 
     def plugin_id(self) -> str:
         return "com.cyrene.tck.generic-worker"
@@ -33,7 +118,11 @@ class GenericTckWorker(CyreneWorker):
         return "1.0"
 
     def declared_capabilities(self):
-        return ["test.capability.v1", "test.application-events.v1"]
+        return [
+            "test.capability.v1",
+            "test.application-events.v1",
+            "model.provider.v1",
+        ]
 
     def on_subscribe(self, subscription_id: str, capability: str, filter_payload: bytes):
         if capability != "test.application-events.v1":
@@ -49,21 +138,21 @@ class GenericTckWorker(CyreneWorker):
 
         def emit_events():
             if mode == "single":
-                emitter.emit("synthetic", b"one")
+                emitter.emit("synthetic", self.scoped_payload(b"one"))
                 emitter.complete("single event complete")
             elif mode == "ordered":
                 for value in range(1, 4):
-                    if not emitter.emit("synthetic", str(value).encode("ascii")):
+                    if not emitter.emit("synthetic", self.scoped_payload(str(value).encode("ascii"))):
                         return
                 emitter.complete("ordered events complete")
             elif mode == "burst":
                 for value in range(1, 128):
-                    if not emitter.emit("synthetic", str(value).encode("ascii")):
+                    if not emitter.emit("synthetic", self.scoped_payload(str(value).encode("ascii"))):
                         return
                 emitter.complete("burst complete")
             elif mode == "slow":
                 time.sleep(0.15)
-                if emitter.emit("synthetic", b"slow"):
+                if emitter.emit("synthetic", self.scoped_payload(b"slow")):
                     emitter.complete("slow event complete")
             elif mode == "generation":
                 emitter.terminate(5, "synthetic generation changed")
@@ -88,13 +177,31 @@ class GenericTckWorker(CyreneWorker):
         self.cancelled_requests.add(target_request_id)
 
     def on_invoke(self, capability: str, action: str, payload: bytes):
+        if capability == "model.provider.v1":
+            if action == "embeddings":
+                if not self.embeddings_supported:
+                    return False, PluginErrorPayload(
+                        code=3,
+                        message="embedding method is not supported by this binding",
+                        details="UNKNOWN_OPERATION",
+                    )
+                return True, TypedCapabilityPayload(
+                    value=embedding_response(self.resolve_model("embeddings", payload)),
+                    type_url=EMBEDDINGS_RESPONSE_TYPE_URL,
+                )
+            if action == "chat_completion":
+                return True, json.dumps({"model": self.operation_default_models()["chat_completion"]}).encode("utf-8")
+
         try:
             req = json.loads(payload.decode("utf-8")) if payload else {}
         except Exception as e:
             return False, b"INVALID_INPUT: malformed json payload"
 
         if action == "echo":
-            return True, json.dumps({"echo": req.get("message", "")}).encode("utf-8")
+            response = {"echo": req.get("message", "")}
+            if self.instance_id:
+                response["instance_id"] = self.instance_id
+            return True, json.dumps(response).encode("utf-8")
 
         elif action == "compute":
             val = req.get("value")

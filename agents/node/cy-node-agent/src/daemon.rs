@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: agents/node/cy-node-agent/src/daemon.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Deployable outbound Node Agent runtime.
 //!
 //! The Agent owns the remote mTLS connection and forwards type-safe Core v1
@@ -103,6 +111,15 @@ impl NodeAgentConfig {
 /// Runs a single Agent forever. Every reconnect rereads the local Kernel's
 /// NodeRef. If a Kernel restart changed the epoch, the previous resume cursor
 /// is discarded and the control plane sees a fenced new node epoch.
+// ════════════════════════════════════════════════════════════════════════════
+// 🔧 FUNCTION: run_node_agent
+//
+//   Maintains the outbound node session and reconnects from fresh local Kernel
+//   identity evidence, fencing the previous epoch when it changes.
+//
+//   维护出站节点会话，并依据本地 Kernel 的最新身份事实重连；节点纪元变化时，
+//   丢弃旧游标并围栏之前的会话。
+// ════════════════════════════════════════════════════════════════════════════
 pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentError> {
     config.validate()?;
     let kernel = UdsKernelCommandExecutor::new(config.kernel_socket.clone())

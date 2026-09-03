@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-extension-registry/tests/transport_concurrency_test.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 #![cfg(unix)]
 
 use bytes::BytesMut;
@@ -84,6 +92,7 @@ async fn test_worker_transport_large_payload_integrity() {
                     };
                     Payload::InvokeResult(InvokeResult {
                         payload: Vec::new(),
+                        payload_type_url: String::new(),
                         response: Some(Response::ExecuteInference(ExecuteInferenceResponse {
                             output_text: format!("echo:{}", echo_text),
                         })),
@@ -220,6 +229,7 @@ async fn test_pipelined_concurrent_transport_multiplexing_and_correlation() {
                     fence_token,
                     payload: Some(Payload::InvokeResult(InvokeResult {
                         payload: Vec::new(),
+                        payload_type_url: String::new(),
                         response: Some(Response::ExecuteInference(ExecuteInferenceResponse {
                             output_text: format!("resp:{}", prompt),
                         })),

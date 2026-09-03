@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/src/media.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! The narrow, product-neutral `media.processor.v1` contract.
 //!
 //! This module contains data types and lifecycle/error semantics only.  It does
@@ -17,6 +25,8 @@ pub const MEDIA_PROCESSOR_INTERFACE_V1: &str = "1";
 pub const INSPECT_IMAGE_OPERATION: &str = "inspect_image";
 /// Second operation in the contract.
 pub const TRANSFORM_IMAGE_OPERATION: &str = "transform_image";
+/// Narrow audio normalization operation used by Product record ingestion.
+pub const NORMALIZE_AUDIO_OPERATION: &str = "normalize_audio";
 
 /// Image formats that the contract can name without binding callers to a
 /// particular codec implementation.
@@ -165,6 +175,58 @@ pub struct TransformedImage {
     pub content_sha256: String,
 }
 
+/// Explicit caller-provided audio reference. Remote acquisition and attachment
+/// authorization remain Product responsibilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AudioInput {
+    Bytes {
+        data_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
+    File {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
+}
+
+/// The first bounded Product-selected canonical audio profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalAudioProfile {
+    WavPcmS16leMono16000,
+}
+
+/// Typed request for `normalize_audio`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizeAudioRequest {
+    pub input: AudioInput,
+    pub target_profile: CanonicalAudioProfile,
+}
+
+/// JSON-safe normalized audio bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncodedAudio {
+    pub data_base64: String,
+    pub media_type: String,
+}
+
+/// Result returned by `normalize_audio`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedAudio {
+    pub content: EncodedAudio,
+    pub format: String,
+    pub codec: String,
+    pub profile: CanonicalAudioProfile,
+    pub sample_rate_hz: u32,
+    pub channels: u8,
+    pub duration_ms: u64,
+    pub size_bytes: u64,
+    pub content_sha256: String,
+}
+
 pub use crate::worker::{AtomicCancellationToken, CancellationToken, NeverCancelled};
 
 /// Stable, transport-neutral error categories for the first slice.
@@ -222,6 +284,12 @@ pub trait MediaProcessor {
         request: &TransformImageRequest,
         cancellation: &dyn CancellationToken,
     ) -> Result<TransformedImage, MediaProcessorError>;
+
+    fn normalize_audio(
+        &self,
+        request: &NormalizeAudioRequest,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<NormalizedAudio, MediaProcessorError>;
 }
 
 #[cfg(test)]
@@ -275,5 +343,19 @@ mod tests {
             MediaProcessorError::UnsupportedInput("ppm".to_string()).code(),
             "UNSUPPORTED_INPUT"
         );
+    }
+
+    #[test]
+    fn audio_contract_has_one_bounded_canonical_profile() {
+        let request = NormalizeAudioRequest {
+            input: AudioInput::Bytes {
+                data_base64: "UklGRg==".to_string(),
+                media_type: Some("audio/wav".to_string()),
+            },
+            target_profile: CanonicalAudioProfile::WavPcmS16leMono16000,
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["target_profile"], "wav_pcm_s16le_mono16000");
+        assert_eq!(value["input"]["kind"], "bytes");
     }
 }

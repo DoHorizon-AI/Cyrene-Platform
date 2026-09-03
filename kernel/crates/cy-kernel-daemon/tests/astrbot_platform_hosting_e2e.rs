@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/tests/astrbot_platform_hosting_e2e.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Real Cross-Repository End-to-End Test: Platform Service Supervision of AstrBot .NET Host.
 //!
 //! Proves that the canonical AstrBot .NET Host (AstrBot.DotNetHost.dll) is reliably
@@ -16,7 +24,6 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    process::Command,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -32,33 +39,21 @@ use tokio::{
     net::TcpStream,
 };
 
-fn find_astrbot_dll() -> Option<(PathBuf, PathBuf)> {
-    let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("CYRENE_ASTRBOT_DOTNET_HOST_DLL") {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.extend([
+fn find_astrbot_dll() -> (PathBuf, PathBuf) {
+    let candidates = [
         PathBuf::from("../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost/bin/Debug/net10.0/AstrBot.DotNetHost.dll"),
         PathBuf::from("../../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost/bin/Debug/net10.0/AstrBot.DotNetHost.dll"),
         PathBuf::from(r"C:\Users\Baiji\DHDev\Cyrene\services\cyrene-astrbot-rev\src\AstrBot.DotNetHost\bin\Debug\net10.0\AstrBot.DotNetHost.dll"),
-    ]);
+    ];
 
     for candidate in &candidates {
         if candidate.exists() {
             let working_dir = candidate.parent().unwrap().to_path_buf();
-            return Some((candidate.clone(), working_dir));
+            return (candidate.clone(), working_dir);
         }
     }
 
-    None
-}
-
-fn dotnet_available() -> bool {
-    Command::new("dotnet")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    panic!("AstrBot.DotNetHost.dll not found in candidate paths. Ensure `dotnet build` was run.");
 }
 
 async fn get_ephemeral_port() -> u16 {
@@ -188,18 +183,9 @@ async fn http_get_text(
 }
 
 #[tokio::test]
+#[ignore = "requires a prebuilt AstrBot.DotNetHost.dll from the external AstrBot repository"]
 async fn test_platform_supervised_astrbot_dotnet_host_e2e_lifecycle() {
-    let Some((astrbot_dll, working_dir)) = find_astrbot_dll() else {
-        eprintln!(
-            "Skipping AstrBot .NET host E2E: AstrBot.DotNetHost.dll was not found; set CYRENE_ASTRBOT_DOTNET_HOST_DLL or build the sibling service"
-        );
-        return;
-    };
-    if !dotnet_available() {
-        eprintln!("Skipping AstrBot .NET host E2E: dotnet is not available");
-        return;
-    }
-
+    let (astrbot_dll, working_dir) = find_astrbot_dll();
     let port = get_ephemeral_port().await;
 
     let mut env = BTreeMap::new();

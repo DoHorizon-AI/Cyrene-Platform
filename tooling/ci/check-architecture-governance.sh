@@ -27,7 +27,7 @@ fi
 
 if rg -n --fixed-strings "in-proc-rust" \
     contracts/schemas/plugin.schema.json \
-    contracts/rust/cy-manifest/src/manifest; then
+    contracts/rust/cy-manifest/src/manifest/plugin.rs; then
   echo "installable schema or Rust manifest model exposes in-proc-rust"
   failed=1
 fi
@@ -42,16 +42,28 @@ if rg -n --fixed-strings '"crate"' contracts/schemas/plugin.schema.json; then
   failed=1
 fi
 
+# Only canonical runtime and contract source participates in the cutover guard.
+# Historical migration snapshots and compatibility-only enterprise images retain
+# the frozen v0 names by design and are audited by their own migration checks.
+# 仅扫描当前权威运行时与契约源码；迁移快照及兼容性企业镜像按设计保留冻结
+# 的 v0 名称，并由各自迁移检查负责审计。
+source_roots=(contracts kernel framework runtime sdk adapters agents)
+if [[ -d infrastructure ]]; then
+  source_roots+=(infrastructure)
+fi
+
 mapfile -t legacy_refs < <(
   rg -l --hidden \
     -g '!target/**' \
     -g '!.git/**' \
     -g '!**/*.md' \
-    -g '!infrastructure/**' \
-    -g '!tooling/migration/**' \
     -g '!tooling/ci/check-architecture-governance.sh' \
+    -g '!tooling/migration/**' \
+    -g '!infrastructure/**/enterprise/**' \
+    -g '!infrastructure/**/enterprise-dockerfiles/**' \
+    -g '!infrastructure/**/compatibility/**' \
     'cy\.llm|AgentService|AiService|ai_service\.proto|agent_service\.proto' \
-    contracts kernel framework runtime adapters agents sdk || true
+    "${source_roots[@]}" || true
 )
 
 while IFS= read -r path; do

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/rust/cy-proto/tests/message_connector_contract_tck.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 use std::collections::HashSet;
 
 use cy_proto::capability_v1::{
@@ -172,6 +180,7 @@ fn typed_any_payloads_round_trip_through_capability_execution_contract() {
         payload: Some(pack(INBOUND_MESSAGE_TYPE_URL, &inbound)),
         generation: 7,
         source_id: "onebot-connector".to_string(),
+        binding_id: "qq-main".to_string(),
     };
 
     let unpacked: InboundMessagePayload =
@@ -195,6 +204,7 @@ fn typed_any_payloads_round_trip_through_capability_execution_contract() {
         interface_version: INTERFACE_VERSION.to_string(),
         method: SEND_MESSAGE_METHOD.to_string(),
         request: Some(pack(SEND_MESSAGE_REQUEST_TYPE_URL, &send)),
+        binding_id: Some("qq-main".to_string()),
     };
     let unpacked_send: SendMessageRequest = unpack(
         invoke.request.as_ref().unwrap(),

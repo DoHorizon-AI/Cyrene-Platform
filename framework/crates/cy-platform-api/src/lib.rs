@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/src/lib.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! CYRENE 平台扩展点 SPI 与插件分类契约 (Platform Extension Points & SPI).
 //!
 //! 【平台扩展架构】
@@ -21,13 +29,18 @@ pub mod worker;
 use async_trait::async_trait;
 pub use cy_manifest::*;
 pub use media::{
-    CancellationToken, EncodedImage, INSPECT_IMAGE_OPERATION, ImageFormat, ImageInput,
-    ImageInspection, ImageOrientation, InspectImageRequest, MEDIA_PROCESSOR_INTERFACE_V1,
-    MEDIA_PROCESSOR_V1, MediaProcessor, MediaProcessorError, NeverCancelled, ResizeOptions,
-    TRANSFORM_IMAGE_OPERATION, TransformImageRequest, TransformedImage,
+    AudioInput, CancellationToken, CanonicalAudioProfile, EncodedAudio, EncodedImage,
+    INSPECT_IMAGE_OPERATION, ImageFormat, ImageInput, ImageInspection, ImageOrientation,
+    InspectImageRequest, MEDIA_PROCESSOR_INTERFACE_V1, MEDIA_PROCESSOR_V1, MediaProcessor,
+    MediaProcessorError, NORMALIZE_AUDIO_OPERATION, NeverCancelled, NormalizeAudioRequest,
+    NormalizedAudio, ResizeOptions, TRANSFORM_IMAGE_OPERATION, TransformImageRequest,
+    TransformedImage,
 };
 pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
-pub use plugin::{CapabilityRegistry, CapabilityResolutionError, CapabilityResolver};
+pub use plugin::{
+    CapabilityBinding, CapabilityRegistry, CapabilityResolutionError, CapabilityResolver,
+    ResolvedCapabilityTarget,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 pub use worker::{
@@ -35,7 +48,7 @@ pub use worker::{
     ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
     CapabilityWorkerClient, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
     MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions, WorkerApplicationEvent,
-    WorkerMediaProcessor, WorkerTerminalError,
+    WorkerInvocationResult, WorkerMediaProcessor, WorkerTerminalError,
 };
 
 /// 规范化插件分类字典枚举 (`kind`)

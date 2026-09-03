@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/plugin/v1/plugin_protocol.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
 syntax = "proto3";
 
 package cy.plugin.v1;
@@ -145,6 +153,11 @@ message InvokeResult {
   // Opaque capability result bytes for generic worker-control consumers.
   bytes payload = 3;
 
+  // Optional canonical protobuf Any type URL for payload. The worker host
+  // forwards this metadata without interpreting capability-owned fields. An
+  // empty value preserves the legacy opaque response projection.
+  string payload_type_url = 4;
+
   oneof response {
     DetectHardwareResponse detect_hardware = 10;
     AnalyzeModelResponse analyze_model = 11;
@@ -204,6 +217,11 @@ message ApplicationEvent {
   uint64 event_sequence = 3;
   string event_type = 4;
   bytes payload = 5;
+
+  // Optional canonical protobuf Any type URL for payload. The worker host
+  // forwards this metadata without interpreting capability-owned fields. An
+  // empty value preserves the legacy opaque event projection.
+  string payload_type_url = 6;
 }
 
 // Terminal condition for one application-event stream. A worker crash may

@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package cyrene.model.provider.v1;
+
+import "google/protobuf/duration.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.model.provider.v1";
+option java_outer_classname = "ModelProviderProto";
+option csharp_namespace = "Cyrene.Model.Provider.V1";
+
+// EXPERIMENTAL typed payloads for model.provider.v1.
+//
+// Transport is cyrene.capability.v1.CapabilityExecutionService:
+//   capability ID: model.provider.v1
+//   interface version: 1
+//   embedding method: embeddings
+//
+// This file intentionally declares no gRPC service. It describes stateless
+// model computation facts only. Product memory policy, chunking, retrieval,
+// vector persistence, and provider transport mechanics are outside it.
+
+message EmbeddingsRequest {
+  // Ordered text inputs. A request MUST contain at least one item. Empty
+  // strings are invalid; whitespace is preserved and is not normalized.
+  repeated string inputs = 1;
+
+  // Optional provider-supported model selector. Omitted means the model
+  // configured for the embeddings operation by the selected CapabilityBinding.
+  // A provider MUST NOT substitute another operation's default model. This is
+  // not a routing policy.
+  optional string model = 2;
+}
+
+message EmbeddingsResponse {
+  // Provider/domain outcomes remain a typed capability result. Generic CES
+  // execution failures such as timeout and cancellation use
+  // CapabilityExecutionError instead.
+  oneof result {
+    EmbeddingBatch embeddings = 1;
+    EmbeddingError error = 2;
+  }
+}
+
+message EmbeddingBatch {
+  // Position N is the embedding for request.inputs[N]. Providers MUST NOT
+  // reorder, truncate, or partially return a requested batch.
+  repeated EmbeddingVector vectors = 1;
+
+  // Common non-zero dimension of every returned vector.
+  uint32 dimensions = 2;
+
+  // Provider-resolved model identifier. This records a computation fact and
+  // does not replace the configured binding identity.
+  string model = 3;
+}
+
+message EmbeddingVector {
+  repeated float values = 1 [packed = true];
+}
+
+message EmbeddingError {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_INVALID_INPUT = 1;
+    CODE_MODEL_NOT_AVAILABLE = 2;
+    CODE_DIMENSION_MISMATCH = 3;
+    CODE_PROVIDER_ERROR = 4;
+    CODE_RATE_LIMITED = 5;
+  }
+
+  Code code = 1;
+  string message = 2;
+
+  // Present only when the provider supplied a meaningful retry delay.
+  google.protobuf.Duration retry_after = 3;
+}

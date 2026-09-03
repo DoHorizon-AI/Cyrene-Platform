@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/watchdog/instance_actor.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Instance-level Watchdog Actor implementation.
 
 use std::{
@@ -52,6 +60,9 @@ pub struct WorkerCancelAck {
     pub target_request_id: String,
 }
 
+type PendingCancellation = (String, oneshot::Sender<WorkerCancelAck>);
+type PendingCancellations = Arc<Mutex<HashMap<String, PendingCancellation>>>;
+
 #[derive(Debug)]
 pub struct WorkerTransportRequest {
     pub request_id: String,
@@ -69,17 +80,12 @@ pub struct WorkerTransportResponse {
     pub payload: Vec<u8>,
 }
 
-type PendingWorkerRequests =
-    Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>;
-type PendingWorkerCancellations =
-    Arc<Mutex<HashMap<String, (String, oneshot::Sender<WorkerCancelAck>)>>>;
-
 #[derive(Clone)]
 pub struct WorkerTransportDispatcher {
     generation: u64,
     fence_token: u64,
-    pending_requests: PendingWorkerRequests,
-    pending_cancellations: PendingWorkerCancellations,
+    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
+    pending_cancellations: PendingCancellations,
 }
 
 impl WorkerTransportDispatcher {
@@ -133,8 +139,8 @@ pub struct InstanceActor {
     generation: u64,
     consecutive_timeouts: u32,
     transport_tx: Option<mpsc::Sender<WorkerTransportCommand>>,
-    pending_requests: PendingWorkerRequests,
-    pending_cancellations: PendingWorkerCancellations,
+    pending_requests: Arc<AsyncMutex<HashMap<String, oneshot::Sender<WorkerTransportResponse>>>>,
+    pending_cancellations: PendingCancellations,
 }
 
 impl InstanceActor {

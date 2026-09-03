@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-extension-registry/src/registry.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! 强类型扩展注册中心 (Extension Registry)
 
 use std::collections::HashMap;
@@ -31,6 +39,13 @@ impl ExtensionRegistry {
         Self::default()
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: ExtensionRegistry::register_plugin
+    //
+    //   Records the shared plugin identity before typed extension-point lookup.
+    //
+    //   先记录共享的插件身份，再由各个强类型扩展点负责后续查找。
+    // ════════════════════════════════════════════════════════════════════════
     /// 注册通用插件
     pub fn register_plugin(&mut self, plugin: Arc<dyn Plugin>) {
         self.all_plugins.insert(plugin.id().to_string(), plugin);

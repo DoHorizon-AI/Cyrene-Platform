@@ -7,8 +7,8 @@ description = "CYRENE Linux host CPU, memory, NUMA, and OS capability facts adap
 [dependencies]
 cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
-prost = "0.14"
-prost-types = "0.14"
+prost = "0.12"
+prost-types = "0.12"
 libc = "0.2"
 
 [dev-dependencies]

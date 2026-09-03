@@ -70,19 +70,18 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 def find_workspace_root() -> Path:
     """Locate the workspace root directory containing Cyrene-Platform."""
     current = Path.cwd().resolve()
-    parents = [current] + list(current.parents)
-    for parent in parents:
+    for parent in [current] + list(current.parents):
         if (parent / "Cyrene-Platform").is_dir() and (parent / "services").is_dir():
-            return parent
-    for parent in parents:
-        if (parent / "Cargo.toml").is_file() and (parent / "contracts").is_dir():
             return parent
     return current
 
 
-def platform_root(workspace_root: Path) -> Path:
-    nested = workspace_root / "Cyrene-Platform"
-    return nested if nested.is_dir() else workspace_root
+def is_full_workspace(workspace_root: Path) -> bool:
+    """Return whether all sibling roots needed by workspace mode are present."""
+    return all(
+        (workspace_root / name).is_dir()
+        for name in ("Cyrene-Platform", "plugins", "services")
+    )
 
 
 def check_markdown_links_and_paths(file_path: Path, repo_root: Path) -> List[str]:
@@ -173,10 +172,14 @@ def verify_single_repo(repo_dir: Path, rel_path: str, repo_type: str) -> List[st
 
 def verify_workspace_api_docs(workspace_root: Path) -> List[str]:
     """Verify all 10 active repositories and workspace tooling."""
-    errors = []
-    if not (workspace_root / "Cyrene-Platform").is_dir():
-        return verify_single_repo(workspace_root, workspace_root.name, "ACTIVE_PLATFORM")
+    if not is_full_workspace(workspace_root):
+        # Platform's public CI checks out one repository, not the private
+        # umbrella workspace.  Keep the standalone guard strict for this
+        # checkout while reserving the ten-repository inventory for workspace
+        # mode where every sibling is actually available.
+        return verify_single_repo(workspace_root, workspace_root.name, "STANDALONE_REPO")
 
+    errors = []
     # Verify 10 standalone git repositories
     for rel_path, repo_type in ACTIVE_REPOSITORIES:
         repo_dir = workspace_root / rel_path
@@ -193,7 +196,12 @@ def verify_workspace_api_docs(workspace_root: Path) -> List[str]:
 def verify_capability_index(workspace_root: Path) -> List[str]:
     """Verify validity of CAPABILITY_INDEX.md in Platform."""
     errors = []
-    index_path = platform_root(workspace_root) / "docs" / "api" / "CAPABILITY_INDEX.md"
+    platform_root = (
+        workspace_root
+        if (workspace_root / "docs" / "api").is_dir()
+        else workspace_root / "Cyrene-Platform"
+    )
+    index_path = platform_root / "docs" / "api" / "CAPABILITY_INDEX.md"
     if not index_path.exists():
         return [f"Central Capability Index not found at {index_path}"]
 
@@ -212,10 +220,10 @@ def verify_capability_index(workspace_root: Path) -> List[str]:
 def verify_plugin_docs(workspace_root: Path) -> List[str]:
     """Verify that all active plugins have manifest and readme documentation."""
     errors = []
+    if not is_full_workspace(workspace_root):
+        return errors
     plugins_dir = workspace_root / "plugins" / "plugins"
     if not plugins_dir.exists():
-        if not (workspace_root / "Cyrene-Platform").is_dir():
-            return errors
         return [f"Plugins directory not found at {plugins_dir}"]
 
     count = 0

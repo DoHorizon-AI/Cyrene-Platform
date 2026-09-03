@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-extension-registry/src/tests.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Unit tests for cy-extension-registry
 
 use std::collections::HashMap;
@@ -653,6 +661,7 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
             fence_token: request.fence_token,
             payload: Some(Payload::InvokeResult(InvokeResult {
                 payload: Vec::new(),
+                payload_type_url: String::new(),
                 response: Some(invoke_result::Response::SendNotification(
                     SendNotificationResponse { success: true },
                 )),
@@ -672,6 +681,7 @@ async fn remote_notification_uses_sandbox_worker_socket_and_correlates_responses
             fence_token: 0,
             payload: Some(Payload::InvokeResult(InvokeResult {
                 payload: Vec::new(),
+                payload_type_url: String::new(),
                 response: Some(invoke_result::Response::SendNotification(
                     SendNotificationResponse { success: true },
                 )),

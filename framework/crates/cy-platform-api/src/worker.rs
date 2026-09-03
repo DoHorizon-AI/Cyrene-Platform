@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-platform-api/src/worker.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic capability worker activation, supervision, lifecycle framing, and RPC client.
 //!
 //! This module provides a Product-neutral, capability-agnostic worker activation layer
@@ -34,7 +42,7 @@ use uuid::Uuid;
 
 use crate::media::{
     ImageInspection, InspectImageRequest, MediaProcessor, MediaProcessorError,
-    TransformImageRequest, TransformedImage,
+    NormalizeAudioRequest, NormalizedAudio, TransformImageRequest, TransformedImage,
 };
 
 /// Cooperative cancellation token passed to worker operations.
@@ -89,8 +97,19 @@ pub struct WorkerApplicationEvent {
     pub event_sequence: u64,
     pub event_type: String,
     pub payload: Vec<u8>,
+    pub payload_type_url: String,
     pub generation: u64,
     pub source_id: String,
+}
+
+/// Product-neutral result returned by one worker invocation.
+///
+/// The worker owns the payload schema. The optional type URL is only transport
+/// metadata that lets the CES preserve a capability-owned protobuf `Any`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerInvocationResult {
+    pub payload: Vec<u8>,
+    pub payload_type_url: String,
 }
 
 /// Terminal condition for one application-event subscription.
@@ -203,15 +222,15 @@ struct EventSubscriptionState {
     last_event_sequence: u64,
 }
 
-type ApplicationEventReceiver =
-    Receiver<Result<WorkerApplicationEvent, ApplicationEventStreamTermination>>;
-
 struct EventRegistry {
     subscriptions: Mutex<HashMap<String, EventSubscriptionState>>,
     plugin_id: String,
     generation: u64,
     fence_token: u64,
 }
+
+type EventReceiver = Receiver<Result<WorkerApplicationEvent, ApplicationEventStreamTermination>>;
+type EventRegistration = (EventReceiver, Arc<AtomicUsize>);
 
 impl EventRegistry {
     fn new(plugin_id: String, generation: u64, fence_token: u64) -> Self {
@@ -228,7 +247,7 @@ impl EventRegistry {
         subscription_id: String,
         capability: String,
         buffer_capacity: usize,
-    ) -> Result<(ApplicationEventReceiver, Arc<AtomicUsize>), WorkerTerminalError> {
+    ) -> Result<EventRegistration, WorkerTerminalError> {
         let (sender, receiver) = mpsc::sync_channel(buffer_capacity + 1);
         let queued_events = Arc::new(AtomicUsize::new(0));
         let state = EventSubscriptionState {
@@ -396,6 +415,7 @@ impl EventRegistry {
                         event_sequence: event.event_sequence,
                         event_type: event.event_type,
                         payload: event.payload,
+                        payload_type_url: event.payload_type_url,
                         generation: envelope.generation,
                         source_id,
                     };
@@ -836,6 +856,25 @@ impl CapabilityWorkerClient {
         &self.declared_capabilities
     }
 
+    /// Poll the owned child process without inferring runtime state from
+    /// package or binding metadata.
+    pub fn is_running(&mut self) -> Result<bool, WorkerTerminalError> {
+        if self.is_shut_down {
+            return Ok(false);
+        }
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+        child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| {
+                WorkerTerminalError::WorkerUnavailable(format!(
+                    "failed to poll worker process: {error}"
+                ))
+            })
+    }
+
     fn next_sequence(&self) -> u64 {
         self.transport.next_sequence()
     }
@@ -1062,6 +1101,15 @@ impl CapabilityWorkerClient {
     }
 
     /// Invoke a typed capability RPC method on the worker.
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔧 FUNCTION: CapabilityWorkerClient::invoke
+    //
+    //   Sends one request, observes the response, and cooperates with the
+    //   cancellation channel while preserving the worker session state.
+    //
+    //   发送一次请求、等待响应，并在保持 Worker 会话状态的同时协作处理取消通道。
+    //   取消只改变本次调用的生命周期证据，不伪造 Worker 已完成状态。
+    // ════════════════════════════════════════════════════════════════════════
     pub fn invoke(
         &mut self,
         capability: &str,
@@ -1070,6 +1118,20 @@ impl CapabilityWorkerClient {
         timeout: Duration,
         cancellation: &dyn CancellationToken,
     ) -> Result<Vec<u8>, WorkerTerminalError> {
+        self.invoke_typed(capability, method, payload, timeout, cancellation)
+            .map(|result| result.payload)
+    }
+
+    /// Invoke a capability and preserve optional worker-owned payload type
+    /// metadata for the Product-facing CES `Any` response.
+    pub fn invoke_typed(
+        &mut self,
+        capability: &str,
+        method: &str,
+        payload: &[u8],
+        timeout: Duration,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<WorkerInvocationResult, WorkerTerminalError> {
         if self.is_shut_down {
             return Err(WorkerTerminalError::WorkerUnavailable(
                 "worker client is already shut down".into(),
@@ -1150,7 +1212,12 @@ impl CapabilityWorkerClient {
                         continue;
                     }
                     match response.payload {
-                        Some(Payload::InvokeResult(result)) => return Ok(result.payload),
+                        Some(Payload::InvokeResult(result)) => {
+                            return Ok(WorkerInvocationResult {
+                                payload: result.payload,
+                                payload_type_url: result.payload_type_url,
+                            });
+                        }
                         Some(Payload::Error(err)) => {
                             return Err(Self::map_error_payload(err));
                         }
@@ -1512,6 +1579,34 @@ impl MediaProcessor for WorkerMediaProcessor {
         serde_json::from_slice::<TransformedImage>(&response_bytes).map_err(|e| {
             MediaProcessorError::ExecutionFailed(format!(
                 "failed to deserialize TransformedImage response: {e}"
+            ))
+        })
+    }
+
+    fn normalize_audio(
+        &self,
+        request: &NormalizeAudioRequest,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<NormalizedAudio, MediaProcessorError> {
+        let payload = serde_json::to_vec(request).map_err(|error| {
+            MediaProcessorError::invalid_input(format!("failed to serialize request: {error}"))
+        })?;
+        let mut client = self.client.lock().map_err(|_| {
+            MediaProcessorError::ExecutionFailed("worker client lock poisoned".into())
+        })?;
+        let timeout = client.options.default_invoke_timeout;
+        let response_bytes = client
+            .invoke(
+                "media.processor.v1",
+                "normalize_audio",
+                &payload,
+                timeout,
+                cancellation,
+            )
+            .map_err(map_worker_error_to_media)?;
+        serde_json::from_slice::<NormalizedAudio>(&response_bytes).map_err(|error| {
+            MediaProcessorError::ExecutionFailed(format!(
+                "failed to deserialize NormalizedAudio response: {error}"
             ))
         })
     }

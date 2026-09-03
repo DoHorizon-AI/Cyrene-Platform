@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: runtime/cyrene-kernel/src/main.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Linux composition root for the CYRENE Kernel daemon.
 //!
 //! The process owns no vendor driver code. It joins a versioned UDS hardware
@@ -7,7 +15,6 @@
 //! trusted peer UID/GID (fail-closed at startup), and the authority socket also
 //! authenticates the calling Principal from the peer credential.
 
-#[cfg(unix)]
 mod runtime_journal;
 
 #[cfg(not(unix))]

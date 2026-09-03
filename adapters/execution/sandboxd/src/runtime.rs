@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: adapters/execution/sandboxd/src/runtime.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Privileged Linux cgroup v2 execution runtime backend.
 
 use std::{
@@ -5,17 +13,13 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
     time::{Duration, Instant},
 };
-
-#[cfg(unix)]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-
-use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::{
@@ -875,7 +879,7 @@ impl ProcessRuntime for CgroupV2Runtime {
                 Ok(())
             });
         }
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 if let Some(path) = plan.transport_socket.as_ref() {
@@ -890,8 +894,6 @@ impl ProcessRuntime for CgroupV2Runtime {
                 ));
             }
         };
-        #[cfg(unix)]
-        let mut child = child;
         #[cfg(unix)]
         let transport = if let Some(listener) = transport_listener {
             let stdin = match child.stdin.take() {

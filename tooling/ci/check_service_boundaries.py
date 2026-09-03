@@ -28,27 +28,29 @@ class Violation(NamedTuple):
 
 
 def find_workspace_root(start_path: Path | None = None) -> Path:
+    """Locate the umbrella workspace or fall back to this Platform checkout.
+
+    The guard also runs in standalone GitHub checkouts.  A machine-local
+    Windows fallback made those runs inspect a path that cannot exist on the
+    runner, so standalone validation must remain rooted at the checked-out
+    repository instead.
+    """
     current = (start_path or Path(__file__)).resolve()
-    if current.is_file():
-        current = current.parent
-    parents = [current] + list(current.parents)
-    for parent in parents:
+    for parent in [current] + list(current.parents):
         if (parent / "Cyrene-Platform").exists() and (parent / "services").exists():
             return parent
-    for parent in parents:
-        if (parent / "Cargo.toml").is_file() and (parent / "contracts").is_dir():
+        if (parent / "tooling" / "ci" / "check_service_boundaries.py").exists() and (
+            (parent / "kernel").is_dir() or (parent / "Cargo.toml").is_file()
+        ):
             return parent
-    return current
+    return current.parent.parent
 
 
 def check_service_boundaries(workspace_root: Path) -> List[Violation]:
     violations: List[Violation] = []
-    platform_dir = workspace_root / "Cyrene-Platform"
-    if not platform_dir.is_dir():
-        platform_dir = workspace_root
     services_dir = workspace_root / "services"
     plugins_dir = workspace_root / "plugins"
-    kernel_dir = platform_dir / "kernel" / "crates"
+    kernel_dir = workspace_root / "Cyrene-Platform" / "kernel" / "crates"
 
     ignored_dirs = {
         ".git",
@@ -185,7 +187,7 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                         )
 
     # 4. Check Public Foundation does not import Private Enterprise/Commercial packages
-    public_dirs = [platform_dir, plugins_dir]
+    public_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
     for pdir in public_dirs:
         if not pdir.exists():
             continue
@@ -213,7 +215,7 @@ def check_service_boundaries(workspace_root: Path) -> List[Violation]:
                         )
 
     # Rule 5: CI Authority and Public Workflow Alignment
-    repo_dirs = [platform_dir, plugins_dir]
+    repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
     services_dir = workspace_root / "services"
     if services_dir.exists():
         for s in services_dir.iterdir():

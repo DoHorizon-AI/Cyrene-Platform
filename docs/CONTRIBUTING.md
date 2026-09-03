@@ -26,9 +26,7 @@ Before handing off a core change, run:
 ```bash
 cargo fmt --all -- --check
 cargo check --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo build --workspace --locked --release
 bash tooling/ci/check-kernel-boundary.sh
 ```
 

@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/jvm/adapters/outbound-kernel/src/main/kotlin/cyrene/adapters/outbound/kernel/NodeAgentGrpcClient.kt
+// ║ Module: CYRENE Platform
+// ║ Role: Kotlin Framework implementation or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Kotlin Framework 实现或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.adapters.outbound.kernel
 
 import cyrene.application.port.outbound.KernelCommandEnvelope

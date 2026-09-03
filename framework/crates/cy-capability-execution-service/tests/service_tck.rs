@@ -1,9 +1,17 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-capability-execution-service/tests/service_tck.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! Generic Capability Execution Service TCK.
 //!
 //! These tests use only the generated public gRPC client. They deliberately
 //! do not instantiate `CapabilityWorkerClient` or inspect `cy.plugin.v1`.
 
-use std::{collections::HashMap, path::PathBuf, process::Command, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use cy_manifest::{
     CapabilityDescriptor, CapabilityId, CapabilityInterfaceVersion, Edition, ExecutionMode,
@@ -11,7 +19,8 @@ use cy_manifest::{
     Runtime,
 };
 use cy_platform_api::{
-    CapabilityRegistry, MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions,
+    CapabilityBinding, CapabilityRegistry, MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
+    WorkerActivationOptions,
 };
 use cy_proto::capability_v1::{
     CapabilityEventStreamEnd, CapabilityEventStreamEndReason, InvokeCapabilityRequest,
@@ -19,6 +28,14 @@ use cy_proto::capability_v1::{
     capability_execution_service_client::CapabilityExecutionServiceClient,
     invoke_capability_response,
 };
+use cy_proto::{
+    model_provider::{
+        CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, EMBEDDINGS_METHOD,
+        EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL,
+    },
+    model_provider_v1::{EmbeddingsRequest, EmbeddingsResponse, embeddings_response},
+};
+use prost::Message;
 use prost_types::Any;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -41,35 +58,6 @@ fn platform_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
-}
-
-fn python_executable() -> String {
-    std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        }
-    })
-}
-
-fn python_worker_available() -> bool {
-    Command::new(python_executable())
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn skip_without_python() -> bool {
-    if python_worker_available() {
-        return false;
-    }
-
-    eprintln!(
-        "Skipping Python worker TCK: no usable Python interpreter found; set CYRENE_PYTHON to one"
-    );
-    true
 }
 
 fn fixture_manifest() -> PluginManifest {
@@ -113,6 +101,12 @@ fn fixture_manifest() -> PluginManifest {
                 vec![ExecutionMode::Worker],
             )
             .unwrap(),
+            CapabilityDescriptor::new(
+                CapabilityId::new(MODEL_PROVIDER_CAPABILITY_ID).unwrap(),
+                CapabilityInterfaceVersion::new("1").unwrap(),
+                vec![ExecutionMode::Worker],
+            )
+            .unwrap(),
         ],
         artifact: None,
     }
@@ -120,19 +114,72 @@ fn fixture_manifest() -> PluginManifest {
 
 fn worker_options() -> WorkerActivationOptions {
     let root = platform_root();
+    let python_bin = std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    });
     WorkerActivationOptions {
         working_dir: Some(root.join("framework/crates/cy-platform-api/tests")),
         python_path: vec![
             root.join("sdk/python"),
             root.join("sdk/python/cyrene_worker_shim"),
         ],
-        python_executable: Some(python_executable()),
+        python_executable: Some(python_bin),
         environment: HashMap::new(),
         handshake_timeout: Duration::from_secs(5),
         default_invoke_timeout: Duration::from_secs(5),
         shutdown_grace_period: Duration::from_secs(2),
         max_message_bytes: 1024 * 1024,
     }
+}
+
+fn worker_options_for_instance(instance_id: &str) -> WorkerActivationOptions {
+    let mut options = worker_options();
+    options.environment.insert(
+        "CYRENE_TEST_INSTANCE_ID".to_string(),
+        instance_id.to_string(),
+    );
+    options
+}
+
+/// Configures one binding that serves both operations with distinct defaults.
+fn worker_options_with_operation_defaults(
+    instance_id: &str,
+    chat_default: &str,
+    embeddings_default: &str,
+) -> WorkerActivationOptions {
+    let mut options = worker_options_for_instance(instance_id);
+    options.environment.insert(
+        "CYRENE_TEST_CHAT_DEFAULT_MODEL".to_string(),
+        chat_default.to_string(),
+    );
+    options.environment.insert(
+        "CYRENE_TEST_EMBEDDINGS_DEFAULT_MODEL".to_string(),
+        embeddings_default.to_string(),
+    );
+    options
+}
+
+fn worker_options_without_embeddings(instance_id: &str) -> WorkerActivationOptions {
+    let mut options = worker_options_for_instance(instance_id);
+    options.environment.insert(
+        "CYRENE_TEST_EMBEDDINGS_SUPPORTED".to_string(),
+        "0".to_string(),
+    );
+    options
+}
+
+fn two_instance_bindings() -> Vec<(String, WorkerActivationOptions)> {
+    vec![
+        ("main".to_string(), worker_options_for_instance("main")),
+        (
+            "secondary".to_string(),
+            worker_options_for_instance("secondary"),
+        ),
+    ]
 }
 
 struct TestServer {
@@ -151,15 +198,38 @@ impl TestServer {
         buffer_capacity: usize,
         worker_activation_options: WorkerActivationOptions,
     ) -> Self {
+        Self::start_with_bindings(buffer_capacity, worker_activation_options, Vec::new()).await
+    }
+
+    async fn start_with_bindings(
+        buffer_capacity: usize,
+        worker_activation_options: WorkerActivationOptions,
+        bindings: Vec<(String, WorkerActivationOptions)>,
+    ) -> Self {
         let mut registry = CapabilityRegistry::new();
         let manifest = fixture_manifest();
         registry.register(manifest.clone()).unwrap();
+        for (binding_id, _) in &bindings {
+            registry
+                .register_binding(
+                    CapabilityBinding::new(
+                        binding_id,
+                        &manifest.plugin.id,
+                        &manifest.plugin.version,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
         let config = CapabilityExecutionConfig {
             worker_options: worker_activation_options,
             application_event_buffer_capacity: buffer_capacity,
             ..CapabilityExecutionConfig::default()
         };
-        let service = CapabilityExecutionService::new(registry, config);
+        let mut service = CapabilityExecutionService::new(registry, config);
+        for (binding_id, options) in bindings {
+            service = service.with_binding_worker_options(binding_id, options);
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let incoming = TcpListenerStream::new(listener);
@@ -203,7 +273,15 @@ fn any_json(value: serde_json::Value) -> Any {
 }
 
 fn invoke_request(method: &str, payload: serde_json::Value) -> Request<InvokeCapabilityRequest> {
-    let mut request = invoke_request_without_deadline(method, payload);
+    invoke_request_for_binding(None, method, payload)
+}
+
+fn invoke_request_for_binding(
+    binding_id: Option<&str>,
+    method: &str,
+    payload: serde_json::Value,
+) -> Request<InvokeCapabilityRequest> {
+    let mut request = invoke_request_without_deadline_for_binding(binding_id, method, payload);
     request.set_timeout(Duration::from_secs(5));
     request
 }
@@ -212,19 +290,93 @@ fn invoke_request_without_deadline(
     method: &str,
     payload: serde_json::Value,
 ) -> Request<InvokeCapabilityRequest> {
+    invoke_request_without_deadline_for_binding(None, method, payload)
+}
+
+fn invoke_request_without_deadline_for_binding(
+    binding_id: Option<&str>,
+    method: &str,
+    payload: serde_json::Value,
+) -> Request<InvokeCapabilityRequest> {
     Request::new(InvokeCapabilityRequest {
         capability: "test.capability.v1".to_string(),
         interface_version: "1".to_string(),
         method: method.to_string(),
         request: Some(any_json(payload)),
+        binding_id: binding_id.map(str::to_string),
     })
 }
 
+fn embedding_invoke_request(binding_id: Option<&str>) -> Request<InvokeCapabilityRequest> {
+    embedding_invoke_request_with_model(binding_id, None)
+}
+
+fn embedding_invoke_request_with_model(
+    binding_id: Option<&str>,
+    model: Option<&str>,
+) -> Request<InvokeCapabilityRequest> {
+    let payload = EmbeddingsRequest {
+        inputs: vec!["deterministic".to_string()],
+        model: model.map(str::to_string),
+    };
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
+        interface_version: "1".to_string(),
+        method: EMBEDDINGS_METHOD.to_string(),
+        request: Some(Any {
+            type_url: EMBEDDINGS_REQUEST_TYPE_URL.to_string(),
+            value: payload.encode_to_vec(),
+        }),
+        binding_id: binding_id.map(str::to_string),
+    });
+    request.set_timeout(Duration::from_secs(5));
+    request
+}
+
+fn model_provider_json_invoke_request(
+    binding_id: Option<&str>,
+    method: &str,
+    payload: serde_json::Value,
+) -> Request<InvokeCapabilityRequest> {
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
+        interface_version: "1".to_string(),
+        method: method.to_string(),
+        request: Some(any_json(payload)),
+        binding_id: binding_id.map(str::to_string),
+    });
+    request.set_timeout(Duration::from_secs(5));
+    request
+}
+
+fn embedding_model(response: cy_proto::capability_v1::InvokeCapabilityResponse) -> String {
+    let Some(invoke_capability_response::Result::Response(payload)) = response.result else {
+        panic!("expected typed embedding response: {response:?}");
+    };
+    assert_eq!(payload.type_url, EMBEDDINGS_RESPONSE_TYPE_URL);
+    let response = EmbeddingsResponse::decode(payload.value.as_slice()).unwrap();
+    let Some(embeddings_response::Result::Embeddings(batch)) = response.result else {
+        panic!("expected embedding batch");
+    };
+    assert_eq!(batch.vectors.len(), 1);
+    assert_eq!(batch.dimensions, 3);
+    assert_eq!(batch.vectors[0].values, [1.0, 2.0, 3.0]);
+    batch.model
+}
+
 fn subscribe_request(mode: &str) -> Request<SubscribeCapabilityEventsRequest> {
+    subscribe_request_for_binding(mode, None)
+}
+
+fn subscribe_request_for_binding(
+    mode: &str,
+    binding_id: Option<&str>,
+) -> Request<SubscribeCapabilityEventsRequest> {
     let request = SubscribeCapabilityEventsRequest {
         capability: "test.application-events.v1".to_string(),
         interface_version: "1".to_string(),
         filter: Some(any_json(serde_json::json!({ "mode": mode }))),
+        binding_id: binding_id.map(str::to_string),
     };
     let mut request = Request::new(request);
     request.set_timeout(Duration::from_secs(5));
@@ -261,10 +413,6 @@ async fn wait_until_idle(service: &CapabilityExecutionService) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_unary_uses_any_and_maps_invalid_request() {
-    if skip_without_python() {
-        return;
-    }
-
     let mut server = TestServer::start(4).await;
     let response = server
         .client
@@ -306,11 +454,442 @@ async fn service_tck_unary_uses_any_and_maps_invalid_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn service_tck_streams_single_event_and_normal_end() {
-    if skip_without_python() {
-        return;
-    }
+async fn configured_binding_single_instance_keeps_implicit_invoke_compatibility() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![("main".to_string(), worker_options_for_instance("main"))],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(invoke_request(
+            "echo",
+            serde_json::json!({ "message": "main" }),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Response(result)) = response.result else {
+        panic!("single configured instance should be selected implicitly: {response:?}");
+    };
+    let result: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+    assert_eq!(result["instance_id"], "main");
+    server.shutdown().await;
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_multiple_instances_reject_implicit_invoke_as_ambiguous() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    let response = server
+        .client
+        .invoke_capability(invoke_request(
+            "echo",
+            serde_json::json!({ "message": "ambiguous" }),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("implicit invocation must not select an arbitrary configured instance");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(error.message.contains("ambiguous"));
+    assert!(error.message.contains("main"));
+    assert!(error.message.contains("secondary"));
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_explicit_invoke_targets_each_instance() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    for instance_id in ["main", "secondary"] {
+        let response = server
+            .client
+            .invoke_capability(invoke_request_for_binding(
+                Some(instance_id),
+                "echo",
+                serde_json::json!({ "message": instance_id }),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let Some(invoke_capability_response::Result::Response(result)) = response.result else {
+            panic!("explicit invocation should target {instance_id}: {response:?}");
+        };
+        let result: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+        assert_eq!(result["instance_id"], instance_id);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_subscriptions_are_isolated_and_report_target_identity() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    for instance_id in ["main", "secondary"] {
+        let response = server
+            .client
+            .subscribe_capability_events(subscribe_request_for_binding("single", Some(instance_id)))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let Some(capability_event_stream_item::Item::ApplicationEvent(event)) =
+            next_stream_item(&mut stream).await.item
+        else {
+            panic!("expected one event from {instance_id}");
+        };
+        assert_eq!(event.binding_id, instance_id);
+        assert_eq!(
+            String::from_utf8(event.payload.unwrap().value).unwrap(),
+            format!("{instance_id}:one")
+        );
+        let Some(capability_event_stream_item::Item::StreamEnd(end)) =
+            next_stream_item(&mut stream).await.item
+        else {
+            panic!("expected terminal event for {instance_id}");
+        };
+        assert_eq!(end.binding_id, instance_id);
+        assert_eq!(end.error, None);
+    }
+    wait_until_idle(&server.service).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_invoke_and_subscribe_use_the_same_identity() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    let invoke = server
+        .client
+        .invoke_capability(invoke_request_for_binding(
+            Some("main"),
+            "echo",
+            serde_json::json!({ "message": "coherent" }),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Response(result)) = invoke.result else {
+        panic!("explicit invocation should target main: {invoke:?}");
+    };
+    let result: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+    assert_eq!(result["instance_id"], "main");
+
+    let response = server
+        .client
+        .subscribe_capability_events(subscribe_request_for_binding("single", Some("main")))
+        .await
+        .unwrap();
+    let mut stream = response.into_inner();
+    let Some(capability_event_stream_item::Item::ApplicationEvent(event)) =
+        next_stream_item(&mut stream).await.item
+    else {
+        panic!("expected event from main");
+    };
+    assert_eq!(event.binding_id, "main");
+    assert_eq!(
+        String::from_utf8(event.payload.unwrap().value).unwrap(),
+        "main:one"
+    );
+    let _ = next_stream_item(&mut stream).await;
+    wait_until_idle(&server.service).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_identity_survives_runtime_generation_change() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    let response = server
+        .client
+        .subscribe_capability_events(subscribe_request_for_binding("generation", Some("main")))
+        .await
+        .unwrap();
+    let mut stream = response.into_inner();
+    let Some(capability_event_stream_item::Item::StreamEnd(generation_end)) =
+        next_stream_item(&mut stream).await.item
+    else {
+        panic!("expected generation terminal item");
+    };
+    assert_eq!(generation_end.binding_id, "main");
+    assert_eq!(generation_end.generation, 1);
+    assert_eq!(
+        end_reason(&generation_end),
+        CapabilityEventStreamEndReason::GenerationTerminated
+    );
+
+    let response = server
+        .client
+        .subscribe_capability_events(subscribe_request_for_binding("single", Some("main")))
+        .await
+        .unwrap();
+    let mut stream = response.into_inner();
+    let Some(capability_event_stream_item::Item::ApplicationEvent(event)) =
+        next_stream_item(&mut stream).await.item
+    else {
+        panic!("expected event after the generation changed");
+    };
+    assert_eq!(event.binding_id, "main");
+    assert_eq!(event.generation, 1);
+    let _ = next_stream_item(&mut stream).await;
+    wait_until_idle(&server.service).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_unknown_target_is_deterministic() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    let response = server
+        .client
+        .invoke_capability(invoke_request_for_binding(
+            Some("missing"),
+            "echo",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("unknown configured target must fail");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::CapabilityUnavailable as i32
+    );
+    assert!(
+        error
+            .message
+            .contains("unknown configured capability binding: missing")
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_binding_capability_mismatch_is_deterministic() {
+    let mut server =
+        TestServer::start_with_bindings(4, worker_options(), two_instance_bindings()).await;
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: "missing.capability.v1".to_string(),
+        interface_version: "1".to_string(),
+        method: "echo".to_string(),
+        request: Some(any_json(serde_json::json!({}))),
+        binding_id: Some("main".to_string()),
+    });
+    request.set_timeout(Duration::from_secs(5));
+    let response = server
+        .client
+        .invoke_capability(request)
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("binding capability mismatch must fail");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(
+        error
+            .message
+            .contains("does not expose capability missing.capability.v1")
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_single_binding_keeps_implicit_compatibility() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "openai-main".to_string(),
+            worker_options_for_instance("openai-main"),
+        )],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(None))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(embedding_model(response), "openai-main");
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_two_bindings_require_explicit_target_and_are_isolated() {
+    let bindings = vec![
+        (
+            "openai-main".to_string(),
+            worker_options_for_instance("openai-main"),
+        ),
+        (
+            "ollama-local".to_string(),
+            worker_options_for_instance("ollama-local"),
+        ),
+    ];
+    let mut server = TestServer::start_with_bindings(4, worker_options(), bindings).await;
+
+    let ambiguous = server
+        .client
+        .invoke_capability(embedding_invoke_request(None))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = ambiguous.result else {
+        panic!("implicit embedding target must not first-match");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(error.message.contains("ambiguous"));
+
+    for binding_id in ["openai-main", "ollama-local"] {
+        let response = server
+            .client
+            .invoke_capability(embedding_invoke_request(Some(binding_id)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(embedding_model(response), binding_id);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_unknown_binding_is_deterministic() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "openai-main".to_string(),
+            worker_options_for_instance("openai-main"),
+        )],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(Some("missing")))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("unknown embedding binding must fail");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::CapabilityUnavailable as i32
+    );
+    assert!(
+        error
+            .message
+            .contains("unknown configured capability binding: missing")
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_unsupported_method_is_generic_invalid_request() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "chat-only".to_string(),
+            worker_options_without_embeddings("chat-only"),
+        )],
+    )
+    .await;
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(Some("chat-only")))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
+        panic!("unsupported embeddings method must fail generically");
+    };
+    assert_eq!(
+        error.code,
+        capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(error.message.contains("not supported by this binding"));
+    server.shutdown().await;
+}
+
+/// A binding may serve `chat_completion` and `embeddings` with different
+/// default models. An embedding request that omits the model selector must
+/// resolve the embeddings default and must never inherit the chat default;
+/// an explicit selector still overrides both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedding_tck_omitted_model_uses_binding_operation_default() {
+    let mut server = TestServer::start_with_bindings(
+        4,
+        worker_options(),
+        vec![(
+            "dual-operation".to_string(),
+            worker_options_with_operation_defaults(
+                "dual-operation",
+                "chat-default-model",
+                "embeddings-default-model",
+            ),
+        )],
+    )
+    .await;
+
+    let chat = server
+        .client
+        .invoke_capability(model_provider_json_invoke_request(
+            Some("dual-operation"),
+            "chat_completion",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Response(payload)) = chat.result else {
+        panic!("chat_completion must stay supported on the same binding: {chat:?}");
+    };
+    let chat_model: serde_json::Value = serde_json::from_slice(&payload.value).unwrap();
+    assert_eq!(chat_model["model"], "chat-default-model");
+
+    let response = server
+        .client
+        .invoke_capability(embedding_invoke_request(Some("dual-operation")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        embedding_model(response),
+        "embeddings-default-model",
+        "an omitted embedding model must resolve the embeddings operation default"
+    );
+
+    let explicit = server
+        .client
+        .invoke_capability(embedding_invoke_request_with_model(
+            Some("dual-operation"),
+            Some("caller-selected-model"),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(embedding_model(explicit), "caller-selected-model");
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_tck_streams_single_event_and_normal_end() {
     let mut server = TestServer::start(4).await;
     let response = server
         .client
@@ -343,10 +922,6 @@ async fn service_tck_streams_single_event_and_normal_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_streams_ordered_events_and_normal_end() {
-    if skip_without_python() {
-        return;
-    }
-
     let mut server = TestServer::start(4).await;
     let response = server
         .client
@@ -391,10 +966,6 @@ async fn service_tck_streams_ordered_events_and_normal_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_has_bounded_backpressure_and_generation_end() {
-    if skip_without_python() {
-        return;
-    }
-
     let mut server = TestServer::start(2).await;
     let response = server
         .client
@@ -475,10 +1046,6 @@ async fn service_tck_pre_cancelled_call_does_not_require_worker_activation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_maps_worker_crash_and_native_deadline_cancellation() {
-    if skip_without_python() {
-        return;
-    }
-
     let mut server = TestServer::start(4).await;
     let crashed = server
         .client
@@ -527,10 +1094,6 @@ async fn service_tck_maps_worker_crash_and_native_deadline_cancellation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_uses_platform_timeout_fallback_without_public_timeout_field() {
-    if skip_without_python() {
-        return;
-    }
-
     let mut options = worker_options();
     options.default_invoke_timeout = Duration::from_millis(100);
     let mut server = TestServer::start_with_options(4, options).await;
@@ -553,10 +1116,6 @@ async fn service_tck_uses_platform_timeout_fallback_without_public_timeout_field
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_tck_stream_cancellation_and_normal_service_shutdown_cleanup() {
-    if skip_without_python() {
-        return;
-    }
-
     let mut server = TestServer::start(MAX_APPLICATION_EVENT_BUFFER_CAPACITY).await;
     let response = server
         .client

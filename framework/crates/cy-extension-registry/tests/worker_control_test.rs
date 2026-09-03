@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-extension-registry/tests/worker_control_test.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 #![cfg(unix)]
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -128,6 +136,7 @@ async fn host_completes_generic_hello_configure_invoke_cancel_channel() {
             3,
             Payload::InvokeResult(InvokeResult {
                 payload: b"opaque-result".to_vec(),
+                payload_type_url: String::new(),
                 response: None,
             }),
         )

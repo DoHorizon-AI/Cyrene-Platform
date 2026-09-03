@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, process::Command, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use cy_manifest::{
     CapabilityDescriptor, CapabilityId, CapabilityInterfaceVersion, Edition, ExecutionMode,
@@ -20,35 +20,6 @@ fn root_dir() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
-}
-
-fn python_executable() -> String {
-    std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        }
-    })
-}
-
-fn python_worker_available() -> bool {
-    Command::new(python_executable())
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn skip_without_python() -> bool {
-    if python_worker_available() {
-        return false;
-    }
-
-    eprintln!(
-        "Skipping Python worker TCK: no usable Python interpreter found; set CYRENE_PYTHON to one"
-    );
-    true
 }
 
 fn fixture_manifest() -> PluginManifest {
@@ -103,10 +74,18 @@ fn worker_options() -> WorkerActivationOptions {
     let shim_dir = root.join("sdk/python/cyrene_worker_shim");
     let tests_dir = root.join("framework/crates/cy-platform-api/tests");
 
+    let python_bin = std::env::var("CYRENE_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    });
+
     WorkerActivationOptions {
         working_dir: Some(tests_dir),
         python_path: vec![python_sdk_dir, shim_dir],
-        python_executable: Some(python_executable()),
+        python_executable: Some(python_bin),
         environment: HashMap::new(),
         handshake_timeout: Duration::from_secs(5),
         default_invoke_timeout: Duration::from_secs(5),
@@ -117,10 +96,6 @@ fn worker_options() -> WorkerActivationOptions {
 
 #[test]
 fn test_capability_worker_activation_and_handshake() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
 
@@ -147,10 +122,6 @@ fn event_filter(mode: &str) -> Vec<u8> {
 
 #[test]
 fn test_capability_worker_application_events_single_and_ordered() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -201,10 +172,6 @@ fn test_capability_worker_application_events_single_and_ordered() {
 
 #[test]
 fn test_capability_worker_application_events_bounded_backpressure_and_slow_consumer() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -255,10 +222,6 @@ fn test_capability_worker_application_events_bounded_backpressure_and_slow_consu
 
 #[test]
 fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -323,10 +286,6 @@ fn test_capability_worker_application_events_pre_cancel_and_unsubscribe() {
 
 #[test]
 fn test_capability_worker_application_events_generation_and_worker_crash() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -382,10 +341,6 @@ fn test_capability_worker_application_events_generation_and_worker_crash() {
 
 #[test]
 fn test_capability_worker_application_events_normal_shutdown() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -413,10 +368,6 @@ fn test_capability_worker_application_events_normal_shutdown() {
 
 #[test]
 fn test_capability_worker_typed_invocation() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -456,10 +407,6 @@ fn test_capability_worker_typed_invocation() {
 
 #[test]
 fn test_capability_worker_invalid_request_error() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -484,10 +431,6 @@ fn test_capability_worker_invalid_request_error() {
 
 #[test]
 fn test_capability_worker_execution_failure_error() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -514,10 +457,6 @@ fn test_capability_worker_execution_failure_error() {
 
 #[test]
 fn test_capability_worker_pre_cancellation() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -543,10 +482,6 @@ fn test_capability_worker_pre_cancellation() {
 
 #[test]
 fn test_capability_worker_inflight_cancellation() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -579,10 +514,6 @@ fn test_capability_worker_inflight_cancellation() {
 
 #[test]
 fn test_capability_worker_timeout() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -606,10 +537,6 @@ fn test_capability_worker_timeout() {
 
 #[test]
 fn test_capability_worker_crash_detection() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let mut client =
@@ -630,10 +557,6 @@ fn test_capability_worker_crash_detection() {
 
 #[test]
 fn test_capability_worker_drop_cleanup() {
-    if skip_without_python() {
-        return;
-    }
-
     let manifest = fixture_manifest();
     let options = worker_options();
     let client = CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();

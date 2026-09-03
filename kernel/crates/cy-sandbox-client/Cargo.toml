@@ -13,5 +13,5 @@ path = "src/lib.rs"
 cy-adapter-client = { path = "../cy-adapter-client" }
 cy-kernel-api = { path = "../cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
-nix = { version = "0.31", features = ["socket"] }
-prost = "0.14"
+nix = { version = "0.29", features = ["socket"] }
+prost = "0.12"

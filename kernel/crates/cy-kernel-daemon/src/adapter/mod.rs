@@ -1,3 +1,11 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: kernel/crates/cy-kernel-daemon/src/adapter/mod.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 //! KernelServiceAdapter 定义、构造器与后台监控线程。
 
 pub(crate) mod events;
@@ -273,10 +281,9 @@ impl KernelServiceAdapter {
             if snapshot_regressed || state_requires_new_session {
                 tracker.advance_session()?;
             }
-            let publish_snapshot = match tracker.last_snapshot_generation {
-                None => true,
-                Some(generation) => observation.snapshot.generation > generation,
-            };
+            let publish_snapshot = tracker
+                .last_snapshot_generation
+                .is_none_or(|generation| observation.snapshot.generation > generation);
             if publish_snapshot {
                 tracker.last_snapshot_generation = Some(observation.snapshot.generation);
             }

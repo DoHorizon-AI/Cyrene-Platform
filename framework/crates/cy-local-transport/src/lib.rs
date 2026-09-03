@@ -1,7 +1,14 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: framework/crates/cy-local-transport/src/lib.rs
+// ║ Module: CYRENE Platform
+// ║ Role: Rust implementation, protocol, or conformance test for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：Rust 实现、协议或一致性测试。
+// ╚══════════════════════════════════════════════════════════════════════╝
 use async_trait::async_trait;
 use bytes::BytesMut;
 use cy_plugin_protocol::{Envelope, FramedCodec, ProtocolError};
-use std::ffi::OsStr;
 use std::process::Stdio;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -42,12 +49,8 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     /// Launch an out-of-process plugin via explicit binary executable and argument array.
-    /// Shell string concatenation is strictly prohibited.
-    pub fn spawn<P, A>(executable: P, args: &[A]) -> Result<Self, TransportError>
-    where
-        P: AsRef<OsStr>,
-        A: AsRef<OsStr>,
-    {
+    /// Do not concatenate a shell command string.
+    pub fn spawn(executable: &str, args: &[&str]) -> Result<Self, TransportError> {
         let mut cmd = Command::new(executable);
         cmd.args(args)
             .stdin(Stdio::piped())
