@@ -1,0 +1,8 @@
+FROM ubuntu:24.04
+
+COPY target/release/cy-runtime-agent /usr/local/bin/cy-runtime-agent
+COPY tooling/acceptance/distributed-execution-fabric/fake-workload.sh /fixture/fake-workload.sh
+
+# The acceptance command supplies the host caller's non-root UID/GID.
+# 验收命令显式使用宿主调用者的非 root UID/GID。
+ENTRYPOINT ["/usr/local/bin/cy-runtime-agent"]

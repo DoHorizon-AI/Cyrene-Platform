@@ -1,0 +1,26 @@
+scenario	input	observation	expected
+attachment_host	HOST_AGENT+PERSISTENT	valid contract	ADMITTED
+attachment_container	CONTAINER_AGENT+EPHEMERAL	valid contract	ADMITTED
+attachment_provider	PROVIDER_MANAGED+EPHEMERAL	provider snapshot	ADMITTED
+restart_container	CONTAINER_AGENT+NONE	container destroyed	WAITING_FOR_EXECUTION_TARGET
+restart_host	HOST_AGENT+HOST_SUPERVISED	host supervisor	RECREATE_RUNTIME
+restart_provider	PROVIDER_MANAGED+PROVIDER_SUPERVISED	provider adapter	RECREATE_RUNTIME
+node_persistent_reconnect	persistent=true+stream loss	new NodeSessionId+same NodeId	ONLINE
+node_ephemeral_loss	persistent=false+Lease expiry	lifecycle close	TERMINATED
+reconnect	active Lease+stream loss	new authenticated session	ACTIVE
+sequence_gap	sequence 1 then 3	missing sequence 2	SEQUENCE_GAP
+duplicate_frame	same frame id replayed	bounded replay cursor	DUPLICATE
+lease_expiry	desired RUNNING+expired Lease	no provider running evidence	UNEXPECTED_LOSS
+graceful_stop	desired STOPPED+StopAck	Lease disappears	EXPECTED_TERMINATION
+provider_stop	desired RUNNING+provider terminated	provider observation	EXTERNAL_TERMINATION
+provider_running_partition	agent absent+provider RUNNING+expired Lease	combined reconciliation	NETWORK_PARTITION_CANDIDATE
+generation_fence	runtime generation 2+assignment generation 1	admission	STALE_GENERATION
+artifact_source_resolution	ArtifactId+policy	Peer Directory+Planner	TRANSFER_PLAN
+artifact_policy_first	unauthorized low-latency Peer+authorized slower Peer	policy before quality score	AUTHORIZED_PEER
+artifact_ticket	Artifact+source+destination+allowed chunks+expiry+max bytes	reference signer	SCOPED_TICKET
+artifact_multi_source	parts 0 and 1+two Peers	per-part routes	ADMITTED
+artifact_resume	verified completed parts+checkpoint	restarted Agent	REUSE_VERIFIED_PARTS
+artifact_atomic_publish	all parts+whole digest	publish rename	PUBLISHED
+artifact_corruption	wrong part or whole digest	verification	REJECTED
+external_acquisition	HTTP-like source snapshot	AcquisitionProvider	INTERNAL_ARTIFACT
+connectivity_relay	outbound authenticated Agent	RELAY provider	CONNECTED

@@ -1,10 +1,10 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
 // ║ 📄 File: contracts/proto/cyrene/core/v1/node_control.proto
 // ║ Module: CYRENE Platform
-// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║ Role: One outbound Host/Runtime Agent control stream.
 // ║
 // ║ 模块：CYRENE Platform
-// ║ 职责：版本化 Protobuf 线协议契约。
+// ║ 职责：统一 Host Agent 与容器内 Runtime Agent 的出站控制通道。
 // ╚══════════════════════════════════════════════════════════════════════╝
 syntax = "proto3";
 
@@ -46,18 +46,315 @@ message NodeHeartbeat {
   google.protobuf.Timestamp observed_at = 3;
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// EXECUTION ATTACHMENT: product-neutral remote execution topology
+//
+//   These values are Platform orchestration projections. They do not add
+//   Kernel semantic nouns or create a second Lease/Worker authority.
+//   以下类型属于 Platform 编排投影，不扩展 Kernel 的九个权威名词。
+// ════════════════════════════════════════════════════════════════════════
+
+enum ExecutionAttachmentType {
+  EXECUTION_ATTACHMENT_TYPE_UNSPECIFIED = 0;
+  EXECUTION_ATTACHMENT_TYPE_HOST_AGENT = 1;
+  EXECUTION_ATTACHMENT_TYPE_CONTAINER_AGENT = 2;
+  EXECUTION_ATTACHMENT_TYPE_PROVIDER_MANAGED = 3;
+}
+
+enum PersistenceClass {
+  PERSISTENCE_CLASS_UNSPECIFIED = 0;
+  PERSISTENCE_CLASS_PERSISTENT = 1;
+  PERSISTENCE_CLASS_EPHEMERAL = 2;
+}
+
+enum RestartCapability {
+  RESTART_CAPABILITY_UNSPECIFIED = 0;
+  RESTART_CAPABILITY_NONE = 1;
+  RESTART_CAPABILITY_HOST_SUPERVISED = 2;
+  RESTART_CAPABILITY_PROVIDER_SUPERVISED = 3;
+}
+
+enum NodeLifecycleState {
+  NODE_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  NODE_LIFECYCLE_STATE_ONLINE = 1;
+  NODE_LIFECYCLE_STATE_OFFLINE = 2;
+  NODE_LIFECYCLE_STATE_LOST = 3;
+  NODE_LIFECYCLE_STATE_TERMINATED = 4;
+}
+
+enum ConnectivityMode {
+  CONNECTIVITY_MODE_UNSPECIFIED = 0;
+  CONNECTIVITY_MODE_LOCAL = 1;
+  CONNECTIVITY_MODE_LAN_DIRECT = 2;
+  CONNECTIVITY_MODE_DIRECT = 3;
+  CONNECTIVITY_MODE_OVERLAY = 4;
+  CONNECTIVITY_MODE_RELAY = 5;
+}
+
+message ExecutionNodeDescriptor {
+  // Reuses the existing NodeRef identity; addresses and container ids are not identities.
+  // 复用既有 NodeRef，网络地址和容器 ID 都不属于 Node 身份。
+  NodeRef node = 1;
+  string node_type = 2;
+  // Explicit presence prevents an omitted value from silently becoming ephemeral.
+  // 显式 presence 避免未填写时被静默解释为临时节点。
+  optional bool persistent = 3;
+}
+
+enum DesiredRuntimeState {
+  DESIRED_RUNTIME_STATE_UNSPECIFIED = 0;
+  DESIRED_RUNTIME_STATE_RUNNING = 1;
+  DESIRED_RUNTIME_STATE_STOPPED = 2;
+}
+
+enum RuntimeObservedState {
+  RUNTIME_OBSERVED_STATE_UNSPECIFIED = 0;
+  RUNTIME_OBSERVED_STATE_ENROLLED = 1;
+  RUNTIME_OBSERVED_STATE_STAGING = 2;
+  RUNTIME_OBSERVED_STATE_STARTING = 3;
+  RUNTIME_OBSERVED_STATE_RUNNING = 4;
+  RUNTIME_OBSERVED_STATE_STOPPING = 5;
+  RUNTIME_OBSERVED_STATE_STOPPED = 6;
+  RUNTIME_OBSERVED_STATE_FAILED = 7;
+  RUNTIME_OBSERVED_STATE_LOST = 8;
+}
+
+enum TerminationClassification {
+  TERMINATION_CLASSIFICATION_UNSPECIFIED = 0;
+  TERMINATION_CLASSIFICATION_EXPECTED = 1;
+  TERMINATION_CLASSIFICATION_GRACEFUL = 2;
+  TERMINATION_CLASSIFICATION_UNEXPECTED_LOSS = 3;
+  TERMINATION_CLASSIFICATION_EXTERNAL = 4;
+  TERMINATION_CLASSIFICATION_UNKNOWN_LOSS = 5;
+}
+
+message AccountScope {
+  string user_id = 1;
+  string organization_id = 2;
+  string workspace_id = 3;
+}
+
+message RuntimeRef {
+  // Runtime identity follows semantic Identity generation/fencing rules.
+  // Runtime 身份复用 semantic Identity 的 generation 规则。
+  cyrene.semantic.v1.Identity identity = 1;
+}
+
+message RuntimeProfile {
+  string image_digest = 1;
+  // Digest of the fully resolved execution environment.
+  // 完整解析后执行环境的不可变摘要。
+  string resolved_digest = 2;
+}
+
+message WorkloadIdentity {
+  cyrene.semantic.v1.Identity identity = 1;
+  AccountScope scope = 2;
+  RuntimeRef runtime = 3;
+  repeated string allowed_actions = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message ExecutionAgentHello {
+  RuntimeRef runtime = 1;
+  AccountScope scope = 2;
+  ExecutionAttachmentType attachment_type = 3;
+  PersistenceClass persistence_class = 4;
+  string agent_version = 5;
+  uint32 min_protocol_version = 6;
+  uint32 max_protocol_version = 7;
+  string resume_token = 8;
+  repeated cyrene.semantic.v1.Capability capabilities = 9;
+  // Development bootstrap proof. It is consumed once and never journaled.
+  // 开发引导凭证只消费一次，禁止写入 journal。
+  string enrollment_proof = 10;
+  ExecutionNodeDescriptor node = 11;
+  RestartCapability restart_capability = 12;
+}
+
+message ExecutionAgentWelcome {
+  string session_id = 1;
+  uint32 selected_protocol_version = 2;
+  google.protobuf.Duration heartbeat_interval = 3;
+  google.protobuf.Timestamp server_time = 4;
+  string resume_token = 5;
+  uint64 acknowledged_agent_sequence = 6;
+  cyrene.semantic.v1.ContractRevision selected_contract = 7;
+}
+
+message ArtifactTransferSource {
+  string peer_id = 1;
+  string replica_id = 2;
+  string locator = 3;
+  // Opaque, short-lived Artifact-plane ticket presented to the source Peer.
+  // 向 source Peer 出示的短期 Artifact Plane ticket。
+  string transfer_ticket = 4;
+}
+
+message ArtifactPartSource {
+  uint32 part_index = 1;
+  string peer_id = 2;
+  string replica_id = 3;
+}
+
+message ArtifactTransferSpec {
+  string artifact_uri = 1;
+  string digest = 2;
+  uint64 size_bytes = 3;
+  string manifest_digest = 4;
+  string replica_uri = 5 [deprecated = true];
+  uint64 part_size_bytes = 6;
+  repeated string part_digests = 7;
+  repeated ArtifactTransferSource sources = 8;
+  repeated ArtifactPartSource part_sources = 9;
+  string destination_peer_id = 10;
+}
+
+message RuntimeAssignment {
+  string assignment_id = 1;
+  RuntimeRef runtime = 2;
+  cyrene.semantic.v1.Identity operation = 3;
+  string attempt_id = 4;
+  cyrene.semantic.v1.Lease lease = 5;
+  WorkloadIdentity workload_identity = 6;
+  RuntimeProfile profile = 7;
+  DesiredRuntimeState desired_state = 8;
+  repeated ArtifactTransferSpec artifacts = 9;
+}
+
+enum AssignmentAckDisposition {
+  ASSIGNMENT_ACK_DISPOSITION_UNSPECIFIED = 0;
+  ASSIGNMENT_ACK_DISPOSITION_ACCEPTED = 1;
+  ASSIGNMENT_ACK_DISPOSITION_DUPLICATE = 2;
+  ASSIGNMENT_ACK_DISPOSITION_REJECTED = 3;
+}
+
+message AssignmentAck {
+  string assignment_id = 1;
+  RuntimeRef runtime = 2;
+  AssignmentAckDisposition disposition = 3;
+  cyrene.semantic.v1.Rejection rejection = 4;
+}
+
+message ExecutionInventory {
+  RuntimeRef runtime = 1;
+  cyrene.semantic.v1.ProviderSnapshot provider_snapshot = 2;
+}
+
+enum ProviderRuntimeState {
+  PROVIDER_RUNTIME_STATE_UNSPECIFIED = 0;
+  PROVIDER_RUNTIME_STATE_RUNNING = 1;
+  PROVIDER_RUNTIME_STATE_PREEMPTED = 2;
+  PROVIDER_RUNTIME_STATE_TERMINATED = 3;
+  PROVIDER_RUNTIME_STATE_UNAVAILABLE = 4;
+}
+
+message ProviderRuntimeObservation {
+  cyrene.semantic.v1.Identity provider = 1;
+  RuntimeRef runtime = 2;
+  ProviderRuntimeState state = 3;
+  string reason_code = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+message RuntimeHeartbeat {
+  RuntimeRef runtime = 1;
+  cyrene.semantic.v1.Identity lease = 2;
+  uint64 fence_token = 3;
+  RuntimeObservedState observed_state = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+message LeaseRenewalRequest {
+  string request_id = 1;
+  RuntimeRef runtime = 2;
+  cyrene.semantic.v1.Identity lease = 3;
+  uint64 fence_token = 4;
+  google.protobuf.Timestamp requested_expires_at = 5;
+}
+
+message LeaseRenewalResult {
+  string request_id = 1;
+  RuntimeRef runtime = 2;
+  oneof outcome {
+    cyrene.semantic.v1.Lease lease = 3;
+    cyrene.semantic.v1.Rejection rejection = 4;
+  }
+}
+
+message RuntimeObservation {
+  RuntimeRef runtime = 1;
+  RuntimeObservedState observed_state = 2;
+  TerminationClassification termination = 3;
+  string reason_code = 4;
+  string summary = 5;
+  google.protobuf.Timestamp observed_at = 6;
+  cyrene.semantic.v1.Worker worker = 7;
+  cyrene.semantic.v1.Operation operation = 8;
+}
+
+message RuntimeProgress {
+  RuntimeRef runtime = 1;
+  uint64 completed_units = 2;
+  uint64 total_units = 3;
+  string unit = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+message StructuredAgentEvent {
+  RuntimeRef runtime = 1;
+  string event_id = 2;
+  string kind = 3;
+  string schema_id = 4;
+  bytes body = 5;
+  google.protobuf.Timestamp observed_at = 6;
+}
+
+message LogReference {
+  RuntimeRef runtime = 1;
+  string artifact_uri = 2;
+  string digest = 3;
+  uint64 size_bytes = 4;
+}
+
+message StopCommand {
+  string command_id = 1;
+  RuntimeRef runtime = 2;
+  google.protobuf.Duration grace_period = 3;
+  string reason_code = 4;
+}
+
+message StopAck {
+  string command_id = 1;
+  RuntimeRef runtime = 2;
+  google.protobuf.Timestamp accepted_at = 3;
+}
+
 message NodeToControlPlane {
   string frame_id = 1;
   uint64 sequence_number = 2;
   // Empty only on the initial NodeHello. Every later frame is bound to the
   // session selected by NodeWelcome so stale reconnects cannot report state.
   string session_id = 3;
+  // Highest contiguous control-plane sequence durably applied by this Agent.
+  // Agent 已持久应用的控制面最高连续序号。
+  uint64 ack_sequence_number = 4;
 
   oneof body {
     NodeHello hello = 10;
     NodeHeartbeat heartbeat = 11;
     KernelCommandResult command_result = 12;
     OperationEvent operation_event = 13;
+    ExecutionAgentHello execution_agent_hello = 20;
+    AssignmentAck assignment_ack = 21;
+    ExecutionInventory execution_inventory = 22;
+    RuntimeHeartbeat runtime_heartbeat = 23;
+    LeaseRenewalRequest lease_renewal = 24;
+    RuntimeObservation runtime_observation = 25;
+    RuntimeProgress runtime_progress = 26;
+    StructuredAgentEvent structured_event = 27;
+    LogReference log_reference = 28;
+    StopAck stop_ack = 29;
   }
 }
 
@@ -66,10 +363,17 @@ message ControlPlaneToNode {
   uint64 sequence_number = 2;
   // Must equal NodeWelcome.session_id for the welcome and every later command.
   string session_id = 3;
+  // Highest contiguous Agent sequence durably applied by the control plane.
+  // 控制面已持久应用的 Agent 最高连续序号。
+  uint64 ack_sequence_number = 4;
 
   oneof body {
     NodeWelcome welcome = 10;
     KernelCommand command = 11;
+    ExecutionAgentWelcome execution_agent_welcome = 20;
+    RuntimeAssignment runtime_assignment = 21;
+    LeaseRenewalResult lease_renewal_result = 22;
+    StopCommand stop_command = 23;
   }
 }
 

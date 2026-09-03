@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/artifact_transfer.schema.json",
+  "title": "ArtifactTransferContractV1",
+  "description": "Provider-private replica and resumable transfer records around the canonical ArtifactRef. Artifact identity never includes a URL or path. 围绕 canonical ArtifactRef 的 Provider 私有副本与断点续传记录，地址和路径不属于 Artifact 身份。",
+  "oneOf": [
+    { "$ref": "#/$defs/artifactPeer" },
+    { "$ref": "#/$defs/artifactReplica" },
+    { "$ref": "#/$defs/transferTicket" },
+    { "$ref": "#/$defs/transferPlan" },
+    { "$ref": "#/$defs/transferSession" },
+    { "$ref": "#/$defs/transferPart" },
+    { "$ref": "#/$defs/transferCheckpoint" },
+    { "$ref": "#/$defs/externalSource" },
+    { "$ref": "#/$defs/sourceImportJob" },
+    { "$ref": "#/$defs/sourceSnapshot" }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifactIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "digest", "size_bytes", "kind"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^artifact://sha256/[0-9a-f]{64}$"
+        },
+        "digest": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "kind": {
+          "enum": ["generic", "model", "dataset", "checkpoint", "training_spec", "metrics", "merged", "quantized", "report"]
+        },
+        "manifest_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "artifactPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peer_id", "kind", "authorized", "residency", "trust_domain", "classifications", "policy_tags", "healthy", "latency_ms", "bandwidth_mbps", "cost_microunits"],
+      "properties": {
+        "peer_id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["central_seed", "regional_cache", "object_store_gateway", "desktop_cache", "node_cache", "generic"] },
+        "authorized": { "type": "boolean" },
+        "residency": { "type": "string", "minLength": 1 },
+        "trust_domain": { "type": "string", "minLength": 1 },
+        "classifications": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "policy_tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "healthy": { "type": "boolean" },
+        "latency_ms": { "type": "integer", "minimum": 0 },
+        "bandwidth_mbps": { "type": "integer", "minimum": 0 },
+        "cost_microunits": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "artifactReplica": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replica_id", "artifact", "peer_id", "protocol", "locator", "priority"],
+      "properties": {
+        "replica_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "peer_id": { "type": "string", "minLength": 1 },
+        "protocol": { "enum": ["https_range_v1"] },
+        "locator": { "type": "string", "format": "uri" },
+        "region": { "type": "string" },
+        "priority": { "type": "integer", "minimum": 0 },
+        "expires_at_unix_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "transferTicket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ticket_id", "artifact", "source_peer_id", "destination_peer_id", "allowed_parts", "expires_at_unix_ms", "max_bytes", "signature"],
+      "properties": {
+        "ticket_id": { "type": "string", "minLength": 1 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "source_peer_id": { "type": "string", "minLength": 1 },
+        "destination_peer_id": { "type": "string", "minLength": 1 },
+        "allowed_parts": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 1, "uniqueItems": true },
+        "expires_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "max_bytes": { "type": "integer", "minimum": 1 },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    },
+    "transferSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peer", "replica", "ticket"],
+      "properties": {
+        "peer": { "$ref": "#/$defs/artifactPeer" },
+        "replica": { "$ref": "#/$defs/artifactReplica" },
+        "ticket": { "$ref": "#/$defs/transferTicket" }
+      }
+    },
+    "transferPartSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["part_index", "peer_id", "replica_id"],
+      "properties": {
+        "part_index": { "type": "integer", "minimum": 0 },
+        "peer_id": { "type": "string", "minLength": 1 },
+        "replica_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "transferPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_id", "artifact", "destination_peer_id", "sources", "part_sources"],
+      "properties": {
+        "plan_id": { "type": "string", "minLength": 1 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "destination_peer_id": { "type": "string", "minLength": 1 },
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/transferSource" }, "minItems": 1 },
+        "part_sources": { "type": "array", "items": { "$ref": "#/$defs/transferPartSource" }, "minItems": 1 }
+      }
+    },
+    "transferPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "start", "end_exclusive", "digest"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "start": { "type": "integer", "minimum": 0 },
+        "end_exclusive": { "type": "integer", "minimum": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "transferSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "artifact", "replica_id", "part_size_bytes"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "replica_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "part_size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "transferCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "artifact", "completed_parts"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" },
+        "completed_parts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/transferPart" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "externalSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "locator"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "locator": { "type": "string", "minLength": 1 },
+        "revision": { "type": "string" }
+      }
+    },
+    "sourceImportJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "source"],
+      "properties": {
+        "operation_id": { "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/externalSource" }
+      }
+    },
+    "sourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "artifact"],
+      "properties": {
+        "source": { "$ref": "#/$defs/externalSource" },
+        "artifact": { "$ref": "#/$defs/artifactIdentity" }
+      }
+    }
+  }
+}

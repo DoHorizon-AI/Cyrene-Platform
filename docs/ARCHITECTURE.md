@@ -86,6 +86,7 @@ kernel component.
 
 ## Kernel document layers
 
+- [Distributed Execution Fabric v1](architecture/distributed-execution-fabric-v1.md): frozen attachment, identity, control, loss, and Artifact transfer model for host, container-only, and provider-managed execution.
 - [Kernel design goals](architecture/kernel-design-goals.md): durable design
   direction and boundaries.
 - [Kernel semantic contract v1](contracts/kernel-semantic-contract-v1.md): the
