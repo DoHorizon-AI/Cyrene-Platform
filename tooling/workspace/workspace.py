@@ -22,6 +22,8 @@ def find_workspace_root() -> Path:
 def load_catalog(workspace_root: Path) -> dict:
     cat_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "repos.yaml"
     if not cat_file.exists():
+        cat_file = Path(__file__).resolve().parent / "repos.yaml"
+    if not cat_file.exists():
         return {"profiles": {}, "repositories": {}}
     try:
         return yaml.safe_load(cat_file.read_text(encoding="utf-8")) or {}
@@ -30,6 +32,8 @@ def load_catalog(workspace_root: Path) -> dict:
 
 def load_baseline(workspace_root: Path) -> dict:
     base_file = workspace_root / "Cyrene-Platform" / "tooling" / "workspace" / "workspace-baseline.yaml"
+    if not base_file.exists():
+        base_file = Path(__file__).resolve().parent / "workspace-baseline.yaml"
     if not base_file.exists():
         return {}
     try:

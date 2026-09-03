@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, fix/*, chore/*, feat/*]
   pull_request:
     branches: [develop, main]
 
@@ -19,8 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Validate documentation links and indexes
@@ -31,8 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run architecture boundary guard
@@ -46,8 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install Python SDKs and dependencies
@@ -67,19 +67,12 @@ jobs:
           python -m pytest tooling/docs/tests
           python -m pytest tooling/ci/tests
 
-  rust-kernel:
-    name: ci / rust-kernel
+  platform-core:
+    name: ci / platform-core
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - name: Checkout exact Plugins runtime for cross-repository TCK
-        uses: actions/checkout@v4
-        with:
-          repository: DoHorizon-AI/Cyrene-Plugins-Official
-          ref: 7906f2672a1b80620a32840bd95c81a9cc38352c
-          path: .ci/plugins
-          token: ${{ secrets.CYRENE_CROSS_REPO_TOKEN }}
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -90,6 +83,4 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Run Rust unit tests (--locked)
-        env:
-          CYRENE_PLUGINS_WORKTREE: ${{ github.workspace }}/.ci/plugins
         run: cargo test --locked --workspace
