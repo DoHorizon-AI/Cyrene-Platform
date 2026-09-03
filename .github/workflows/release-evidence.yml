@@ -46,10 +46,22 @@ jobs:
               pull_number: pr.number,
             });
 
-            // If the PR author is an OWNER or organization MEMBER, GitHub prevents self-approval via reviews.
-            // In that case, author approval is inherently satisfied by the privileged author association.
-            const isPrivilegedAuthor = ["OWNER", "MEMBER"].includes(prData.author_association);
-            core.info(`PR author: ${prData.user.login}, association: ${prData.author_association}, isPrivilegedAuthor: ${isPrivilegedAuthor}`);
+            // Check if PR author is an administrator or maintainer of the repository
+            let isPrivilegedAuthor = ["OWNER", "MEMBER"].includes(prData.author_association);
+            try {
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: prData.user.login,
+              });
+              const level = perm.data.permission; // "admin", "maintain", etc.
+              if (["admin", "maintain"].includes(level)) {
+                isPrivilegedAuthor = true;
+              }
+              core.info(`PR author ${prData.user.login} permission level: ${level}, isPrivilegedAuthor: ${isPrivilegedAuthor}`);
+            } catch (err) {
+              core.warning(`Could not fetch collaborator permission for ${prData.user.login}: ${err}`);
+            }
 
             const reviews = await github.rest.pulls.listReviews({
               owner: context.repo.owner,
