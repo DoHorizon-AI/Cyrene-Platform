@@ -7,6 +7,7 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cy_execution_fabric::ConnectivityRoute;
 use cy_proto::workspace_v1::relay_frame;
@@ -22,6 +23,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use tonic::{Request, Streaming};
 
 use crate::WorkspaceApi;
+
+const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// TLS material and resolved route for one outbound relay connection.
 #[derive(Clone)]
@@ -41,6 +44,8 @@ pub enum RelayTransportError {
     Transport(String),
     #[error("RELAY_STREAM_CLOSED")]
     Closed,
+    #[error("RELAY_RESPONSE_TIMEOUT")]
+    ResponseTimeout,
     #[error("RELAY_PROTOCOL_INVALID: {0}")]
     Protocol(String),
 }
@@ -75,20 +80,15 @@ impl RelaySession {
             )),
         })
         .await?;
-        loop {
-            let frame = self.next().await?;
-            if frame.frame_id != request_id {
-                continue;
+        let frame = self.next_matching(&request_id).await?;
+        match frame.body {
+            Some(relay_frame::Body::DiscoverResponse(response)) => Ok(response.workspaces),
+            Some(relay_frame::Body::Error(error)) => {
+                Err(RelayTransportError::Protocol(error.message))
             }
-            return match frame.body {
-                Some(relay_frame::Body::DiscoverResponse(response)) => Ok(response.workspaces),
-                Some(relay_frame::Body::Error(error)) => {
-                    Err(RelayTransportError::Protocol(error.message))
-                }
-                _ => Err(RelayTransportError::Protocol(
-                    "discovery received an unexpected relay frame".to_string(),
-                )),
-            };
+            _ => Err(RelayTransportError::Protocol(
+                "discovery received an unexpected relay frame".to_string(),
+            )),
         }
     }
 
@@ -103,20 +103,15 @@ impl RelaySession {
             body: Some(relay_frame::Body::WorkspaceRequest(request)),
         })
         .await?;
-        loop {
-            let frame = self.next().await?;
-            if frame.frame_id != request_id {
-                continue;
+        let frame = self.next_matching(&request_id).await?;
+        match frame.body {
+            Some(relay_frame::Body::WorkspaceResponse(response)) => Ok(response),
+            Some(relay_frame::Body::Error(error)) => {
+                Err(RelayTransportError::Protocol(error.message))
             }
-            return match frame.body {
-                Some(relay_frame::Body::WorkspaceResponse(response)) => Ok(response),
-                Some(relay_frame::Body::Error(error)) => {
-                    Err(RelayTransportError::Protocol(error.message))
-                }
-                _ => Err(RelayTransportError::Protocol(
-                    "Workspace request received an unexpected relay frame".to_string(),
-                )),
-            };
+            _ => Err(RelayTransportError::Protocol(
+                "Workspace request received an unexpected relay frame".to_string(),
+            )),
         }
     }
 
@@ -161,6 +156,19 @@ impl RelaySession {
             .map_err(|error| RelayTransportError::Transport(error.to_string()))?
             .ok_or(RelayTransportError::Closed)
     }
+
+    async fn next_matching(&mut self, request_id: &str) -> Result<RelayFrame, RelayTransportError> {
+        tokio::time::timeout(RELAY_RESPONSE_TIMEOUT, async {
+            loop {
+                let frame = self.next().await?;
+                if frame.frame_id == request_id {
+                    return Ok(frame);
+                }
+            }
+        })
+        .await
+        .map_err(|_| RelayTransportError::ResponseTimeout)?
+    }
 }
 
 /// Establish one outbound authenticated relay session.
@@ -183,9 +191,9 @@ pub async fn connect_relay_session(
         .await
         .map_err(|error| RelayTransportError::Transport(error.to_string()))?
         .into_inner();
-    let ready = inbound
-        .message()
+    let ready = tokio::time::timeout(RELAY_RESPONSE_TIMEOUT, inbound.message())
         .await
+        .map_err(|_| RelayTransportError::ResponseTimeout)?
         .map_err(|error| RelayTransportError::Transport(error.to_string()))?
         .ok_or(RelayTransportError::Closed)?;
     let Some(relay_frame::Body::Ready(ready)) = ready.body else {

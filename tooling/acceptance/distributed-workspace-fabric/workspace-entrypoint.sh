@@ -21,7 +21,9 @@ runtime_pid=""
 #   Returns: Always 0 after best-effort cleanup.
 # ════════════════════════════════════════════════════════════════════════
 shutdown_workspace() {
-  touch /commands/stop-1
+  if ! touch /commands/stop-1; then
+    printf 'unable to request graceful fixture stop; continuing cleanup\n' >&2
+  fi
   for _ in $(seq 1 100); do
     if [[ -f /state/workload-graceful-1 ]]; then
       break

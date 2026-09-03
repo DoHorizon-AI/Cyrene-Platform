@@ -54,7 +54,12 @@ for mode in LOCAL LAN_DIRECT DIRECT OVERLAY RELAY; do
   }
 done
 
-test "$(rg -c '^service ' "${workspace_proto}")" -eq 1
+service_count=$(rg -c '^service ' "${workspace_proto}" || true)
+if [[ "${service_count}" != 1 ]]; then
+  printf 'Workspace wire contract must define exactly one service; found %s\n' \
+    "${service_count:-0}" >&2
+  exit 1
+fi
 rg -q '^service WorkspaceRelayService' "${workspace_proto}"
 rg -q 'rpc Connect\(stream RelayFrame\) returns \(stream RelayFrame\)' "${workspace_proto}"
 rg -q 'trait WorkspaceDirectory' "${workspace_crate}/src/directory.rs"

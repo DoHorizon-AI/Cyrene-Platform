@@ -73,6 +73,22 @@ impl WorkspaceRelay {
         let sequence = self.state.next_session.fetch_add(1, Ordering::Relaxed);
         format!("{prefix}-{sequence}")
     }
+
+    fn workspace_sender(&self, workspace_id: &str) -> Result<Option<RelaySender>, ()> {
+        let connections = self.state.connections.lock().map_err(|_| ())?;
+        Ok(connections
+            .workspaces
+            .get(workspace_id)
+            .map(|connection| connection.sender.clone()))
+    }
+
+    fn frontend_sender(&self, relay_session_id: &str) -> Result<Option<RelaySender>, ()> {
+        let connections = self.state.connections.lock().map_err(|_| ())?;
+        Ok(connections
+            .frontends
+            .get(relay_session_id)
+            .map(|connection| connection.sender.clone()))
+    }
 }
 
 #[tonic::async_trait]
@@ -127,6 +143,7 @@ impl WorkspaceRelay {
             return Err(Status::permission_denied("frontend requires user identity"));
         };
         let relay_session_id = self.next_session("frontend");
+        send_ready(&sender, &relay_session_id, claims.expires_at_unix_ms).await?;
         self.state
             .connections
             .lock()
@@ -139,7 +156,6 @@ impl WorkspaceRelay {
                     sender: sender.clone(),
                 },
             );
-        send_ready(&sender, &relay_session_id, claims.expires_at_unix_ms).await?;
 
         let relay = self.clone();
         tokio::spawn(async move {
@@ -231,12 +247,19 @@ impl WorkspaceRelay {
             .await;
             return;
         }
-        let workspace_sender = self.state.connections.lock().ok().and_then(|connections| {
-            connections
-                .workspaces
-                .get(&request.workspace_id)
-                .map(|connection| connection.sender.clone())
-        });
+        let workspace_sender = match self.workspace_sender(&request.workspace_id) {
+            Ok(sender) => sender,
+            Err(_) => {
+                let _ = send_workspace_error(
+                    frontend_sender,
+                    request.request_id,
+                    13,
+                    "RELAY_CONNECTION_STATE_POISONED",
+                )
+                .await;
+                return;
+            }
+        };
         let Some(workspace_sender) = workspace_sender else {
             let _ = send_workspace_error(
                 frontend_sender,
@@ -276,6 +299,7 @@ impl WorkspaceRelay {
             return Err(Status::permission_denied("Workspace identity mismatch"));
         }
         let relay_session_id = self.next_session("workspace");
+        send_ready(&sender, &relay_session_id, claims.expires_at_unix_ms).await?;
         self.state
             .connections
             .lock()
@@ -288,7 +312,6 @@ impl WorkspaceRelay {
                     sender: sender.clone(),
                 },
             );
-        send_ready(&sender, &relay_session_id, claims.expires_at_unix_ms).await?;
 
         let relay = self.clone();
         let registered_workspace = workspace_id.clone();
@@ -300,12 +323,19 @@ impl WorkspaceRelay {
                             .await;
                     continue;
                 };
-                let frontend_sender = relay.state.connections.lock().ok().and_then(|connections| {
-                    connections
-                        .frontends
-                        .get(&forwarded.frontend_session_id)
-                        .map(|connection| connection.sender.clone())
-                });
+                let frontend_sender = match relay.frontend_sender(&forwarded.frontend_session_id) {
+                    Ok(sender) => sender,
+                    Err(_) => {
+                        let _ = send_error(
+                            &sender,
+                            &frame.frame_id,
+                            13,
+                            "RELAY_CONNECTION_STATE_POISONED",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
                 if let (Some(frontend_sender), Some(response)) =
                     (frontend_sender, forwarded.response)
                 {
