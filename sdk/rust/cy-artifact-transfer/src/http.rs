@@ -255,18 +255,17 @@ fn load_checkpoint(
     session: &TransferSession,
     part_root: &Path,
 ) -> Result<TransferCheckpoint, TransferError> {
-    if !session.checkpoint_path.exists() {
-        let checkpoint = TransferCheckpoint {
+    let mut checkpoint = if session.checkpoint_path.exists() {
+        let bytes = fs::read(&session.checkpoint_path)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| TransferError::Checkpoint(error.to_string()))?
+    } else {
+        TransferCheckpoint {
             session_id: session.session_id.clone(),
             artifact: session.manifest.artifact.clone(),
             completed_parts: Default::default(),
-        };
-        persist_checkpoint(&session.checkpoint_path, &checkpoint)?;
-        return Ok(checkpoint);
-    }
-    let bytes = fs::read(&session.checkpoint_path)?;
-    let mut checkpoint: TransferCheckpoint = serde_json::from_slice(&bytes)
-        .map_err(|error| TransferError::Checkpoint(error.to_string()))?;
+        }
+    };
     if checkpoint.session_id != session.session_id
         || checkpoint.artifact != session.manifest.artifact
         || !checkpoint
@@ -282,6 +281,15 @@ fn load_checkpoint(
         let path = part_path(part_root, part.index);
         path.exists() && verify_file(&path, &part.digest, part.size_bytes()).is_ok()
     });
+    for part in &session.manifest.parts {
+        if checkpoint.completed_parts.contains(part) {
+            continue;
+        }
+        let path = part_path(part_root, part.index);
+        if path.exists() && verify_file(&path, &part.digest, part.size_bytes()).is_ok() {
+            checkpoint.completed_parts.insert(part.clone());
+        }
+    }
     persist_checkpoint(&session.checkpoint_path, &checkpoint)?;
     Ok(checkpoint)
 }
@@ -455,5 +463,26 @@ mod tests {
             HttpRangeTransfer::new().unwrap().transfer(&session),
             Err(TransferError::ArtifactDigest(_))
         ));
+    }
+
+    #[test]
+    fn verified_part_written_before_checkpoint_is_reused() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"verified orphan part";
+        let digest = sha256_bytes(bytes);
+        let session = existing_session(root.path(), bytes, digest);
+        fs::remove_file(&session.destination).unwrap();
+        let parts = part_root(&session).unwrap();
+        fs::create_dir_all(&parts).unwrap();
+        fs::write(part_path(&parts, 0), bytes).unwrap();
+
+        let result = HttpRangeTransfer::new()
+            .unwrap()
+            .transfer(&session)
+            .unwrap();
+
+        assert_eq!(result.downloaded_parts, 0);
+        assert_eq!(result.reused_parts, 1);
+        assert_eq!(fs::read(&session.destination).unwrap(), bytes);
     }
 }
