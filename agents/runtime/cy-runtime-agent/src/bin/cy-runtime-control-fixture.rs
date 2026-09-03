@@ -47,6 +47,7 @@ struct FixtureState {
     authority_generation: u64,
     next_session: u64,
     disconnect_generation: u64,
+    wait_for_assignment_trigger: bool,
     disconnected_generations: BTreeSet<u64>,
     stop_sent_generations: BTreeSet<u64>,
     leases: BTreeMap<u64, LeaseRecord>,
@@ -108,7 +109,14 @@ impl NodeControlService for Fixture {
             .ok_or_else(|| Status::invalid_argument("missing NodeRef"))?
             .node_id
             .clone();
-        let (session_id, resume_token, assignment, disconnect_this_session) = {
+        let (
+            session_id,
+            resume_token,
+            assignment,
+            disconnect_this_session,
+            assignment_trigger,
+            trace_path,
+        ) = {
             let mut state = self
                 .shared
                 .lock()
@@ -191,6 +199,12 @@ impl NodeControlService for Fixture {
                 resume_token,
                 make_assignment(&state, &runtime, lease),
                 disconnect,
+                state.wait_for_assignment_trigger.then(|| {
+                    state
+                        .command_dir
+                        .join(format!("start-{}", runtime.generation))
+                }),
+                state.trace_path.clone(),
             )
         };
 
@@ -232,6 +246,23 @@ impl NodeControlService for Fixture {
                 return;
             }
             sequence += 1;
+            if let Some(trigger) = assignment_trigger {
+                trace(
+                    &trace_path,
+                    &format!(
+                        "ASSIGNMENT_WAITING generation={} trigger={}",
+                        runtime.generation,
+                        trigger.display()
+                    ),
+                );
+                while !trigger.exists() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                trace(
+                    &trace_path,
+                    &format!("ASSIGNMENT_RELEASED generation={}", runtime.generation),
+                );
+            }
             if send_control(
                 &outbound,
                 control_frame(
@@ -724,6 +755,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         disconnect_generation: env::var("CYRENE_FIXTURE_DISCONNECT_GENERATION")
             .unwrap_or_else(|_| "2".to_string())
             .parse()?,
+        wait_for_assignment_trigger: env::var("CYRENE_FIXTURE_WAIT_FOR_START")
+            .is_ok_and(|value| value == "1"),
         disconnected_generations: BTreeSet::new(),
         stop_sent_generations: BTreeSet::new(),
         leases: BTreeMap::new(),

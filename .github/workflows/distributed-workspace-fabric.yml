@@ -1,0 +1,37 @@
+name: Distributed Workspace Fabric
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main, feat/distributed-execution-fabric-v1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install contract prerequisites
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+      - name: Install pinned Buf
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+          version: 1.45.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check Workspace Fabric contract and unit suites
+        run: bash tooling/ci/check-distributed-workspace-fabric.sh
+
+  relay-container-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run real Workspace relay and Runtime Agent proof
+        env:
+          CYRENE_ACCEPTANCE_BASE_IMAGE: ubuntu:24.04
+          CYRENE_ACCEPTANCE_PULL_IMAGE: "1"
+        run: bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh

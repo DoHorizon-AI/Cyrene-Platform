@@ -1,0 +1,20 @@
+scenario	input	observation	expected
+identity_discovery	UserIdentity+Organization membership	Directory lookup	WORKSPACE_DESCRIPTOR
+identity_scope_denied	unrelated UserIdentity	Directory lookup	DENIED
+descriptor_modes	LOCAL+LAN_DIRECT+DIRECT+OVERLAY+RELAY candidates	contract validation	ADMITTED
+descriptor_expiry	expired descriptor	contract validation	REJECTED
+identity_address_independence	WorkspaceId+candidate URI	identity validation	WORKSPACE_ID_UNCHANGED
+local_access	LOCAL candidate+Workspace API	LocalWorkspaceClient	CONNECTED
+relay_workspace_connect	approved device+short-lived credential+outbound mTLS	Relay registration	CONNECTED
+relay_frontend_connect	member user+short-lived credential+mTLS	Relay registration	CONNECTED
+credential_role_separation	user token used as Workspace device	authentication	REJECTED
+workspace_offline	member frontend request+no Workspace connector	Relay routing	WORKSPACE_CONNECTOR_OFFLINE
+frontend_boundary	remote operation request	Workspace API only	NO_RUNTIME_OR_DOCKER_ACCESS
+relay_restart	live Operation+Relay termination	new relay sessions	SAME_WORKSPACE_AUTHORITY
+execution_vertical	remote request+canonical Operation	existing Execution Fabric assignment	RUNTIME_AGENT_STARTED
+runtime_progress	Runtime Agent observation	Workspace API view	SAME_OPERATION_PROGRESS
+artifact_vertical	ArtifactRef+existing transfer plan	target CAS publish	DIGEST_VERIFIED
+artifact_frontend_boundary	remote Operation view	Artifact URI	NO_LOCAL_PATH_OR_PEER_DETAIL
+workspace_inbound_port	outbound Workspace connector	Docker port bindings	ZERO
+identity_separation	User+device+workload credentials	relay and Runtime sessions	NOT_INTERCHANGEABLE
+relay_authority_boundary	Relay restart	Workspace/Product state	UNCHANGED
