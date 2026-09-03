@@ -29,7 +29,7 @@ jobs:
     env:
       CROSS_REPO_REQUIRED: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event.inputs.cross_repo_required == 'true')) && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Check cross-repo credentials
         id: cred-check
@@ -50,7 +50,7 @@ jobs:
         if: steps.cred-check.outputs.has_token == 'true'
         id: checkout-plugins
         continue-on-error: true
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: DoHorizon-AI/Cyrene-Plugins-Official
           ref: 7906f2672a1b80620a32840bd95c81a9cc38352c
