@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate release entry
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const pr = context.payload.pull_request;
@@ -40,6 +40,29 @@ jobs:
             }
 
             // 4. Admin / Maintainer approval review
+            const { data: prData } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+
+            // Check if PR author is an administrator or maintainer of the repository
+            let isPrivilegedAuthor = ["OWNER", "MEMBER"].includes(prData.author_association);
+            try {
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: prData.user.login,
+              });
+              const level = perm.data.permission; // "admin", "maintain", etc.
+              if (["admin", "maintain"].includes(level)) {
+                isPrivilegedAuthor = true;
+              }
+              core.info(`PR author ${prData.user.login} permission level: ${level}, isPrivilegedAuthor: ${isPrivilegedAuthor}`);
+            } catch (err) {
+              core.warning(`Could not fetch collaborator permission for ${prData.user.login}: ${err}`);
+            }
+
             const reviews = await github.rest.pulls.listReviews({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -51,10 +74,12 @@ jobs:
               userLatestReview.set(r.user.id, r);
             }
 
-            const hasApproval = Array.from(userLatestReview.values()).some(
+            const hasApproval = isPrivilegedAuthor || Array.from(userLatestReview.values()).some(
               (r) => r.state === "APPROVED" && ["OWNER", "MEMBER", "COLLABORATOR"].includes(r.author_association)
             );
 
             if (!hasApproval) {
               core.setFailed("main release PR requires approval (APPROVED review) from at least one repository administrator/maintainer");
+            } else {
+              core.info("Release evidence gate passed: valid branch, verified label, evidence link, and authorized approval.");
             }

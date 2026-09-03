@@ -1,0 +1,74 @@
+name: cross-repo
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      cross_repo_required:
+        description: "Enforce cross-repo validation (fail if credentials unavailable)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-repo-integration:
+    name: cross-repo / plugins-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CROSS_REPO_REQUIRED: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event.inputs.cross_repo_required == 'true')) && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check cross-repo credentials
+        id: cred-check
+        run: |
+          if [ -n "${{ secrets.CYRENE_CROSS_REPO_TOKEN }}" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            if [ "$CROSS_REPO_REQUIRED" = "true" ]; then
+              echo "::error title=CROSS_REPO_REQUIRED_FAILURE::secrets.CYRENE_CROSS_REPO_TOKEN is missing for required cross-repo gate."
+              exit 1
+            else
+              echo "::notice title=SKIPPED_CREDENTIALS::secrets.CYRENE_CROSS_REPO_TOKEN is not configured in this environment. Cross-repo validation skipped."
+            fi
+          fi
+
+      - name: Checkout exact Plugins runtime for cross-repository TCK
+        if: steps.cred-check.outputs.has_token == 'true'
+        id: checkout-plugins
+        continue-on-error: true
+        uses: actions/checkout@v5
+        with:
+          repository: DoHorizon-AI/Cyrene-Plugins-Official
+          ref: 7906f2672a1b80620a32840bd95c81a9cc38352c
+          path: .ci/plugins
+          token: ${{ secrets.CYRENE_CROSS_REPO_TOKEN }}
+
+      - name: Report cross-repo infrastructure failure
+        if: steps.cred-check.outputs.has_token == 'true' && steps.checkout-plugins.outcome != 'success'
+        run: |
+          echo "::error title=BLOCKED_INFRASTRUCTURE::Cross-repo checkout of DoHorizon-AI/Cyrene-Plugins-Official failed despite credentials being configured (network timeout, rate limit, or service outage)."
+          exit 1
+
+      - name: Setup Rust Toolchain
+        if: steps.cred-check.outputs.has_token == 'true' && steps.checkout-plugins.outcome == 'success'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cross-repository Plugins TCK
+        if: steps.cred-check.outputs.has_token == 'true' && steps.checkout-plugins.outcome == 'success'
+        env:
+          CYRENE_PLUGINS_WORKTREE: ${{ github.workspace }}/.ci/plugins
+        run: cargo test --locked -p cy-capability-execution-service --test plugins_model_provider_tck
