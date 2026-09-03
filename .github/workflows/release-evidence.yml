@@ -40,9 +40,16 @@ jobs:
             }
 
             // 4. Admin / Maintainer approval review
+            const { data: prData } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+
             // If the PR author is an OWNER or organization MEMBER, GitHub prevents self-approval via reviews.
             // In that case, author approval is inherently satisfied by the privileged author association.
-            const isPrivilegedAuthor = ["OWNER", "MEMBER"].includes(pr.author_association);
+            const isPrivilegedAuthor = ["OWNER", "MEMBER"].includes(prData.author_association);
+            core.info(`PR author: ${prData.user.login}, association: ${prData.author_association}, isPrivilegedAuthor: ${isPrivilegedAuthor}`);
 
             const reviews = await github.rest.pulls.listReviews({
               owner: context.repo.owner,
@@ -61,4 +68,6 @@ jobs:
 
             if (!hasApproval) {
               core.setFailed("main release PR requires approval (APPROVED review) from at least one repository administrator/maintainer");
+            } else {
+              core.info("Release evidence gate passed: valid branch, verified label, evidence link, and authorized approval.");
             }
