@@ -40,6 +40,10 @@ jobs:
             }
 
             // 4. Admin / Maintainer approval review
+            // If the PR author is an OWNER or organization MEMBER, GitHub prevents self-approval via reviews.
+            // In that case, author approval is inherently satisfied by the privileged author association.
+            const isPrivilegedAuthor = ["OWNER", "MEMBER"].includes(pr.author_association);
+
             const reviews = await github.rest.pulls.listReviews({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -51,7 +55,7 @@ jobs:
               userLatestReview.set(r.user.id, r);
             }
 
-            const hasApproval = Array.from(userLatestReview.values()).some(
+            const hasApproval = isPrivilegedAuthor || Array.from(userLatestReview.values()).some(
               (r) => r.state === "APPROVED" && ["OWNER", "MEMBER", "COLLABORATOR"].includes(r.author_association)
             );
 
