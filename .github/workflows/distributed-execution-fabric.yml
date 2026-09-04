@@ -12,9 +12,14 @@ permissions:
 
 jobs:
   contract-and-unit:
+    name: fabric / contract-and-unit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Install contract prerequisites
         run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - name: Install pinned Buf
@@ -27,9 +32,13 @@ jobs:
         run: bash tooling/ci/check-distributed-execution-fabric.sh
 
   container-proof:
+    name: fabric / container-proof
+    needs: contract-and-unit
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
       - name: Run real container fault and Artifact resume proof
         env:
           CYRENE_ACCEPTANCE_BASE_IMAGE: ubuntu:24.04

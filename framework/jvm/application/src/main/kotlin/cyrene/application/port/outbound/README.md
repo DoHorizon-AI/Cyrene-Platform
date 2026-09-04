@@ -19,7 +19,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `KernelCommandPort.kt` | Kotlin Framework implementation or test. | Kotlin Framework 实现或测试。 |
 | `ProductControlPlaneStore.kt` | Kotlin Framework implementation or test. | Kotlin Framework 实现或测试。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
