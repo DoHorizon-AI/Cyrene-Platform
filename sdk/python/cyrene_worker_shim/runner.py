@@ -121,6 +121,23 @@ class GenericCapabilityWorker(CyreneWorker):
         capability: str,
         action: str,
         payload: bytes,
+        request_type_url: str = "",
+    ) -> Tuple[bool, Any]:
+        return self._invoke_request_with_type_url(
+            request_id,
+            capability,
+            action,
+            payload,
+            request_type_url,
+        )
+
+    def _invoke_request_with_type_url(
+        self,
+        request_id: str,
+        capability: str,
+        action: str,
+        payload: bytes,
+        request_type_url: str,
     ) -> Tuple[bool, Any]:
         with self._lock:
             token = self._active_tokens.get(request_id)
@@ -129,7 +146,12 @@ class GenericCapabilityWorker(CyreneWorker):
             # request, so retain the old non-correlated behaviour for them.
             token = WorkerCancellationToken()
         return self._invoke_with_token(
-            capability, action, payload, token, request_id=request_id
+            capability,
+            action,
+            payload,
+            token,
+            request_id=request_id,
+            request_type_url=request_type_url,
         )
 
     def on_subscribe(
@@ -196,6 +218,7 @@ class GenericCapabilityWorker(CyreneWorker):
         action: str,
         payload: bytes,
         request_id: Optional[str] = None,
+        request_type_url: str = "",
     ) -> Tuple[bool, Any]:
         return self._invoke_with_token(
             capability,
@@ -203,6 +226,7 @@ class GenericCapabilityWorker(CyreneWorker):
             payload,
             WorkerCancellationToken(),
             request_id=request_id,
+            request_type_url=request_type_url,
         )
 
     def _invoke_with_token(
@@ -212,6 +236,7 @@ class GenericCapabilityWorker(CyreneWorker):
         payload: bytes,
         token: WorkerCancellationToken,
         request_id: Optional[str] = None,
+        request_type_url: str = "",
     ) -> Tuple[bool, Any]:
         if hasattr(self._instance, "on_invoke"):
             handler = self._instance.on_invoke
@@ -222,6 +247,7 @@ class GenericCapabilityWorker(CyreneWorker):
             if signature is not None:
                 cancellation = signature.parameters.get("cancellation")
                 request = signature.parameters.get("request_id")
+                request_type = signature.parameters.get("request_type_url")
                 accepts_kwargs = any(
                     parameter.kind == inspect.Parameter.VAR_KEYWORD
                     for parameter in signature.parameters.values()
@@ -237,9 +263,15 @@ class GenericCapabilityWorker(CyreneWorker):
                     inspect.Parameter.KEYWORD_ONLY,
                 ):
                     keyword_args["request_id"] = request_id
+                if request_type is not None and request_type.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    keyword_args["request_type_url"] = request_type_url
                 if accepts_kwargs:
                     keyword_args.setdefault("cancellation", token)
                     keyword_args.setdefault("request_id", request_id)
+                    keyword_args.setdefault("request_type_url", request_type_url)
                 if keyword_args:
                     return handler(capability, action, payload, **keyword_args)
                 if cancellation is not None and cancellation.kind == inspect.Parameter.POSITIONAL_ONLY:

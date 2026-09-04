@@ -66,6 +66,7 @@ impl Notification for RemoteNotification {
             extension_point: "notification".to_string(),
             method: "send_notification".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::SendNotification(
                 SendNotificationRequest {
                     topic: topic.to_string(),

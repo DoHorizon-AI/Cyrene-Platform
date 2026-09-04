@@ -9,6 +9,8 @@ This directory groups one boundary of the CYRENE Platform source, protocol, fixt
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
+| `service_tck.rs` | Repository-local CES contract and lifecycle tests. | 仓内 CES 契约与生命周期测试。 |
+| `plugins_model_provider_tck.rs` | Cross-repository real Python worker/provider TCK; intentionally ignored unless invoked by its required workflow. | 跨仓真实 Python worker/provider TCK；仅由 required 工作流显式运行。 |
 
 ## Suggested reading / execution order | 推荐阅读 / 执行顺序
 
@@ -20,6 +22,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `service_tck.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
+| `plugins_model_provider_tck.rs` | Explicit cross-repository integration test. | 显式跨仓集成测试。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

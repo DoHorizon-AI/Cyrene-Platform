@@ -121,11 +121,13 @@ async fn host_completes_generic_hello_configure_invoke_cancel_channel() {
                 extension_point,
                 method,
                 payload,
+                payload_type_url,
                 request: None,
             })) => {
                 assert_eq!(extension_point, "custom.capability");
                 assert_eq!(method, "run");
                 assert_eq!(payload.as_slice(), b"opaque-request");
+                assert!(payload_type_url.is_empty());
             }
             other => panic!("expected opaque Invoke, got {other:?}"),
         }

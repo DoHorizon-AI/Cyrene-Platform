@@ -406,6 +406,30 @@ fn test_capability_worker_typed_invocation() {
 }
 
 #[test]
+fn test_capability_worker_request_type_url_reaches_python_handler() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let request_type_url = "type.googleapis.com/example.Request";
+
+    let result = client
+        .invoke_typed_with_request_type_url(
+            "test.capability.v1",
+            "request_type_url",
+            b"opaque-request",
+            request_type_url,
+            Duration::from_secs(2),
+            &NeverCancelled,
+        )
+        .expect("request type URL invocation should succeed");
+
+    assert_eq!(result.payload, request_type_url.as_bytes());
+    assert!(result.payload_type_url.is_empty());
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
 fn test_capability_worker_invalid_request_error() {
     let manifest = fixture_manifest();
     let options = worker_options();

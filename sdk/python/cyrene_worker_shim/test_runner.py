@@ -75,6 +75,32 @@ class TypedService:
         emitter.complete("done")
 
 
+class DeclaredRequestTypeUrlService:
+    def __init__(self):
+        self.request_type_url = None
+
+    def on_invoke(self, capability, action, payload, request_type_url):
+        del capability, action, payload
+        self.request_type_url = request_type_url
+        return True, request_type_url.encode("utf-8")
+
+
+class LegacyOnInvokeService:
+    def on_invoke(self, capability, action, payload):
+        del capability, action
+        return True, b"legacy:" + payload
+
+
+class KwargsRequestTypeUrlService:
+    def __init__(self):
+        self.request_type_url = None
+
+    def on_invoke(self, capability, action, payload, **kwargs):
+        del capability, action, payload
+        self.request_type_url = kwargs["request_type_url"]
+        return True, self.request_type_url.encode("utf-8")
+
+
 def test_generic_capability_worker_lifecycle():
     service = DummyService()
     worker = GenericCapabilityWorker(
@@ -334,7 +360,71 @@ def test_typed_capability_payload_metadata_round_trip():
     print("test_typed_capability_payload_metadata_round_trip PASSED!")
 
 
+def test_request_type_url_handler_compatibility():
+    request_type_url = "type.googleapis.com/example.Request"
+    wire_invoke = Invoke(
+        capability="example.request.v1",
+        action="invoke",
+        payload=b"request",
+        payload_type_url=request_type_url,
+    )
+    decoded_invoke = Invoke.decode(wire_invoke.encode())
+    assert decoded_invoke.payload == b"request"
+    assert decoded_invoke.payload_type_url == request_type_url
+
+    declared_service = DeclaredRequestTypeUrlService()
+    declared_worker = GenericCapabilityWorker(
+        instance=declared_service,
+        plugin_id="com.cyrene.test.request-type-url",
+        capabilities=["example.request.v1"],
+    )
+    ok, payload = declared_worker._invoke_request(
+        "request-1",
+        "example.request.v1",
+        "invoke",
+        decoded_invoke.payload,
+        decoded_invoke.payload_type_url,
+    )
+    assert ok is True
+    assert payload == request_type_url.encode("utf-8")
+    assert declared_service.request_type_url == request_type_url
+
+    kwargs_service = KwargsRequestTypeUrlService()
+    kwargs_worker = GenericCapabilityWorker(
+        instance=kwargs_service,
+        plugin_id="com.cyrene.test.request-type-url-kwargs",
+        capabilities=["example.request.v1"],
+    )
+    ok, payload = kwargs_worker._invoke_request(
+        "request-2",
+        "example.request.v1",
+        "invoke",
+        b"request",
+        request_type_url,
+    )
+    assert ok is True
+    assert payload == request_type_url.encode("utf-8")
+    assert kwargs_service.request_type_url == request_type_url
+
+    legacy_worker = GenericCapabilityWorker(
+        instance=LegacyOnInvokeService(),
+        plugin_id="com.cyrene.test.request-type-url-legacy",
+        capabilities=["example.request.v1"],
+    )
+    ok, payload = legacy_worker._invoke_request(
+        "request-3",
+        "example.request.v1",
+        "invoke",
+        b"request",
+        request_type_url,
+    )
+    assert ok is True
+    assert payload == b"legacy:request"
+    print("test_request_type_url_handler_compatibility PASSED!")
+
+
 if __name__ == "__main__":
     test_generic_capability_worker_lifecycle()
     test_generic_capability_worker_application_events()
     test_typed_capability_payload_metadata_round_trip()
+    test_request_type_url_handler_compatibility()

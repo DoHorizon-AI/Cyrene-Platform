@@ -150,6 +150,7 @@ impl<'a> WorkerControlClient<'a> {
                 extension_point: extension_point.into(),
                 method: method.into(),
                 payload,
+                payload_type_url: String::new(),
                 request: None,
             },
             timeout,

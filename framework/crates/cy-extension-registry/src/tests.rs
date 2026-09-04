@@ -778,6 +778,7 @@ async fn invoke_timeout_sends_protocol_cancel_before_actor_fails_closed() {
                 extension_point: "test".to_string(),
                 method: "timeout".to_string(),
                 payload: Vec::new(),
+                payload_type_url: String::new(),
                 request: None,
             },
             Duration::from_millis(25),

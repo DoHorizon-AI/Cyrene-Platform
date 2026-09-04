@@ -74,8 +74,11 @@ jobs:
           python -m pip install -e sdk/python/cyrene_environment
           python -m pip install -e sdk/python/cyrene_preflight
           python -m pip install -e sdk/python/cyrene_control_plane
+          python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
       - name: Run SDK unit tests
         run: |
+          python sdk/python/cyrene_capability_client/scripts/generate_proto.py --check
+          python -m pytest sdk/python/cyrene_capability_client/tests
           python -m pytest sdk/python/cyrene_artifacts/tests
           python -m pytest sdk/python/cyrene_environment/tests
           python -m pytest sdk/python/cyrene_preflight/tests

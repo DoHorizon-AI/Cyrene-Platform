@@ -129,6 +129,7 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
             extension_point: "Probe".to_string(),
             method: "detect_hardware".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(InvokeReq::DetectHardware(DetectHardwareRequest {})),
         })),
     };
@@ -275,6 +276,7 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
             extension_point: "Probe".to_string(),
             method: "detect_hardware".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(InvokeReq::DetectHardware(DetectHardwareRequest {})),
         })),
     };
