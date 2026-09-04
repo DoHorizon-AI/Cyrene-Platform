@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate or verify the Python projection of the canonical CES protobuf.
+Generate or verify the Python projection of the canonical CES and capability
+payload protobufs.
 
-生成或校验 canonical CES protobuf 的 Python 投影。
+生成或校验 canonical CES 与能力负载 protobuf 的 Python 投影。
 """
 
 from __future__ import annotations
@@ -22,11 +23,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_ROOT = Path(__file__).resolve().parents[4]
 CAPABILITY_PROTO = PLATFORM_ROOT / "contracts/proto/cyrene/capability/v1/capability_execution.proto"
 MODEL_PROVIDER_PROTO = PLATFORM_ROOT / "contracts/proto/cyrene/model/provider/v1/model_provider.proto"
+TRAINING_BACKEND_PROTO = PLATFORM_ROOT / "contracts/proto/plugin/v1/training_backend.proto"
 OUTPUT = PACKAGE_ROOT / "src/cyrene_capability_client/_generated"
 GENERATED_FILES = (
     "capability_execution_pb2.py",
     "capability_execution_pb2_grpc.py",
     "model_provider_pb2.py",
+    "training_backend_pb2.py",
 )
 
 
@@ -55,6 +58,7 @@ def _run_protoc(proto: Path, destination: Path, *, grpc_service: bool) -> None:
 def _generate(destination: Path) -> None:
     _run_protoc(CAPABILITY_PROTO, destination, grpc_service=True)
     _run_protoc(MODEL_PROVIDER_PROTO, destination, grpc_service=False)
+    _run_protoc(TRAINING_BACKEND_PROTO, destination, grpc_service=False)
 
     grpc_projection = destination / "capability_execution_pb2_grpc.py"
     source = grpc_projection.read_text(encoding="utf-8")
