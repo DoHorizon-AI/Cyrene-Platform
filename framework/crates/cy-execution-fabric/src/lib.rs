@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+mod assignment;
 mod capability;
 mod connectivity;
 mod enrollment;
@@ -18,9 +19,10 @@ mod provider;
 mod reconcile;
 
 pub use admission::{
-    validate_assignment, validate_hello, validate_renewal, AdmissionDisposition,
-    FabricContractError, ObservationCursor,
+    semantic_lease_from_proto, validate_assignment, validate_hello, validate_renewal,
+    AdmissionDisposition, FabricContractError, ObservationCursor,
 };
+pub use assignment::RuntimeAssignmentBuilder;
 pub use capability::{
     artifact_transfer_capability, execution_capability, validate_execution_capability,
     ExecutionCapabilityEnvelope, ARTIFACT_TRANSFER_CAPABILITY_ID, EXECUTION_CAPABILITY_ID,

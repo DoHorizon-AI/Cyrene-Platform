@@ -22,8 +22,6 @@ enum class PlanStatus {
     PENDING, RUNNING, AWAITING_RETRY, SUCCEEDED, FAILED, BLOCKED, CANCEL_REQUESTED, CANCELLING, CANCELLED
 }
 
-data class ArtifactReference(val uri: String, val digest: String, val kind: String = "")
-
 data class StepDependency(val stepId: String, val requiredStatus: StepStatus = StepStatus.SUCCEEDED)
 
 data class RetryPolicy(
@@ -43,7 +41,10 @@ data class RetryPolicy(
 data class PlanStep(
     val stepId: String,
     val capability: String,
-    val inputs: List<ArtifactReference> = emptyList(),
+    // Artifact identity remains canonical outside this Product-control model;
+    // plans carry only opaque content-addressed URI references.
+    // Artifact identity 仍由 canonical contract 定义；计划只保存不透明 URI 引用。
+    val inputs: List<String> = emptyList(),
     val outputs: List<String> = emptyList(),
     val environmentIdentity: String? = null,
     val resourceReference: String? = null,

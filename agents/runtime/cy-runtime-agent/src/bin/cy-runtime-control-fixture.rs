@@ -12,7 +12,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cy_artifact_transfer::{ArtifactKind, ArtifactRef, TransferTicket};
+use cy_artifact_transfer::{
+    ArtifactKind, ArtifactRef, DevelopmentTransferTicketAuthority, TransferTicketIssuer,
+    TransferTicketRequest,
+};
 use cy_execution_fabric::{
     validate_hello, DevelopmentEnrollmentProvider, EnrollmentProvider, NodeLifecycleProjection,
     RuntimeScope,
@@ -53,6 +56,8 @@ struct FixtureState {
     leases: BTreeMap<u64, LeaseRecord>,
     nodes: BTreeMap<String, NodeLifecycleProjection>,
     artifact: ArtifactFixture,
+    artifact_ticket_authority: DevelopmentTransferTicketAuthority,
+    ticket_signature_path: PathBuf,
 }
 
 struct LeaseRecord {
@@ -483,7 +488,6 @@ fn authenticate(
     Ok(())
 }
 
-#[allow(deprecated)]
 fn make_assignment(
     state: &FixtureState,
     runtime: &semantic_v1::Identity,
@@ -522,7 +526,6 @@ fn make_assignment(
             digest: state.artifact.digest.clone(),
             size_bytes: state.artifact.size_bytes,
             manifest_digest: String::new(),
-            replica_uri: String::new(),
             part_size_bytes: state.artifact.part_size_bytes,
             part_digests: state.artifact.part_digests.clone(),
             sources: vec![core_v1::ArtifactTransferSource {
@@ -543,30 +546,35 @@ fn make_assignment(
                 })
                 .collect(),
             destination_peer_id: format!("node-cache-{}", runtime.generation),
+            ..Default::default()
         }],
     }
 }
 
 fn transfer_ticket_json(state: &FixtureState, runtime: &semantic_v1::Identity) -> String {
-    serde_json::to_string(&TransferTicket {
-        ticket_id: format!("ticket-{}", runtime.generation),
-        artifact: ArtifactRef {
-            uri: state.artifact.uri.clone(),
-            digest: state.artifact.digest.clone(),
-            size_bytes: state.artifact.size_bytes,
-            kind: ArtifactKind::Generic,
-            manifest_digest: None,
-        },
-        source_peer_id: "seed-peer-1".to_string(),
-        destination_peer_id: format!("node-cache-{}", runtime.generation),
-        allowed_parts: (0..state.artifact.part_digests.len())
-            .filter_map(|index| u32::try_from(index).ok())
-            .collect(),
-        expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
-        max_bytes: state.artifact.size_bytes,
-        signature: "fixture-ticket-signature".to_string(),
-    })
-    .expect("fixture TransferTicket serialization")
+    let ticket = state
+        .artifact_ticket_authority
+        .issue(TransferTicketRequest {
+            ticket_id: format!("ticket-{}", runtime.generation),
+            artifact: ArtifactRef {
+                uri: state.artifact.uri.clone(),
+                digest: state.artifact.digest.clone(),
+                size_bytes: state.artifact.size_bytes,
+                kind: ArtifactKind::Generic,
+                manifest_digest: None,
+            },
+            source_peer_id: "seed-peer-1".to_string(),
+            destination_peer_id: format!("node-cache-{}", runtime.generation),
+            allowed_parts: (0..state.artifact.part_digests.len())
+                .filter_map(|index| u32::try_from(index).ok())
+                .collect(),
+            expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+            max_bytes: state.artifact.size_bytes,
+        })
+        .expect("fixture Artifact authority must issue a valid ticket");
+    fs::write(&state.ticket_signature_path, &ticket.signature)
+        .expect("fixture ticket signature must be published before assignment");
+    serde_json::to_string(&ticket).expect("fixture TransferTicket serialization")
 }
 
 fn new_lease(runtime: &semantic_v1::Identity, expiry: u64) -> semantic_v1::Lease {
@@ -741,6 +749,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "1048576".to_string())
             .parse()?,
     )?;
+    let artifact_ticket_authority = DevelopmentTransferTicketAuthority::new(fs::read(required(
+        "CYRENE_FIXTURE_ARTIFACT_TICKET_KEY",
+    )?)?)?;
     let state = FixtureState {
         trace_path,
         command_dir,
@@ -762,6 +773,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         leases: BTreeMap::new(),
         nodes: BTreeMap::new(),
         artifact,
+        artifact_ticket_authority,
+        ticket_signature_path: PathBuf::from(required("CYRENE_FIXTURE_TICKET_SIGNATURE")?),
     };
     let shared = Arc::new(Mutex::new(state));
     tokio::spawn(loss_monitor(Arc::clone(&shared)));

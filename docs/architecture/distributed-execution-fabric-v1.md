@@ -193,6 +193,12 @@ session. A resume cursor can recover unacknowledged observations only after the
 control plane proves the same enrolled identity and active Runtime generation.
 `GAP` or changed authority generation triggers snapshot reconciliation, using
 the existing Kernel replay semantics rather than inventing event sourcing.
+The Alpha reference control service keeps an initial enrollment pending until
+the first authenticated post-Welcome frame, so a dropped Welcome can replay the
+same grant and token without spending a second one-shot proof. The opaque token
+is stable for that grant's lifetime. This pending/grant state remains in memory;
+a control-service restart therefore requires production durable session state
+or fresh enrollment rather than a fabricated fallback.
 
 ## 6. Lease, loss, and reconciliation / Lease、丢失与协调
 
@@ -296,6 +302,14 @@ inside Artifact provider/transfer state.
 
 Control stream 只传 Artifact identity、manifest/digest 与短期 scoped ticket；大型
 数据走独立 Artifact Plane。一个 Artifact 可以有多个 Replica，地址不是身份。
+
+Core v1 `RuntimeAssignment` currently projects remote inputs only through
+`ArtifactTransferSpec`. It has no field that can carry an already-local
+`ArtifactRef` for Runtime verification. Placement may still score
+`VerifiedLocal` evidence, but placement-to-assignment orchestration fails with
+`ARTIFACT_LOCAL_INPUT_UNREPRESENTABLE` instead of silently omitting that input.
+An additive canonical local-input projection is required before this case can
+execute.
 
 ## 10. Artifact transfer MVP / Artifact 传输 MVP
 
@@ -401,7 +415,7 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 | Execution target placement | `cy-execution-fabric` deterministic planner over caller-supplied observations | control-plane assignment workflow | Resource reservation, Lease issuance, Artifact replica/ticket selection |
 | Wire | `NodeControlService.Connect` + `node_control.proto` | Host and Runtime agents | a second runtime-specific service |
 | Package/runtime lifecycle | `cy-package-runtime` | Fabric Runtime may host a binding | Fabric control session, Product binding state |
-| Product Run/Attempt | Product-neutral control plane | Product services | Kernel, Runtime Agent, container provider |
+| Product Run/Attempt | Product domain/state authority | control-plane execution projections | Kernel, Runtime Agent, container provider |
 
 `DUPLICATE_AUTHORITIES=0` is a release gate, not a documentation aspiration.
 
@@ -411,8 +425,11 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 
 - **Concept:** How the control plane reaches execution without changing Kernel nouns.
 - **Canonical authority:** Platform orchestration record; wire projection uses semantic `Identity`.
-- **Current existing implementation:** Host-only `NodeRef` / `NodeHello` projection.
-- **New code needed:** YES.
+- **Current existing implementation:** protocol-v1 Host plus protocol-v2 Runtime
+  attachment, identity, persistence, restart, observation, and assignment
+  projections.
+- **New code needed:** NO for the Alpha reference seam; production identity and
+  replicated recovery composition remain required.
 - **Proposed location:** `contracts/proto/cyrene/core/v1/node_control.proto`; pure admission/reconciliation in `framework/crates/cy-execution-fabric/`.
 - **Why this location:** Reuses the only existing agent stream and keeps policy outside Kernel.
 - **Dependencies:** semantic contract, existing Node control envelopes.
@@ -424,8 +441,14 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 
 - **Concept:** Unprivileged in-container outbound agent supervising one child workload.
 - **Canonical authority:** Runtime assignment in Fabric control state; child authority remains Lease/Fence-bound.
-- **Current existing implementation:** None; `cy-node-agent` requires a local Kernel UDS.
-- **New code needed:** YES.
+- **Current existing implementation:** `agents/runtime/cy-runtime-agent` provides
+  an unprivileged outbound mTLS agent, canonical assignment/Lease admission,
+  resumable Artifact staging, child-process supervision, and observation
+  delivery. Its grant-lifetime resume token is atomically persisted under the
+  exact Runtime generation and NodeRef namespace in a locked, symlink-resistant
+  owner-only state directory.
+- **New code needed:** accepted-assignment/workload recovery and a supervised
+  restart mode; the current `CONTAINER_AGENT` declares `RestartCapability::None`.
 - **Proposed location:** `agents/runtime/cy-runtime-agent/`.
 - **Why this location:** Sibling of, not replacement for, the existing Host/Node Agent.
 - **Dependencies:** `cy-proto`, `cy-kernel-contract`, `cy-execution-fabric`, Artifact transfer SDK.
@@ -458,10 +481,34 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
   because the canonical Kernel API currently acquires one Lease from one query.
   Atomic CPU + RAM + accelerator bundles require a Kernel contract extension;
   Framework must not emulate them with independently acquired Leases.
-- **Integration seam:** after selection, the control plane routes the selected
-  `NodeRef` to that Node's canonical `KernelAuthority`, calls `acquire_lease`
-  with the same query, then builds and dispatches `RuntimeAssignment`. No
-  production caller for that chain is claimed in this reference slice.
+- **Integration seam:** `cy-execution-control` routes the selected `NodeRef`
+  through its authenticated Host Agent session, sends the existing typed
+  semantic `AcquireLease` command with the exact placement query, binds only
+  the Kernel-returned Lease into `RuntimeAssignment`, and waits for the exact
+  Runtime generation's `AssignmentAck`. The controller never mints or owns a
+  Lease. A caller-injected durable intent ledger stores only the immutable
+  payload digest, transition state, and read-only Node/Lease identity/fence
+  evidence; Resource ownership remains exclusively in Kernel authority. A
+  timeout after command delivery is classified
+  `UNKNOWN_REQUIRES_RECONCILIATION`; it never changes the idempotency key and
+  blindly acquires again.
+- **Integration evidence:** `execution_assignment_tck` uses the production
+  NodeControl service state machine, real `cy-node-agent` session/bridge, a
+  real Kernel authority service over peer-credential-authenticated UDS, and
+  the real Runtime assignment admission validator. It proves one selected
+  Node, one canonical Lease/fence, one accepted assignment, duplicate dispatch
+  suppression, canonical release/resource reuse, and exact idempotent Lease
+  rollback through a replacement Host session on the same Node epoch. Its
+  Runtime peer is a protocol harness. Separately, `mtls_runtime_agent_tck` uses
+  locally issued CA/server/Host/Runtime certificates, the production
+  fingerprint authenticator, real `cy-node-agent`, a peer-credential-authenticated
+  Kernel UDS, `LinuxSystemProvider`, the real `cy-runtime-agent` and child
+  process, a reopened file intent ledger, and a fresh Runtime Agent task/state
+  invocation using its persisted grant-lifetime resume token. The Agent and
+  control service are real production implementations composed inside one test
+  OS process; this is not proof of an Agent OS-process restart, Docker, or a
+  multi-container deployment. It does not restart `ExecutionControlService`;
+  resume grants/tokens and accepted assignment bindings there remain in memory.
 - **0.2 migration:** callers must construct canonical Provider/resource
   snapshots and Artifact placement quotes instead of passing ad-hoc target
   scores. The public request/candidate/result structs are intentionally a
@@ -503,8 +550,12 @@ Plane 基于同一 policy scope 生成，Framework 不接触 replica、ticket �
 
 - **Concept:** Authenticated session, commands, observations, ack/replay.
 - **Canonical authority:** `NodeControlService.Connect` and `node_control.proto`.
-- **Current existing implementation:** protocol-v1 Node hello/welcome/heartbeat/command stream.
-- **New code needed:** YES, additive protocol-v2 fields/messages.
+- **Current existing implementation:** Rust `cy-execution-control` owns the
+  protocol-v1 Host and protocol-v2 Runtime session state machine. The former
+  registration-only JVM inbound service and its `activeNodes` registry are
+  retired, so there is one source implementation owner.
+- **New code needed:** production composition for external identity/enrollment
+  and durable multi-replica session state; no second NodeControl implementation.
 - **Proposed location:** `contracts/proto/cyrene/core/v1/node_control.proto`; generated by `contracts/rust/cy-proto`.
 - **Why this location:** Prevents a second wire authority.
 - **Dependencies:** semantic contract and Artifact identity projection.
@@ -594,8 +645,18 @@ Plane 基于同一 policy scope 生成，Framework 不接触 replica、ticket �
 
 - **Concept:** Provider-neutral resumable movement of existing Artifact identity.
 - **Canonical authority:** existing `ArtifactRef`/`ArtifactManifest`.
-- **Current existing implementation:** Python local CAS/stager with full digest and atomic staging; no remote range/resume.
-- **New code needed:** YES.
+- **Current existing implementation:** `cy-artifact-transfer` provides the
+  canonical Rust projection, policy-scoped source/Peer planner, scoped ticket
+  boundary, HTTPS Range transfer, bounded concurrency, part/full digest
+  verification, durable checkpoints, resume, and atomic publication. The
+  Runtime Agent consumes that implementation, requires an Artifact Plane source
+  projection, and invokes a ticket verifier before any network transfer. The
+  bundled symmetric verifier is explicitly limited to development and
+  conformance; production must inject managed verification authority without
+  giving the Agent ticket-issuance power.
+- **New code needed:** a canonical local-input wire projection and production
+  Artifact directory/ticket issuers; `VerifiedLocal` execution currently fails
+  closed rather than losing identity.
 - **Proposed location:** `sdk/rust/cy-artifact-transfer/`; Runtime Agent consumes it; schemas remain under `contracts/schemas/`.
 - **Why this location:** Transfer is a reusable SDK/data-plane concern, not Kernel or Product logic.
 - **Dependencies:** HTTPS client, SHA-256, ArtifactRef, atomic filesystem operations.
@@ -611,8 +672,11 @@ Plane 基于同一 policy scope 生成，Framework 不接触 replica、ticket �
 
 - **Concept:** Convert an external mutable source into an internal immutable Artifact.
 - **Canonical authority:** acquisition port plus Artifact identity after import.
-- **Current existing implementation:** Artifact manifest `source` metadata only.
-- **New code needed:** YES, contract/fixture only.
+- **Current existing implementation:** `cy-artifact-transfer::AcquisitionProvider`
+  plus a reference HTTP importer that publishes a digest-verified immutable
+  `SourceSnapshot`.
+- **New code needed:** production Git/Hugging Face and regional acquisition
+  adapters only; they must remain outside Runtime startup.
 - **Proposed location:** `sdk/rust/cy-artifact-transfer/src/acquisition.rs`.
 - **Why this location:** Acquisition feeds the Artifact Plane and stays out of Runtime startup.
 - **Dependencies:** Artifact provider and generic Operation reference.
@@ -648,10 +712,19 @@ The implementation sequence fixed by this document is:
    interrupted transfer resume with atomic publication after SHA-256 checks of
    every part and the complete Artifact.
 
-The Docker fixture may use a development enrollment token and locally issued
-test certificates. It must label them development-only, must not skip Docker
-fault injection when Docker is available, and must report exact pass/fail/skip
-counts. Unit/fake tests do not substitute for the real Docker acceptance.
+The Docker fixture uses development enrollment tokens, locally issued test
+certificates, and the development Artifact ticket authority. Its HTTPS source
+accepts only the signed ticket carried by the Runtime Agent. These prove the
+fixture's transport and authorization flow, not production certificate-to-Agent
+identity binding or a production ticket issuer. It must not skip Docker fault
+injection when Docker is available and must report exact pass/fail/skip counts.
+Unit/fake tests do not substitute for the real Docker acceptance.
+
+The in-process `mtls_runtime_agent_tck` is an additional executable boundary
+proof for fingerprint-bound mTLS identity, Host-to-Kernel UDS, real Runtime
+Agent workload launch, a fresh Agent task/state invocation, durable intent
+reopen, and canonical release. It complements but does not replace the Docker
+fault matrix or claim an OS-process restart.
 
 本文冻结后的实现顺序不会在编码过程中重新分配 ownership。FakeProvider 只证明
 Provider/Agent/Lease observation 可组合；真实 Docker kill、reconnect、Lease expiry 和
@@ -662,14 +735,19 @@ Artifact resume 才构成最终容器模式证据。
 ### Required next
 
 - production OIDC/device enrollment and Workload identity issuer;
-- protocol-v2 support in the production JVM `NodeControlService` and existing
-  Host Agent adapter;
-- production durable Fabric session/runtime store and HA reconciliation;
-- production remote KernelAuthority routing for Host attachments.
-- production placement-to-assignment orchestration: route the selected Node,
-  acquire the canonical Lease, build `RuntimeAssignment`, and dispatch it;
+- production durable Fabric session/runtime store, resume grant/token state,
+  accepted assignment binding, and HA reconciliation; the current Agent token
+  survives a fresh Agent invocation, but neither an OS-process restart nor a
+  control-service restart is established by the in-process TCK;
+- Runtime accepted-assignment/workload persistence and a non-`None` restart
+  contract before claiming workload recovery across Agent process loss;
+- canonical reconciliation readers for unknown Acquire/Assignment/Release
+  outcomes; the durable intent ledger already prevents blind redispatch, but
+  only Kernel events and Runtime observations can resolve an unknown outcome;
 - a canonical atomic resource-bundle contract before jointly reserving CPU,
-  RAM, and accelerators.
+  RAM, and accelerators;
+- an additive canonical local Artifact input projection before
+  `VerifiedLocal` placement can be dispatched without losing identity.
 
 ### Optional scale-up
 

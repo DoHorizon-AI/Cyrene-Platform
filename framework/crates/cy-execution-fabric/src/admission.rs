@@ -165,6 +165,12 @@ pub fn validate_hello(hello: &core_v1::ExecutionAgentHello) -> Result<(), Fabric
             "an enrollment proof or authenticated resume token is required",
         ));
     }
+    if !hello.enrollment_proof.is_empty() && !hello.resume_token.is_empty() {
+        return Err(FabricContractError::new(
+            "CREDENTIAL_AMBIGUOUS",
+            "enrollment proof and resume token cannot be presented together",
+        ));
+    }
     if hello
         .scope
         .as_ref()
@@ -190,6 +196,41 @@ pub fn validate_assignment(
     assignment: &core_v1::RuntimeAssignment,
     now_unix_ms: u64,
 ) -> Result<semantic::Lease, FabricContractError> {
+    let runtime = validate_assignment_payload(expected_runtime, assignment, now_unix_ms)?;
+    let lease = lease_from_proto(assignment.lease.as_ref())?;
+    lease.validate().map_err(contract_error)?;
+    if lease.state != semantic::LeaseState::Active {
+        return Err(FabricContractError::new(
+            "LEASE_NOT_ACTIVE",
+            "assignment Lease is not active",
+        ));
+    }
+    if lease.holder != runtime {
+        return Err(FabricContractError::new(
+            "LEASE_HOLDER_MISMATCH",
+            "assignment Lease holder is not the Runtime generation",
+        ));
+    }
+    if lease
+        .expires_at_unix_ms
+        .is_none_or(|expiry| now_unix_ms >= expiry)
+    {
+        return Err(FabricContractError::new(
+            "LEASE_EXPIRED",
+            "assignment Lease has expired",
+        ));
+    }
+    Ok(lease)
+}
+
+/// Validate every non-authority field before asking the Kernel to issue a
+/// Lease. This prevents malformed assignment payloads from consuming scarce
+/// resources and deliberately ignores only `assignment.lease`.
+pub(crate) fn validate_assignment_payload(
+    expected_runtime: &semantic::Identity,
+    assignment: &core_v1::RuntimeAssignment,
+    now_unix_ms: u64,
+) -> Result<semantic::Identity, FabricContractError> {
     if assignment.assignment_id.is_empty() || assignment.attempt_id.is_empty() {
         return Err(FabricContractError::new(
             "REQUIRED_FIELD_MISSING",
@@ -221,30 +262,6 @@ pub fn validate_assignment(
         ));
     }
 
-    let lease = lease_from_proto(assignment.lease.as_ref())?;
-    lease.validate().map_err(contract_error)?;
-    if lease.state != semantic::LeaseState::Active {
-        return Err(FabricContractError::new(
-            "LEASE_NOT_ACTIVE",
-            "assignment Lease is not active",
-        ));
-    }
-    if lease.holder != runtime {
-        return Err(FabricContractError::new(
-            "LEASE_HOLDER_MISMATCH",
-            "assignment Lease holder is not the Runtime generation",
-        ));
-    }
-    if lease
-        .expires_at_unix_ms
-        .is_none_or(|expiry| now_unix_ms >= expiry)
-    {
-        return Err(FabricContractError::new(
-            "LEASE_EXPIRED",
-            "assignment Lease has expired",
-        ));
-    }
-
     let identity = assignment.workload_identity.as_ref().ok_or_else(|| {
         FabricContractError::new("REQUIRED_FIELD_MISSING", "workload identity is required")
     })?;
@@ -273,7 +290,7 @@ pub fn validate_assignment(
         if artifact.artifact_uri != format!("artifact://sha256/{}", &artifact.digest[7..])
             || artifact.size_bytes == 0
             || artifact.part_size_bytes == 0
-            || (artifact.sources.is_empty() && legacy_replica_missing(artifact))
+            || artifact.sources.is_empty()
         {
             return Err(FabricContractError::new(
                 "ARTIFACT_TRANSFER_INVALID",
@@ -317,12 +334,7 @@ pub fn validate_assignment(
             }
         }
     }
-    Ok(lease)
-}
-
-#[allow(deprecated)]
-fn legacy_replica_missing(artifact: &core_v1::ArtifactTransferSpec) -> bool {
-    artifact.replica_uri.is_empty()
+    Ok(runtime)
 }
 
 /// Validate a renewed Lease using the canonical Lease transition rules.
@@ -356,6 +368,16 @@ pub fn validate_renewal(
         ));
     }
     Ok(renewed)
+}
+
+/// Decode the canonical semantic Lease projection without granting it any
+/// authority beyond the signed/fenced fields present on the wire.
+pub fn semantic_lease_from_proto(
+    lease: &semantic_v1::Lease,
+) -> Result<semantic::Lease, FabricContractError> {
+    let lease = lease_from_proto(Some(lease))?;
+    lease.validate().map_err(contract_error)?;
+    Ok(lease)
 }
 
 fn validate_runtime(runtime: Option<&core_v1::RuntimeRef>) -> Result<(), FabricContractError> {
@@ -479,6 +501,8 @@ fn contract_error(error: semantic::ContractError) -> FabricContractError {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message;
+
     use super::*;
 
     fn timestamp(value: u64) -> prost_types::Timestamp {
@@ -608,6 +632,21 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_and_resume_credentials_are_mutually_exclusive() {
+        let mut value = hello(
+            core_v1::ExecutionAttachmentType::ContainerAgent,
+            false,
+            core_v1::RestartCapability::None,
+        );
+        value.enrollment_proof = "one-shot-proof".to_string();
+
+        assert_eq!(
+            validate_hello(&value).unwrap_err().reason_code,
+            "CREDENTIAL_AMBIGUOUS"
+        );
+    }
+
+    #[test]
     fn host_and_provider_managed_restart_contracts_are_admitted() {
         assert_eq!(
             validate_hello(&hello(
@@ -646,5 +685,45 @@ mod tests {
         let lease = validate_assignment(&expected, &assignment(2), 10_000).unwrap();
         assert_eq!(lease.holder, expected);
         assert_eq!(lease.fence_token, 7);
+    }
+
+    #[test]
+    fn legacy_replica_uri_cannot_bypass_artifact_plane_authorization() {
+        let mut value = assignment(1);
+        let artifact = core_v1::ArtifactTransferSpec {
+            artifact_uri: format!("artifact://sha256/{}", "a".repeat(64)),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 1,
+            manifest_digest: String::new(),
+            part_size_bytes: 1,
+            part_digests: vec![format!("sha256:{}", "b".repeat(64))],
+            sources: Vec::new(),
+            part_sources: Vec::new(),
+            destination_peer_id: String::new(),
+            ..Default::default()
+        };
+        let legacy_replica = b"https://legacy.example/artifact";
+        let mut encoded = artifact.encode_to_vec();
+        assert!(legacy_replica.len() < 128);
+        encoded.extend([42, legacy_replica.len() as u8]);
+        encoded.extend(legacy_replica);
+        value.artifacts.push(
+            core_v1::ArtifactTransferSpec::decode(encoded.as_slice())
+                .expect("legacy wire field should remain decodable"),
+        );
+
+        assert_eq!(
+            validate_assignment_payload(
+                &semantic::Identity {
+                    id: "runtime-1".to_string(),
+                    generation: 1,
+                },
+                &value,
+                10_000,
+            )
+            .unwrap_err()
+            .reason_code,
+            "ARTIFACT_TRANSFER_INVALID"
+        );
     }
 }

@@ -21,6 +21,7 @@ struct Args {
     client_certificate: PathBuf,
     client_key: PathBuf,
     artifact_ca: PathBuf,
+    artifact_ticket_key: Option<PathBuf>,
     organization_id: String,
     workspace_id: String,
     node_id: String,
@@ -72,6 +73,10 @@ impl Args {
                 .map(PathBuf::from)?,
             client_key: value("--client-key", "CYRENE_AGENT_CLIENT_KEY").map(PathBuf::from)?,
             artifact_ca: value("--artifact-ca", "CYRENE_ARTIFACT_CA").map(PathBuf::from)?,
+            artifact_ticket_key: flag_value(&arguments[1..separator], "--artifact-ticket-key")
+                .or_else(|| env::var("CYRENE_ARTIFACT_TICKET_KEY").ok())
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             organization_id: value("--organization-id", "CYRENE_ORGANIZATION_ID")?,
             workspace_id: value("--workspace-id", "CYRENE_WORKSPACE_ID")?,
             node_id: value("--node-id", "CYRENE_NODE_ID")?,
@@ -107,6 +112,7 @@ impl Args {
             client_certificate: self.client_certificate,
             client_key: self.client_key,
             artifact_ca: self.artifact_ca,
+            artifact_ticket_key: self.artifact_ticket_key,
             organization_id: self.organization_id,
             workspace_id: self.workspace_id,
             node: NodeRef {

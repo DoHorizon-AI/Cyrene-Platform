@@ -41,6 +41,23 @@ jobs:
           python tooling/ci/check_service_boundaries.py
           python -m pytest tooling/ci/test_check_service_boundaries.py
 
+  jvm-boundary:
+    name: ci / jvm-boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.5.0"
+          cache-provider: basic
+      - name: Test JVM authority boundary
+        run: gradle --no-daemon -p framework/jvm test
+
   python-sdk:
     name: ci / python-sdk
     runs-on: ubuntu-latest

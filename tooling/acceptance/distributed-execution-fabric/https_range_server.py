@@ -18,14 +18,18 @@ class RangeHandler(http.server.BaseHTTPRequestHandler):
     artifact: pathlib.Path
     trace: pathlib.Path
     delay_seconds: float
-    ticket_signature: str
+    ticket_signature_file: pathlib.Path
     trace_lock = threading.Lock()
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
         if self.path != "/artifact.bin":
             self.send_error(404)
             return
-        if self.headers.get("Authorization") != f"Bearer {self.ticket_signature}":
+        try:
+            ticket_signature = self.ticket_signature_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            ticket_signature = ""
+        if not ticket_signature or self.headers.get("Authorization") != f"Bearer {ticket_signature}":
             self._trace("TICKET_REJECTED")
             self.send_error(403)
             return
@@ -86,12 +90,12 @@ def main() -> None:
     parser.add_argument("--key", required=True)
     parser.add_argument("--trace", type=pathlib.Path, required=True)
     parser.add_argument("--delay-ms", type=float, default=20.0)
-    parser.add_argument("--ticket-signature", required=True)
+    parser.add_argument("--ticket-signature-file", type=pathlib.Path, required=True)
     args = parser.parse_args()
     RangeHandler.artifact = args.artifact
     RangeHandler.trace = args.trace
     RangeHandler.delay_seconds = args.delay_ms / 1000.0
-    RangeHandler.ticket_signature = args.ticket_signature
+    RangeHandler.ticket_signature_file = args.ticket_signature_file
     server = http.server.ThreadingHTTPServer((args.bind, args.port), RangeHandler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.certificate, args.key)
