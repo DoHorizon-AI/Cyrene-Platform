@@ -548,6 +548,7 @@ fn make_assignment(
             destination_peer_id: format!("node-cache-{}", runtime.generation),
             ..Default::default()
         }],
+        local_artifacts: Vec::new(),
     }
 }
 

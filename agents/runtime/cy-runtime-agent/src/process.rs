@@ -90,6 +90,9 @@ impl ChildSupervisor {
             return Err(ChildSupervisorError::AlreadyRunning);
         }
         let mut command = Command::new(&self.command[0]);
+        // Pass only the explicit workload environment. The Runtime Agent's
+        // credentials and control-plane settings must stay outside the workload.
+        command.env_clear();
         command.args(&self.command[1..]);
         command.envs(additions);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -216,5 +219,27 @@ mod tests {
         let outcome = child.stop(Duration::from_secs(2)).await.unwrap();
         assert!(!outcome.forced);
         assert!(outcome.exit.success);
+    }
+
+    #[tokio::test]
+    async fn workload_does_not_inherit_runtime_agent_environment() {
+        let mut child = ChildSupervisor::new(vec!["/usr/bin/env".to_string()]);
+        let mut additions = BTreeMap::new();
+        additions.insert("CYRENE_TEST_EXPLICIT".to_string(), "present".to_string());
+
+        child.start(None, &additions).await.unwrap();
+        for _ in 0..20 {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let output = child.drain_output(32);
+        assert!(output
+            .iter()
+            .any(|line| line.line == "CYRENE_TEST_EXPLICIT=present"));
+        assert!(!output.iter().any(|line| line.line.starts_with("PATH=")));
     }
 }

@@ -218,6 +218,12 @@ class GenericTckWorker(CyreneWorker):
                 return False, b"INVALID_INPUT: value must be a non-negative integer"
             return True, json.dumps({"result": val * 2}).encode("utf-8")
 
+        elif action == "read_env":
+            key = req.get("key")
+            if not isinstance(key, str):
+                return False, b"INVALID_INPUT: key must be a string"
+            return True, json.dumps({"value": os.environ.get(key)}).encode("utf-8")
+
         elif action == "slow_operation":
             delay = req.get("delay_ms", 500) / 1000.0
             time.sleep(delay)

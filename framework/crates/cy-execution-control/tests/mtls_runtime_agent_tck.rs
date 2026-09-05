@@ -26,8 +26,9 @@ use cy_execution_control::{
     FileExecutionIntentStore, IntentDisposition,
 };
 use cy_execution_fabric::{
-    execution_capability, DevelopmentEnrollmentProvider, ExecutionPlacementRequest,
-    ExecutionTargetCandidate, NetworkRequirements, PlacementPolicy, RuntimeAssignmentBuilder,
+    execution_capability, plan_execution_placement, ArtifactAvailability, ArtifactPlacementQuote,
+    DevelopmentEnrollmentProvider, ExecutionPlacementRequest, ExecutionTargetCandidate,
+    NetworkRequirements, PlacementPolicy, RuntimeAssignmentBuilder,
 };
 use cy_kernel_api::{
     AuthorityCallContext, CleanupReport, DeviceBinding, HostInventoryProvider,
@@ -40,6 +41,7 @@ use cy_kernel_daemon::{
     peer_cred::{inject_authority_principal, PeerCredAccept},
     KernelDaemon, KernelServiceAdapter,
 };
+use cy_manifest::{ArtifactKind, ArtifactRef};
 use cy_node_agent::{NodeCommandBridge, NodeControlSession, UdsKernelCommandExecutor};
 use cy_proto::core_v1 as core;
 use cy_proto::core_v1::{
@@ -155,6 +157,12 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     let intent_path = temporary.path().join("execution-intents.json");
     let runtime_state = temporary.path().join("runtime-state");
     let artifact_root = temporary.path().join("artifact-root");
+    let local_artifact = artifact_ref(b"verified local Artifact input");
+    fs::create_dir_all(&artifact_root)?;
+    fs::write(
+        artifact_root.join(&local_artifact.digest[7..]),
+        b"verified local Artifact input",
+    )?;
     let controller_store = Arc::new(FileExecutionIntentStore::open(&intent_path)?);
     let controller = ExecutionController::new(
         service.clone(),
@@ -186,6 +194,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
                 acquire: "acquire-mtls-one",
                 release: "release-mtls-one",
             },
+            Some(&local_artifact),
         )?)
         .await?;
     assert_eq!(
@@ -298,8 +307,8 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     let second_runtime_config = runtime_config(
         &certificates,
         &control_endpoint,
-        runtime_state,
-        artifact_root,
+        runtime_state.clone(),
+        artifact_root.clone(),
         "CYRENE_REAL_WORKLOAD_TWO",
     );
     assert_eq!(
@@ -326,6 +335,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
                 acquire: "acquire-mtls-two",
                 release: "release-mtls-two",
             },
+            None,
         )?)
         .await?;
     assert_eq!(second_receipt.lease.resources[0].id, cpu.identity.id);
@@ -357,6 +367,68 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         restarted_controller.intent_disposition("assignment-mtls-two")?,
         Some(IntentDisposition::Released)
     );
+
+    let workload_log = runtime_state.join(format!(
+        "workload-{}-{}.log",
+        runtime.id, runtime.generation
+    ));
+    let completed_log = fs::read(&workload_log)?;
+    let missing_artifact = artifact_ref(b"missing local Artifact input");
+    let rejected_runtime_task = spawn_runtime_agent(runtime_config(
+        &certificates,
+        &control_endpoint,
+        runtime_state,
+        artifact_root,
+        "CYRENE_WORKLOAD_MUST_NOT_START",
+    ));
+    wait_until("Runtime session for rejected local Artifact", || {
+        service.has_runtime_session(&runtime)
+    })
+    .await?;
+    let missing_artifact_request = dispatch_request(
+        &service,
+        &runtime,
+        &cpu,
+        DispatchIds {
+            assignment: "assignment-mtls-local-missing",
+            operation: "operation-mtls-local-missing",
+            attempt: "attempt-mtls-local-missing",
+            acquire: "acquire-mtls-local-missing",
+            release: "release-mtls-local-missing",
+        },
+        Some(&missing_artifact),
+    )?;
+    let placement = plan_execution_placement(
+        &missing_artifact_request.placement,
+        &missing_artifact_request.candidates,
+    )?;
+    assert!(
+        placement.selected_node.is_some(),
+        "missing-local Artifact scenario must reach Runtime staging: {:?}",
+        placement.evaluations
+    );
+    let rejected = restarted_controller
+        .dispatch(missing_artifact_request)
+        .await
+        .expect_err("missing local CAS input must reject the assignment");
+    assert_eq!(
+        rejected.reason_code, "ARTIFACT_STAGING_FAILED",
+        "unexpected dispatch rejection: {rejected:?}"
+    );
+    assert!(!rejected.reconciliation_required);
+    assert_eq!(
+        restarted_controller.intent_disposition("assignment-mtls-local-missing")?,
+        Some(IntentDisposition::Failed)
+    );
+    assert!(!resources.is_allocated(&cpu.identity.id));
+    let failure = wait_for_observation(&mut observations, &runtime, |observation| {
+        observation.observed_state == RuntimeObservedState::Failed as i32
+            && observation.reason_code == "ARTIFACT_STAGING_FAILED"
+    })
+    .await?;
+    assert_eq!(failure.reason_code, "ARTIFACT_STAGING_FAILED");
+    assert_eq!(fs::read(&workload_log)?, completed_log);
+    rejected_runtime_task.abort();
 
     host_task.abort();
     control_task.abort();
@@ -836,6 +908,7 @@ fn dispatch_request(
     runtime: &semantic::Identity,
     resource: &semantic::Resource,
     ids: DispatchIds<'_>,
+    local_artifact: Option<&ArtifactRef>,
 ) -> TestResult<ExecutionDispatchRequest> {
     let now = now_unix_ms();
     let workload_identity = service.workload_identity(
@@ -848,6 +921,32 @@ fn dispatch_request(
         state: semantic::ProviderState::Ready,
         capabilities: Vec::new(),
     };
+    let local_artifacts = local_artifact
+        .map(|artifact| {
+            vec![core::ArtifactLocalInput {
+                artifact_uri: artifact.uri.clone(),
+                digest: artifact.digest.clone(),
+                size_bytes: artifact.size_bytes,
+                artifact_kind: "generic".to_string(),
+                manifest_digest: artifact.manifest_digest.clone().unwrap_or_default(),
+            }]
+        })
+        .unwrap_or_default();
+    let artifact_quotes = local_artifact
+        .map(|artifact| {
+            vec![ArtifactPlacementQuote {
+                quote_id: format!("local-{}", artifact.digest),
+                artifact: artifact.clone(),
+                destination_peer_id: "peer-node-mtls-runtime-tck".to_string(),
+                policy_scope: "workspace-local-cas-v1".to_string(),
+                observed_at_unix_ms: now,
+                valid_until_unix_ms: now.saturating_add(60_000),
+                availability: ArtifactAvailability::VerifiedLocal {
+                    inventory_generation: 1,
+                },
+            }]
+        })
+        .unwrap_or_default();
     let candidate = ExecutionTargetCandidate {
         node: node_ref(),
         lifecycle_state: core::NodeLifecycleState::Online,
@@ -874,7 +973,7 @@ fn dispatch_request(
         classifications: BTreeSet::new(),
         policy_tags: BTreeSet::new(),
         artifact_destination_peer_id: "peer-node-mtls-runtime-tck".to_string(),
-        artifact_quotes: Vec::new(),
+        artifact_quotes,
         execution_cost_microunits: 1,
         available_at_unix_ms: now,
         reliability_score: 100,
@@ -893,8 +992,15 @@ fn dispatch_request(
             restart_capability: Some(core::RestartCapability::None),
             checkpoint_resume: false,
             network: NetworkRequirements::default(),
-            artifacts: Vec::new(),
-            artifact_policy_scope: String::new(),
+            artifacts: local_artifact
+                .iter()
+                .map(|artifact| (*artifact).clone())
+                .collect(),
+            artifact_policy_scope: if local_artifact.is_some() {
+                "workspace-local-cas-v1".to_string()
+            } else {
+                String::new()
+            },
             policy: PlacementPolicy::default(),
             latest_start_unix_ms: Some(now.saturating_add(30_000)),
             now_unix_ms: now,
@@ -914,7 +1020,8 @@ fn dispatch_request(
                 resolved_digest: format!("sha256:{}", "2".repeat(64)),
             },
             Vec::new(),
-        ),
+        )
+        .with_local_artifacts(local_artifacts),
         intent_payload_digest: digest(format!("{}-intent", ids.assignment)),
         acquire_command_id: format!("command-{}", ids.acquire),
         acquire_context: context(ids.acquire),
@@ -1047,6 +1154,17 @@ fn context(id: &str) -> AuthorityCallContext {
 
 fn digest(value: impl AsRef<[u8]>) -> String {
     format!("sha256:{:x}", Sha256::digest(value))
+}
+
+fn artifact_ref(value: &[u8]) -> ArtifactRef {
+    let digest = digest(value);
+    ArtifactRef {
+        uri: format!("artifact://sha256/{}", &digest[7..]),
+        digest,
+        size_bytes: value.len() as u64,
+        kind: ArtifactKind::Generic,
+        manifest_digest: None,
+    }
 }
 
 fn now_unix_ms() -> u64 {
