@@ -29,7 +29,13 @@ rg -q 'cyrene.execution.fabric.v1' framework/crates/cy-execution-fabric/src/capa
 rg -q 'trait ConnectivityProvider' framework/crates/cy-execution-fabric/src/connectivity.rs
 rg -q 'trait ProviderObservationSource' framework/crates/cy-execution-fabric/src/provider.rs
 rg -q 'struct NodeLifecycleProjection' framework/crates/cy-execution-fabric/src/node.rs
+rg -q 'struct ExecutionPlacementRequest' framework/crates/cy-execution-fabric/src/placement.rs
+rg -q 'fn plan_execution_placement' framework/crates/cy-execution-fabric/src/placement.rs
+rg -q 'struct ResourceMatchEvidence' framework/crates/cy-execution-fabric/src/placement.rs
+rg -q 'struct ArtifactPlacementQuote' framework/crates/cy-execution-fabric/src/placement.rs
 rg -q 'struct ArtifactPeer' sdk/rust/cy-artifact-transfer/src/contract.rs
+rg -q 'struct TransferEstimate' sdk/rust/cy-artifact-transfer/src/contract.rs
+rg -q 'pub fn estimate' sdk/rust/cy-artifact-transfer/src/contract.rs
 rg -q 'trait ArtifactSourceResolver' sdk/rust/cy-artifact-transfer/src/planner.rs
 rg -q 'struct ArtifactTransferCoordinator' sdk/rust/cy-artifact-transfer/src/planner.rs
 rg -q 'trait TransferTicketIssuer' sdk/rust/cy-artifact-transfer/src/ticket.rs

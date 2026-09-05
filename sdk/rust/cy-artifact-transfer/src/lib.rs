@@ -19,8 +19,8 @@ pub use acquisition::{
 };
 pub use contract::{
     ArtifactPeer, ArtifactPeerKind, ArtifactReplica, ArtifactSourceCandidate, TransferCheckpoint,
-    TransferManifest, TransferPart, TransferPartSource, TransferPlan, TransferProtocol,
-    TransferSession, TransferSource, TransferTicket,
+    TransferEstimate, TransferManifest, TransferPart, TransferPartSource, TransferPlan,
+    TransferProtocol, TransferSession, TransferSource, TransferTicket,
 };
 pub use cy_manifest::{ArtifactKind, ArtifactRef};
 pub use http::{HttpRangeTransfer, TransferError, TransferResult};

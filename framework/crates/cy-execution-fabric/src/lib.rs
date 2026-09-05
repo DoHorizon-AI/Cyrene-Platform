@@ -32,7 +32,12 @@ pub use enrollment::{
     DevelopmentEnrollmentProvider, EnrollmentGrant, EnrollmentProvider, RuntimeScope,
 };
 pub use node::NodeLifecycleProjection;
-pub use placement::{place_execution_target, ExecutionTargetCandidate};
+pub use placement::{
+    place_execution_target, plan_execution_placement, ArtifactAvailability, ArtifactPlacementQuote,
+    ArtifactTransferQuote, CandidateEvaluation, ExecutionPlacementRequest,
+    ExecutionTargetCandidate, NetworkRequirements, PlacementDecision, PlacementPolicy,
+    PlacementReason, PlacementScore, ResourceMatchEvidence,
+};
 pub use provider::{FakeProvider, ProviderObservationSource};
 pub use reconcile::{
     reconcile_runtime, DesiredRuntime, LeaseObservation, ProviderObservation, ReconcileEvidence,

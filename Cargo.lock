@@ -336,9 +336,11 @@ dependencies = [
 
 [[package]]
 name = "cy-execution-fabric"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "cy-artifact-transfer",
  "cy-kernel-contract",
+ "cy-manifest",
  "cy-proto",
  "prost-types",
  "thiserror 1.0.69",

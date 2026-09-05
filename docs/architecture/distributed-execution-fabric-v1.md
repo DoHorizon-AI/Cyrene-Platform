@@ -398,6 +398,7 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 | Worker/Operation lifecycle | Kernel semantic authority | Fabric observations and Product Attempt mapping | package install state, connection state |
 | Capability | semantic Capability + existing resolver/catalog authorities | advertisement snapshots | agent-private ad-hoc schema |
 | Artifact identity | `cy-manifest` / Artifact schemas | Python/Rust SDK projections and transfer providers | URL, path, TransferSession |
+| Execution target placement | `cy-execution-fabric` deterministic planner over caller-supplied observations | control-plane assignment workflow | Resource reservation, Lease issuance, Artifact replica/ticket selection |
 | Wire | `NodeControlService.Connect` + `node_control.proto` | Host and Runtime agents | a second runtime-specific service |
 | Package/runtime lifecycle | `cy-package-runtime` | Fabric Runtime may host a binding | Fabric control session, Product binding state |
 | Product Run/Attempt | Product-neutral control plane | Product services | Kernel, Runtime Agent, container provider |
@@ -431,6 +432,46 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 - **Must NOT own:** host resources, Docker daemon, Product semantics, Lease issuance, package installation.
 - **MVP implementation:** `cy-runtime-agent run -- <command>`, outbound TLS, child process group, observations, reconnect, stop.
 - **Future extension:** richer checkpoints, Windows container process boundary, multiple isolated child slots.
+
+### Execution target placement
+
+- **Concept:** Select one execution Node from current, Product-neutral resource,
+  lifecycle, policy, cost, and Artifact locality evidence.
+- **Canonical authority:** `cy-execution-fabric` owns only the deterministic
+  placement decision and explanation. Kernel owns resources and Lease issuance;
+  the Artifact Plane owns replica, Peer, ticket, and transfer-plan selection.
+- **Current implementation:** `cy-execution-fabric` 0.2 exposes
+  `plan_execution_placement` and `place_execution_target`. The planner consumes
+  canonical `ProviderSnapshot`, `ResourceQuery`, capability contracts,
+  `ArtifactRef`, and policy-scoped, time-bounded Artifact Plane quotes.
+- **Why this location:** Placement composes existing authorities without moving
+  cloud-vendor behavior into Framework and without making observations binding.
+- **Must NOT own:** Provider adapters, Resource allocation, Lease/Fence,
+  Artifact replicas/tickets/transfer plans, Product retry policy, or a global
+  scheduler.
+- **MVP evidence:** deterministic ordering, rejection reason codes, real
+  provider resource classes, stale Provider generations, Artifact locality,
+  HTTPS/capability enforcement, transfer cost/deadline, quote scope/expiry, and
+  duplicate Node rejection are covered by the placement TCK.
+- **Current limit:** `ResourceMatchEvidence` is read-only snapshot evidence, not
+  a reservation. One placement request carries exactly one `ResourceQuery`
+  because the canonical Kernel API currently acquires one Lease from one query.
+  Atomic CPU + RAM + accelerator bundles require a Kernel contract extension;
+  Framework must not emulate them with independently acquired Leases.
+- **Integration seam:** after selection, the control plane routes the selected
+  `NodeRef` to that Node's canonical `KernelAuthority`, calls `acquire_lease`
+  with the same query, then builds and dispatches `RuntimeAssignment`. No
+  production caller for that chain is claimed in this reference slice.
+- **0.2 migration:** callers must construct canonical Provider/resource
+  snapshots and Artifact placement quotes instead of passing ad-hoc target
+  scores. The public request/candidate/result structs are intentionally a
+  breaking 0.1-to-0.2 change.
+
+执行目标 placement 只对调用方提供的当前观测做确定性决策与解释。ProviderSnapshot
+匹配不是资源预留；只有 KernelAuthority 能签发 Lease。Artifact quote 必须由 Artifact
+Plane 基于同一 policy scope 生成，Framework 不接触 replica、ticket 或 TransferPlan。
+当前单个 `ResourceQuery` 与单 Lease API 对齐；CPU、内存、加速器的原子组合资源需要
+先扩展 Kernel Contract，不能在 Framework 内用多个独立 Lease 假装原子性。
 
 ### Host Agent seam
 
@@ -560,6 +601,10 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 - **Dependencies:** HTTPS client, SHA-256, ArtifactRef, atomic filesystem operations.
 - **Must NOT own:** Artifact identity, Product paths, global replica scheduling.
 - **MVP implementation:** Range, bounded concurrency, part/full verification, checkpoint, resume, atomic publish.
+- **Placement projection:** the Artifact Plane may derive a conservative,
+  authorization-bounded `TransferEstimate` and project only neutral scalar
+  metrics into an `ArtifactPlacementQuote`; `cy-execution-fabric` has no normal
+  dependency on the transfer SDK and cannot select replicas or mint tickets.
 - **Future extension:** regional, LAN, P2P, Dragonfly, cloud-native providers.
 
 ### AcquisitionProvider
@@ -600,7 +645,8 @@ The implementation sequence fixed by this document is:
 6. real Docker acceptance for enrollment, capability advertisement, running
    observation, heartbeat/renewal, reconnect, graceful stop, `docker stop`,
    `docker kill`, Lease expiry, generation fencing, stale rejection, and
-   interrupted transfer resume with atomic digest-verified publication.
+   interrupted transfer resume with atomic publication after SHA-256 checks of
+   every part and the complete Artifact.
 
 The Docker fixture may use a development enrollment token and locally issued
 test certificates. It must label them development-only, must not skip Docker
@@ -620,6 +666,10 @@ Artifact resume 才构成最终容器模式证据。
   Host Agent adapter;
 - production durable Fabric session/runtime store and HA reconciliation;
 - production remote KernelAuthority routing for Host attachments.
+- production placement-to-assignment orchestration: route the selected Node,
+  acquire the canonical Lease, build `RuntimeAssignment`, and dispatch it;
+- a canonical atomic resource-bundle contract before jointly reserving CPU,
+  RAM, and accelerators.
 
 ### Optional scale-up
 

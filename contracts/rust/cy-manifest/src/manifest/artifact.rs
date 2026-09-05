@@ -52,6 +52,72 @@ pub struct ArtifactRef {
     pub manifest_digest: Option<String>,
 }
 
+impl ArtifactRef {
+    /// Validate the provider-neutral, content-addressed Artifact identity.
+    ///
+    /// Zero-byte Artifacts remain valid here. Transfer implementations may
+    /// impose a positive-size requirement when their protocol needs ranges.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_digest(&self.digest)?;
+        if self.uri != format!("artifact://sha256/{}", &self.digest[7..]) {
+            return Err("Artifact URI does not match its canonical digest".to_string());
+        }
+        if let Some(manifest_digest) = &self.manifest_digest {
+            validate_digest(manifest_digest)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_digest(value: &str) -> Result<(), String> {
+    let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err("digest must be lowercase sha256:<hex>".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_artifact_identity_accepts_zero_bytes() {
+        let hex = "0".repeat(64);
+        let artifact = ArtifactRef {
+            uri: format!("artifact://sha256/{hex}"),
+            digest: format!("sha256:{hex}"),
+            size_bytes: 0,
+            kind: ArtifactKind::Generic,
+            manifest_digest: None,
+        };
+
+        assert_eq!(artifact.validate(), Ok(()));
+    }
+
+    #[test]
+    fn canonical_artifact_identity_rejects_a_mismatched_uri() {
+        let artifact = ArtifactRef {
+            uri: format!("artifact://sha256/{}", "1".repeat(64)),
+            digest: format!("sha256:{}", "0".repeat(64)),
+            size_bytes: 1,
+            kind: ArtifactKind::Generic,
+            manifest_digest: None,
+        };
+
+        assert_eq!(
+            artifact.validate(),
+            Err("Artifact URI does not match its canonical digest".to_string())
+        );
+    }
+}
+
 /// 产物血缘追踪记录（Lineage）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lineage {
