@@ -32,6 +32,7 @@ pub struct RuntimeAssignmentBuilder {
     workload_identity: core_v1::WorkloadIdentity,
     profile: core_v1::RuntimeProfile,
     artifacts: Vec<core_v1::ArtifactTransferSpec>,
+    local_artifacts: Vec<core_v1::ArtifactLocalInput>,
 }
 
 impl RuntimeAssignmentBuilder {
@@ -52,7 +53,18 @@ impl RuntimeAssignmentBuilder {
             workload_identity,
             profile,
             artifacts,
+            local_artifacts: Vec::new(),
         }
+    }
+
+    /// Add immutable identity projections for Artifacts already verified on the
+    /// selected Node. No local path, locator, ticket, or credential is accepted.
+    pub fn with_local_artifacts(
+        mut self,
+        local_artifacts: Vec<core_v1::ArtifactLocalInput>,
+    ) -> Self {
+        self.local_artifacts = local_artifacts;
+        self
     }
 
     pub fn runtime(&self) -> &semantic::Identity {
@@ -68,15 +80,13 @@ impl RuntimeAssignmentBuilder {
     }
 
     /// Validate the immutable Artifact projection after placement selects one
-    /// candidate. Transfer specs are checked against the requested Artifact
-    /// identity and the selected Artifact Peer, but replica selection and
-    /// ticket issuance remain outside Framework.
+    /// candidate. Local inputs and transfer specs must form an exact, disjoint
+    /// projection of the placement request; replica selection and ticket
+    /// issuance remain outside Framework.
     ///
-    /// Core v1 exposes only transfer specs, not an explicit local-input
-    /// projection. `VerifiedLocal` Artifacts therefore fail closed because
-    /// omitting them would prevent the Runtime from verifying their identity.
-    /// Zero-byte remote transfers and non-Generic remote Artifacts also fail
-    /// closed because the wire cannot represent them without losing semantics.
+    /// Zero-byte local Artifacts remain valid. Remote transfers still require a
+    /// positive-size Generic Artifact because that is the only Artifact kind
+    /// representable by `ArtifactTransferSpec`.
     pub fn validate_artifact_projection(
         &self,
         placement: &ExecutionPlacementRequest,
@@ -84,32 +94,31 @@ impl RuntimeAssignmentBuilder {
     ) -> Result<(), FabricContractError> {
         let requested = index_requested_artifacts(&placement.artifacts)?;
         let assignments = index_assignment_artifacts(&self.artifacts)?;
+        let local_artifacts = index_local_artifacts(&self.local_artifacts)?;
         let quotes = index_artifact_quotes(&selected.artifact_quotes)?;
 
-        if requested.is_empty() {
-            if let Some((digest, _)) = assignments.iter().next() {
-                return Err(FabricContractError::new(
-                    "ARTIFACT_ASSIGNMENT_UNEXPECTED",
-                    format!("assignment contains an Artifact absent from placement: {digest}"),
-                ));
-            }
-            if let Some((digest, _)) = quotes.iter().next() {
-                return Err(FabricContractError::new(
-                    "ARTIFACT_QUOTE_SET_MISMATCH",
-                    format!("candidate contains an Artifact quote absent from placement: {digest}"),
-                ));
-            }
-            return Ok(());
-        }
-
-        let destination = &selected.artifact_destination_peer_id;
-        if destination.is_empty() || destination == &selected.node.node_id {
+        if let Some(digest) = assignments
+            .keys()
+            .find(|digest| local_artifacts.contains_key(*digest))
+        {
             return Err(FabricContractError::new(
-                "ARTIFACT_DESTINATION_INVALID",
-                "selected candidate requires an explicit Artifact Peer distinct from Node identity",
+                "ARTIFACT_ASSIGNMENT_DUPLICATE",
+                format!("assignment projects Artifact {digest} as both local and transfer"),
             ));
         }
 
+        let requested_digests = requested.keys().cloned().collect::<BTreeSet<_>>();
+        let projection_digests = assignments
+            .keys()
+            .chain(local_artifacts.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(digest) = projection_digests.difference(&requested_digests).next() {
+            return Err(FabricContractError::new(
+                "ARTIFACT_ASSIGNMENT_UNEXPECTED",
+                format!("assignment contains an Artifact absent from placement: {digest}"),
+            ));
+        }
         if quotes.len() != requested.len() {
             return Err(FabricContractError::new(
                 "ARTIFACT_QUOTE_SET_MISMATCH",
@@ -117,35 +126,24 @@ impl RuntimeAssignmentBuilder {
             ));
         }
 
-        let expected_transfer_digests = requested
-            .keys()
-            .filter_map(|digest| {
-                quotes.get(digest).and_then(|quote| {
-                    matches!(
-                        quote.availability,
-                        ArtifactAvailability::AuthorizedTransfer(_)
-                    )
-                    .then_some(digest.clone())
-                })
-            })
-            .collect::<BTreeSet<_>>();
-        let assignment_digests = assignments.keys().cloned().collect::<BTreeSet<_>>();
-        if let Some(digest) = expected_transfer_digests
-            .difference(&assignment_digests)
-            .next()
+        let destination = &selected.artifact_destination_peer_id;
+        if !requested.is_empty()
+            && (destination.is_empty() || destination == &selected.node.node_id)
         {
             return Err(FabricContractError::new(
-                "ARTIFACT_ASSIGNMENT_MISSING",
-                format!("assignment lacks the transfer projection for Artifact {digest}"),
+                "ARTIFACT_DESTINATION_INVALID",
+                "selected candidate requires an explicit Artifact Peer distinct from Node identity",
             ));
         }
-        if let Some(digest) = assignment_digests
-            .difference(&expected_transfer_digests)
-            .next()
-        {
+
+        if let Some(digest) = requested_digests.difference(&projection_digests).next() {
+            let reason_code = match quotes.get(digest).map(|quote| &quote.availability) {
+                Some(ArtifactAvailability::VerifiedLocal { .. }) => "ARTIFACT_LOCAL_INPUT_MISSING",
+                _ => "ARTIFACT_ASSIGNMENT_MISSING",
+            };
             return Err(FabricContractError::new(
-                "ARTIFACT_ASSIGNMENT_UNEXPECTED",
-                format!("assignment transfers an Artifact not authorized by placement: {digest}"),
+                reason_code,
+                format!("assignment lacks the Artifact projection for {digest}"),
             ));
         }
 
@@ -175,12 +173,21 @@ impl RuntimeAssignmentBuilder {
 
             match quote.availability {
                 ArtifactAvailability::VerifiedLocal { .. } => {
-                    return Err(FabricContractError::new(
-                        "ARTIFACT_LOCAL_INPUT_UNREPRESENTABLE",
-                        format!(
-                            "Core v1 RuntimeAssignment cannot preserve local Artifact identity for {digest}"
-                        ),
-                    ));
+                    let local = local_artifacts.get(&digest).ok_or_else(|| {
+                        FabricContractError::new(
+                            "ARTIFACT_LOCAL_INPUT_MISSING",
+                            format!("assignment lacks the local projection for Artifact {digest}"),
+                        )
+                    })?;
+                    let projected = artifact_ref_from_local_input(local)?;
+                    if projected != *artifact {
+                        return Err(FabricContractError::new(
+                            "ARTIFACT_LOCAL_INPUT_IDENTITY_MISMATCH",
+                            format!(
+                                "assignment local input disagrees with placement identity for {digest}"
+                            ),
+                        ));
+                    }
                 }
                 ArtifactAvailability::AuthorizedTransfer(_) => {
                     if artifact.size_bytes == 0 {
@@ -257,6 +264,7 @@ impl RuntimeAssignmentBuilder {
             profile: Some(self.profile.clone()),
             desired_state: core_v1::DesiredRuntimeState::Running as i32,
             artifacts: self.artifacts.clone(),
+            local_artifacts: self.local_artifacts.clone(),
         }
     }
 }
@@ -304,6 +312,25 @@ fn index_assignment_artifacts(
     Ok(indexed)
 }
 
+fn index_local_artifacts(
+    artifacts: &[core_v1::ArtifactLocalInput],
+) -> Result<BTreeMap<String, &core_v1::ArtifactLocalInput>, FabricContractError> {
+    let mut indexed = BTreeMap::new();
+    for input in artifacts {
+        let projected = artifact_ref_from_local_input(input)?;
+        if indexed.insert(projected.digest.clone(), input).is_some() {
+            return Err(FabricContractError::new(
+                "ARTIFACT_ASSIGNMENT_DUPLICATE",
+                format!(
+                    "assignment contains a duplicate local Artifact digest: {}",
+                    projected.digest
+                ),
+            ));
+        }
+    }
+    Ok(indexed)
+}
+
 fn index_artifact_quotes(
     quotes: &[ArtifactPlacementQuote],
 ) -> Result<BTreeMap<String, &ArtifactPlacementQuote>, FabricContractError> {
@@ -336,6 +363,67 @@ fn index_artifact_quotes(
         }
     }
     Ok(indexed)
+}
+
+fn artifact_kind_to_proto(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Generic => "generic",
+        ArtifactKind::Model => "model",
+        ArtifactKind::Dataset => "dataset",
+        ArtifactKind::Checkpoint => "checkpoint",
+        ArtifactKind::TrainingSpec => "training_spec",
+        ArtifactKind::Metrics => "metrics",
+        ArtifactKind::Merged => "merged",
+        ArtifactKind::Quantized => "quantized",
+        ArtifactKind::Report => "report",
+    }
+}
+
+pub(crate) fn artifact_kind_from_proto(value: &str) -> Result<ArtifactKind, FabricContractError> {
+    let kind = match value {
+        "generic" => ArtifactKind::Generic,
+        "model" => ArtifactKind::Model,
+        "dataset" => ArtifactKind::Dataset,
+        "checkpoint" => ArtifactKind::Checkpoint,
+        "training_spec" => ArtifactKind::TrainingSpec,
+        "metrics" => ArtifactKind::Metrics,
+        "merged" => ArtifactKind::Merged,
+        "quantized" => ArtifactKind::Quantized,
+        "report" => ArtifactKind::Report,
+        _ => {
+            return Err(FabricContractError::new(
+                "ARTIFACT_KIND_INVALID",
+                format!("unknown or non-canonical Artifact kind: {value}"),
+            ));
+        }
+    };
+    if artifact_kind_to_proto(kind) != value {
+        return Err(FabricContractError::new(
+            "ARTIFACT_KIND_INVALID",
+            format!("Artifact kind is not canonical snake_case: {value}"),
+        ));
+    }
+    Ok(kind)
+}
+
+fn artifact_ref_from_local_input(
+    input: &core_v1::ArtifactLocalInput,
+) -> Result<ArtifactRef, FabricContractError> {
+    let kind = artifact_kind_from_proto(&input.artifact_kind)?;
+    let artifact = ArtifactRef {
+        uri: input.artifact_uri.clone(),
+        digest: input.digest.clone(),
+        size_bytes: input.size_bytes,
+        kind,
+        manifest_digest: (!input.manifest_digest.is_empty()).then(|| input.manifest_digest.clone()),
+    };
+    artifact.validate().map_err(|message| {
+        FabricContractError::new(
+            "ARTIFACT_LOCAL_IDENTITY_INVALID",
+            format!("assignment local Artifact is invalid: {message}"),
+        )
+    })?;
+    Ok(artifact)
 }
 
 fn artifact_ref_from_transfer_spec(
@@ -591,6 +679,16 @@ mod tests {
         }
     }
 
+    fn local_input(artifact: &ArtifactRef) -> core_v1::ArtifactLocalInput {
+        core_v1::ArtifactLocalInput {
+            artifact_uri: artifact.uri.clone(),
+            digest: artifact.digest.clone(),
+            size_bytes: artifact.size_bytes,
+            artifact_kind: artifact_kind_to_proto(artifact.kind).to_string(),
+            manifest_digest: artifact.manifest_digest.clone().unwrap_or_default(),
+        }
+    }
+
     fn lease(holder: semantic::Identity) -> semantic::Lease {
         semantic::Lease {
             identity: identity("lease-1"),
@@ -707,17 +805,94 @@ mod tests {
     }
 
     #[test]
-    fn verified_local_artifact_fails_closed_without_an_identity_projection() {
+    fn verified_local_artifact_preserves_identity_without_transfer_authority() {
         let artifact = artifact('e', 0);
-        let result = builder().validate_artifact_projection(
+        let builder = builder().with_local_artifacts(vec![local_input(&artifact)]);
+        let result = builder.validate_artifact_projection(
             &placement(vec![artifact.clone()]),
             &candidate(vec![local_quote(&artifact, "peer-1")], "peer-1"),
         );
 
-        assert_eq!(
-            result.unwrap_err().reason_code,
-            "ARTIFACT_LOCAL_INPUT_UNREPRESENTABLE"
+        assert_eq!(result, Ok(()));
+        let assignment = builder
+            .build(&lease(builder.runtime().clone()), NOW)
+            .unwrap();
+        assert!(assignment.artifacts.is_empty());
+        assert_eq!(assignment.local_artifacts, vec![local_input(&artifact)]);
+    }
+
+    #[test]
+    fn verified_local_artifact_requires_an_exact_local_projection() {
+        let artifact = artifact('e', 4);
+        let missing = builder().validate_artifact_projection(
+            &placement(vec![artifact.clone()]),
+            &candidate(vec![local_quote(&artifact, "peer-1")], "peer-1"),
         );
+        assert_eq!(
+            missing.unwrap_err().reason_code,
+            "ARTIFACT_LOCAL_INPUT_MISSING"
+        );
+
+        let mut mismatched = local_input(&artifact);
+        mismatched.size_bytes += 1;
+        let mismatch = builder()
+            .with_local_artifacts(vec![mismatched])
+            .validate_artifact_projection(
+                &placement(vec![artifact.clone()]),
+                &candidate(vec![local_quote(&artifact, "peer-1")], "peer-1"),
+            );
+        assert_eq!(
+            mismatch.unwrap_err().reason_code,
+            "ARTIFACT_LOCAL_INPUT_IDENTITY_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn local_projection_rejects_bad_kind_and_cross_projection_duplicates() {
+        let artifact = artifact('e', 4);
+        let mut bad_kind = local_input(&artifact);
+        bad_kind.artifact_kind = "TrainingSpec".to_string();
+        let bad_kind_result = builder()
+            .with_local_artifacts(vec![bad_kind])
+            .validate_artifact_projection(
+                &placement(vec![artifact.clone()]),
+                &candidate(vec![local_quote(&artifact, "peer-1")], "peer-1"),
+            );
+        assert_eq!(
+            bad_kind_result.unwrap_err().reason_code,
+            "ARTIFACT_KIND_INVALID"
+        );
+
+        let duplicate = builder_with_artifacts(vec![transfer_spec(&artifact, "peer-1")])
+            .with_local_artifacts(vec![local_input(&artifact)])
+            .validate_artifact_projection(
+                &placement(vec![artifact.clone()]),
+                &candidate(vec![local_quote(&artifact, "peer-1")], "peer-1"),
+            );
+        assert_eq!(
+            duplicate.unwrap_err().reason_code,
+            "ARTIFACT_ASSIGNMENT_DUPLICATE"
+        );
+    }
+
+    #[test]
+    fn every_canonical_artifact_kind_round_trips_through_local_projection() {
+        for kind in [
+            ArtifactKind::Generic,
+            ArtifactKind::Model,
+            ArtifactKind::Dataset,
+            ArtifactKind::Checkpoint,
+            ArtifactKind::TrainingSpec,
+            ArtifactKind::Metrics,
+            ArtifactKind::Merged,
+            ArtifactKind::Quantized,
+            ArtifactKind::Report,
+        ] {
+            assert_eq!(
+                artifact_kind_from_proto(artifact_kind_to_proto(kind)),
+                Ok(kind)
+            );
+        }
     }
 
     #[test]

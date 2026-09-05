@@ -332,6 +332,7 @@ class Attempt:
         execution_references: Optional[Sequence[str]] = None,
         cleanup_confirmed: Optional[bool] = None,
         error: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
     ) -> "Attempt":
         if self.status.terminal and status is not self.status:
             raise ValueError(f"Terminal Attempt {self.attempt_id} is immutable")
@@ -345,6 +346,7 @@ class Attempt:
             ),
             cleanup_confirmed=self.cleanup_confirmed if cleanup_confirmed is None else cleanup_confirmed,
             error=self.error if error is None else error,
+            metadata=self.metadata if metadata is None else dict(metadata),
             observed_at=_timestamp(),
         )
 
