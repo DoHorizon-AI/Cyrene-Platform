@@ -1,13 +1,15 @@
 # Node Agent runtime
 
-The Node Agent is the only component that dials the Kotlin control plane. It
-is deliberately outside the Kernel process; mTLS parsing, certificate rotation,
-network loss, backoff, and session state cannot crash or block the Kernel.
+The Host Node Agent dials the Rust execution-control plane on the protocol-v1
+Host role; protocol-v2 Runtime Agents establish separate Runtime-scoped
+sessions. The Host Agent is deliberately outside the Kernel process, so mTLS
+parsing, certificate rotation, network loss, backoff, and session state cannot
+crash or block the Kernel.
 
 The production path is:
 
 ```text
-Kotlin NodeControlService -- mTLS bidi gRPC --> cy-node-agent -- UDS --> KernelService
+Rust `cy-execution-control::ExecutionControlService` -- mTLS bidi gRPC --> cy-node-agent -- UDS --> KernelService
 ```
 
 The Agent accepts only `KernelCommand`'s six typed requests: capability query,

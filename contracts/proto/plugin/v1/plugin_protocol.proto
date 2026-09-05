@@ -134,6 +134,11 @@ message Invoke {
   // Typed extension requests remain available below for existing adapters.
   bytes payload = 3;
 
+  // Canonical protobuf Any type URL for the opaque request payload. This is
+  // optional transport metadata; an empty value preserves legacy workers that
+  // only consume the payload bytes.
+  string payload_type_url = 4;
+
   oneof request {
     DetectHardwareRequest detect_hardware = 10;
     AnalyzeModelRequest analyze_model = 11;

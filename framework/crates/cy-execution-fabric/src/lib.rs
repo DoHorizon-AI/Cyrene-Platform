@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+mod assignment;
 mod capability;
 mod connectivity;
 mod enrollment;
@@ -18,9 +19,10 @@ mod provider;
 mod reconcile;
 
 pub use admission::{
-    validate_assignment, validate_hello, validate_renewal, AdmissionDisposition,
-    FabricContractError, ObservationCursor,
+    semantic_lease_from_proto, validate_assignment, validate_hello, validate_renewal,
+    AdmissionDisposition, FabricContractError, ObservationCursor,
 };
+pub use assignment::RuntimeAssignmentBuilder;
 pub use capability::{
     artifact_transfer_capability, execution_capability, validate_execution_capability,
     ExecutionCapabilityEnvelope, ARTIFACT_TRANSFER_CAPABILITY_ID, EXECUTION_CAPABILITY_ID,
@@ -32,7 +34,12 @@ pub use enrollment::{
     DevelopmentEnrollmentProvider, EnrollmentGrant, EnrollmentProvider, RuntimeScope,
 };
 pub use node::NodeLifecycleProjection;
-pub use placement::{place_execution_target, ExecutionTargetCandidate};
+pub use placement::{
+    place_execution_target, plan_execution_placement, ArtifactAvailability, ArtifactPlacementQuote,
+    ArtifactTransferQuote, CandidateEvaluation, ExecutionPlacementRequest,
+    ExecutionTargetCandidate, NetworkRequirements, PlacementDecision, PlacementPolicy,
+    PlacementReason, PlacementScore, ResourceMatchEvidence,
+};
 pub use provider::{FakeProvider, ProviderObservationSource};
 pub use reconcile::{
     reconcile_runtime, DesiredRuntime, LeaseObservation, ProviderObservation, ReconcileEvidence,

@@ -77,7 +77,7 @@ pub struct ArtifactReplica {
 
 impl ArtifactReplica {
     pub fn validate(&self) -> Result<(), TransferError> {
-        validate_artifact_ref(&self.artifact)?;
+        validate_transfer_artifact_ref(&self.artifact)?;
         if self.replica_id.is_empty()
             || self.peer_id.is_empty()
             || self.protocol != TransferProtocol::HttpsRangeV1
@@ -113,7 +113,7 @@ pub struct TransferTicket {
 
 impl TransferTicket {
     pub fn validate(&self) -> Result<(), TransferError> {
-        validate_artifact_ref(&self.artifact)?;
+        validate_transfer_artifact_ref(&self.artifact)?;
         if self.ticket_id.is_empty()
             || self.source_peer_id.is_empty()
             || self.destination_peer_id.is_empty()
@@ -172,6 +172,20 @@ pub struct TransferPlan {
     pub part_sources: Vec<TransferPartSource>,
 }
 
+/// Deterministic, conservative transfer estimate derived from an authorized
+/// [`TransferPlan`]. Cost remains provider-defined, while byte and time values
+/// are computed from the canonical part routes and source Peer facts.
+///
+/// 该估算只消费 Artifact Plane 已生成的计划，不重新选择 Peer 或复制数据策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferEstimate {
+    pub bytes_to_transfer: u64,
+    pub estimated_transfer_millis: u64,
+    pub cost_microunits: u64,
+    pub source_count: u32,
+    pub valid_until_unix_ms: u64,
+}
+
 impl TransferPlan {
     pub fn validate(
         &self,
@@ -213,6 +227,15 @@ impl TransferPlan {
             source.peer.validate()?;
             source.replica.validate()?;
             source.ticket.validate()?;
+            if source
+                .replica
+                .expires_at_unix_ms
+                .is_some_and(|expires_at| now_unix_ms >= expires_at)
+            {
+                return Err(TransferError::Authorization(
+                    "Artifact replica expired before the planned transfer".to_string(),
+                ));
+            }
             if source.replica.artifact != self.artifact
                 || source.replica.peer_id != source.peer.peer_id
                 || !source.ticket.authorizes(
@@ -238,6 +261,94 @@ impl TransferPlan {
             }
         }
         Ok(())
+    }
+
+    /// Estimate transfer cost from the exact per-part routes in this plan.
+    ///
+    /// The time estimate is intentionally conservative: routed bytes are
+    /// aggregated per source, each source pays one latency cost, and source
+    /// times are added rather than assuming unproven cross-source parallelism.
+    pub fn estimate(
+        &self,
+        manifest: &TransferManifest,
+        now_unix_ms: u64,
+    ) -> Result<TransferEstimate, TransferError> {
+        self.validate(manifest, now_unix_ms)?;
+
+        let mut bytes_by_source = BTreeMap::<(&str, &str), u64>::new();
+        for route in &self.part_sources {
+            let part = manifest
+                .parts
+                .iter()
+                .find(|part| part.index == route.part_index)
+                .expect("validated TransferPlan references an existing part");
+            let bytes = bytes_by_source
+                .entry((route.peer_id.as_str(), route.replica_id.as_str()))
+                .or_default();
+            *bytes = bytes.checked_add(part.size_bytes()).ok_or_else(|| {
+                TransferError::Contract("Transfer estimate byte count overflow".to_string())
+            })?;
+        }
+
+        let mut estimate = TransferEstimate {
+            bytes_to_transfer: 0,
+            estimated_transfer_millis: 0,
+            cost_microunits: 0,
+            source_count: u32::try_from(bytes_by_source.len()).map_err(|_| {
+                TransferError::Contract("Transfer estimate source count overflow".to_string())
+            })?,
+            valid_until_unix_ms: u64::MAX,
+        };
+        for ((peer_id, replica_id), bytes) in bytes_by_source {
+            let source = self
+                .sources
+                .iter()
+                .find(|source| {
+                    source.peer.peer_id == peer_id && source.replica.replica_id == replica_id
+                })
+                .expect("TransferPlan validation covers every source route");
+            if source.peer.bandwidth_mbps == 0 {
+                return Err(TransferError::Contract(
+                    "Transfer estimate requires positive source bandwidth".to_string(),
+                ));
+            }
+
+            let transfer_millis = u64::try_from(
+                (u128::from(bytes) * 8 * 1_000)
+                    .div_ceil(u128::from(source.peer.bandwidth_mbps) * 1_000_000),
+            )
+            .map_err(|_| TransferError::Contract("Transfer estimate time overflow".to_string()))?;
+            estimate.bytes_to_transfer =
+                estimate
+                    .bytes_to_transfer
+                    .checked_add(bytes)
+                    .ok_or_else(|| {
+                        TransferError::Contract("Transfer estimate byte count overflow".to_string())
+                    })?;
+            estimate.estimated_transfer_millis = estimate
+                .estimated_transfer_millis
+                .checked_add(source.peer.latency_ms)
+                .and_then(|value| value.checked_add(transfer_millis))
+                .ok_or_else(|| {
+                    TransferError::Contract("Transfer estimate time overflow".to_string())
+                })?;
+            estimate.cost_microunits = estimate
+                .cost_microunits
+                .checked_add(source.peer.cost_microunits)
+                .ok_or_else(|| {
+                    TransferError::Contract("Transfer estimate cost overflow".to_string())
+                })?;
+            estimate.valid_until_unix_ms = estimate
+                .valid_until_unix_ms
+                .min(source.ticket.expires_at_unix_ms)
+                .min(source.replica.expires_at_unix_ms.unwrap_or(u64::MAX));
+        }
+        if estimate.bytes_to_transfer != manifest.artifact.size_bytes {
+            return Err(TransferError::Contract(
+                "Transfer estimate must cover the complete Artifact".to_string(),
+            ));
+        }
+        Ok(estimate)
     }
 
     pub fn source(&self, route: &TransferPartSource) -> Option<&TransferSource> {
@@ -287,7 +398,7 @@ pub struct TransferManifest {
 
 impl TransferManifest {
     pub fn validate(&self) -> Result<(), TransferError> {
-        validate_artifact_ref(&self.artifact)?;
+        validate_transfer_artifact_ref(&self.artifact)?;
         if self.part_size_bytes == 0 || self.parts.is_empty() {
             return Err(TransferError::Contract(
                 "Transfer manifest requires a positive part size and parts".to_string(),
@@ -365,20 +476,13 @@ pub(crate) fn validate_digest(value: &str) -> Result<(), TransferError> {
     }
 }
 
-fn validate_artifact_ref(artifact: &ArtifactRef) -> Result<(), TransferError> {
-    validate_digest(&artifact.digest)?;
-    if artifact.uri != format!("artifact://sha256/{}", &artifact.digest[7..]) {
-        return Err(TransferError::Contract(
-            "Artifact URI does not match its canonical digest".to_string(),
-        ));
-    }
+/// Apply range-transfer constraints after canonical Artifact validation.
+fn validate_transfer_artifact_ref(artifact: &ArtifactRef) -> Result<(), TransferError> {
+    artifact.validate().map_err(TransferError::Contract)?;
     if artifact.size_bytes == 0 {
         return Err(TransferError::Contract(
             "Artifact size must be positive for range transfer".to_string(),
         ));
-    }
-    if let Some(manifest_digest) = &artifact.manifest_digest {
-        validate_digest(manifest_digest)?;
     }
     Ok(())
 }
@@ -402,7 +506,7 @@ mod tests {
         let mut artifact = identity(4);
         artifact.uri = "/mnt/private/model.bin".to_string();
         assert!(matches!(
-            validate_artifact_ref(&artifact),
+            validate_transfer_artifact_ref(&artifact),
             Err(TransferError::Contract(_))
         ));
     }
@@ -510,6 +614,171 @@ mod tests {
         assert!(compiled_schema()
             .validate(&serde_json::to_value(plan).unwrap())
             .is_ok());
+    }
+
+    #[test]
+    fn transfer_estimate_uses_authorized_part_routes() {
+        let artifact = identity(4);
+        let manifest = TransferManifest {
+            artifact: artifact.clone(),
+            part_size_bytes: 2,
+            parts: vec![
+                TransferPart {
+                    index: 0,
+                    start: 0,
+                    end_exclusive: 2,
+                    digest: format!("sha256:{}", "1".repeat(64)),
+                },
+                TransferPart {
+                    index: 1,
+                    start: 2,
+                    end_exclusive: 4,
+                    digest: format!("sha256:{}", "2".repeat(64)),
+                },
+            ],
+        };
+        let mut plan = TransferPlan {
+            plan_id: "estimate-plan".to_string(),
+            artifact,
+            destination_peer_id: "target-cache".to_string(),
+            sources: vec![
+                estimate_source("source-a", 10, 1, 1, 0),
+                estimate_source("source-b", 20, 1, 2, 1),
+            ],
+            part_sources: vec![
+                TransferPartSource {
+                    part_index: 0,
+                    peer_id: "source-a".to_string(),
+                    replica_id: "replica-source-a".to_string(),
+                },
+                TransferPartSource {
+                    part_index: 1,
+                    peer_id: "source-b".to_string(),
+                    replica_id: "replica-source-b".to_string(),
+                },
+            ],
+        };
+        plan.sources[0].ticket.expires_at_unix_ms = 900;
+        plan.sources[1].replica.expires_at_unix_ms = Some(800);
+
+        let estimate = plan.estimate(&manifest, 1).unwrap();
+
+        assert_eq!(estimate.bytes_to_transfer, 4);
+        assert_eq!(estimate.estimated_transfer_millis, 32);
+        assert_eq!(estimate.cost_microunits, 3);
+        assert_eq!(estimate.source_count, 2);
+        assert_eq!(estimate.valid_until_unix_ms, 800);
+    }
+
+    #[test]
+    fn transfer_estimate_rejects_unknown_bandwidth() {
+        let artifact = identity(4);
+        let manifest = TransferManifest {
+            artifact: artifact.clone(),
+            part_size_bytes: 4,
+            parts: vec![TransferPart {
+                index: 0,
+                start: 0,
+                end_exclusive: 4,
+                digest: format!("sha256:{}", "1".repeat(64)),
+            }],
+        };
+        let plan = TransferPlan {
+            plan_id: "unknown-bandwidth".to_string(),
+            artifact,
+            destination_peer_id: "target-cache".to_string(),
+            sources: vec![estimate_source("source-a", 10, 0, 1, 0)],
+            part_sources: vec![TransferPartSource {
+                part_index: 0,
+                peer_id: "source-a".to_string(),
+                replica_id: "replica-source-a".to_string(),
+            }],
+        };
+
+        assert!(matches!(
+            plan.estimate(&manifest, 1),
+            Err(TransferError::Contract(message))
+                if message == "Transfer estimate requires positive source bandwidth"
+        ));
+    }
+
+    #[test]
+    fn transfer_plan_rejects_an_expired_replica() {
+        let artifact = identity(4);
+        let manifest = TransferManifest {
+            artifact: artifact.clone(),
+            part_size_bytes: 4,
+            parts: vec![TransferPart {
+                index: 0,
+                start: 0,
+                end_exclusive: 4,
+                digest: format!("sha256:{}", "1".repeat(64)),
+            }],
+        };
+        let mut source = estimate_source("source-a", 10, 1, 1, 0);
+        source.replica.expires_at_unix_ms = Some(2);
+        let plan = TransferPlan {
+            plan_id: "expired-replica".to_string(),
+            artifact,
+            destination_peer_id: "target-cache".to_string(),
+            sources: vec![source],
+            part_sources: vec![TransferPartSource {
+                part_index: 0,
+                peer_id: "source-a".to_string(),
+                replica_id: "replica-source-a".to_string(),
+            }],
+        };
+
+        assert!(matches!(
+            plan.estimate(&manifest, 2),
+            Err(TransferError::Authorization(message))
+                if message == "Artifact replica expired before the planned transfer"
+        ));
+    }
+
+    fn estimate_source(
+        peer_id: &str,
+        latency_ms: u64,
+        bandwidth_mbps: u64,
+        cost_microunits: u64,
+        part_index: u32,
+    ) -> TransferSource {
+        let artifact = identity(4);
+        TransferSource {
+            peer: ArtifactPeer {
+                peer_id: peer_id.to_string(),
+                kind: ArtifactPeerKind::CentralSeed,
+                authorized: true,
+                residency: "us-east".to_string(),
+                trust_domain: "workspace-1".to_string(),
+                classifications: BTreeSet::from(["internal".to_string()]),
+                policy_tags: BTreeSet::from(["training".to_string()]),
+                healthy: true,
+                latency_ms,
+                bandwidth_mbps,
+                cost_microunits,
+            },
+            replica: ArtifactReplica {
+                replica_id: format!("replica-{peer_id}"),
+                artifact: artifact.clone(),
+                peer_id: peer_id.to_string(),
+                protocol: TransferProtocol::HttpsRangeV1,
+                locator: format!("https://{peer_id}.example.test/value"),
+                region: Some("us-east".to_string()),
+                priority: 0,
+                expires_at_unix_ms: None,
+            },
+            ticket: TransferTicket {
+                ticket_id: format!("ticket-{peer_id}"),
+                artifact,
+                source_peer_id: peer_id.to_string(),
+                destination_peer_id: "target-cache".to_string(),
+                allowed_parts: BTreeSet::from([part_index]),
+                expires_at_unix_ms: u64::MAX,
+                max_bytes: 4,
+                signature: "fixture-signature".to_string(),
+            },
+        }
     }
 
     fn compiled_schema() -> jsonschema::JSONSchema {

@@ -52,8 +52,10 @@ Linux 内核。这里的 “Kernel” 是运行在 Linux 用户态、部署于�
 11. **插件以签名 OCI Artifact 分发。**
     tag 只用于发现，安装与运行必须绑定 digest、签名身份和策略。
 12. **Node 默认主动拨号，直连模式可选。**
-    默认由 Rust Agent 建立到 Kotlin 的 mTLS 双向流；网络可达且经策略允许时，
-    Kotlin 也可直接请求 Node 的 `KernelService`。两种模式复用同一命令消息。
+    默认由 Rust Agent 建立到 Rust `cy-execution-control` 的 mTLS 双向流；Product
+    控制面通过 canonical Platform client seam 提交执行意图。网络可达且经策略允许时，
+    控制编排也可独占式直连 Node 的 `KernelService`；两种模式复用同一命令消息，
+    同一 Node 同一时刻只能有一个命令权威。
 13. **Rust 与 Kotlin 分线开发，`develop` 负责集成。**
     Rust Kernel/Node Runtime 使用 `develop-kernel`，Kotlin Framework/Control
     Plane 使用 `develop-framework`；跨语言变更合并到 `develop` 后，才形成
@@ -184,30 +186,34 @@ Endpoint 只保存授权事实，数据直接在 Worker/Provider 间传输。Pro
 ```mermaid
 sequenceDiagram
     participant UI as Plugin-owned UI / Navigator Shell
-    participant CP as Kotlin Control Plane
-    participant K as Rust Kernel / Node Agent
+    participant CP as Product Control Plane
+    participant EC as Rust Execution Control
+    participant K as Rust Kernel / Host Agent
     participant S as Sandbox Adapter Host
     participant P as Out-of-process Plugin
     participant D as Artifact/Data Plane
 
-    K->>CP: ConnectNode(mTLS, node identity, resume token)
-    CP-->>K: session accepted + desired generation
+    K->>EC: ConnectNode(mTLS, node identity, resume token)
+    EC-->>K: session accepted + desired generation
     UI->>CP: StartPlugin / workload request
-    CP->>CP: manifest、权限、依赖、节点调度
-    CP-->>K: LaunchPlugin command over outbound stream
+    CP->>CP: Product manifest、权限、依赖与执行需求
+    CP->>EC: execution intent + requirements
+    EC->>EC: deterministic placement + durable intent
+    EC-->>K: typed Kernel command over outbound stream
     K->>K: 原子租约 + fence + 已批准 binding
     K->>S: LaunchPlan + binding（本地 UDS）
     S->>P: 启动、cgroup/device 强制与本地握手
     P-->>K: cy.plugin.v1 Health/Invoke
-    K->>CP: command result / observed state / heartbeat
+    K->>EC: command result / observed state / heartbeat
+    EC->>CP: execution observation
     CP-->>UI: lifecycle event
     P->>D: URI/handle/shared memory/streaming data
 ```
 
-上图是默认的主动拨号模式。可选直连模式下，Kotlin 通过 mTLS 直接调用 Rust
-暴露的 `KernelService`；`LaunchPluginRequest`、`Operation`、幂等规则、
-generation 和错误语义完全相同。直连模式只是传输拓扑变化，不能形成第二套
-节点 API。
+上图是默认的主动拨号模式。可选直连模式下，唯一控制编排方通过 canonical
+generated binding 和 mTLS 调用 Rust 暴露的 `KernelService`；`LaunchPluginRequest`、
+`Operation`、幂等规则、generation 和错误语义完全相同。直连模式只是传输拓扑
+变化，不能形成第二套节点 API，也不能与 outbound session 同时成为命令权威。
 
 控制 RPC 只传标识符、digest、URI/handle、配额、状态、deadline、revision、
 幂等键和能力引用。模型权重、数据集、checkpoint、日志正文和张量不作为
@@ -217,18 +223,18 @@ generation 和错误语义完全相同。直连模式只是传输拓扑变化，
 
 | 平面    | 用途                                    | 推荐传输                                                         |
 | ----- | ------------------------------------- | ------------------------------------------------------------ |
-| 控制面   | 资源租约、插件期望状态、进程启停、查询                   | 默认 Agent 主动 mTLS 双向 gRPC；可选 Kotlin 直连 KernelService；本地可用 UDS |
+| 控制面   | 资源租约、插件期望状态、进程启停、查询                   | 默认 Agent 主动连接 Rust execution-control；可选独占式直连 KernelService；本地可用 UDS |
 | 事件面   | 节点、租约、进程、插件状态变化                       | 可恢复的 gRPC stream；后续可接事件总线                                    |
 | 本地插件面 | Supervisor 与 Python/JVM/native worker | 现有 length-prefixed Protobuf over stdio；后续 UDS/Named Pipe     |
 | 数据面   | 模型、数据集、checkpoint、token/tensor 流      | 对象存储 URI、共享内存、mmap、UDS 或独立流服务                                |
 | 客户端面  | Shell 到控制面                            | HTTPS、WebSocket、gRPC-Web/Connect 等公开 API                     |
 
-分布式部署默认由 Rust Agent 主动建立到 Kotlin 控制面的 mTLS 长连接，以
-适应 NAT 和防火墙。第一帧必须完成节点身份、node epoch、协议版本和恢复
+分布式部署默认由 Rust Agent 主动建立到 Rust execution-control 的 mTLS 长连接，
+以适应 NAT 和防火墙。第一帧必须完成节点身份、node epoch、协议版本和恢复
 token 协商；断线重连后先对账 desired/observed generation，再接收新命令。
-网络可达时可以启用控制面直连，但必须由显式部署策略选择，不能在运行中
-无序混用两种命令通道。若确需故障切换，同一节点同一时刻只能有一个持有效
-session lease 的命令来源。
+Product 控制面不直接拥有 Node session。网络可达时可以启用控制编排直连，但
+必须由显式部署策略选择，不能在运行中无序混用两种命令通道。若确需故障切换，
+同一节点同一时刻只能有一个持有效 session lease 的命令来源。
 
 ### 3.5 连接故障与恢复规则
 
@@ -421,6 +427,8 @@ cyrene-core/
 │   │   ├── cy-installation-resolver/     # 已验证安装记录的文件系统/JSON adapter
 │   │   ├── cy-local-transport/           # 历史 stdio transport；禁止 Kernel 使用
 │   │   ├── cy-platform-api/              # legacy extension API
+│   │   ├── cy-execution-fabric/           # 通用 placement/admission/reconciliation
+│   │   ├── cy-execution-control/          # 唯一 NodeControl owner 与 Lease 路由
 │   │   └── cy-plugin-supervisor/         # 历史 runner；必须迁移至 KernelService
 │   └── jvm/                              # Kotlin/JVM 控制面
 │       ├── settings.gradle.kts
@@ -429,10 +437,8 @@ cyrene-core/
 │       ├── domain/                       # 纯 Kotlin/JDK 领域模型与规则
 │       ├── application/                  # use case 与 inbound/outbound ports
 │       ├── adapters/
-│       │   ├── inbound-grpc/
 │       │   ├── inbound-http/
 │       │   ├── inbound-websocket/
-│       │   ├── outbound-kernel/
 │       │   ├── outbound-persistence/
 │       │   ├── outbound-events/
 │       │   ├── outbound-oci/
@@ -509,7 +515,7 @@ cyrene-<service>/
 `shell/` 是可选目录：普通服务通常只提供 `ui/extension`；`cyrene-navigator`
 作为官方组合体验可以同时提供 Tauri desktop shell 和 Web/PWA shell。其他服务
 若需要独立产品入口，也在自己的仓库内提供，但只能通过公开 Control Plane SDK
-访问平台，不能持有节点凭证或绕过 Kotlin 直连 Kernel。
+访问平台，不能持有节点凭证或绕过 canonical Platform seam 直连 Kernel。
 
 ### 6.4 Navigator 的产品壳示例
 
@@ -588,14 +594,17 @@ Core 源码。
 
 职责方向：
 
-- `NodeControlService` 由 Kotlin 控制面实现。默认模式下，Rust Agent 通过
-  mTLS 主动建立双向流，控制面在该流上发送类型化 Kernel 命令，节点回传结果、
-  Operation 事件与心跳。
-- `KernelService` 由每台 Linux 节点上的 Rust Agent 实现，作为完整的逻辑
-  Kernel API 和可选的控制面主动请求入口；直连模式也必须使用 mTLS、相同消息、
-  幂等键、generation 和 fencing 语义。
-- `PluginLifecycleService` 由 Kotlin 控制面实现，Shell、管理员、Rust Agent
-  和经过授权的远程 service 插件按角色调用。
+- `NodeControlService` 由 Rust `cy-execution-control` 实现。Host/Runtime Agent
+  通过 mTLS 主动建立双向流，控制面在该流上发送类型化 Kernel 命令，节点回传
+  结果、Operation 事件与心跳。Kotlin Product 控制面只能通过该 canonical seam
+  编排业务状态，不得再提供 registration-only inbound service 或 `activeNodes`
+  authority。
+- `KernelService` 由每台 Linux 节点上的 Rust Kernel daemon 实现，Host Agent
+  只通过本地 UDS 转发已围栏的类型化命令。它也是可选的控制编排主动请求入口；
+  直连模式必须使用 mTLS、相同消息、幂等键、generation 和 fencing 语义。
+- `PluginLifecycleService` 由 Kotlin Product 控制面实现，Shell、管理员和经过授权
+  的远程 service 插件按角色调用；Rust Agent 不直接调用它，执行观测必须经过
+  canonical execution seam。
 - 本地 Python/JVM/native 子进程继续使用现有 `cy.plugin.v1`，不直接连接
   Kotlin。
 
@@ -612,7 +621,7 @@ option java_multiple_files = true;
 option java_package = "io.cyrene.proto.core.v1";
 option java_outer_classname = "CyreneCoreProto";
 
-// Implemented by the Kotlin control plane. This is the default transport:
+// Implemented by the Rust execution-control component. This is the default transport:
 // each Rust Node Agent dials out and keeps one authenticated bidirectional
 // control stream for the active node epoch.
 service NodeControlService {
@@ -1479,7 +1488,7 @@ golden fixture 一致。
 
 ### P5：分布式与数据面
 
-- Agent 默认 outbound mTLS 双向流、session fencing、重连已落地；补齐与 Kotlin
+- Agent 默认 outbound mTLS 双向流、session fencing、重连已落地；补齐与 Product
   事件存储协作的 event recovery 和 durable desired/observed reconcile；
 - 可选 direct KernelService 经过同一 TCK，且不能与 outbound 模式形成双主；
 - 对象存储/共享内存/UDS 数据面；

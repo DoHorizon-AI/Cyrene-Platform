@@ -1,8 +1,9 @@
 # CYRENE Node Agent
 
 `cy-node-agent` is an external bridge, not part of the Rust Kernel. It keeps
-one outbound mTLS `NodeControlService.Connect` stream to the Kotlin control
-plane and forwards only typed `KernelCommand` oneof requests to the local
+one outbound mTLS `NodeControlService.Connect` stream to the Rust
+`cy-execution-control` control plane and forwards only typed `KernelCommand`
+oneof requests to the local
 `KernelService` UDS endpoint.
 
 It never creates cgroups, scans hardware, loads drivers, spawns Workers, or

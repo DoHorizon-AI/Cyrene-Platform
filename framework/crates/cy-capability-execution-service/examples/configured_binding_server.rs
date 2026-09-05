@@ -7,21 +7,10 @@
 //! activator. Binding identity therefore remains independent from worker
 //! process generation and executable details.
 
-use std::{
-    collections::HashMap,
-    env, fs,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashMap, env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
-use cy_capability_execution_service::{
-    CapabilityExecutionConfig, CapabilityExecutionService, server,
-};
-use cy_manifest::PluginManifest;
-use cy_platform_api::{
-    CapabilityBinding, CapabilityRegistry, WorkerActivationOptions, normalize_official_manifest,
-};
+use cy_capability_execution_service::{build_service, load_bindings, load_manifest, server};
+use cy_platform_api::WorkerActivationOptions;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 
@@ -30,16 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arguments::parse(env::args().skip(1))?;
     let manifest = load_manifest(&args.manifest)?;
     let binding_environments = load_bindings(&args.bindings)?;
-
-    let mut registry = CapabilityRegistry::new();
-    registry.register(manifest.clone())?;
-    for binding in &binding_environments {
-        registry.register_binding(CapabilityBinding::new(
-            binding.id.clone(),
-            manifest.plugin.id.clone(),
-            manifest.plugin.version.clone(),
-        )?)?;
-    }
 
     let base_worker_options = WorkerActivationOptions {
         working_dir: args.working_dir.clone(),
@@ -51,25 +30,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_grace_period: args.shutdown_grace_period,
         max_message_bytes: 1024 * 1024,
     };
-    let config = CapabilityExecutionConfig {
-        worker_options: base_worker_options,
-        application_event_buffer_capacity: args.event_buffer_capacity,
-        ..CapabilityExecutionConfig::default()
-    };
-    let mut service = CapabilityExecutionService::new(registry, config);
-    for binding in binding_environments {
-        let options = WorkerActivationOptions {
-            environment: binding.environment,
-            working_dir: args.working_dir.clone(),
-            python_path: args.python_path.clone(),
-            python_executable: args.python_executable.clone(),
-            handshake_timeout: args.handshake_timeout,
-            default_invoke_timeout: args.default_invoke_timeout,
-            shutdown_grace_period: args.shutdown_grace_period,
-            max_message_bytes: 1024 * 1024,
-        };
-        service = service.with_binding_worker_options(binding.id, options);
-    }
+    let service = build_service(
+        manifest,
+        base_worker_options,
+        args.event_buffer_capacity,
+        Some(binding_environments),
+    )?;
 
     let service_for_shutdown = service.clone();
     let listener = TcpListener::bind(args.bind).await?;
@@ -108,62 +74,6 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
-}
-
-fn load_manifest(path: &Path) -> Result<PluginManifest, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
-    if value.get("plugin").is_some() {
-        Ok(serde_json::from_value(value)?)
-    } else {
-        Ok(normalize_official_manifest(value)?)
-    }
-}
-
-#[derive(Debug)]
-struct BindingEnvironment {
-    id: String,
-    environment: HashMap<String, String>,
-}
-
-fn load_bindings(path: &Path) -> Result<Vec<BindingEnvironment>, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
-    let entries = value
-        .as_array()
-        .ok_or("--bindings must contain a JSON array")?;
-    let mut bindings = Vec::with_capacity(entries.len());
-    let mut ids = std::collections::HashSet::with_capacity(entries.len());
-    for entry in entries {
-        let object = entry
-            .as_object()
-            .ok_or("each configured binding must be a JSON object")?;
-        let id = object
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .ok_or("each configured binding requires a non-empty id")?
-            .to_string();
-        if !ids.insert(id.clone()) {
-            return Err(format!("duplicate configured binding id: {id}").into());
-        }
-        let environment = object
-            .get("environment")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| format!("binding {id} requires an environment object"))?
-            .iter()
-            .map(|(key, value)| {
-                value
-                    .as_str()
-                    .map(|value| (key.clone(), value.to_string()))
-                    .ok_or_else(|| format!("binding {id} environment value {key} must be a string"))
-            })
-            .collect::<Result<HashMap<_, _>, _>>()?;
-        bindings.push(BindingEnvironment { id, environment });
-    }
-    if bindings.is_empty() {
-        return Err("--bindings must contain at least one configured binding".into());
-    }
-    Ok(bindings)
 }
 
 #[derive(Debug)]

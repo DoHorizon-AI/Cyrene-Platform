@@ -2,13 +2,36 @@
 
 ## Purpose | 目录职责
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+This crate is the canonical Product-facing capability execution service. It
+owns generic binding resolution, worker activation, cancellation, typed `Any`
+forwarding, and application-event streams; it owns no Product payload fields.
+
+本 crate 是面向 Product 的 canonical 能力执行服务，负责通用 binding 解析、worker
+激活、取消、类型化 `Any` 透传和应用事件流，不拥有 Product payload 字段。
 
 ## Contents | 内容
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
+| `src/lib.rs` | Canonical CES implementation and gRPC projection. | canonical CES 实现及 gRPC 投影。 |
+| `src/main.rs` | Production process entrypoint for one manifest and one or more configured bindings. | 单 manifest、多配置 binding 的正式进程入口。 |
+| `src/binding_config.rs` | Shared manifest/binding configuration loader. | 共享 manifest/binding 配置加载器。 |
+| `tests/service_tck.rs` | Repository-local CES lifecycle TCK. | 仓内 CES 生命周期 TCK。 |
+| `tests/plugins_model_provider_tck.rs` | Explicitly ignored cross-repository provider TCK, run by the required cross-repo workflow. | 由 required 跨仓工作流显式运行的 ignored provider TCK。 |
+
+## Process configuration | 进程配置
+
+The binary requires `--manifest PATH`. `--bindings PATH` accepts a non-empty
+JSON array of `{ "id": string, "environment": { string: string } }` records;
+IDs must be non-empty and unique. `--ready-file PATH` publishes the resolved
+ephemeral endpoint and is removed on graceful exit. TCP is intentionally
+restricted to loopback because this process does not provide transport
+authentication; a remote deployment must inject an authenticated transport.
+
+二进制要求提供 `--manifest PATH`。`--bindings PATH` 接受非空 JSON 数组，每项为
+`{ "id": string, "environment": { string: string } }`；ID 必须非空且唯一。
+`--ready-file PATH` 发布实际 endpoint，并在优雅退出时移除。该进程尚无传输认证，
+因此 TCP 只允许 loopback；远程部署必须注入已认证传输。
 
 ## Suggested reading / execution order | 推荐阅读 / 执行顺序
 

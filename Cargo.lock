@@ -335,11 +335,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-execution-fabric"
+name = "cy-execution-control"
 version = "0.1.0"
 dependencies = [
+ "cy-execution-fabric",
+ "cy-kernel-api",
  "cy-kernel-contract",
+ "cy-kernel-daemon",
+ "cy-node-agent",
  "cy-proto",
+ "cy-resource-manager",
+ "cy-runtime-agent",
+ "cyrene-linux-sys-adapter",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
+]
+
+[[package]]
+name = "cy-execution-fabric"
+version = "0.2.0"
+dependencies = [
+ "cy-artifact-transfer",
+ "cy-kernel-contract",
+ "cy-manifest",
+ "cy-proto",
+ "prost",
  "prost-types",
  "thiserror 1.0.69",
 ]
@@ -518,6 +547,7 @@ dependencies = [
  "cy-proto",
  "nix",
  "prost-types",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -526,6 +556,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "uuid",
 ]
 
 [[package]]

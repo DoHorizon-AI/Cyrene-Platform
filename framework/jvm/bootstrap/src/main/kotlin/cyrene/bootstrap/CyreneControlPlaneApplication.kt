@@ -8,13 +8,11 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 package cyrene.bootstrap
 
-import cyrene.adapters.inbound.grpc.NodeControlService
-import cyrene.adapters.outbound.kernel.KernelOutboundAdapter
-
-class CyreneControlPlaneApplication {
-    val nodeControlService = NodeControlService()
-    val kernelOutboundAdapter = KernelOutboundAdapter()
-}
+/**
+ * Product orchestration bootstrap; execution wiring awaits a canonical client contract.
+ * Product 编排启动边界；执行接线必须等待 canonical client contract。
+ */
+class CyreneControlPlaneApplication
 
 fun main() {
     println("CYRENE JVM Control Plane Initialized.")

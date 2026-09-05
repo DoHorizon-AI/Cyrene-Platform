@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_artifact_transfer::{
-    ArtifactKind, ArtifactPeer, ArtifactPeerKind, ArtifactRef, ArtifactReplica, HttpRangeTransfer,
-    TransferManifest, TransferPart, TransferPartSource, TransferPlan, TransferProtocol,
-    TransferSession, TransferSource, TransferTicket,
+    ArtifactKind, ArtifactPeer, ArtifactPeerKind, ArtifactRef, ArtifactReplica,
+    DevelopmentTransferTicketAuthority, HttpRangeTransfer, TransferManifest, TransferPart,
+    TransferPartSource, TransferPlan, TransferProtocol, TransferSession, TransferSource,
+    TransferTicket, TransferTicketVerifier,
 };
 use cy_execution_fabric::{
     artifact_transfer_capability, execution_capability, validate_assignment, validate_renewal,
@@ -58,6 +59,8 @@ pub enum RuntimeAgentError {
     Transport(String),
     #[error("control-plane protocol failed: {0}")]
     Protocol(#[from] FabricContractError),
+    #[error("Runtime Agent state failed: {0}")]
+    State(String),
     #[error("Artifact transfer failed: {0}")]
     Artifact(String),
     #[error("child supervision failed: {0}")]
@@ -114,17 +117,24 @@ enum ControlAction {
 /// Run one unprivileged Runtime Agent until its workload reaches a terminal state.
 pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), RuntimeAgentError> {
     config.validate()?;
-    fs::create_dir_all(&config.state_dir)
-        .map_err(|error| RuntimeAgentError::Configuration(error.to_string()))?;
+    let state_directory = config.prepare_state_directory()?;
     fs::create_dir_all(&config.artifact_destination_root)
         .map_err(|error| RuntimeAgentError::Configuration(error.to_string()))?;
     let mut state = AgentState::new(config.workload.clone());
-    let mut resume_token = config.resume_token.clone();
+    let mut resume_token = config.resolve_resume_token(&state_directory)?;
     let mut delay = config.reconnect_min;
     let mut terminate = termination_signal()?;
 
     loop {
-        match connect_once(&config, &mut state, &mut resume_token, &mut terminate).await {
+        match connect_once(
+            &config,
+            &state_directory,
+            &mut state,
+            &mut resume_token,
+            &mut terminate,
+        )
+        .await
+        {
             Ok(ConnectionOutcome::Reconnect(token)) => {
                 resume_token = token;
                 delay = config.reconnect_min;
@@ -132,11 +142,13 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
             Ok(ConnectionOutcome::Completed) => return Ok(()),
             Err(error) => {
                 eprintln!("runtime-agent connection failed: {error}");
-                if state.assignment.is_none()
-                    && matches!(
-                        error,
-                        RuntimeAgentError::Configuration(_) | RuntimeAgentError::EmptyCredential(_)
-                    )
+                if matches!(error, RuntimeAgentError::State(_))
+                    || (state.assignment.is_none()
+                        && matches!(
+                            error,
+                            RuntimeAgentError::Configuration(_)
+                                | RuntimeAgentError::EmptyCredential(_)
+                        ))
                 {
                     return Err(error);
                 }
@@ -154,6 +166,7 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
 
 async fn connect_once(
     config: &RuntimeAgentConfig,
+    state_directory: &crate::config::StateDirectory,
     state: &mut AgentState,
     resume_token: &mut String,
     terminate: &mut tokio::signal::unix::Signal,
@@ -183,6 +196,7 @@ async fn connect_once(
     // A Welcome consumes a single-use enrollment proof. Preserve its resume
     // token before any local staging work can fail and force a reconnect.
     // Welcome 会消耗一次性 enrollment proof；本地 staging 前先保存 resume token。
+    config.persist_resume_token(state_directory, &welcome.resume_token)?;
     *resume_token = welcome.resume_token.clone();
     let session_id = welcome.session_id.clone();
     let mut control_cursor = ObservationCursor::default();
@@ -419,13 +433,6 @@ async fn handle_assignment(
         return Ok(());
     }
 
-    enqueue_assignment_ack(
-        config,
-        state,
-        &assignment,
-        AssignmentAckDisposition::Accepted,
-        None,
-    )?;
     state.observed_state = RuntimeObservedState::Staging;
     enqueue_observation(
         config,
@@ -433,7 +440,19 @@ async fn handle_assignment(
         "ARTIFACT_STAGING",
         "staging immutable Artifact inputs",
     )?;
-    let (downloaded_parts, reused_parts) = stage_artifacts(config, &assignment).await?;
+    let (downloaded_parts, reused_parts) = match stage_artifacts(config, &assignment).await {
+        Ok(result) => result,
+        Err(error) => {
+            reject_assignment_preparation(
+                config,
+                state,
+                &assignment,
+                "ARTIFACT_STAGING_FAILED",
+                &error.to_string(),
+            )?;
+            return Ok(());
+        }
+    };
     if reused_parts > 0 {
         enqueue_observation(
             config,
@@ -454,20 +473,35 @@ async fn handle_assignment(
         fs::remove_file(&log_path).map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
     }
     state.log_reference_published = false;
-    state
-        .child
-        .start(None, &Default::default())
-        .await
-        .map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
+    if let Err(error) = state.child.start(None, &Default::default()).await {
+        reject_assignment_preparation(
+            config,
+            state,
+            &assignment,
+            "WORKLOAD_START_FAILED",
+            &error.to_string(),
+        )?;
+        return Ok(());
+    }
     state
         .accepted_assignments
         .insert(assignment.assignment_id.clone());
     state.assignment = Some(ActiveAssignment {
-        assignment_id: assignment.assignment_id,
+        assignment_id: assignment.assignment_id.clone(),
         lease,
-        lease_proto: assignment.lease.expect("validated Assignment has Lease"),
+        lease_proto: assignment
+            .lease
+            .clone()
+            .expect("validated Assignment has Lease"),
         pending_renewal: None,
     });
+    enqueue_assignment_ack(
+        config,
+        state,
+        &assignment,
+        AssignmentAckDisposition::Accepted,
+        None,
+    )?;
     state.observed_state = RuntimeObservedState::Running;
     enqueue_observation(
         config,
@@ -476,6 +510,27 @@ async fn handle_assignment(
         "fixed workload command is running",
     )?;
     Ok(())
+}
+
+fn reject_assignment_preparation(
+    config: &RuntimeAgentConfig,
+    state: &mut AgentState,
+    assignment: &core_v1::RuntimeAssignment,
+    reason_code: &'static str,
+    message: &str,
+) -> Result<(), RuntimeAgentError> {
+    state.observed_state = RuntimeObservedState::Failed;
+    enqueue_observation(config, state, reason_code, message)?;
+    enqueue_assignment_ack(
+        config,
+        state,
+        assignment,
+        AssignmentAckDisposition::Rejected,
+        Some(&FabricContractError {
+            reason_code,
+            message: message.to_string(),
+        }),
+    )
 }
 
 fn enqueue_assignment_ack(
@@ -503,6 +558,17 @@ async fn stage_artifacts(
     config: &RuntimeAgentConfig,
     assignment: &core_v1::RuntimeAssignment,
 ) -> Result<(usize, usize), RuntimeAgentError> {
+    if assignment.artifacts.is_empty() {
+        return Ok((0, 0));
+    }
+    let ticket_key_path = config.artifact_ticket_key.as_ref().ok_or_else(|| {
+        RuntimeAgentError::Artifact(
+            "Artifact transfer requires a configured ticket verification key".to_string(),
+        )
+    })?;
+    let ticket_key = read_credential(ticket_key_path, true)?;
+    let ticket_verifier = DevelopmentTransferTicketAuthority::new(ticket_key)
+        .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
     let ca = read_credential(&config.artifact_ca, false)?;
     let transfer = HttpRangeTransfer::with_pem_ca(&ca)
         .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
@@ -536,30 +602,16 @@ async fn stage_artifacts(
         } else {
             spec.destination_peer_id.clone()
         };
-        let sources = build_transfer_sources(spec, &artifact, &destination_peer_id, &manifest)?;
-        let part_sources = if spec.part_sources.is_empty() {
-            let source = sources.first().ok_or_else(|| {
-                RuntimeAgentError::Artifact("TransferPlan has no source Peer".to_string())
-            })?;
-            manifest
-                .parts
-                .iter()
-                .map(|part| TransferPartSource {
-                    part_index: part.index,
-                    peer_id: source.peer.peer_id.clone(),
-                    replica_id: source.replica.replica_id.clone(),
-                })
-                .collect()
-        } else {
-            spec.part_sources
-                .iter()
-                .map(|route| TransferPartSource {
-                    part_index: route.part_index,
-                    peer_id: route.peer_id.clone(),
-                    replica_id: route.replica_id.clone(),
-                })
-                .collect()
-        };
+        let sources = build_transfer_sources(spec, &artifact, &ticket_verifier)?;
+        let part_sources = spec
+            .part_sources
+            .iter()
+            .map(|route| TransferPartSource {
+                part_index: route.part_index,
+                peer_id: route.peer_id.clone(),
+                replica_id: route.replica_id.clone(),
+            })
+            .collect();
         let session = TransferSession {
             // Artifact resume identity is content-scoped, not Attempt- or
             // Runtime-generation-scoped, so replacement Attempts reuse parts.
@@ -593,16 +645,21 @@ async fn stage_artifacts(
 fn build_transfer_sources(
     spec: &core_v1::ArtifactTransferSpec,
     artifact: &ArtifactRef,
-    destination_peer_id: &str,
-    manifest: &TransferManifest,
+    ticket_verifier: &dyn TransferTicketVerifier,
 ) -> Result<Vec<TransferSource>, RuntimeAgentError> {
     if spec.sources.is_empty() {
-        return legacy_transfer_source(spec, artifact, destination_peer_id, manifest);
+        return Err(RuntimeAgentError::Artifact(
+            "Artifact transfer requires an Artifact Plane-authorized source Peer and ticket"
+                .to_string(),
+        ));
     }
     spec.sources
         .iter()
         .map(|source| {
             let ticket: TransferTicket = serde_json::from_str(&source.transfer_ticket)
+                .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
+            ticket_verifier
+                .verify(&ticket)
                 .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
             Ok(TransferSource {
                 peer: ArtifactPeer {
@@ -632,55 +689,6 @@ fn build_transfer_sources(
             })
         })
         .collect()
-}
-
-#[allow(deprecated)]
-fn legacy_transfer_source(
-    spec: &core_v1::ArtifactTransferSpec,
-    artifact: &ArtifactRef,
-    destination_peer_id: &str,
-    manifest: &TransferManifest,
-) -> Result<Vec<TransferSource>, RuntimeAgentError> {
-    if spec.replica_uri.is_empty() {
-        return Err(RuntimeAgentError::Artifact(
-            "TransferPlan has no source Peer".to_string(),
-        ));
-    }
-    Ok(vec![TransferSource {
-        peer: ArtifactPeer {
-            peer_id: "legacy-seed-peer".to_string(),
-            kind: ArtifactPeerKind::CentralSeed,
-            authorized: true,
-            residency: "legacy".to_string(),
-            trust_domain: "workspace".to_string(),
-            classifications: BTreeSet::from(["assigned".to_string()]),
-            policy_tags: BTreeSet::new(),
-            healthy: true,
-            latency_ms: 0,
-            bandwidth_mbps: 0,
-            cost_microunits: 0,
-        },
-        replica: ArtifactReplica {
-            replica_id: format!("{}-primary", spec.artifact_uri),
-            artifact: artifact.clone(),
-            peer_id: "legacy-seed-peer".to_string(),
-            protocol: TransferProtocol::HttpsRangeV1,
-            locator: spec.replica_uri.clone(),
-            region: None,
-            priority: 0,
-            expires_at_unix_ms: None,
-        },
-        ticket: TransferTicket {
-            ticket_id: "legacy-local-ticket".to_string(),
-            artifact: artifact.clone(),
-            source_peer_id: "legacy-seed-peer".to_string(),
-            destination_peer_id: destination_peer_id.to_string(),
-            allowed_parts: manifest.parts.iter().map(|part| part.index).collect(),
-            expires_at_unix_ms: u64::MAX,
-            max_bytes: artifact.size_bytes,
-            signature: "legacy-local-compatibility".to_string(),
-        },
-    }])
 }
 
 fn build_parts(
@@ -1170,7 +1178,7 @@ fn validate_private_key_permissions(path: &Path) -> Result<(), RuntimeAgentError
         .mode();
     if mode & 0o077 != 0 {
         return Err(RuntimeAgentError::Configuration(format!(
-            "client key {} must not be readable by group or other users",
+            "private credential {} must not be readable by group or other users",
             path.display()
         )));
     }
@@ -1253,3 +1261,215 @@ fn termination_signal() -> Result<tokio::signal::unix::Signal, RuntimeAgentError
 
 #[cfg(not(unix))]
 compile_error!("cy-runtime-agent v1 requires a Unix container runtime");
+
+#[cfg(test)]
+mod tests {
+    use cy_artifact_transfer::TransferTicketSigner;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn child_start_failure_rejects_without_accepting_assignment() {
+        let directory = tempdir().unwrap();
+        let config = test_config(
+            directory.path(),
+            vec!["/definitely/not/a/cyrene-workload".to_string()],
+        );
+        let mut state = AgentState::new(config.workload.clone());
+        let assignment = test_assignment(Vec::new());
+
+        handle_assignment(&config, &mut state, assignment)
+            .await
+            .unwrap();
+
+        assert!(state.assignment.is_none());
+        assert!(!state.child.is_running());
+        assert!(state.accepted_assignments.is_empty());
+        assert_eq!(
+            rejection_reason(&mut state),
+            Some("WORKLOAD_START_FAILED".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_staging_failure_rejects_without_starting_workload() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
+        let mut state = AgentState::new(config.workload.clone());
+        let assignment = test_assignment(vec![authorized_transfer_spec()]);
+
+        handle_assignment(&config, &mut state, assignment)
+            .await
+            .unwrap();
+
+        assert!(state.assignment.is_none());
+        assert!(!state.child.is_running());
+        assert!(state.accepted_assignments.is_empty());
+        assert_eq!(
+            rejection_reason(&mut state),
+            Some("ARTIFACT_STAGING_FAILED".to_string())
+        );
+    }
+
+    #[test]
+    fn tampered_artifact_ticket_is_rejected_before_transfer() {
+        let authority = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+        let artifact = ArtifactRef {
+            uri: format!("artifact://sha256/{}", "a".repeat(64)),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 1,
+            kind: ArtifactKind::Generic,
+            manifest_digest: None,
+        };
+        let mut ticket = TransferTicket {
+            ticket_id: "ticket-1".to_string(),
+            artifact: artifact.clone(),
+            source_peer_id: "seed-peer-1".to_string(),
+            destination_peer_id: "runtime-cache-1".to_string(),
+            allowed_parts: BTreeSet::from([0]),
+            expires_at_unix_ms: u64::MAX,
+            max_bytes: 1,
+            signature: String::new(),
+        };
+        authority.sign(&mut ticket).unwrap();
+        ticket.destination_peer_id = "attacker-cache".to_string();
+        let mut spec = authorized_transfer_spec();
+        spec.sources[0].transfer_ticket = serde_json::to_string(&ticket).unwrap();
+
+        assert!(matches!(
+            build_transfer_sources(&spec, &artifact, &authority),
+            Err(RuntimeAgentError::Artifact(message)) if message.contains("signature is invalid")
+        ));
+    }
+
+    fn test_config(root: &Path, workload: Vec<String>) -> RuntimeAgentConfig {
+        RuntimeAgentConfig {
+            control_plane_endpoint: "https://control.example".to_string(),
+            control_plane_server_name: "control.example".to_string(),
+            control_plane_ca: root.join("control-ca.pem"),
+            client_certificate: root.join("client.pem"),
+            client_key: root.join("client.key"),
+            artifact_ca: root.join("missing-artifact-ca.pem"),
+            artifact_ticket_key: None,
+            organization_id: "organization-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            node: core_v1::NodeRef {
+                node_id: "node-1".to_string(),
+                node_epoch: 1,
+            },
+            node_type: "container".to_string(),
+            persistent: false,
+            runtime: cy_kernel_contract::Identity {
+                id: "runtime-1".to_string(),
+                generation: 1,
+            },
+            agent_version: "test".to_string(),
+            enrollment_proof: "one-shot-proof".to_string(),
+            resume_token: String::new(),
+            state_dir: root.join("state"),
+            artifact_destination_root: root.join("artifacts"),
+            reconnect_min: Duration::from_millis(10),
+            reconnect_max: Duration::from_millis(100),
+            workload,
+        }
+    }
+
+    fn test_assignment(
+        artifacts: Vec<core_v1::ArtifactTransferSpec>,
+    ) -> core_v1::RuntimeAssignment {
+        let now = now_unix_ms();
+        let runtime = semantic_v1::Identity {
+            id: "runtime-1".to_string(),
+            generation: 1,
+        };
+        core_v1::RuntimeAssignment {
+            assignment_id: "assignment-1".to_string(),
+            runtime: Some(core_v1::RuntimeRef {
+                identity: Some(runtime.clone()),
+            }),
+            operation: Some(semantic_v1::Identity {
+                id: "operation-1".to_string(),
+                generation: 1,
+            }),
+            attempt_id: "attempt-1".to_string(),
+            lease: Some(semantic_v1::Lease {
+                identity: Some(semantic_v1::Identity {
+                    id: "lease-1".to_string(),
+                    generation: 1,
+                }),
+                holder: Some(runtime.clone()),
+                resources: vec![semantic_v1::Identity {
+                    id: "resource-1".to_string(),
+                    generation: 1,
+                }],
+                state: semantic_v1::LeaseState::Active as i32,
+                fence_token: 1,
+                expires_at: Some(timestamp_from_ms(now + 30_000)),
+            }),
+            workload_identity: Some(core_v1::WorkloadIdentity {
+                identity: Some(semantic_v1::Identity {
+                    id: "workload-1".to_string(),
+                    generation: 1,
+                }),
+                scope: Some(core_v1::AccountScope {
+                    user_id: "user-1".to_string(),
+                    organization_id: "organization-1".to_string(),
+                    workspace_id: "workspace-1".to_string(),
+                }),
+                runtime: Some(core_v1::RuntimeRef {
+                    identity: Some(runtime),
+                }),
+                allowed_actions: vec!["operation.report".to_string()],
+                expires_at: Some(timestamp_from_ms(now + 60_000)),
+            }),
+            profile: Some(core_v1::RuntimeProfile {
+                image_digest: format!("sha256:{}", "1".repeat(64)),
+                resolved_digest: format!("sha256:{}", "2".repeat(64)),
+            }),
+            desired_state: core_v1::DesiredRuntimeState::Running as i32,
+            artifacts,
+        }
+    }
+
+    fn authorized_transfer_spec() -> core_v1::ArtifactTransferSpec {
+        core_v1::ArtifactTransferSpec {
+            artifact_uri: format!("artifact://sha256/{}", "a".repeat(64)),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 1,
+            manifest_digest: String::new(),
+            part_size_bytes: 1,
+            part_digests: vec![format!("sha256:{}", "b".repeat(64))],
+            sources: vec![core_v1::ArtifactTransferSource {
+                peer_id: "seed-peer-1".to_string(),
+                replica_id: "replica-1".to_string(),
+                locator: "https://artifact.example/blob".to_string(),
+                transfer_ticket: "not-read-before-ca".to_string(),
+            }],
+            part_sources: vec![core_v1::ArtifactPartSource {
+                part_index: 0,
+                peer_id: "seed-peer-1".to_string(),
+                replica_id: "replica-1".to_string(),
+            }],
+            destination_peer_id: "runtime-cache-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn rejection_reason(state: &mut AgentState) -> Option<String> {
+        state.outbox.begin_session();
+        state
+            .outbox
+            .unsent_frames("session-1", 1)
+            .into_iter()
+            .find_map(|frame| match frame.body {
+                Some(node_to_control_plane::Body::AssignmentAck(ack))
+                    if AssignmentAckDisposition::try_from(ack.disposition).ok()
+                        == Some(AssignmentAckDisposition::Rejected) =>
+                {
+                    ack.rejection.map(|rejection| rejection.reason_code)
+                }
+                _ => None,
+            })
+    }
+}

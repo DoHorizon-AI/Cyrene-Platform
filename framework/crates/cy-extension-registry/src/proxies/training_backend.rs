@@ -86,6 +86,7 @@ impl TrainingBackend for RemoteTrainingBackend {
             extension_point: "training-backend".to_string(),
             method: "run_training_step".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::RunTrainingStep(
                 RunTrainingStepRequest {
                     runtime_manifest_json: runtime_json,
