@@ -49,6 +49,21 @@ class ControlPlaneConformanceTest {
         assertEquals(7L, numberValue(fixture, "generation"))
     }
 
+    @Test
+    fun observationCanPersistProductNeutralResultMetadata() {
+        val attempt = Attempt("run-1:1", "run-1", 1, "execute")
+
+        val observed = attempt.observe(
+            AttemptStatus.SUCCEEDED,
+            metadata = mapOf("result_artifacts" to "{\"checkpoint\":\"sha256:abc\"}"),
+        )
+
+        assertEquals(
+            mapOf("result_artifacts" to "{\"checkpoint\":\"sha256:abc\"}"),
+            observed.metadata,
+        )
+    }
+
     private fun fixturePath(): Path {
         var directory: Path? = Path.of("").toAbsolutePath()
         while (directory != null) {

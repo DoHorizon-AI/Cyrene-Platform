@@ -71,6 +71,22 @@ def test_restart_restores_pending_and_running_state(tmp_path):
     assert [item.run_id for item in restarted.list_nonterminal()] == [run.run_id]
 
 
+def test_attempt_observation_metadata_survives_restart(tmp_path):
+    store, control, run = _control(tmp_path)
+    attempt = control.start_next_attempt(run.run_id)
+    control.observe_attempt(
+        run.run_id,
+        attempt.attempt_id,
+        AttemptStatus.SUCCEEDED,
+        metadata={"result_artifacts": "{\"checkpoint\":\"sha256:abc\"}"},
+    )
+
+    restored = JsonFileControlPlaneStore(store.path).load_run(run.run_id)
+    assert restored.latest_attempt.metadata == {
+        "result_artifacts": "{\"checkpoint\":\"sha256:abc\"}"
+    }
+
+
 def test_failed_or_lost_attempt_retries_then_exhaustion_fails(tmp_path):
     _, control, run = _control(tmp_path, _plan(retry=RetryPolicy(max_attempts=2)))
     first = control.start_next_attempt(run.run_id)

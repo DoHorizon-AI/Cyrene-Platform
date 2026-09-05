@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from .contracts import Attempt, AttemptId, AttemptNumber, AttemptStatus, DesiredState, ExecutionPlan, Generation, IdempotencyKey, PlanStatus, ProductRun, StepStatus
 from .store import ControlPlaneStore
@@ -112,7 +112,18 @@ class ProductControlPlane:
         self._store.compare_and_set(updated, run.generation)
         return attempt
 
-    def observe_attempt(self, run_id: str, attempt_id: AttemptId, status: AttemptStatus, *, execution_references: Optional[Sequence[str]] = None, cleanup_confirmed: Optional[bool] = None, error: Optional[str] = None, expected_generation: Optional[Generation] = None) -> ProductRun:
+    def observe_attempt(
+        self,
+        run_id: str,
+        attempt_id: AttemptId,
+        status: AttemptStatus,
+        *,
+        execution_references: Optional[Sequence[str]] = None,
+        cleanup_confirmed: Optional[bool] = None,
+        error: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        expected_generation: Optional[Generation] = None,
+    ) -> ProductRun:
         run = self._store.load_run(run_id)
         if expected_generation is not None and run.generation != expected_generation:
             from .store import StaleGenerationError
@@ -120,7 +131,13 @@ class ProductControlPlane:
         attempt = next((item for item in run.attempts if item.attempt_id == attempt_id), None)
         if attempt is None:
             raise KeyError(f"Unknown Attempt: {attempt_id}")
-        observed = attempt.with_observation(status, execution_references=execution_references, cleanup_confirmed=cleanup_confirmed, error=error)
+        observed = attempt.with_observation(
+            status,
+            execution_references=execution_references,
+            cleanup_confirmed=cleanup_confirmed,
+            error=error,
+            metadata=metadata,
+        )
         updated = run.with_observed_attempt(observed)
         if status in {AttemptStatus.FAILED, AttemptStatus.LOST}:
             updated = updated.with_observed_status(PlanStatus.AWAITING_RETRY)
