@@ -51,6 +51,18 @@ def validate_release_safety(repo_path: Path, tag: str, allow_dirty: bool = False
 
     return True, "Safety checks passed."
 
+
+def resolve_head(repo_path: Path) -> str:
+    """Resolve the immutable checked-out commit used by every release step."""
+
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
 def main():
     parser = argparse.ArgumentParser(description="Cyrene Release Preparation Tool")
     parser.add_argument("--repo-path", default=".", help="Path to repository")
@@ -76,9 +88,7 @@ def main():
     print(f"[OK] {msg}")
 
     # Determine target SHA
-    target_sha = "UNKNOWN"
-    if (rp / ".git").exists():
-        target_sha = subprocess.run(["git", "-C", str(rp), "rev-parse", "main"] if (rp / ".git").exists() else "UNKNOWN", capture_output=True, text=True).stdout.strip()
+    target_sha = resolve_head(rp) if (rp / ".git").exists() else "UNKNOWN"
     print(f"Target Release Commit SHA: {target_sha}")
 
     # Release Plan

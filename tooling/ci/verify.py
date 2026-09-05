@@ -85,8 +85,8 @@ def verify_python() -> bool:
 
 def verify_rust() -> bool:
     if not shutil.which("cargo"):
-        print("[SKIPPED] cargo not found in PATH")
-        return True
+        print("[FAILED] cargo not found in PATH; Rust verification is required")
+        return False
     ok1 = run_step("Rust Cargo Format Check", ["cargo", "fmt", "--check"])
     ok2 = run_step("Rust Cargo Check (--locked)", ["cargo", "check", "--locked"])
     ok3 = run_step("Rust Cargo Unit Tests (--locked)", ["cargo", "test", "--locked"])

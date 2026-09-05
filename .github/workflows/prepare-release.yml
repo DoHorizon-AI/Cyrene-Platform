@@ -21,15 +21,23 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          ref: main
+
+      - name: Resolve Immutable Release Source
+        id: release-source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install Tooling Dependencies
         run: |
-          python -m pip install --upgrade pip pytest hypothesis pyyaml
+          python -m pip install --upgrade pip build hypothesis pytest pyyaml setuptools twine wheel
           python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
 
       # STEP 1: Pre-validation of requested version and policy BEFORE doing anything
@@ -43,16 +51,23 @@ jobs:
       # STEP 2: Full verification gate (all SDK tests, contracts, governance)
       - name: Step 2 - Run Full Release Verification Suite
         run: |
-          python tooling/ci/verify.py
+          python tooling/ci/verify.py --scope all-light
+          python tooling/ci/verify.py --scope rust
 
       # STEP 3: Build release artifacts and packages
       - name: Step 3 - Build Release Packages & SDKs
         run: |
-          echo "Building SDK packages and verifying build artifacts..."
-          python -m pip install --upgrade build
-          python -m build sdk/python/cyrene_control_plane
-          python -m build sdk/python/cyrene_capability_client
-          python -m build sdk/python/cyrene_preflight
+          python tooling/release/build_python_sdks.py \
+            --repo-path . \
+            --output-dir release-dist
+          python -m twine check --strict release-dist/*
+
+      - name: Preserve Verified Release Candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyrene-platform-python-sdks-${{ steps.release-source.outputs.sha }}
+          path: release-dist/*
+          if-no-files-found: error
 
       # STEP 4: Only after Step 1, 2, 3 succeed 100%, create the annotated tag AT THE VERY END!
       - name: Step 4 - Create Immutable Annotated Tag (Final Step)
@@ -79,6 +94,7 @@ jobs:
           TAG="${VERSION#v}"
           TAG="v${TAG}"
           gh release create "${TAG}" \
+            release-dist/* \
             --draft \
             --title "Cyrene Platform ${TAG}" \
-            --notes "Automated component release for Cyrene Platform at commit ${{ github.sha }} (Verified green)"
+            --notes "Automated component release for Cyrene Platform at commit ${{ steps.release-source.outputs.sha }} (Verified green)"

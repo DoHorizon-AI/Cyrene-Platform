@@ -18,6 +18,7 @@ tck/message-connector-contract/dotnet/obj/
 logs/
 runs/
 output/
+release-dist/
 storage/
 *.log
 

@@ -29,6 +29,8 @@ artifacts:
   - cyrene-preflight
   - cyrene-artifacts
   - cyrene-environment
+  - cyrene-worker-shim
+  - cyrene-capability-client
   native_binaries:
   - cy-kernel-daemon
   - cy-node-agent

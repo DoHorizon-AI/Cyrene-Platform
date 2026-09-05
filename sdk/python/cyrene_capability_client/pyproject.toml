@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cyrene-capability-client"
 version = "0.1.0"
 description = "Product-facing Python client for the canonical Cyrene Capability Execution Service"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.83.1,<2.0.0",
