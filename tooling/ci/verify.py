@@ -54,6 +54,7 @@ def verify_governance() -> bool:
 
 def verify_python() -> bool:
     tests = [
+        PLATFORM_ROOT / "sdk/python/cyrene_capability_client/tests",
         PLATFORM_ROOT / "sdk/python/cyrene_preflight/tests",
         PLATFORM_ROOT / "sdk/python/cyrene_control_plane/tests",
         PLATFORM_ROOT / "sdk/python/cyrene_artifacts/tests",
@@ -64,13 +65,28 @@ def verify_python() -> bool:
         PLATFORM_ROOT / "tooling/ci/tests",
     ]
     existing = [str(t) for t in tests if t.exists()]
-    return run_step("Python SDKs & Tooling Unit Tests", [sys.executable, "-m", "pytest"] + existing)
+    generated = run_step(
+        "Capability Client Generated Bindings",
+        [
+            sys.executable,
+            str(
+                PLATFORM_ROOT
+                / "sdk/python/cyrene_capability_client/scripts/generate_proto.py"
+            ),
+            "--check",
+        ],
+    )
+    tested = run_step(
+        "Python SDKs & Tooling Unit Tests",
+        [sys.executable, "-m", "pytest"] + existing,
+    )
+    return generated and tested
 
 
 def verify_rust() -> bool:
     if not shutil.which("cargo"):
-        print("[SKIPPED] cargo not found in PATH")
-        return True
+        print("[FAILED] cargo not found in PATH; Rust verification is required")
+        return False
     ok1 = run_step("Rust Cargo Format Check", ["cargo", "fmt", "--check"])
     ok2 = run_step("Rust Cargo Check (--locked)", ["cargo", "check", "--locked"])
     ok3 = run_step("Rust Cargo Unit Tests (--locked)", ["cargo", "test", "--locked"])

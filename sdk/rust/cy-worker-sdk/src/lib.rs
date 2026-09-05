@@ -552,6 +552,7 @@ mod tests {
                     extension_point: "custom.capability".to_string(),
                     method: "run".to_string(),
                     payload: b"opaque-request".to_vec(),
+                    payload_type_url: String::new(),
                     request: None,
                 }),
             ),

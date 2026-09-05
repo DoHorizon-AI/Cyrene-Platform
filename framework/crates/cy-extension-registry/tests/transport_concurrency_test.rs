@@ -137,6 +137,7 @@ async fn test_worker_transport_large_payload_integrity() {
         extension_point: "execution_engine".to_string(),
         method: "execute_inference".to_string(),
         payload: Vec::new(),
+        payload_type_url: String::new(),
         request: Some(Request::ExecuteInference(ExecuteInferenceRequest {
             runtime_manifest_json: String::new(),
             model_manifest_json: String::new(),
@@ -308,6 +309,7 @@ async fn test_pipelined_concurrent_transport_multiplexing_and_correlation() {
                     extension_point: "execution_engine".to_string(),
                     method: "execute_inference".to_string(),
                     payload: Vec::new(),
+                    payload_type_url: String::new(),
                     request: Some(Request::ExecuteInference(ExecuteInferenceRequest {
                         runtime_manifest_json: String::new(),
                         model_manifest_json: String::new(),
@@ -408,6 +410,7 @@ async fn test_streaming_chunking_and_backpressure() {
             extension_point: "execution_engine".to_string(),
             method: "execute_inference".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(Request::ExecuteInference(ExecuteInferenceRequest {
                 runtime_manifest_json: String::new(),
                 model_manifest_json: String::new(),

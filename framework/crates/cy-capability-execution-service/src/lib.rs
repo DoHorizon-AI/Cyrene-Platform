@@ -14,6 +14,12 @@
 //! `cy.plugin.v1` envelope, worker subscription IDs, process handles, and
 //! executable details remain private to this crate and `cy-platform-api`.
 
+mod binding_config;
+
+pub use binding_config::{
+    ConfigurationError, ConfiguredBinding, build_service, load_bindings, load_manifest,
+};
+
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -463,6 +469,7 @@ impl CapabilityExecutionService {
         let cancellation = Arc::clone(&guard.token);
         let capability = request.capability.clone();
         let method = request.method.clone();
+        let request_type_url = request_payload.type_url;
         let payload = request_payload.value;
         let manifest = execution.manifest;
         let worker_options = execution.worker_options;
@@ -472,10 +479,11 @@ impl CapabilityExecutionService {
             let _task_guard = task_guard;
             let mut client =
                 CapabilityWorkerActivator::activate_from_manifest(&manifest, &worker_options)?;
-            let result = client.invoke_typed(
+            let result = client.invoke_typed_with_request_type_url(
                 &capability,
                 &method,
                 &payload,
+                &request_type_url,
                 worker_timeout,
                 cancellation.as_ref(),
             );

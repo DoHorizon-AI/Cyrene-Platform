@@ -24,6 +24,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | `cy-installation-resolver/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-local-transport/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-platform-api/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `cy-workspace-fabric/` | Workspace discovery, stable frontend API, and outbound relay connectivity. | Workspace 发现、稳定 frontend API 与出站 Relay 连接。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

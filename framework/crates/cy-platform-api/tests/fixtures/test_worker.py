@@ -176,7 +176,16 @@ class GenericTckWorker(CyreneWorker):
     def on_cancel(self, target_request_id: str, reason: str) -> None:
         self.cancelled_requests.add(target_request_id)
 
-    def on_invoke(self, capability: str, action: str, payload: bytes):
+    def on_invoke(
+        self,
+        capability: str,
+        action: str,
+        payload: bytes,
+        request_type_url: str = "",
+    ):
+        if action == "request_type_url":
+            return True, request_type_url.encode("utf-8")
+
         if capability == "model.provider.v1":
             if action == "embeddings":
                 if not self.embeddings_supported:
@@ -208,6 +217,12 @@ class GenericTckWorker(CyreneWorker):
             if val is None or not isinstance(val, int) or val < 0:
                 return False, b"INVALID_INPUT: value must be a non-negative integer"
             return True, json.dumps({"result": val * 2}).encode("utf-8")
+
+        elif action == "read_env":
+            key = req.get("key")
+            if not isinstance(key, str):
+                return False, b"INVALID_INPUT: key must be a string"
+            return True, json.dumps({"value": os.environ.get(key)}).encode("utf-8")
 
         elif action == "slow_operation":
             delay = req.get("delay_ms", 500) / 1000.0

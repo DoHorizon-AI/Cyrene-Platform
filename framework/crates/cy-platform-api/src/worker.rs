@@ -1132,6 +1132,32 @@ impl CapabilityWorkerClient {
         timeout: Duration,
         cancellation: &dyn CancellationToken,
     ) -> Result<WorkerInvocationResult, WorkerTerminalError> {
+        self.invoke_typed_with_request_type_url(
+            capability,
+            method,
+            payload,
+            "",
+            timeout,
+            cancellation,
+        )
+    }
+
+    /// Invoke a capability while forwarding the canonical request `Any`
+    /// type URL to the worker as transport metadata.
+    ///
+    /// The existing [`Self::invoke_typed`] API intentionally remains the
+    /// compatibility entry point for callers that do not have request type
+    /// metadata. An empty `request_type_url` is encoded as the protobuf
+    /// default and is therefore wire-compatible with older workers.
+    pub fn invoke_typed_with_request_type_url(
+        &mut self,
+        capability: &str,
+        method: &str,
+        payload: &[u8],
+        request_type_url: &str,
+        timeout: Duration,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<WorkerInvocationResult, WorkerTerminalError> {
         if self.is_shut_down {
             return Err(WorkerTerminalError::WorkerUnavailable(
                 "worker client is already shut down".into(),
@@ -1160,6 +1186,7 @@ impl CapabilityWorkerClient {
                 extension_point: capability.to_string(),
                 method: method.to_string(),
                 payload: payload.to_vec(),
+                payload_type_url: request_type_url.to_string(),
                 request: None,
             })),
         };
@@ -1389,6 +1416,10 @@ impl CapabilityWorkerActivator {
             });
 
         let mut cmd = Command::new(&python_bin);
+        // Pass only the explicit worker environment. Inheriting the host
+        // environment would expose unrelated credentials and host settings to
+        // an out-of-process plugin.
+        cmd.env_clear();
         cmd.args(["-m", "cyrene_worker_shim.runner"]);
 
         if let Some(entrypoint) = &manifest.plugin.entrypoint {
@@ -1406,9 +1437,6 @@ impl CapabilityWorkerActivator {
 
         // Build PYTHONPATH
         let mut python_paths = options.python_path.clone();
-        if let Ok(existing) = std::env::var("PYTHONPATH") {
-            python_paths.extend(std::env::split_paths(&existing));
-        }
         if let Some(working_dir) = &options.working_dir {
             python_paths.push(working_dir.clone());
         }

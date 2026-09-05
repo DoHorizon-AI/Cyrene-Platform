@@ -69,6 +69,7 @@ impl Storage for RemoteStorage {
             extension_point: "storage".to_string(),
             method: "store_artifact".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::StoreArtifact(
                 StoreArtifactRequest {
                     artifact_manifest_json: artifact_json,
@@ -91,6 +92,7 @@ impl Storage for RemoteStorage {
             extension_point: "storage".to_string(),
             method: "fetch_artifact".to_string(),
             payload: Vec::new(),
+            payload_type_url: String::new(),
             request: Some(cy_plugin_protocol::pb::invoke::Request::FetchArtifact(
                 FetchArtifactRequest {
                     artifact_id: artifact_id.to_string(),

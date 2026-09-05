@@ -21,11 +21,16 @@ members = [
     "framework/crates/cy-local-transport",
     "framework/crates/cy-platform-api",
     "framework/crates/cy-capability-execution-service",
+    "framework/crates/cy-execution-fabric",
+    "framework/crates/cy-execution-control",
+    "framework/crates/cy-workspace-fabric",
     "sdk/rust/cy-worker-sdk",
+    "sdk/rust/cy-artifact-transfer",
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）
     "runtime/cyrene-kernel",
     "agents/node/cy-node-agent",
+    "agents/runtime/cy-runtime-agent",
 
     # 5. 进程外硬件适配器（不属于 Kernel 进程）
     "adapters/hardware/nvidia",

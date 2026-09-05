@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Cyrene Platform Python SDKs and Tooling Harness"
 requires-python = ">=3.11"
 dependencies = [
+    "grpcio>=1.83.1,<2.0.0",
+    "grpcio-tools==1.83.1",
     "jsonschema>=4.20.0",
+    "protobuf>=7.36.1,<8.0.0",
     "pyyaml>=6.0",
     "pytest>=8.0.0",
     "ruff>=0.11.0",
@@ -22,6 +25,7 @@ pythonpath = [
     "tooling/ci",
     "sdk/python/cyrene_control_plane/src",
     "sdk/python/cyrene_environment/src",
+    "sdk/python/cyrene_capability_client/src",
     "sdk/python/cyrene_worker_shim/src",
     "sdk/python/cyrene_artifacts/src",
     "sdk/python/cyrene_preflight/src",

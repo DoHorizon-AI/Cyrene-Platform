@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message_connector_proto =
         proto_dir.join("cyrene/message/connector/v1/message_connector.proto");
     let model_provider_proto = proto_dir.join("cyrene/model/provider/v1/model_provider.proto");
+    let workspace_fabric_proto = proto_dir.join("cyrene/workspace/v1/workspace_fabric.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
     println!("cargo:rerun-if-changed={}", authority_proto.display());
@@ -41,6 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         message_connector_proto.display()
     );
     println!("cargo:rerun-if-changed={}", model_provider_proto.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_fabric_proto.display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         proto_dir.join("cyrene/core/v1").display()
@@ -70,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 capability_execution_proto,
                 message_connector_proto,
                 model_provider_proto,
+                workspace_fabric_proto,
                 hardware_adapter_proto,
                 sandbox_adapter_proto,
                 semantic_contract_proto,

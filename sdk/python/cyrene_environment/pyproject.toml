@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cyrene-environment"
 version = "0.1.0"
 description = "Provider-neutral reproducible environment contract and resolver"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["cyrene-artifacts>=0.1.0"]
 

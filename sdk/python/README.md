@@ -19,6 +19,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
+| `cyrene_capability_client/` | Canonical Python client for Capability Execution Service. | Capability Execution Service 的 canonical Python 客户端。 |
 | `cyrene_artifacts/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cyrene_control_plane/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cyrene_environment/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |

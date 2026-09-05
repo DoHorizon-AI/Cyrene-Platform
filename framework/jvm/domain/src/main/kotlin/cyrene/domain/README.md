@@ -20,7 +20,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `control/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `model/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

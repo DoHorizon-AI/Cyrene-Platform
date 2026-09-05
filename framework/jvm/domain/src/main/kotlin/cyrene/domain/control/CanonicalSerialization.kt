@@ -48,17 +48,7 @@ fun PlanStep.canonicalIdentityJson(): String = canonicalObject(
     mapOf(
         "step_id" to quoteCanonical(stepId),
         "capability" to quoteCanonical(capability),
-        "inputs" to canonicalArray(
-            inputs.sortedBy { "${it.uri}|${it.digest}|${it.kind}" }.map {
-                canonicalObject(
-                    mapOf(
-                        "uri" to quoteCanonical(it.uri),
-                        "digest" to quoteCanonical(it.digest),
-                        "kind" to quoteCanonical(it.kind),
-                    )
-                )
-            }
-        ),
+        "inputs" to canonicalArray(inputs.sorted().map(::quoteCanonical)),
         "outputs" to canonicalArray(outputs.sorted().map(::quoteCanonical)),
         "environment_identity" to canonicalNullable(environmentIdentity),
         "resource_reference" to canonicalNullable(resourceReference),

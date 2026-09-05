@@ -30,6 +30,7 @@ def test_same_idempotency_key_returns_one_logical_product_run(tmp_path):
     duplicate = control.submit(_plan(), product_kind="example.product", idempotency_key=IdempotencyKey("submit-1"))
     assert duplicate.run_id == run.run_id
     assert duplicate.plan_id == run.plan_id
+    assert control.load_plan(run.plan_id) == _plan()
 
 
 def test_plan_identity_and_dependency_order_are_deterministic():
@@ -69,6 +70,22 @@ def test_restart_restores_pending_and_running_state(tmp_path):
     assert restored.observed_status is PlanStatus.RUNNING
     assert restored.latest_attempt.status is AttemptStatus.RUNNING
     assert [item.run_id for item in restarted.list_nonterminal()] == [run.run_id]
+
+
+def test_attempt_observation_metadata_survives_restart(tmp_path):
+    store, control, run = _control(tmp_path)
+    attempt = control.start_next_attempt(run.run_id)
+    control.observe_attempt(
+        run.run_id,
+        attempt.attempt_id,
+        AttemptStatus.SUCCEEDED,
+        metadata={"result_artifacts": "{\"checkpoint\":\"sha256:abc\"}"},
+    )
+
+    restored = JsonFileControlPlaneStore(store.path).load_run(run.run_id)
+    assert restored.latest_attempt.metadata == {
+        "result_artifacts": "{\"checkpoint\":\"sha256:abc\"}"
+    }
 
 
 def test_failed_or_lost_attempt_retries_then_exhaustion_fails(tmp_path):

@@ -18,10 +18,7 @@ use cy_manifest::{
     PluginCapabilitiesManifest, PluginDependencies, PluginManifest, PluginMetadata, RestartPolicy,
     Runtime,
 };
-use cy_platform_api::{
-    CapabilityBinding, CapabilityRegistry, MAX_APPLICATION_EVENT_BUFFER_CAPACITY,
-    WorkerActivationOptions,
-};
+use cy_platform_api::{MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions};
 use cy_proto::capability_v1::{
     CapabilityEventStreamEnd, CapabilityEventStreamEndReason, InvokeCapabilityRequest,
     SubscribeCapabilityEventsRequest, capability_event_stream_item, capability_execution_error,
@@ -46,7 +43,7 @@ use tonic::{
 };
 
 use cy_capability_execution_service::{
-    CapabilityExecutionConfig, CapabilityExecutionService, server,
+    CapabilityExecutionService, ConfiguredBinding, build_service, server,
 };
 
 fn platform_root() -> PathBuf {
@@ -206,30 +203,27 @@ impl TestServer {
         worker_activation_options: WorkerActivationOptions,
         bindings: Vec<(String, WorkerActivationOptions)>,
     ) -> Self {
-        let mut registry = CapabilityRegistry::new();
         let manifest = fixture_manifest();
-        registry.register(manifest.clone()).unwrap();
-        for (binding_id, _) in &bindings {
-            registry
-                .register_binding(
-                    CapabilityBinding::new(
-                        binding_id,
-                        &manifest.plugin.id,
-                        &manifest.plugin.version,
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        let config = CapabilityExecutionConfig {
-            worker_options: worker_activation_options,
-            application_event_buffer_capacity: buffer_capacity,
-            ..CapabilityExecutionConfig::default()
+        let configured_bindings = if bindings.is_empty() {
+            None
+        } else {
+            Some(
+                bindings
+                    .iter()
+                    .map(|(id, options)| ConfiguredBinding {
+                        id: id.clone(),
+                        environment: options.environment.clone(),
+                    })
+                    .collect(),
+            )
         };
-        let mut service = CapabilityExecutionService::new(registry, config);
-        for (binding_id, options) in bindings {
-            service = service.with_binding_worker_options(binding_id, options);
-        }
+        let service = build_service(
+            manifest,
+            worker_activation_options,
+            buffer_capacity,
+            configured_bindings,
+        )
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let incoming = TcpListenerStream::new(listener);
@@ -274,6 +268,21 @@ fn any_json(value: serde_json::Value) -> Any {
 
 fn invoke_request(method: &str, payload: serde_json::Value) -> Request<InvokeCapabilityRequest> {
     invoke_request_for_binding(None, method, payload)
+}
+
+fn request_type_url_invoke_request() -> Request<InvokeCapabilityRequest> {
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: "test.capability.v1".to_string(),
+        interface_version: "1".to_string(),
+        method: "request_type_url".to_string(),
+        request: Some(Any {
+            type_url: "type.googleapis.com/example.Request".to_string(),
+            value: b"opaque-request".to_vec(),
+        }),
+        binding_id: None,
+    });
+    request.set_timeout(Duration::from_secs(5));
+    request
 }
 
 fn invoke_request_for_binding(
@@ -450,6 +459,26 @@ async fn service_tck_unary_uses_any_and_maps_invalid_request() {
         capability_execution_error::Code::InvalidRequest as i32
     );
 
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_tck_forwards_request_any_type_url_to_worker() {
+    let mut server = TestServer::start(4).await;
+    let response = server
+        .client
+        .invoke_capability(request_type_url_invoke_request())
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Response(result)) = response.result else {
+        panic!("expected request type URL response: {response:?}");
+    };
+    assert_eq!(
+        result.type_url,
+        "type.cyrene.io/capability/test.capability.v1/request_type_url/response"
+    );
+    assert_eq!(result.value, b"type.googleapis.com/example.Request");
     server.shutdown().await;
 }
 

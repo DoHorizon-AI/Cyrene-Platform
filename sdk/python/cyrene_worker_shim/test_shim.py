@@ -55,7 +55,7 @@ def main():
     write_frame(e3.encode(), inp)
 
     # 4. Invoke with active generation 3, fence 6
-    e4 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', sequence_number=4, generation=3, fence_token=6, payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123'))
+    e4 = Envelope(request_id='req-3', plugin_id='com.cy.analyzer', sequence_number=4, generation=3, fence_token=6, payload=Invoke(capability='ModelAnalyzer', action='Inspect', payload=b'data123', payload_type_url='type.googleapis.com/example.AnalyzeRequest'))
     write_frame(e4.encode(), inp)
 
     # 5. Cancel is acknowledged separately from the eventual Operation result.
@@ -104,6 +104,7 @@ def main():
     assert r3.request_id == 'req-3'
     assert r3.payload_tag == 21, f'expected InvokeResult(21), got {r3.payload_tag}'
     assert r3.payload.payload == b'ANALYSIS_OK:data123'
+    assert r3.payload.payload_type_url == ''
     assert worker.cancelled == ('req-3', 'deadline')
 
     f4 = read_frame(out)
