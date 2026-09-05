@@ -5,7 +5,7 @@
 set -eu
 
 state_dir=$1
-generation=${CYRENE_RUNTIME_GENERATION:?CYRENE_RUNTIME_GENERATION is required}
+generation=${2:?runtime generation is required}
 printf '%s\n' "running" > "${state_dir}/workload-running-${generation}"
 printf '%s\n' "fixture workload generation ${generation} started"
 printf '%s\n' "CYRENE_PROGRESS 1/10 steps"

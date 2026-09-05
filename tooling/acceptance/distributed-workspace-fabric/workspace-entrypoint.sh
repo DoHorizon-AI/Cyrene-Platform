@@ -47,6 +47,8 @@ CYRENE_FIXTURE_ARTIFACT_URL="https://cyrene-artifact.test:${CYRENE_ARTIFACT_PORT
 CYRENE_FIXTURE_SERVER_CERT=/certs/server.crt \
 CYRENE_FIXTURE_SERVER_KEY=/certs/server.key \
 CYRENE_FIXTURE_CLIENT_CA=/certs/ca.crt \
+CYRENE_FIXTURE_ARTIFACT_TICKET_KEY=/certs/artifact-ticket.key \
+CYRENE_FIXTURE_TICKET_SIGNATURE=/commands/artifact-ticket.signature \
 CYRENE_FIXTURE_DISCONNECT_GENERATION=1 \
 CYRENE_FIXTURE_WAIT_FOR_START=1 \
 /runtime/cy-runtime-control-fixture &
@@ -82,6 +84,7 @@ env -u CYRENE_WORKSPACE_SESSION_CREDENTIAL CYRENE_RUNTIME_GENERATION=1 \
   --client-certificate /certs/runtime.crt \
   --client-key /certs/runtime.key \
   --artifact-ca /certs/ca.crt \
+  --artifact-ticket-key /certs/artifact-ticket.key \
   --organization-id "${CYRENE_ORGANIZATION_ID}" \
   --workspace-id "${CYRENE_WORKSPACE_ID}" \
   --node-id node-workspace-fixture \
@@ -93,7 +96,7 @@ env -u CYRENE_WORKSPACE_SESSION_CREDENTIAL CYRENE_RUNTIME_GENERATION=1 \
   --enrollment-proof development-token-1 \
   --state-dir /state \
   --artifact-root /artifacts \
-  -- /bin/sh /fixture/fake-workload.sh /state &
+  -- /bin/sh /fixture/fake-workload.sh /state 1 &
 runtime_pid=$!
 
 wait "${connector_pid}"

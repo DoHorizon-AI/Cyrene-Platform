@@ -1389,6 +1389,10 @@ impl CapabilityWorkerActivator {
             });
 
         let mut cmd = Command::new(&python_bin);
+        // Pass only the explicit worker environment. Inheriting the host
+        // environment would expose unrelated credentials and host settings to
+        // an out-of-process plugin.
+        cmd.env_clear();
         cmd.args(["-m", "cyrene_worker_shim.runner"]);
 
         if let Some(entrypoint) = &manifest.plugin.entrypoint {
@@ -1406,9 +1410,6 @@ impl CapabilityWorkerActivator {
 
         // Build PYTHONPATH
         let mut python_paths = options.python_path.clone();
-        if let Ok(existing) = std::env::var("PYTHONPATH") {
-            python_paths.extend(std::env::split_paths(&existing));
-        }
         if let Some(working_dir) = &options.working_dir {
             python_paths.push(working_dir.clone());
         }
