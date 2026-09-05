@@ -406,6 +406,29 @@ fn test_capability_worker_typed_invocation() {
 }
 
 #[test]
+fn test_capability_worker_does_not_inherit_host_environment() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let payload = serde_json::to_vec(&json!({"key": "PATH"})).unwrap();
+    let response = client
+        .invoke(
+            "test.capability.v1",
+            "read_env",
+            &payload,
+            Duration::from_secs(2),
+            &NeverCancelled,
+        )
+        .expect("environment inspection should succeed");
+
+    let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert!(response["value"].is_null());
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
 fn test_capability_worker_invalid_request_error() {
     let manifest = fixture_manifest();
     let options = worker_options();
