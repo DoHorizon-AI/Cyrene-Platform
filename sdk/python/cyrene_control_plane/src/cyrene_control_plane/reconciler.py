@@ -96,6 +96,9 @@ class ProductControlPlane:
     def load(self, run_id: str) -> ProductRun:
         return self._store.load_run(run_id)
 
+    def load_plan(self, plan_id: str) -> ExecutionPlan:
+        return self._store.load_plan(plan_id)
+
     def next_action(self, run_id: str) -> ReconcileAction:
         run = self._store.load_run(run_id)
         return self._reconciler.next_action(self._store.load_plan(run.plan_id), run)

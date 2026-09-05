@@ -30,6 +30,7 @@ def test_same_idempotency_key_returns_one_logical_product_run(tmp_path):
     duplicate = control.submit(_plan(), product_kind="example.product", idempotency_key=IdempotencyKey("submit-1"))
     assert duplicate.run_id == run.run_id
     assert duplicate.plan_id == run.plan_id
+    assert control.load_plan(run.plan_id) == _plan()
 
 
 def test_plan_identity_and_dependency_order_are_deterministic():
