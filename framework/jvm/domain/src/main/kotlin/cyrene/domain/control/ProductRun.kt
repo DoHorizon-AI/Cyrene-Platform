@@ -42,10 +42,18 @@ data class Attempt(
         executionReferences: List<String> = this.executionReferences,
         cleanupConfirmed: Boolean = this.cleanupConfirmed,
         error: String? = this.error,
+        metadata: Map<String, String> = this.metadata,
         now: Instant = Instant.now()
     ): Attempt {
         require(!status.terminal || nextStatus == status) { "Terminal Attempt $attemptId is immutable" }
-        return copy(status = nextStatus, executionReferences = executionReferences, cleanupConfirmed = cleanupConfirmed, error = error, observedAt = now)
+        return copy(
+            status = nextStatus,
+            executionReferences = executionReferences,
+            cleanupConfirmed = cleanupConfirmed,
+            error = error,
+            metadata = metadata,
+            observedAt = now,
+        )
     }
 }
 
