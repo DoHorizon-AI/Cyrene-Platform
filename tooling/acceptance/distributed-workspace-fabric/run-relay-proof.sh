@@ -76,6 +76,7 @@ issue_client_certificate() {
 issue_client_certificate frontend
 issue_client_certificate workspace
 issue_client_certificate runtime
+openssl rand -hex 32 > "${proof_root}/certs/artifact-ticket.key"
 chmod 600 "${proof_root}/certs/"*.key
 
 cd "${repo_root}"
@@ -93,7 +94,7 @@ python3 tooling/acceptance/distributed-execution-fabric/https_range_server.py \
   --artifact "${proof_root}/artifact.bin" \
   --certificate "${proof_root}/certs/server.crt" \
   --key "${proof_root}/certs/server.key" \
-  --ticket-signature fixture-ticket-signature \
+  --ticket-signature-file "${proof_root}/commands/artifact-ticket.signature" \
   --trace "${proof_root}/artifact.trace" &
 artifact_pid=$!
 
