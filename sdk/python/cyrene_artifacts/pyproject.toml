@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cyrene-artifacts"
 version = "0.1.0"
 description = "Provider-neutral Cyrene Artifact Contract and local provider"
+readme = "README.md"
 requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
