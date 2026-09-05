@@ -158,6 +158,42 @@ mod tests {
     }
 
     #[test]
+    fn test_invoke_request_type_url_roundtrip() {
+        let codec = FramedCodec::default();
+        let envelope = Envelope {
+            request_id: "req-type-url".to_string(),
+            trace_id: "trace".to_string(),
+            plugin_id: "test-plugin".to_string(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: 1,
+            generation: 1,
+            fence_token: 1,
+            payload: Some(envelope::Payload::Invoke(Invoke {
+                extension_point: "example.capability.v1".to_string(),
+                method: "invoke".to_string(),
+                payload: b"opaque-request".to_vec(),
+                payload_type_url: "type.googleapis.com/example.Request".to_string(),
+                request: None,
+            })),
+        };
+
+        let encoded = codec.encode(&envelope).unwrap();
+        let mut bytes_mut = BytesMut::from(&encoded[..]);
+        let (decoded, consumed) = codec.decode(&mut bytes_mut).unwrap().unwrap();
+        assert_eq!(consumed, encoded.len());
+
+        let Some(envelope::Payload::Invoke(invoke)) = decoded.payload else {
+            panic!("expected Invoke payload");
+        };
+        assert_eq!(invoke.payload, b"opaque-request");
+        assert_eq!(
+            invoke.payload_type_url,
+            "type.googleapis.com/example.Request"
+        );
+    }
+
+    #[test]
     fn test_framed_codec_message_too_large() {
         let codec = FramedCodec::new(100);
         let envelope = Envelope {

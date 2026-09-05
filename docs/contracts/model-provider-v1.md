@@ -1,9 +1,9 @@
-# `model.provider.v1` embedding contract
+# `model.provider.v1` typed payload contract
 
 Status: **EXPERIMENTAL**
 
-Embedding is a stateless model computation subcapability of the existing
-`model.provider.v1`; it is not a second `embedding.provider.v1` capability.
+Chat completion and embedding are stateless model computations on the existing
+`model.provider.v1`; neither creates a parallel capability or transport.
 The configured provider endpoint, credentials, model defaults, lifecycle, and
 rate-limit domain are already owned by one model-provider binding. Keeping the
 method on that capability lets `openai-main` and `ollama-local` remain stable
@@ -20,9 +20,31 @@ parallel transport service.
 | --- | --- |
 | Capability | `model.provider.v1` |
 | Interface version | `1` |
-| Method | `embeddings` |
-| Request `Any` type | `type.googleapis.com/cyrene.model.provider.v1.EmbeddingsRequest` |
-| Result `Any` type | `type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse` |
+| Chat method | `chat_completion` |
+| Chat request `Any` type | `type.googleapis.com/cyrene.model.provider.v1.ChatCompletionRequest` |
+| Chat result `Any` type | `type.googleapis.com/cyrene.model.provider.v1.ChatCompletionResponse` |
+| Embedding method | `embeddings` |
+| Embedding request `Any` type | `type.googleapis.com/cyrene.model.provider.v1.EmbeddingsRequest` |
+| Embedding result `Any` type | `type.googleapis.com/cyrene.model.provider.v1.EmbeddingsResponse` |
+
+## Chat completion semantics
+
+`ChatCompletionRequest.messages` preserves message order and uses the stable
+SYSTEM, USER, ASSISTANT, and TOOL roles. V1 content is text; `name` and
+`tool_call_id` retain proto optional presence. `model`, `temperature`, and
+`max_tokens` are also optional, so omission remains distinct from an explicit
+zero value. Unsupported multimodal or tool-definition shapes fail before
+provider dispatch rather than being silently dropped.
+
+`ChatCompletionResponse.chunks` preserves the provider's ordered normalized
+deltas, finish reason, and optional token counts. CES invocation is unary in
+this version: chunk boundaries survive for Product SSE projection, but the
+contract does not yet promise live first-token delivery over CES.
+
+CES forwards the request `Any.type_url` through the generic worker protocol.
+The provider must reject a non-canonical chat request URL and must return the
+canonical chat response URL. Platform forwards this metadata without decoding
+model-provider fields.
 
 The request's optional `model` is only a provider-supported selector. When it
 is omitted, the selected `CapabilityBinding` supplies its configured default
@@ -35,7 +57,7 @@ dimension as computation facts. Usage metadata is deliberately absent because
 the current canonical model-provider contract has no stable cross-provider
 embedding usage definition.
 
-## Batch semantics
+## Embedding batch semantics
 
 `inputs` is ordered and contains one or more UTF-8 strings. An empty batch or
 zero-length string is `INVALID_INPUT`. Whitespace is data: Platform does not
@@ -97,9 +119,9 @@ top-K, distance threshold, retention, or persistence semantics.
 
 ## TCK and maturity
 
-The deterministic TCK is network-free. Contract-specific tests prove single
-and ordered batch behavior, dimensions, invalid/empty requests, model errors,
-typed `Any`, and the error-layer split. The generic CES TCK is also normative
+The deterministic contract TCK proves chat enum/optional/`Any` stability plus
+embedding batch behavior, dimensions, invalid inputs, model errors, typed
+`Any`, and the error-layer split. The generic CES TCK is also normative
 for two bindings, unknown and mismatched bindings, ambiguous implicit
 selection, deadline/cancellation, and binding stability across generation
 changes.

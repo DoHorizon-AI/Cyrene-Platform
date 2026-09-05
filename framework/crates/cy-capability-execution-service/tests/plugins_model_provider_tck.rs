@@ -30,9 +30,11 @@ use cy_proto::{
         invoke_capability_response,
     },
     model_provider::{
-        CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, EMBEDDINGS_METHOD,
-        EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL,
+        CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, CHAT_COMPLETION_METHOD,
+        CHAT_COMPLETION_REQUEST_TYPE_URL, CHAT_COMPLETION_RESPONSE_TYPE_URL, EMBEDDINGS_METHOD,
+        EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL, INTERFACE_VERSION,
     },
+    model_provider_v1::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, chat_message},
     model_provider_v1::{EmbeddingsRequest, EmbeddingsResponse, embeddings_response},
 };
 use prost::Message;
@@ -404,7 +406,7 @@ fn embedding_request(model: Option<&str>) -> Request<InvokeCapabilityRequest> {
     };
     let mut request = Request::new(InvokeCapabilityRequest {
         capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
-        interface_version: "1".to_string(),
+        interface_version: INTERFACE_VERSION.to_string(),
         method: EMBEDDINGS_METHOD.to_string(),
         request: Some(Any {
             type_url: EMBEDDINGS_REQUEST_TYPE_URL.to_string(),
@@ -417,20 +419,25 @@ fn embedding_request(model: Option<&str>) -> Request<InvokeCapabilityRequest> {
 }
 
 fn chat_request(model: Option<&str>) -> Request<InvokeCapabilityRequest> {
-    let mut value = serde_json::json!({
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream": false
-    });
-    if let Some(model) = model {
-        value["model"] = serde_json::Value::String(model.to_string());
-    }
+    let payload = ChatCompletionRequest {
+        messages: vec![ChatMessage {
+            role: chat_message::Role::User as i32,
+            content: "hello".to_string(),
+            name: None,
+            tool_call_id: None,
+        }],
+        model: model.map(str::to_string),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+    };
     let mut request = Request::new(InvokeCapabilityRequest {
         capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
-        interface_version: "1".to_string(),
-        method: "chat_completion".to_string(),
+        interface_version: INTERFACE_VERSION.to_string(),
+        method: CHAT_COMPLETION_METHOD.to_string(),
         request: Some(Any {
-            type_url: "type.cyrene.io/tck.JsonValue".to_string(),
-            value: serde_json::to_vec(&value).unwrap(),
+            type_url: CHAT_COMPLETION_REQUEST_TYPE_URL.to_string(),
+            value: payload.encode_to_vec(),
         }),
         binding_id: None,
     });
@@ -475,13 +482,10 @@ async fn wait_for(flag: &AtomicBool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an exact Cyrene-Plugins-Official checkout; the cross-repo workflow runs it explicitly"]
 async fn real_ces_provider_cancellation_chat_and_typed_method_support() {
-    let Some(plugins) = plugins_root() else {
-        eprintln!(
-            "Skipping real_ces_provider_cancellation_chat_and_typed_method_support: no Plugins checkout was configured or discovered. This cross-repository TCK requires the Cyrene-Plugins-Official worktree."
-        );
-        return;
-    };
+    let plugins = plugins_root()
+        .expect("CYRENE_PLUGINS_WORKTREE must point to the exact Cyrene-Plugins-Official checkout");
     let manifest = provider_manifest(&plugins);
     let upstream = FakeUpstream::start();
     let mut server =
@@ -496,8 +500,37 @@ async fn real_ces_provider_cancellation_chat_and_typed_method_support() {
     let Some(invoke_capability_response::Result::Response(chat)) = chat.result else {
         panic!("normal chat request did not return a response");
     };
-    let chat_json: serde_json::Value = serde_json::from_slice(&chat.value).unwrap();
-    assert_eq!(chat_json["chunks"][0]["delta"], "real CES chat");
+    assert_eq!(chat.type_url, CHAT_COMPLETION_RESPONSE_TYPE_URL);
+    let chat_response = ChatCompletionResponse::decode(chat.value.as_slice()).unwrap();
+    assert_eq!(chat_response.chunks[0].delta, "real CES chat");
+    assert_eq!(
+        chat_response.chunks[0].finish_reason.as_deref(),
+        Some("stop")
+    );
+    assert_eq!(chat_response.chunks[0].prompt_tokens, Some(2));
+    assert_eq!(chat_response.chunks[0].completion_tokens, Some(2));
+
+    let mut wrong_type = chat_request(Some("wrong-type-model"));
+    wrong_type
+        .get_mut()
+        .request
+        .as_mut()
+        .expect("chat request Any")
+        .type_url = "type.googleapis.com/example.NotChatCompletionRequest".to_string();
+    let wrong_type = server
+        .client
+        .invoke_capability(wrong_type)
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = wrong_type.result else {
+        panic!("wrong chat request type URL must fail closed");
+    };
+    assert_eq!(
+        error.code,
+        cy_proto::capability_v1::capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(error.message.contains(CHAT_COMPLETION_REQUEST_TYPE_URL));
 
     let embedding = server
         .client
@@ -591,8 +624,9 @@ async fn real_ces_provider_cancellation_chat_and_typed_method_support() {
     let Some(invoke_capability_response::Result::Response(next_chat)) = next_chat.result else {
         panic!("chat worker reuse did not return a response");
     };
-    let next_chat_json: serde_json::Value = serde_json::from_slice(&next_chat.value).unwrap();
-    assert_eq!(next_chat_json["chunks"][0]["delta"], "real CES chat");
+    assert_eq!(next_chat.type_url, CHAT_COMPLETION_RESPONSE_TYPE_URL);
+    let next_chat_response = ChatCompletionResponse::decode(next_chat.value.as_slice()).unwrap();
+    assert_eq!(next_chat_response.chunks[0].delta, "real CES chat");
     server.shutdown().await;
 
     let mut unsupported =

@@ -1,3 +1,11 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 model_provider.proto                                             │
+// │  Package: cyrene.model.provider.v1                                    │
+// │  Role: Typed stateless model-provider payloads over canonical CES.    │
+// │                                                                     │
+// │  协议职责：通过 canonical CES 传输无状态模型提供方的类型化负载。       │
+// │  · 本文件不声明第二个 gRPC service，也不拥有 Product 路由策略。       │
+// └─────────────────────────────────────────────────────────────────────┘
 syntax = "proto3";
 
 package cyrene.model.provider.v1;
@@ -15,6 +23,7 @@ option csharp_namespace = "Cyrene.Model.Provider.V1";
 //   capability ID: model.provider.v1
 //   interface version: 1
 //   embedding method: embeddings
+//   chat method: chat_completion
 //
 // This file intentionally declares no gRPC service. It describes stateless
 // model computation facts only. Product memory policy, chunking, retrieval,
@@ -74,4 +83,46 @@ message EmbeddingError {
 
   // Present only when the provider supplied a meaningful retry delay.
   google.protobuf.Duration retry_after = 3;
+}
+
+// A single chat message in request order. Role values are stable wire
+// identifiers; providers must not infer a different role from content.
+message ChatMessage {
+  enum Role {
+    ROLE_UNSPECIFIED = 0;
+    ROLE_SYSTEM = 1;
+    ROLE_USER = 2;
+    ROLE_ASSISTANT = 3;
+    ROLE_TOOL = 4;
+  }
+
+  Role role = 1;
+  string content = 2;
+  optional string name = 3;
+  optional string tool_call_id = 4;
+}
+
+// Typed chat-completion input forwarded through CapabilityExecutionService.
+// Product policy, authentication, and provider routing remain outside this
+// payload. Omitted optional values retain the selected binding's defaults.
+message ChatCompletionRequest {
+  repeated ChatMessage messages = 1;
+  optional string model = 2;
+  bool stream = 3;
+  optional double temperature = 4;
+  optional uint32 max_tokens = 5;
+}
+
+// A provider response is represented as ordered chunks so unary and streamed
+// providers share one capability payload. A missing optional field means the
+// provider did not supply that fact; it is not an empty-string/zero claim.
+message ChatCompletionResponse {
+  repeated ChatCompletionChunk chunks = 1;
+}
+
+message ChatCompletionChunk {
+  string delta = 1;
+  optional string finish_reason = 2;
+  optional uint32 prompt_tokens = 3;
+  optional uint32 completion_tokens = 4;
 }

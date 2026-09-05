@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 from collections import deque
 from enum import IntEnum
+import inspect
 import os
 import struct
 import sys
@@ -562,6 +563,7 @@ class Invoke:
     method: str = ""
     payload_tag: int = 3
     payload: bytes = b""
+    payload_type_url: str = ""
 
     def __init__(
         self,
@@ -571,11 +573,13 @@ class Invoke:
         payload: bytes = b"",
         capability: str = "",
         action: str = "",
+        payload_type_url: str = "",
     ):
         self.extension_point = extension_point or capability
         self.method = method or action
         self.payload_tag = payload_tag
         self.payload = payload
+        self.payload_type_url = payload_type_url
 
     @property
     def capability(self) -> str:
@@ -599,6 +603,7 @@ class Invoke:
         out.extend(encode_string_field(2, self.method))
         if self.payload:
             out.extend(encode_bytes_field(self.payload_tag, self.payload))
+        out.extend(encode_string_field(4, self.payload_type_url))
         return bytes(out)
 
     @classmethod
@@ -620,6 +625,10 @@ class Invoke:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = 3
                 inst.payload = data[offset:offset + length]
+                offset += length
+            elif field_num == 4 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_type_url = data[offset:offset + length].decode("utf-8", "replace")
                 offset += length
             elif field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
@@ -1058,6 +1067,42 @@ class CyreneWorker:
         del request_id
         return self.on_invoke(capability, action, payload)
 
+    def _invoke_request_with_type_url(
+        self,
+        request_id: str,
+        capability: str,
+        action: str,
+        payload: bytes,
+        request_type_url: str,
+    ) -> Tuple[bool, Any]:
+        """Dispatch request metadata without changing legacy worker overrides."""
+        handler = self.on_invoke
+        try:
+            signature = inspect.signature(handler)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            request_type = signature.parameters.get("request_type_url")
+            accepts_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            if accepts_kwargs or (
+                request_type is not None
+                and request_type.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            ):
+                return handler(
+                    capability,
+                    action,
+                    payload,
+                    request_type_url=request_type_url,
+                )
+        return self._invoke_request(request_id, capability, action, payload)
+
     def _finish_invocation(self, request_id: str) -> None:
         """Release invocation state after its response has been emitted."""
         del request_id
@@ -1473,11 +1518,12 @@ def run_worker_stream(
 
         def invoke_target() -> None:
             try:
-                ok, result = worker._invoke_request(
+                ok, result = worker._invoke_request_with_type_url(
                     request_id,
                     inv.capability,
                     inv.action,
                     inv.payload,
+                    inv.payload_type_url,
                 )
                 response_payload = _invoke_response_payload(ok, result)
                 output.send(
