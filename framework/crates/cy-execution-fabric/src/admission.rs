@@ -285,8 +285,18 @@ pub(crate) fn validate_assignment_payload(
     })?;
     validate_sha256(&profile.image_digest, "image digest")?;
     validate_sha256(&profile.resolved_digest, "resolved runtime digest")?;
+    let mut artifact_digests = BTreeSet::new();
     for artifact in &assignment.artifacts {
         validate_sha256(&artifact.digest, "Artifact digest")?;
+        if !artifact_digests.insert(artifact.digest.clone()) {
+            return Err(FabricContractError::new(
+                "ARTIFACT_ASSIGNMENT_DUPLICATE",
+                format!(
+                    "assignment contains a duplicate Artifact digest: {}",
+                    artifact.digest
+                ),
+            ));
+        }
         if artifact.artifact_uri != format!("artifact://sha256/{}", &artifact.digest[7..])
             || artifact.size_bytes == 0
             || artifact.part_size_bytes == 0
@@ -332,6 +342,28 @@ pub(crate) fn validate_assignment_payload(
                     "every Artifact part must have exactly one source route",
                 ));
             }
+        }
+    }
+    for artifact in &assignment.local_artifacts {
+        validate_sha256(&artifact.digest, "local Artifact digest")?;
+        if !artifact_digests.insert(artifact.digest.clone()) {
+            return Err(FabricContractError::new(
+                "ARTIFACT_ASSIGNMENT_DUPLICATE",
+                format!(
+                    "assignment contains a duplicate Artifact digest: {}",
+                    artifact.digest
+                ),
+            ));
+        }
+        if artifact.artifact_uri != format!("artifact://sha256/{}", &artifact.digest[7..]) {
+            return Err(FabricContractError::new(
+                "ARTIFACT_LOCAL_IDENTITY_INVALID",
+                "local Artifact URI must match its canonical digest",
+            ));
+        }
+        crate::assignment::artifact_kind_from_proto(&artifact.artifact_kind)?;
+        if !artifact.manifest_digest.is_empty() {
+            validate_sha256(&artifact.manifest_digest, "local Artifact manifest digest")?;
         }
     }
     Ok(runtime)
@@ -555,6 +587,18 @@ mod tests {
             }),
             desired_state: core_v1::DesiredRuntimeState::Running as i32,
             artifacts: vec![],
+            local_artifacts: vec![],
+        }
+    }
+
+    fn local_artifact(seed: char, size_bytes: u64) -> core_v1::ArtifactLocalInput {
+        let digest_hex = seed.to_string().repeat(64);
+        core_v1::ArtifactLocalInput {
+            artifact_uri: format!("artifact://sha256/{digest_hex}"),
+            digest: format!("sha256:{digest_hex}"),
+            size_bytes,
+            artifact_kind: "generic".to_string(),
+            manifest_digest: String::new(),
         }
     }
 
@@ -685,6 +729,86 @@ mod tests {
         let lease = validate_assignment(&expected, &assignment(2), 10_000).unwrap();
         assert_eq!(lease.holder, expected);
         assert_eq!(lease.fence_token, 7);
+    }
+
+    #[test]
+    fn zero_byte_local_artifact_identity_is_admitted() {
+        let expected = semantic::Identity {
+            id: "runtime-1".to_string(),
+            generation: 1,
+        };
+        let mut value = assignment(1);
+        value.local_artifacts.push(local_artifact('a', 0));
+
+        assert!(validate_assignment(&expected, &value, 10_000).is_ok());
+    }
+
+    #[test]
+    fn local_artifact_rejects_noncanonical_kind_and_identity() {
+        let expected = semantic::Identity {
+            id: "runtime-1".to_string(),
+            generation: 1,
+        };
+        let mut bad_kind = assignment(1);
+        let mut input = local_artifact('b', 1);
+        input.artifact_kind = "TrainingSpec".to_string();
+        bad_kind.local_artifacts.push(input);
+        assert_eq!(
+            validate_assignment(&expected, &bad_kind, 10_000)
+                .unwrap_err()
+                .reason_code,
+            "ARTIFACT_KIND_INVALID"
+        );
+
+        let mut bad_uri = assignment(1);
+        let mut input = local_artifact('c', 1);
+        input.artifact_uri = format!("artifact://sha256/{}", "d".repeat(64));
+        bad_uri.local_artifacts.push(input);
+        assert_eq!(
+            validate_assignment(&expected, &bad_uri, 10_000)
+                .unwrap_err()
+                .reason_code,
+            "ARTIFACT_LOCAL_IDENTITY_INVALID"
+        );
+    }
+
+    #[test]
+    fn local_and_transfer_projections_cannot_repeat_a_digest() {
+        let expected = semantic::Identity {
+            id: "runtime-1".to_string(),
+            generation: 1,
+        };
+        let mut value = assignment(1);
+        let local = local_artifact('a', 1);
+        value.artifacts.push(core_v1::ArtifactTransferSpec {
+            artifact_uri: local.artifact_uri.clone(),
+            digest: local.digest.clone(),
+            size_bytes: 1,
+            manifest_digest: String::new(),
+            part_size_bytes: 1,
+            part_digests: vec![format!("sha256:{}", "b".repeat(64))],
+            sources: vec![core_v1::ArtifactTransferSource {
+                peer_id: "peer-1".to_string(),
+                replica_id: "replica-1".to_string(),
+                locator: "https://source.example/artifact".to_string(),
+                transfer_ticket: "opaque-ticket".to_string(),
+            }],
+            part_sources: vec![core_v1::ArtifactPartSource {
+                part_index: 0,
+                peer_id: "peer-1".to_string(),
+                replica_id: "replica-1".to_string(),
+            }],
+            destination_peer_id: "peer-local".to_string(),
+            ..Default::default()
+        });
+        value.local_artifacts.push(local);
+
+        assert_eq!(
+            validate_assignment(&expected, &value, 10_000)
+                .unwrap_err()
+                .reason_code,
+            "ARTIFACT_ASSIGNMENT_DUPLICATE"
+        );
     }
 
     #[test]

@@ -303,13 +303,15 @@ inside Artifact provider/transfer state.
 Control stream 只传 Artifact identity、manifest/digest 与短期 scoped ticket；大型
 数据走独立 Artifact Plane。一个 Artifact 可以有多个 Replica，地址不是身份。
 
-Core v1 `RuntimeAssignment` currently projects remote inputs only through
-`ArtifactTransferSpec`. It has no field that can carry an already-local
-`ArtifactRef` for Runtime verification. Placement may still score
-`VerifiedLocal` evidence, but placement-to-assignment orchestration fails with
-`ARTIFACT_LOCAL_INPUT_UNREPRESENTABLE` instead of silently omitting that input.
-An additive canonical local-input projection is required before this case can
-execute.
+Core v1 `RuntimeAssignment` projects remote inputs through
+`ArtifactTransferSpec` and already-local inputs through the additive
+`ArtifactLocalInput`. A `VerifiedLocal` quote must map to an exact immutable
+identity projection; the wire never carries a local path, locator, transfer
+ticket, or credential. Before workload startup, Runtime Agent derives the CAS
+entry only from the digest and re-reads the complete file to verify SHA-256 and
+size. Missing or mismatched content rejects the Assignment without a running
+child. This projection does not move Artifact locality, replica, or ticket
+authority into Framework.
 
 ## 10. Artifact transfer MVP / Artifact 传输 MVP
 
@@ -654,9 +656,10 @@ Plane 基于同一 policy scope 生成，Framework 不接触 replica、ticket �
   bundled symmetric verifier is explicitly limited to development and
   conformance; production must inject managed verification authority without
   giving the Agent ticket-issuance power.
-- **New code needed:** a canonical local-input wire projection and production
-  Artifact directory/ticket issuers; `VerifiedLocal` execution currently fails
-  closed rather than losing identity.
+- **New code needed:** production Artifact directory/ticket issuers. The
+  canonical local-input projection is implemented and remains identity-only;
+  `VerifiedLocal` content is reverified from the Runtime Agent CAS before
+  workload startup.
 - **Proposed location:** `sdk/rust/cy-artifact-transfer/`; Runtime Agent consumes it; schemas remain under `contracts/schemas/`.
 - **Why this location:** Transfer is a reusable SDK/data-plane concern, not Kernel or Product logic.
 - **Dependencies:** HTTPS client, SHA-256, ArtifactRef, atomic filesystem operations.
@@ -746,8 +749,6 @@ Artifact resume 才构成最终容器模式证据。
   only Kernel events and Runtime observations can resolve an unknown outcome;
 - a canonical atomic resource-bundle contract before jointly reserving CPU,
   RAM, and accelerators;
-- an additive canonical local Artifact input projection before
-  `VerifiedLocal` placement can be dispatched without losing identity.
 
 ### Optional scale-up
 

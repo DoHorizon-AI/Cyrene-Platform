@@ -342,6 +342,7 @@ dependencies = [
  "cy-kernel-api",
  "cy-kernel-contract",
  "cy-kernel-daemon",
+ "cy-manifest",
  "cy-node-agent",
  "cy-proto",
  "cy-resource-manager",
