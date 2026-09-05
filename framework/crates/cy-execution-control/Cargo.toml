@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 cy-kernel-daemon = { path = "../../../kernel/crates/cy-kernel-daemon" }
+cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
 cy-node-agent = { path = "../../../agents/node/cy-node-agent" }
 cy-resource-manager = { path = "../../../kernel/crates/cy-resource-manager" }
 cy-runtime-agent = { path = "../../../agents/runtime/cy-runtime-agent" }

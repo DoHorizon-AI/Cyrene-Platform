@@ -558,9 +558,17 @@ async fn stage_artifacts(
     config: &RuntimeAgentConfig,
     assignment: &core_v1::RuntimeAssignment,
 ) -> Result<(usize, usize), RuntimeAgentError> {
+    // Verify every local CAS input before reading transfer credentials or
+    // starting any remote transfer. Local Artifact identity never comes from a
+    // path on the wire; the digest is the only path component.
+    for input in &assignment.local_artifacts {
+        verify_local_artifact(config, input)?;
+    }
+
     if assignment.artifacts.is_empty() {
         return Ok((0, 0));
     }
+
     let ticket_key_path = config.artifact_ticket_key.as_ref().ok_or_else(|| {
         RuntimeAgentError::Artifact(
             "Artifact transfer requires a configured ticket verification key".to_string(),
@@ -640,6 +648,53 @@ async fn stage_artifacts(
         reused_parts += result.reused_parts;
     }
     Ok((downloaded_parts, reused_parts))
+}
+
+/// Re-read and verify one local CAS Artifact before workload startup.
+///
+/// The CAS layout is deliberately derived from the validated digest rather
+/// than accepting a path from the control wire. A missing file, changed
+/// content, or declared-size mismatch is an Artifact error and is handled by
+/// `handle_assignment` as a rejected assignment with no running child.
+fn verify_local_artifact(
+    config: &RuntimeAgentConfig,
+    input: &core_v1::ArtifactLocalInput,
+) -> Result<(), RuntimeAgentError> {
+    let artifact = ArtifactRef {
+        uri: input.artifact_uri.clone(),
+        digest: input.digest.clone(),
+        size_bytes: input.size_bytes,
+        kind: ArtifactKind::Generic,
+        manifest_digest: (!input.manifest_digest.is_empty()).then(|| input.manifest_digest.clone()),
+    };
+    artifact.validate().map_err(RuntimeAgentError::Artifact)?;
+    let digest_hex = artifact
+        .digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| RuntimeAgentError::Artifact("invalid Artifact digest".to_string()))?;
+    let destination = config.artifact_destination_root.join(digest_hex);
+    let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+        RuntimeAgentError::Artifact(format!("local Artifact is unavailable: {error}"))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(RuntimeAgentError::Artifact(
+            "local Artifact CAS entry is not a regular file".to_string(),
+        ));
+    }
+    let (actual_digest, actual_size) = digest_file(&destination)?;
+    if actual_digest != artifact.digest {
+        return Err(RuntimeAgentError::Artifact(format!(
+            "local Artifact digest mismatch: expected {}, got {actual_digest}",
+            artifact.digest
+        )));
+    }
+    if actual_size != artifact.size_bytes {
+        return Err(RuntimeAgentError::Artifact(format!(
+            "local Artifact size mismatch: expected {}, got {actual_size}",
+            artifact.size_bytes
+        )));
+    }
+    Ok(())
 }
 
 fn build_transfer_sources(
@@ -1095,11 +1150,8 @@ fn publish_log_reference(
 fn digest_file(path: &Path) -> Result<(String, u64), RuntimeAgentError> {
     let mut input =
         File::open(path).map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
-    let size = input
-        .metadata()
-        .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?
-        .len();
     let mut hasher = Sha256::new();
+    let mut size = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = input
@@ -1109,6 +1161,11 @@ fn digest_file(path: &Path) -> Result<(String, u64), RuntimeAgentError> {
             break;
         }
         hasher.update(&buffer[..read]);
+        size = size
+            .checked_add(u64::try_from(read).map_err(|_| {
+                RuntimeAgentError::Artifact("Artifact size exceeds u64".to_string())
+            })?)
+            .ok_or_else(|| RuntimeAgentError::Artifact("Artifact size exceeds u64".to_string()))?;
     }
     Ok((format!("sha256:{:x}", hasher.finalize()), size))
 }
@@ -1312,6 +1369,119 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn verified_local_artifact_is_accepted_without_transfer_credentials() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
+        fs::create_dir_all(&config.artifact_destination_root).unwrap();
+        let content = b"local-cas";
+        let (spec, digest_hex) = local_artifact_spec(content);
+        fs::write(config.artifact_destination_root.join(digest_hex), content).unwrap();
+
+        assert_eq!(
+            stage_artifacts(&config, &test_assignment_with_local(vec![spec], Vec::new()))
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_local_artifact_rejects_without_starting_workload() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
+        let (spec, _) = local_artifact_spec(b"local-cas");
+        let mut state = AgentState::new(config.workload.clone());
+
+        handle_assignment(
+            &config,
+            &mut state,
+            test_assignment_with_local(vec![spec], Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.assignment.is_none());
+        assert!(!state.child.is_running());
+        assert!(state.accepted_assignments.is_empty());
+        assert_eq!(
+            rejection_reason(&mut state),
+            Some("ARTIFACT_STAGING_FAILED".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_artifact_digest_mismatch_rejects_without_starting_workload() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
+        fs::create_dir_all(&config.artifact_destination_root).unwrap();
+        let (spec, digest_hex) = local_artifact_spec(b"local-cas");
+        fs::write(
+            config.artifact_destination_root.join(digest_hex),
+            b"tampered",
+        )
+        .unwrap();
+        let mut state = AgentState::new(config.workload.clone());
+
+        handle_assignment(
+            &config,
+            &mut state,
+            test_assignment_with_local(vec![spec], Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.assignment.is_none());
+        assert!(!state.child.is_running());
+        assert!(state.accepted_assignments.is_empty());
+        assert_eq!(
+            rejection_reason(&mut state),
+            Some("ARTIFACT_STAGING_FAILED".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_artifact_size_mismatch_rejects_without_starting_workload() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
+        fs::create_dir_all(&config.artifact_destination_root).unwrap();
+        let content = b"local-cas";
+        let (mut spec, digest_hex) = local_artifact_spec(content);
+        spec.size_bytes += 1;
+        fs::write(config.artifact_destination_root.join(digest_hex), content).unwrap();
+        let mut state = AgentState::new(config.workload.clone());
+
+        handle_assignment(
+            &config,
+            &mut state,
+            test_assignment_with_local(vec![spec], Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.assignment.is_none());
+        assert!(!state.child.is_running());
+        assert!(state.accepted_assignments.is_empty());
+        assert_eq!(
+            rejection_reason(&mut state),
+            Some("ARTIFACT_STAGING_FAILED".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_artifacts_verify_local_inputs_before_transfer_credentials() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
+        let (local, _) = local_artifact_spec(b"local-cas");
+        let assignment = test_assignment_with_local(vec![local], vec![authorized_transfer_spec()]);
+
+        assert!(matches!(
+            stage_artifacts(&config, &assignment).await,
+            Err(RuntimeAgentError::Artifact(message))
+                if message.contains("local Artifact is unavailable")
+        ));
+    }
+
     #[test]
     fn tampered_artifact_ticket_is_rejected_before_transfer() {
         let authority = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
@@ -1429,6 +1599,17 @@ mod tests {
             }),
             desired_state: core_v1::DesiredRuntimeState::Running as i32,
             artifacts,
+            local_artifacts: Vec::new(),
+        }
+    }
+
+    fn test_assignment_with_local(
+        local_artifacts: Vec<core_v1::ArtifactLocalInput>,
+        artifacts: Vec<core_v1::ArtifactTransferSpec>,
+    ) -> core_v1::RuntimeAssignment {
+        core_v1::RuntimeAssignment {
+            local_artifacts,
+            ..test_assignment(artifacts)
         }
     }
 
@@ -1454,6 +1635,20 @@ mod tests {
             destination_peer_id: "runtime-cache-1".to_string(),
             ..Default::default()
         }
+    }
+
+    fn local_artifact_spec(content: &[u8]) -> (core_v1::ArtifactLocalInput, String) {
+        let digest_hex = format!("{:x}", Sha256::digest(content));
+        (
+            core_v1::ArtifactLocalInput {
+                artifact_uri: format!("artifact://sha256/{digest_hex}"),
+                digest: format!("sha256:{digest_hex}"),
+                size_bytes: content.len() as u64,
+                artifact_kind: "generic".to_string(),
+                manifest_digest: String::new(),
+            },
+            digest_hex,
+        )
     }
 
     fn rejection_reason(state: &mut AgentState) -> Option<String> {

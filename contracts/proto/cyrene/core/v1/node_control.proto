@@ -210,6 +210,20 @@ message ArtifactTransferSpec {
   string destination_peer_id = 10;
 }
 
+// Immutable identity projection for an Artifact already verified on the selected Node.
+// 选定 Node 上已经校验过的 Artifact 的不可变身份投影。
+// This message intentionally carries no path, locator, transfer ticket, or credential.
+// 此消息刻意不携带 path、locator、transfer ticket 或任何凭证。
+message ArtifactLocalInput {
+  string artifact_uri = 1;
+  string digest = 2;
+  uint64 size_bytes = 3;
+  // Canonical snake_case spelling of cy_manifest::ArtifactKind.
+  // cy_manifest::ArtifactKind 的规范 snake_case 拼写。
+  string artifact_kind = 4;
+  string manifest_digest = 5;
+}
+
 message RuntimeAssignment {
   string assignment_id = 1;
   RuntimeRef runtime = 2;
@@ -220,6 +234,7 @@ message RuntimeAssignment {
   RuntimeProfile profile = 7;
   DesiredRuntimeState desired_state = 8;
   repeated ArtifactTransferSpec artifacts = 9;
+  repeated ArtifactLocalInput local_artifacts = 10;
 }
 
 enum AssignmentAckDisposition {

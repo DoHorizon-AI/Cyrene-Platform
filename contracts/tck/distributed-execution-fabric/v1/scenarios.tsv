@@ -23,7 +23,8 @@ assignment_ack_after_start	Artifact staged+child started	Runtime acknowledgement
 assignment_prepare_failure	Artifact staging or child start failure	Runtime acknowledgement+child state	REJECTED_NO_RUNNING_CHILD
 kernel_unavailable_unknown	unstructured Kernel UNAVAILABLE	durable execution intent	UNKNOWN_REQUIRES_RECONCILIATION
 rollback_host_replacement	captured Host fenced+same NodeRef replacement	exact idempotent release	LEASE_RELEASED
-verified_local_unrepresentable	local placement quote+no local-input wire field	assignment projection	ARTIFACT_LOCAL_INPUT_UNREPRESENTABLE
+verified_local_assignment	local placement quote+ArtifactLocalInput	CAS digest+size verification before workload	ADMITTED
+verified_local_mismatch	local placement quote+missing or mismatched CAS entry	assignment acknowledgement	REJECTED_NO_RUNNING_CHILD
 artifact_source_resolution	ArtifactId+policy	Peer Directory+Planner	TRANSFER_PLAN
 artifact_policy_first	unauthorized low-latency Peer+authorized slower Peer	policy before quality score	AUTHORIZED_PEER
 artifact_ticket	Artifact+source+destination+allowed chunks+expiry+max bytes	reference signer	SCOPED_TICKET
