@@ -75,6 +75,7 @@ impl RuntimeBuilder for RemoteRuntimeBuilder {
             method: "build_runtime".to_string(),
             payload: Vec::new(),
             payload_type_url: String::new(),
+            stream_results: false,
             request: Some(cy_plugin_protocol::pb::invoke::Request::BuildRuntime(
                 BuildRuntimeRequest {
                     workload_request_json: workload_json,

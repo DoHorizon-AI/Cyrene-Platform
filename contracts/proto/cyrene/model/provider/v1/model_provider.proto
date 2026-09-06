@@ -21,9 +21,10 @@ option csharp_namespace = "Cyrene.Model.Provider.V1";
 //
 // Transport is cyrene.capability.v1.CapabilityExecutionService:
 //   capability ID: model.provider.v1
-//   interface version: 1
+//   interface version: 1 (text/embedding) or 2 (structured chat)
 //   embedding method: embeddings
 //   chat method: chat_completion
+//   structured chat method: chat_completion_v2
 //
 // This file intentionally declares no gRPC service. It describes stateless
 // model computation facts only. Product memory policy, chunking, retrieval,
@@ -100,6 +101,43 @@ message ChatMessage {
   string content = 2;
   optional string name = 3;
   optional string tool_call_id = 4;
+
+  // Assistant tool-call history. This field is ignored by interface version 1
+  // implementations and is carried by chat_completion_v2.
+  repeated ChatToolCall tool_calls = 5;
+}
+
+// A function exposed to a provider through a structured chat request.
+message ChatFunction {
+  string name = 1;
+  optional string description = 2;
+  // JSON-encoded JSON Schema. The schema remains provider-owned; Platform only
+  // transports the bytes as text.
+  string parameters_json = 3;
+  optional bool strict = 4;
+}
+
+message ChatTool {
+  string type = 1;
+  ChatFunction function = 2;
+}
+
+// The normalized tool-choice mode. A named function uses mode "function" and
+// sets function_name.
+message ChatToolChoice {
+  string mode = 1;
+  optional string function_name = 2;
+}
+
+message ChatToolCallFunction {
+  string name = 1;
+  string arguments = 2;
+}
+
+message ChatToolCall {
+  string id = 1;
+  string type = 2;
+  ChatToolCallFunction function = 3;
 }
 
 // Typed chat-completion input forwarded through CapabilityExecutionService.
@@ -111,6 +149,12 @@ message ChatCompletionRequest {
   bool stream = 3;
   optional double temperature = 4;
   optional uint32 max_tokens = 5;
+
+  // The following fields are available only through chat_completion_v2.
+  repeated ChatTool tools = 6;
+  optional ChatToolChoice tool_choice = 7;
+  optional bool parallel_tool_calls = 8;
+  optional bool include_usage = 9;
 }
 
 // A provider response is represented as ordered chunks so unary and streamed
@@ -125,4 +169,19 @@ message ChatCompletionChunk {
   optional string finish_reason = 2;
   optional uint32 prompt_tokens = 3;
   optional uint32 completion_tokens = 4;
+
+  // Structured response fields, available through chat_completion_v2.
+  optional string role = 5;
+  repeated ChatToolCallDelta tool_calls = 6;
+  optional uint32 total_tokens = 7;
+}
+
+// One indexed fragment of an assistant tool call. Function name and argument
+// fields are optional because streaming providers split them across chunks.
+message ChatToolCallDelta {
+  uint32 index = 1;
+  optional string id = 2;
+  optional string type = 3;
+  optional string function_name = 4;
+  optional string function_arguments = 5;
 }

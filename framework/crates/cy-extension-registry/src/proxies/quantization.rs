@@ -71,6 +71,7 @@ impl Quantization for RemoteQuantization {
             method: "quantize_model".to_string(),
             payload: Vec::new(),
             payload_type_url: String::new(),
+            stream_results: false,
             request: Some(cy_plugin_protocol::pb::invoke::Request::QuantizeModel(
                 QuantizeModelRequest {
                     model_manifest_json: model_json,

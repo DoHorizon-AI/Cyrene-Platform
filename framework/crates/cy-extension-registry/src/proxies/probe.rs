@@ -66,6 +66,7 @@ impl Probe for RemoteProbe {
             method: "detect_hardware".to_string(),
             payload: Vec::new(),
             payload_type_url: String::new(),
+            stream_results: false,
             request: Some(cy_plugin_protocol::pb::invoke::Request::DetectHardware(
                 DetectHardwareRequest {},
             )),

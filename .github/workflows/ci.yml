@@ -79,6 +79,7 @@ jobs:
         run: |
           python sdk/python/cyrene_capability_client/scripts/generate_proto.py --check
           python -m pytest sdk/python/cyrene_capability_client/tests
+          python -m pytest sdk/python/cyrene_worker_shim/test_stream_item_wire.py
           python -m pytest sdk/python/cyrene_artifacts/tests
           python -m pytest sdk/python/cyrene_environment/tests
           python -m pytest sdk/python/cyrene_preflight/tests

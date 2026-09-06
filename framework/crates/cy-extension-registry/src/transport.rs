@@ -203,6 +203,7 @@ mod tests {
                     request_id: "req-bp".to_string(),
                     sequence_number: i + 1,
                     is_last: i == 4,
+                    payload_type_url: String::new(),
                     data: None,
                 };
                 sender.send_chunk(item).await.unwrap();
