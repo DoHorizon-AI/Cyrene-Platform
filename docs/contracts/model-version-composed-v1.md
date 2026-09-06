@@ -128,16 +128,67 @@ Future Yield publication needs to provide only:
 4. opaque immutable TrainingRun and DatasetVersion references;
 5. input ArtifactRefs and optional checkpoint/metrics provenance.
 
-Yield's `LoRASpec` remains training input, and `TrainingResult`/`outputArtifacts`
-carry produced bytes and lineage. The trainer loop does not need to construct or
-own Reactor Deployment state for this handoff.
+Yield's `LoRASpec` remains training input. A future Product-side projection of
+the completed result into `outputArtifacts` carries produced bytes and lineage;
+the trainer loop does not need to construct or own Reactor Deployment state for
+this handoff.
+
+The current Yield `main` at commit
+[`eff0aabe63a9b9b23508390bf7e53daa53b256c0`](https://github.com/DoHorizon-AI/Cyrene-Yield/tree/eff0aabe63a9b9b23508390bf7e53daa53b256c0)
+does not yet publish this complete handoff. Its Python
+[`TrainingResult`](https://github.com/DoHorizon-AI/Cyrene-Yield/blob/eff0aabe63a9b9b23508390bf7e53daa53b256c0/training/core/src/cy_exec/training/contracts/events.py#L56-L84)
+has an `artifacts: Dict[str, ArtifactRef]` map; `outputArtifacts` is not a
+`TrainingResult` field. The Yield Product
+[`outputArtifacts` candidate schema](https://github.com/DoHorizon-AI/Cyrene-Yield/blob/eff0aabe63a9b9b23508390bf7e53daa53b256c0/contracts/product/v1/training-run.schema.json#L28-L36)
+is a separate external contract shape with logical roles such as
+`MODEL_ADAPTER` and `derivedFromDigests`. The candidate contract is not a
+claim that the current Product runtime or trainer emits that shape.
+
+At this commit, Yield's durable result projection stores named ArtifactRefs but
+does not retain the composed-model role, pinned base repository/revision,
+TrainingRun or DatasetVersion URI, or the input ArtifactRef lineage needed by
+this descriptor. The current internal `ModelRef`/`DatasetRef` are path-oriented
+training inputs, and the LLaMA-Factory result collector does not construct an
+adapter ArtifactRef. A Product-side handoff adapter must therefore project a
+completed Yield result into the V1 boundary and supply the base ArtifactRef plus
+its pinned source identity, exactly one adapter ArtifactRef, inherit/override
+choices, opaque TrainingRun and DatasetVersion references, and input ArtifactRef
+lineage. This projection does not require changing the trainer loop or making
+Platform own Yield/Catalyst business state.
+
+`MODEL_ADAPTER` is only a logical role in the Yield Product `outputArtifacts`
+contract. It does not add a Platform `ArtifactKind`: the resulting
+`adapterArtifact` continues to use the V1 portable-directory ArtifactRef with
+`kind: "model"`, while Reactor validates its adapter contents after staging.
 
 未来 Yield 发布时只需提供：base model ArtifactRef 及不可变 source revision、一个
 adapter ArtifactRef、tokenizer/template override 或显式继承、TrainingRun/
 DatasetVersion opaque 引用，以及 input ArtifactRef 和可选 checkpoint/metrics
-provenance。`LoRASpec` 仍是训练输入，`TrainingResult`/`outputArtifacts` 仍负责
-产物和 lineage；本边界不要求改写 trainer loop，也不让 Yield 拥有 Reactor
-Deployment 状态。
+provenance。`LoRASpec` 仍是训练输入；未来 Product-side projection 将完成结果
+投影为带产物和 lineage 的 `outputArtifacts`。本边界不要求改写 trainer loop，也不让
+Yield 拥有 Reactor Deployment 状态。
+
+当前 Yield `main`（不可变 commit
+[`eff0aabe63a9b9b23508390bf7e53daa53b256c0`](https://github.com/DoHorizon-AI/Cyrene-Yield/tree/eff0aabe63a9b9b23508390bf7e53daa53b256c0)）
+尚未直接产出完整 handoff。Python
+[`TrainingResult`](https://github.com/DoHorizon-AI/Cyrene-Yield/blob/eff0aabe63a9b9b23508390bf7e53daa53b256c0/training/core/src/cy_exec/training/contracts/events.py#L56-L84)
+的实际字段是 `artifacts: Dict[str, ArtifactRef]`；`outputArtifacts` 是另一份
+Product candidate contract，包含 `MODEL_ADAPTER` 和 `derivedFromDigests`，不是
+当前 `TrainingResult` 字段，也不代表当前 Product runtime 或 trainer 已经发出该
+结构。
+
+该 commit 的 durable result projection 只保存命名 ArtifactRef，尚未保存组合角色、
+base pinned repository/revision、TrainingRun/DatasetVersion URI 或本描述符需要的
+input ArtifactRef lineage。当前内部 `ModelRef`/`DatasetRef` 是面向路径的训练输入，
+LLaMA-Factory result collector 也不会构造 adapter ArtifactRef。因此需要一个
+Product-side handoff adapter，将完成的 Yield 结果投影为本 V1 边界，并补齐 base
+ArtifactRef 与 pinned source identity、唯一 adapter ArtifactRef、inherit/override
+选择、opaque TrainingRun/DatasetVersion 引用和 input ArtifactRef lineage；不需要修改
+trainer loop，也不改变 Platform、Yield 或 Catalyst 的业务状态 ownership。
+
+`MODEL_ADAPTER` 只是 Yield Product `outputArtifacts` 的逻辑 role，不是新的
+Platform `ArtifactKind`。最终 `adapterArtifact` 仍使用 V1 portable-directory
+ArtifactRef 的 `kind: "model"`，由 Reactor staging 后校验 adapter 内容。
 
 ## Future merge/export | 未来 merge/export
 
