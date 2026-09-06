@@ -3695,6 +3695,32 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
         "a lease whose cleanup could not be confirmed must remain FAILED, not RELEASED"
     );
 
+    // A FAILED legacy lease cannot be released after its actor disappears:
+    // without a managed actor, a same-fence retry has no physical cleanup
+    // proof and must keep the allocation held.
+    adapter.instances.lock().unwrap().remove("stuck-instance");
+    let missing_actor_retry = runtime.block_on(adapter.release_lease(Request::new(
+        core_v1::ReleaseLeaseRequest {
+            mutation: None,
+            lease: Some(lease_identity.clone()),
+            fence_token,
+        },
+    )));
+    assert_eq!(
+        missing_actor_retry
+            .unwrap_err()
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("CLEANUP_INCOMPLETE"),
+        "a FAILED lease without an actor must fail closed"
+    );
+    assert_eq!(
+        adapter.daemon.lease(&lease_identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Failed,
+        "a missing actor must not make a FAILED lease reusable"
+    );
+
     // The half-cleaned resource must NOT be reacquired by another lease.
     let reacquire = runtime.block_on(adapter.acquire_lease(Request::new(
         core_v1::AcquireLeaseRequest {
@@ -3745,6 +3771,200 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
         Some("INSUFFICIENT_RESOURCES"),
         "the still-held FAILED lease must block reallocation with INSUFFICIENT_RESOURCES"
     );
+}
+
+/// A failed physical stop keeps the actor and its process handle bound to the
+/// same Lease. A later release with the same fence may retry that actor; only
+/// its complete cleanup report can transition the allocation to RELEASED.
+#[test]
+fn failed_canonical_release_retries_same_actor_and_fence() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct RetrySandbox {
+        stop_calls: Arc<AtomicUsize>,
+    }
+
+    impl ProcessRuntime for RetrySandbox {
+        fn preflight(&self) -> NodeCapabilities {
+            NodeCapabilities {
+                ready: true,
+                facts: Vec::new(),
+                enforcement: Vec::new(),
+            }
+        }
+
+        fn launch(
+            &self,
+            _plan: &LaunchPlan,
+            _binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            Ok(ProcessHandle {
+                pid: 1,
+                cgroup_path: PathBuf::from("/test"),
+                start_time_ticks: Some(1),
+                transport_socket: None,
+            })
+        }
+
+        fn stop(
+            &self,
+            _handle: &ProcessHandle,
+            _request: &StopRequest,
+        ) -> Result<CleanupReport, ProviderError> {
+            if self.stop_calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                return Err(ProviderError::new(
+                    "retry-sandbox",
+                    "STOP_TRANSIENT",
+                    "first cleanup attempt failed",
+                ));
+            }
+            Ok(CleanupReport {
+                complete: true,
+                exit_code: Some(0),
+                oom_killed: false,
+                conditions: Vec::new(),
+                reason_code: "RETRY_CLEANUP_COMPLETE".to_string(),
+            })
+        }
+    }
+
+    impl SandboxBackend for RetrySandbox {
+        fn backend_id(&self) -> &str {
+            "retry-test"
+        }
+    }
+
+    let stop_calls = Arc::new(AtomicUsize::new(0));
+    let sandbox = Arc::new(RetrySandbox {
+        stop_calls: Arc::clone(&stop_calls),
+    });
+    let resource = test_resource();
+    let hardware = Arc::new(TestHardware {
+        resources: vec![resource.clone()],
+    });
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", vec![resource])),
+        sandbox.clone(),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(UnusedResolver));
+    let authority = adapter.authority();
+    let context = scoped_authority_context("ns-failed-retry", "failed-retry");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let worker = semantic::Identity {
+        id: "worker-failed-retry".to_string(),
+        generation: 1,
+    };
+    let query = semantic::ResourceQuery {
+        resource_class: "accelerator".to_string(),
+        count: 1,
+        required_capabilities: vec![semantic::CapabilityRequirement {
+            id: "accelerator.compute".to_string(),
+            minimum_revision: 1,
+            required_properties: BTreeMap::new(),
+        }],
+        minimum_capacity: BTreeMap::new(),
+    };
+    let lease = authority
+        .acquire_lease(&context, &principal, worker, query, u64::MAX)
+        .expect("canonical lease should be acquired");
+    let daemon_lease_name = authority
+        .runtime
+        .leases
+        .lock()
+        .unwrap()
+        .get(&context.object_ref(lease.identity.clone()))
+        .cloned()
+        .expect("canonical lease must be registered");
+    let daemon_lease = adapter
+        .daemon
+        .lease(&daemon_lease_name)
+        .expect("daemon lease must exist");
+    let allocation_resource_id = daemon_lease
+        .allocations
+        .first()
+        .expect("lease has an allocation")
+        .resource
+        .id
+        .clone();
+
+    let mut actor = InstanceActor::new(
+        "failed-retry-instance",
+        daemon_lease.name.clone(),
+        daemon_lease.fence_token,
+        sandbox,
+        LaunchPlan {
+            instance_name: "failed-retry-instance".to_string(),
+            executable: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cgroup_name: "failed-retry-instance".to_string(),
+            limits: CgroupLimits::default(),
+            working_dir: None,
+            transport_socket: None,
+        },
+        DeviceBinding {
+            resource_id: allocation_resource_id.clone(),
+            nodes: Vec::new(),
+            environment: BTreeMap::new(),
+            joinable_environment_keys: Default::default(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Soft,
+            adapter_id: "retry-test".to_string(),
+            reason_code: "test".to_string(),
+        },
+        Duration::from_secs(30),
+    );
+    actor.start().expect("retry instance must start");
+    let mut process = managed_test_process(
+        "failed-retry-instance",
+        daemon_lease.fence_token,
+        Some(core_v1::ResourceLeaseRef {
+            lease_name: daemon_lease.name.clone(),
+            fence_token: daemon_lease.fence_token,
+        }),
+    );
+    process.actor = actor;
+    adapter
+        .instances
+        .lock()
+        .unwrap()
+        .insert("failed-retry-instance".to_string(), process);
+
+    let first_error = authority
+        .release_lease(&context, &principal, &lease.identity, lease.fence_token)
+        .unwrap_err();
+    assert_eq!(first_error.reason_code, "STOP_TRANSIENT");
+    assert_eq!(stop_calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(
+        adapter.daemon.lease(&daemon_lease_name).unwrap().state,
+        cy_kernel_api::LeaseState::Failed
+    );
+    assert!(adapter.daemon.is_allocated(&daemon_lease_name));
+
+    let stale_error = authority
+        .release_lease(&context, &principal, &lease.identity, lease.fence_token + 1)
+        .unwrap_err();
+    assert_eq!(stale_error.reason_code, "STALE_FENCE_TOKEN");
+    assert_eq!(stop_calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(
+        adapter.daemon.lease(&daemon_lease_name).unwrap().state,
+        cy_kernel_api::LeaseState::Failed
+    );
+
+    let released = authority
+        .release_lease(&context, &principal, &lease.identity, lease.fence_token)
+        .expect("same-fence retry should complete physical cleanup");
+    assert_eq!(released.state, semantic::LeaseState::Released);
+    assert_eq!(stop_calls.load(AtomicOrdering::SeqCst), 2);
+    assert_eq!(
+        adapter.daemon.lease(&daemon_lease_name).unwrap().state,
+        cy_kernel_api::LeaseState::Released
+    );
+    assert!(!adapter.daemon.is_allocated(&daemon_lease_name));
 }
 
 // ---------------------------------------------------------------------------
@@ -5370,6 +5590,25 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
         canonical_after.state,
         cy_kernel_api::LeaseState::Failed,
         "canonical release must leave the Lease FAILED, never RELEASED"
+    );
+
+    // A FAILED lease cannot be released just because its actor disappeared.
+    // The same-fence retry requires a still-managed actor whose stop call can
+    // return a fresh physical cleanup report.
+    adapter.instances.lock().unwrap().remove("worker-canonical");
+    let missing_actor_error = authority
+        .release_lease(
+            &context_canonical,
+            &principal,
+            &canonical_lease.identity,
+            canonical_lease.fence_token,
+        )
+        .unwrap_err();
+    assert_eq!(missing_actor_error.reason_code, "CLEANUP_INCOMPLETE");
+    assert_eq!(
+        adapter.daemon.lease(&canonical_daemon_name).unwrap().state,
+        cy_kernel_api::LeaseState::Failed,
+        "missing actor must leave the allocation failed and held"
     );
 
     // --- Legacy path ---

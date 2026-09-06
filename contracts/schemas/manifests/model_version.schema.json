@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/manifests/model_version.schema.json",
+  "title": "ModelVersion",
+  "description": "Immutable content-addressed model composition. Product lifecycle state, runtime state, and PEFT hyperparameters are outside this descriptor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "composition",
+    "tokenizer",
+    "chatTemplate",
+    "lineage"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^model-version://sha256/[0-9a-f]{64}$",
+      "description": "Computed identity. Excluded from the canonical hash preimage."
+    },
+    "composition": {
+      "type": "string",
+      "enum": ["FULL_MODEL", "BASE_PLUS_LORA"]
+    },
+    "fullModelArtifact": {
+      "$ref": "#/$defs/portableModelArtifact"
+    },
+    "baseModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "source"],
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/portableModelArtifact"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "revision"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+              "description": "Immutable upstream owner/repository identity."
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "Immutable upstream revision, as a lowercase 40-hex commit."
+            }
+          }
+        }
+      }
+    },
+    "adapterArtifact": {
+      "$ref": "#/$defs/portableModelArtifact"
+    },
+    "tokenizer": {
+      "$ref": "#/$defs/inheritableArtifact"
+    },
+    "chatTemplate": {
+      "$ref": "#/$defs/inheritableArtifact"
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "trainingRun": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:[^\\s]+$",
+          "description": "Opaque immutable TrainingRun reference; Yield owns its business state."
+        },
+        "datasetVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:[^\\s]+$",
+          "description": "Opaque immutable DatasetVersion reference; Yield owns its business state."
+        },
+        "inputArtifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "artifact_ref.schema.json"
+          },
+          "description": "Content-addressed inputs; order is retained in the immutable identity."
+        },
+        "derivedFromModelVersion": {
+          "type": "string",
+          "pattern": "^model-version://sha256/[0-9a-f]{64}$",
+          "description": "Prior immutable ModelVersion, used by future merge/export products."
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "composition": {
+          "const": "FULL_MODEL"
+        }
+      },
+      "required": ["fullModelArtifact"],
+      "not": {
+        "anyOf": [
+          { "required": ["baseModel"] },
+          { "required": ["adapterArtifact"] }
+        ]
+      }
+    },
+    {
+      "properties": {
+        "composition": {
+          "const": "BASE_PLUS_LORA"
+        }
+      },
+      "required": ["baseModel", "adapterArtifact"],
+      "not": {
+        "required": ["fullModelArtifact"]
+      }
+    }
+  ],
+  "$defs": {
+    "portableModelArtifact": {
+      "allOf": [
+        {
+          "$ref": "artifact_ref.schema.json"
+        },
+        {
+          "required": ["manifest_digest"],
+          "properties": {
+            "kind": {
+              "const": "model",
+              "description": "V1 adapter/base/full model role; the bytes are a portable directory."
+            },
+            "manifest_digest": {
+              "description": "Must equal digest for a PortableDirectoryManifest V2 artifact."
+            }
+          }
+        }
+      ]
+    },
+    "inheritableArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["INHERIT", "OVERRIDE"]
+        },
+        "artifact": {
+          "$ref": "artifact_ref.schema.json"
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "const": "INHERIT"
+            }
+          },
+          "not": {
+            "required": ["artifact"]
+          }
+        },
+        {
+          "required": ["mode", "artifact"],
+          "properties": {
+            "mode": {
+              "const": "OVERRIDE"
+            },
+            "artifact": {
+              "$ref": "artifact_ref.schema.json"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

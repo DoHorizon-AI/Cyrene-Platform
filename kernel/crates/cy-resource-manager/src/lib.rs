@@ -373,6 +373,12 @@ impl ResourceLeaseManager for InMemoryResourceManager {
         }
         match lease.state {
             LeaseState::Active => lease.state = LeaseState::Releasing,
+            // A failed cleanup still owns the allocation.  Re-entering the
+            // cleanup phase is safe only after the caller has passed the
+            // exact fence check above; it does not make the resource
+            // reusable.  The subsequent physical cleanup report remains the
+            // gate for `complete_release`.
+            LeaseState::Failed => lease.state = LeaseState::Releasing,
             LeaseState::Releasing | LeaseState::Released => {}
             _ => {
                 return Err(ProviderError::new(
@@ -766,6 +772,38 @@ mod tests {
                 .reason_code,
             "INSUFFICIENT_RESOURCES"
         );
+    }
+
+    #[test]
+    fn failed_cleanup_can_retry_with_same_fence_after_wrong_fence_is_rejected() {
+        let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
+        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+
+        manager
+            .begin_release(&lease.name, lease.fence_token)
+            .unwrap();
+        manager
+            .fail_release(&lease.name, lease.fence_token)
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .begin_release(&lease.name, lease.fence_token + 1)
+                .unwrap_err()
+                .reason_code,
+            "STALE_FENCE_TOKEN"
+        );
+        let retrying = manager
+            .begin_release(&lease.name, lease.fence_token)
+            .unwrap();
+        assert_eq!(retrying.state, LeaseState::Releasing);
+        assert!(manager.is_allocated("resource-0"));
+
+        let released = manager
+            .complete_release(&lease.name, lease.fence_token)
+            .unwrap();
+        assert_eq!(released.state, LeaseState::Released);
+        assert!(!manager.is_allocated("resource-0"));
     }
 
     #[test]
