@@ -32,7 +32,7 @@ use cy_plugin_protocol::{
     envelope::Payload,
     pb::{
         ApplicationEvent, ApplicationEventStreamEnd, Cancel, Envelope, Hello, Invoke,
-        PluginErrorPayload, Shutdown, Subscribe,
+        PluginErrorPayload, Shutdown, Subscribe, stream_item,
     },
     plugin_error_payload,
 };
@@ -88,6 +88,8 @@ impl CancellationToken for AtomicCancellationToken {
 /// subscription. The caller may request a smaller bounded buffer.
 pub const DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY: usize = 32;
 pub const MAX_APPLICATION_EVENT_BUFFER_CAPACITY: usize = 1024;
+/// Handshake feature required before the typed worker-result stream is used.
+pub const TYPED_INVOCATION_STREAM_FEATURE: &str = "cyrene.worker.typed-invocation-stream.v1";
 
 /// Product-neutral application data delivered by a capability worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -734,6 +736,7 @@ pub struct CapabilityWorkerClient {
     plugin_version: String,
     api_version: String,
     declared_capabilities: Vec<String>,
+    protocol_features: Vec<String>,
     options: WorkerActivationOptions,
     is_shut_down: bool,
 }
@@ -835,6 +838,7 @@ impl CapabilityWorkerClient {
             plugin_version,
             api_version,
             declared_capabilities,
+            protocol_features: Vec::new(),
             options,
             is_shut_down: false,
         })
@@ -854,6 +858,11 @@ impl CapabilityWorkerClient {
 
     pub fn declared_capabilities(&self) -> &[String] {
         &self.declared_capabilities
+    }
+
+    /// Whether the worker advertised a transport feature during HelloAck.
+    pub fn supports_protocol_feature(&self, feature: &str) -> bool {
+        self.protocol_features.iter().any(|value| value == feature)
     }
 
     /// Poll the owned child process without inferring runtime state from
@@ -1187,6 +1196,7 @@ impl CapabilityWorkerClient {
                 method: method.to_string(),
                 payload: payload.to_vec(),
                 payload_type_url: request_type_url.to_string(),
+                stream_results: false,
                 request: None,
             })),
         };
@@ -1269,6 +1279,186 @@ impl CapabilityWorkerClient {
             "invocation timed out after {}ms",
             timeout.as_millis()
         )))
+    }
+
+    /// Invoke a capability and forward typed worker chunks as they arrive.
+    ///
+    /// The callback is backpressure: returning an error stops the worker
+    /// request and sends the canonical Cancel frame before this method
+    /// returns. The worker protocol's final empty `StreamItem` is the only
+    /// successful terminal marker; a unary `InvokeResult` is rejected so a
+    /// caller cannot mistake buffered compatibility output for live streaming.
+    #[allow(clippy::too_many_arguments)]
+    pub fn invoke_typed_stream<F>(
+        &mut self,
+        capability: &str,
+        method: &str,
+        payload: &[u8],
+        request_type_url: &str,
+        timeout: Duration,
+        cancellation: &dyn CancellationToken,
+        mut on_chunk: F,
+    ) -> Result<(), WorkerTerminalError>
+    where
+        F: FnMut(WorkerInvocationResult) -> Result<(), WorkerTerminalError>,
+    {
+        if self.is_shut_down {
+            return Err(WorkerTerminalError::WorkerUnavailable(
+                "worker client is already shut down".into(),
+            ));
+        }
+        if !self.supports_protocol_feature(TYPED_INVOCATION_STREAM_FEATURE) {
+            return Err(WorkerTerminalError::ProtocolMismatch(format!(
+                "worker did not advertise required protocol feature {TYPED_INVOCATION_STREAM_FEATURE}"
+            )));
+        }
+        if cancellation.is_cancelled() {
+            return Err(WorkerTerminalError::Cancelled(
+                "pre-invocation cancellation".into(),
+            ));
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let invoke_env = Envelope {
+            request_id: request_id.clone(),
+            trace_id: String::new(),
+            plugin_id: self.plugin_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: self.next_sequence(),
+            generation: INITIAL_WORKER_GENERATION,
+            fence_token: INITIAL_WORKER_FENCE_TOKEN,
+            payload: Some(Payload::Invoke(Invoke {
+                extension_point: capability.to_string(),
+                method: method.to_string(),
+                payload: payload.to_vec(),
+                payload_type_url: request_type_url.to_string(),
+                stream_results: true,
+                request: None,
+            })),
+        };
+        self.write_envelope(&invoke_env)?;
+
+        let start = Instant::now();
+        let slice = Duration::from_millis(20);
+        let mut expected_sequence = 1;
+        while start.elapsed() < timeout {
+            if cancellation.is_cancelled() {
+                self.send_invoke_cancel(&request_id);
+                self.drain_cancel_response(&request_id);
+                return Err(WorkerTerminalError::Cancelled(
+                    "operation cancelled in flight".into(),
+                ));
+            }
+
+            match self.reader_rx.recv_timeout(slice) {
+                Ok(Ok(response)) => {
+                    if response.request_id != request_id {
+                        continue;
+                    }
+                    match response.payload {
+                        Some(Payload::StreamItem(item)) => {
+                            if item.request_id != request_id {
+                                return Err(WorkerTerminalError::ProtocolMismatch(format!(
+                                    "stream item request id mismatch: expected {request_id}, got {}",
+                                    item.request_id
+                                )));
+                            }
+                            if item.sequence_number != expected_sequence {
+                                return Err(WorkerTerminalError::ProtocolMismatch(format!(
+                                    "stream item sequence mismatch: expected {expected_sequence}, got {}",
+                                    item.sequence_number
+                                )));
+                            }
+                            if item.is_last {
+                                if item.data.is_some() || !item.payload_type_url.is_empty() {
+                                    return Err(WorkerTerminalError::ProtocolMismatch(
+                                        "stream terminal item must not carry data".into(),
+                                    ));
+                                }
+                                return Ok(());
+                            }
+                            let Some(stream_item::Data::BinaryChunk(chunk)) = item.data else {
+                                return Err(WorkerTerminalError::ProtocolMismatch(
+                                    "typed stream item must carry binary_chunk data".into(),
+                                ));
+                            };
+                            if item.payload_type_url.is_empty() {
+                                return Err(WorkerTerminalError::ProtocolMismatch(
+                                    "typed stream item payload_type_url is required".into(),
+                                ));
+                            }
+                            if let Err(error) = on_chunk(WorkerInvocationResult {
+                                payload: chunk,
+                                payload_type_url: item.payload_type_url,
+                            }) {
+                                self.send_invoke_cancel(&request_id);
+                                self.drain_cancel_response(&request_id);
+                                return Err(error);
+                            }
+                            expected_sequence += 1;
+                        }
+                        Some(Payload::Error(error)) => {
+                            return Err(Self::map_error_payload(error));
+                        }
+                        Some(Payload::InvokeResult(_)) => {
+                            return Err(WorkerTerminalError::ProtocolMismatch(
+                                "typed streaming invocation returned unary InvokeResult".into(),
+                            ));
+                        }
+                        other => {
+                            return Err(WorkerTerminalError::ProtocolMismatch(format!(
+                                "unexpected streaming response payload: {other:?}"
+                            )));
+                        }
+                    }
+                }
+                Ok(Err(err)) => return Err(err),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(WorkerTerminalError::WorkerCrashed(
+                        "worker communication stream broken".into(),
+                    ));
+                }
+            }
+        }
+
+        self.send_invoke_cancel(&request_id);
+        self.drain_cancel_response(&request_id);
+        Err(WorkerTerminalError::Timeout(format!(
+            "streaming invocation timed out after {}ms",
+            timeout.as_millis()
+        )))
+    }
+
+    fn send_invoke_cancel(&self, request_id: &str) {
+        let cancel_env = Envelope {
+            request_id: format!("cancel-{request_id}"),
+            trace_id: String::new(),
+            plugin_id: self.plugin_id.clone(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            deadline_ms: 0,
+            sequence_number: self.next_sequence(),
+            generation: INITIAL_WORKER_GENERATION,
+            fence_token: INITIAL_WORKER_FENCE_TOKEN,
+            payload: Some(Payload::Cancel(Cancel {
+                target_request_id: request_id.to_string(),
+                reason: "caller requested cancellation".to_string(),
+            })),
+        };
+        let _ = self.write_envelope(&cancel_env);
+    }
+
+    fn drain_cancel_response(&self, request_id: &str) {
+        let cancel_deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < cancel_deadline {
+            if let Ok(Ok(response)) = self.reader_rx.recv_timeout(Duration::from_millis(50))
+                && (response.request_id == request_id
+                    || response.request_id == format!("cancel-{request_id}"))
+            {
+                break;
+            }
+        }
     }
 
     fn map_error_payload(err: PluginErrorPayload) -> WorkerTerminalError {
@@ -1359,6 +1549,23 @@ impl Drop for CapabilityWorkerClient {
             let _ = self.shutdown(Duration::from_millis(500));
         }
     }
+}
+
+fn protocol_features_from_json(raw: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    value
+        .get("protocol_features")
+        .and_then(serde_json::Value::as_array)
+        .map(|features| {
+            features
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Generic capability worker activator.
@@ -1516,6 +1723,7 @@ impl CapabilityWorkerActivator {
                         manifest.plugin.id, ack.plugin_id
                     )));
                 }
+                client.protocol_features = protocol_features_from_json(&ack.capabilities_json);
             }
             Some(Payload::Error(err)) => {
                 return Err(WorkerTerminalError::ProtocolMismatch(format!(

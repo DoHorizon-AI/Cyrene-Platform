@@ -10,6 +10,7 @@ keeping generated protobuf modules out of Product code.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from threading import Event, Thread
 
@@ -177,6 +178,105 @@ class CapabilityExecutionClient:
         if result_kind == "error":
             raise CapabilityExecutionFailure(response.error.code, response.error.message)
         raise CapabilityProtocolError("CapabilityExecutionService returned no result")
+
+    def invoke_stream(
+        self,
+        *,
+        capability: str,
+        interface_version: str,
+        method: str,
+        request: TypedPayload,
+        binding_id: str | None = None,
+        deadline_seconds: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> Iterator[TypedPayload]:
+        """Yield typed capability chunks from the additive CES stream RPC.
+
+        The iterator preserves worker order and completes only after CES sends
+        its normal stream-end marker. A pre-execution error/end marker may use
+        sequence zero; worker-produced responses and their terminal marker
+        start at sequence one. A worker ``InvokeResult`` is not accepted on
+        this path because it would turn a live stream into buffered output.
+        """
+
+        _validate_invocation(
+            capability=capability,
+            interface_version=interface_version,
+            method=method,
+            request=request,
+            binding_id=binding_id,
+            deadline_seconds=deadline_seconds,
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise CapabilityInvocationCancelled(grpc.StatusCode.CANCELLED, "capability invocation cancelled")
+
+        invocation = execution_pb2.InvokeCapabilityRequest(
+            capability=capability,
+            interface_version=interface_version,
+            method=method,
+            request=AnyMessage(type_url=request.type_url, value=request.value),
+        )
+        if binding_id is not None:
+            invocation.binding_id = binding_id
+
+        rpc = self._stub.InvokeCapabilityStream(invocation, timeout=deadline_seconds)
+        completed = Event()
+        watcher = _start_cancellation_watcher(rpc, cancel_event, completed)
+        expected_sequence = 1
+        saw_terminal = False
+        try:
+            for item in rpc:
+                result_kind = item.WhichOneof("item")
+                pre_execution_terminal = (
+                    expected_sequence == 1 and item.sequence == 0 and result_kind in ("error", "stream_end")
+                )
+                if item.sequence != expected_sequence and not pre_execution_terminal:
+                    raise CapabilityProtocolError(
+                        "CapabilityExecutionService returned a non-contiguous stream sequence"
+                    )
+                expected_sequence += 1
+                if result_kind == "response":
+                    if not item.response.type_url:
+                        raise CapabilityProtocolError(
+                            "CapabilityExecutionService returned a stream response without type URL"
+                        )
+                    yield TypedPayload(
+                        type_url=item.response.type_url,
+                        value=bytes(item.response.value),
+                    )
+                    continue
+                if result_kind == "error":
+                    raise CapabilityExecutionFailure(item.error.code, item.error.message)
+                if result_kind == "stream_end":
+                    saw_terminal = True
+                    if item.stream_end.reason == execution_pb2.CapabilityInvocationStreamEnd.CANCELLED:
+                        raise CapabilityExecutionFailure(
+                            execution_pb2.CapabilityExecutionError.CODE_CANCELLED,
+                            item.stream_end.message,
+                        )
+                    if item.stream_end.reason != execution_pb2.CapabilityInvocationStreamEnd.NORMAL_COMPLETION:
+                        raise CapabilityExecutionFailure(
+                            execution_pb2.CapabilityExecutionError.CODE_EXECUTION_FAILURE,
+                            item.stream_end.message,
+                        )
+                    return
+                raise CapabilityProtocolError("CapabilityExecutionService returned an empty stream item")
+            if not saw_terminal:
+                raise CapabilityProtocolError("CapabilityExecutionService closed stream without a terminal marker")
+        except grpc.FutureCancelledError as error:
+            raise CapabilityInvocationCancelled(grpc.StatusCode.CANCELLED, "capability invocation cancelled") from error
+        except grpc.RpcError as error:
+            status = error.code()
+            message = error.details() or str(error)
+            if status is grpc.StatusCode.CANCELLED:
+                raise CapabilityInvocationCancelled(status, message) from error
+            if status is grpc.StatusCode.DEADLINE_EXCEEDED:
+                raise CapabilityDeadlineExceeded(status, message) from error
+            raise CapabilityTransportError(status, message) from error
+        finally:
+            completed.set()
+            if watcher is not None:
+                watcher.join(timeout=0.2)
 
     def __enter__(self) -> "CapabilityExecutionClient":
         return self

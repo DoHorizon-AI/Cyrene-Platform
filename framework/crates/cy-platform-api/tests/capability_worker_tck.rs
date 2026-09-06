@@ -406,6 +406,95 @@ fn test_capability_worker_typed_invocation() {
 }
 
 #[test]
+fn test_capability_worker_typed_stream_forwards_ordered_chunks() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut chunks = Vec::new();
+
+    client
+        .invoke_typed_stream(
+            "test.capability.v1",
+            "stream",
+            b"{}",
+            "type.googleapis.com/test.Request",
+            Duration::from_secs(2),
+            &NeverCancelled,
+            |chunk| {
+                chunks.push((chunk.payload_type_url, chunk.payload));
+                Ok(())
+            },
+        )
+        .expect("typed stream should complete");
+
+    assert_eq!(
+        chunks,
+        vec![
+            (
+                "type.googleapis.com/test.Chunk".to_string(),
+                b"first".to_vec()
+            ),
+            (
+                "type.googleapis.com/test.Chunk".to_string(),
+                b"second".to_vec()
+            ),
+        ]
+    );
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
+fn test_capability_worker_legacy_invoke_keeps_stream_payload_unary() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let result = client
+        .invoke(
+            "test.capability.v1",
+            "stream",
+            b"{}",
+            Duration::from_secs(2),
+            &NeverCancelled,
+        )
+        .expect("legacy Invoke should receive one aggregated response");
+
+    assert_eq!(result, b"legacy-unary-result");
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
+fn test_capability_worker_stream_requires_advertised_protocol_feature() {
+    let manifest = fixture_manifest();
+    let mut options = worker_options();
+    options.environment.insert(
+        "CYRENE_TEST_DISABLE_TYPED_STREAM".to_string(),
+        "1".to_string(),
+    );
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+
+    let error = client
+        .invoke_typed_stream(
+            "test.capability.v1",
+            "stream",
+            b"{}",
+            "type.googleapis.com/test.Request",
+            Duration::from_secs(2),
+            &NeverCancelled,
+            |_| Ok(()),
+        )
+        .expect_err("streaming must fail closed before invoking an old worker");
+
+    assert!(
+        matches!(error, WorkerTerminalError::ProtocolMismatch(message) if message.contains("typed-invocation-stream.v1"))
+    );
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
 fn test_capability_worker_request_type_url_reaches_python_handler() {
     let manifest = fixture_manifest();
     let options = worker_options();

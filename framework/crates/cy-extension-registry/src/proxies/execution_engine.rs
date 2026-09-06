@@ -76,6 +76,7 @@ impl ExecutionEngine for RemoteExecutionEngine {
             method: "execute_inference".to_string(),
             payload: Vec::new(),
             payload_type_url: String::new(),
+            stream_results: false,
             request: Some(cy_plugin_protocol::pb::invoke::Request::ExecuteInference(
                 ExecuteInferenceRequest {
                     runtime_manifest_json: runtime_json,

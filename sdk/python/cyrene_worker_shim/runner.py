@@ -122,6 +122,7 @@ class GenericCapabilityWorker(CyreneWorker):
         action: str,
         payload: bytes,
         request_type_url: str = "",
+        stream_results: bool = False,
     ) -> Tuple[bool, Any]:
         return self._invoke_request_with_type_url(
             request_id,
@@ -129,6 +130,7 @@ class GenericCapabilityWorker(CyreneWorker):
             action,
             payload,
             request_type_url,
+            stream_results,
         )
 
     def _invoke_request_with_type_url(
@@ -138,6 +140,7 @@ class GenericCapabilityWorker(CyreneWorker):
         action: str,
         payload: bytes,
         request_type_url: str,
+        stream_results: bool = False,
     ) -> Tuple[bool, Any]:
         with self._lock:
             token = self._active_tokens.get(request_id)
@@ -152,6 +155,7 @@ class GenericCapabilityWorker(CyreneWorker):
             token,
             request_id=request_id,
             request_type_url=request_type_url,
+            stream_results=stream_results,
         )
 
     def on_subscribe(
@@ -219,6 +223,7 @@ class GenericCapabilityWorker(CyreneWorker):
         payload: bytes,
         request_id: Optional[str] = None,
         request_type_url: str = "",
+        stream_results: bool = False,
     ) -> Tuple[bool, Any]:
         return self._invoke_with_token(
             capability,
@@ -227,6 +232,7 @@ class GenericCapabilityWorker(CyreneWorker):
             WorkerCancellationToken(),
             request_id=request_id,
             request_type_url=request_type_url,
+            stream_results=stream_results,
         )
 
     def _invoke_with_token(
@@ -237,6 +243,7 @@ class GenericCapabilityWorker(CyreneWorker):
         token: WorkerCancellationToken,
         request_id: Optional[str] = None,
         request_type_url: str = "",
+        stream_results: bool = False,
     ) -> Tuple[bool, Any]:
         if hasattr(self._instance, "on_invoke"):
             handler = self._instance.on_invoke
@@ -244,10 +251,17 @@ class GenericCapabilityWorker(CyreneWorker):
                 signature = inspect.signature(handler)
             except (TypeError, ValueError):
                 signature = None
+            if stream_results and signature is None:
+                return False, PluginErrorPayload(
+                    code=9,
+                    message="typed streaming invocation is not supported by this worker handler",
+                    details="TYPED_STREAM_HANDLER_REQUIRED",
+                )
             if signature is not None:
                 cancellation = signature.parameters.get("cancellation")
                 request = signature.parameters.get("request_id")
                 request_type = signature.parameters.get("request_type_url")
+                stream_request = signature.parameters.get("stream_results")
                 accepts_kwargs = any(
                     parameter.kind == inspect.Parameter.VAR_KEYWORD
                     for parameter in signature.parameters.values()
@@ -272,6 +286,29 @@ class GenericCapabilityWorker(CyreneWorker):
                     keyword_args.setdefault("cancellation", token)
                     keyword_args.setdefault("request_id", request_id)
                     keyword_args.setdefault("request_type_url", request_type_url)
+                    keyword_args.setdefault("stream_results", stream_results)
+                if (
+                    stream_results
+                    and not accepts_kwargs
+                    and not (
+                        stream_request is not None
+                        and stream_request.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+                    )
+                ):
+                    return False, PluginErrorPayload(
+                        code=9,
+                        message="typed streaming invocation is not supported by this worker handler",
+                        details="TYPED_STREAM_HANDLER_REQUIRED",
+                    )
+                if stream_request is not None and stream_request.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    keyword_args["stream_results"] = stream_results
                 if keyword_args:
                     return handler(capability, action, payload, **keyword_args)
                 if cancellation is not None and cancellation.kind == inspect.Parameter.POSITIONAL_ONLY:
@@ -284,6 +321,12 @@ class GenericCapabilityWorker(CyreneWorker):
                 code=3,
                 message=f"unknown operation '{action}' on plugin '{self._plugin_id}'",
                 details="UNKNOWN_OPERATION",
+            )
+        if stream_results:
+            return False, PluginErrorPayload(
+                code=9,
+                message="typed streaming invocation requires an on_invoke handler",
+                details="TYPED_STREAM_HANDLER_REQUIRED",
             )
 
         try:

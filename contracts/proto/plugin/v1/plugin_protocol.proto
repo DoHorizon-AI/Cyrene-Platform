@@ -73,6 +73,9 @@ message HelloAck {
   string api_version = 4;
   repeated string declared_capabilities = 5;
   map<string, string> metrics = 6;
+  // Optional structured extension metadata. The reserved
+  // ``protocol_features`` array is used for host/worker capability
+  // negotiation; unknown keys remain capability-owned.
   string capabilities_json = 7;
 }
 
@@ -139,6 +142,11 @@ message Invoke {
   // only consume the payload bytes.
   string payload_type_url = 4;
 
+  // Selects the worker typed-result stream transport. This is independent of
+  // any capability payload field such as chat ``stream``. Legacy Invoke
+  // callers leave it false and continue to receive one InvokeResult.
+  bool stream_results = 5;
+
   oneof request {
     DetectHardwareRequest detect_hardware = 10;
     AnalyzeModelRequest analyze_model = 11;
@@ -182,6 +190,10 @@ message StreamItem {
   string request_id = 1;
   uint64 sequence_number = 2;
   bool is_last = 3;
+
+  // Optional canonical protobuf Any type URL for a typed binary chunk. An
+  // empty value preserves the existing text/binary/log stream consumers.
+  string payload_type_url = 4;
 
   oneof data {
     string text_chunk = 10;

@@ -19,7 +19,9 @@ try:
     from cyrene_worker_shim.cyrene_worker import (
         CyreneWorker,
         PluginErrorPayload,
+        TYPED_INVOCATION_STREAM_FEATURE,
         TypedCapabilityPayload,
+        TypedCapabilityStream,
         decode_varint,
         encode_bytes_field,
         encode_string_field,
@@ -30,7 +32,9 @@ except ImportError:
     from cyrene_worker import (
         CyreneWorker,
         PluginErrorPayload,
+        TYPED_INVOCATION_STREAM_FEATURE,
         TypedCapabilityPayload,
+        TypedCapabilityStream,
         decode_varint,
         encode_bytes_field,
         encode_string_field,
@@ -124,6 +128,11 @@ class GenericTckWorker(CyreneWorker):
             "model.provider.v1",
         ]
 
+    def protocol_features(self):
+        if os.environ.get("CYRENE_TEST_DISABLE_TYPED_STREAM") == "1":
+            return []
+        return [TYPED_INVOCATION_STREAM_FEATURE]
+
     def on_subscribe(self, subscription_id: str, capability: str, filter_payload: bytes):
         if capability != "test.application-events.v1":
             return f"unsupported capability {capability}"
@@ -182,6 +191,7 @@ class GenericTckWorker(CyreneWorker):
         action: str,
         payload: bytes,
         request_type_url: str = "",
+        stream_results: bool = False,
     ):
         if action == "request_type_url":
             return True, request_type_url.encode("utf-8")
@@ -200,6 +210,24 @@ class GenericTckWorker(CyreneWorker):
                 )
             if action == "chat_completion":
                 return True, json.dumps({"model": self.operation_default_models()["chat_completion"]}).encode("utf-8")
+
+        if capability == "test.capability.v1" and action == "stream":
+            if not stream_results:
+                return True, b"legacy-unary-result"
+            return True, TypedCapabilityStream(
+                iter(
+                    (
+                        TypedCapabilityPayload(
+                            value=b"first",
+                            type_url="type.googleapis.com/test.Chunk",
+                        ),
+                        TypedCapabilityPayload(
+                            value=b"second",
+                            type_url="type.googleapis.com/test.Chunk",
+                        ),
+                    )
+                )
+            )
 
         try:
             req = json.loads(payload.decode("utf-8")) if payload else {}

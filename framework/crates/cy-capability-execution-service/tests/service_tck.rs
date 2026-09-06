@@ -20,10 +20,11 @@ use cy_manifest::{
 };
 use cy_platform_api::{MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions};
 use cy_proto::capability_v1::{
-    CapabilityEventStreamEnd, CapabilityEventStreamEndReason, InvokeCapabilityRequest,
-    SubscribeCapabilityEventsRequest, capability_event_stream_item, capability_execution_error,
+    CapabilityEventStreamEnd, CapabilityEventStreamEndReason, CapabilityInvocationStreamItem,
+    InvokeCapabilityRequest, SubscribeCapabilityEventsRequest, capability_event_stream_item,
+    capability_execution_error,
     capability_execution_service_client::CapabilityExecutionServiceClient,
-    invoke_capability_response,
+    capability_invocation_stream_item, invoke_capability_response,
 };
 use cy_proto::{
     model_provider::{
@@ -402,6 +403,28 @@ async fn next_stream_item(
         .expect("stream should produce an item")
 }
 
+async fn next_invocation_stream_item(
+    stream: &mut tonic::Streaming<CapabilityInvocationStreamItem>,
+) -> CapabilityInvocationStreamItem {
+    stream
+        .message()
+        .await
+        .expect("gRPC invocation stream read should succeed")
+        .expect("invocation stream should produce an item")
+}
+
+fn streaming_invoke_request(timeout: Duration) -> Request<InvokeCapabilityRequest> {
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: "test.capability.v1".to_string(),
+        interface_version: "1".to_string(),
+        method: "stream".to_string(),
+        request: Some(any_json(serde_json::json!({}))),
+        binding_id: None,
+    });
+    request.set_timeout(timeout);
+    request
+}
+
 fn end_reason(end: &CapabilityEventStreamEnd) -> CapabilityEventStreamEndReason {
     CapabilityEventStreamEndReason::try_from(end.reason).unwrap()
 }
@@ -479,6 +502,66 @@ async fn service_tck_forwards_request_any_type_url_to_worker() {
         "type.cyrene.io/capability/test.capability.v1/request_type_url/response"
     );
     assert_eq!(result.value, b"type.googleapis.com/example.Request");
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_tck_streams_typed_worker_chunks_and_terminal_outcome() {
+    let mut server = TestServer::start(2).await;
+    let mut stream = server
+        .client
+        .invoke_capability_stream(streaming_invoke_request(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let first = next_invocation_stream_item(&mut stream).await;
+    let Some(capability_invocation_stream_item::Item::Response(payload)) = first.item else {
+        panic!("expected first typed response: {first:?}");
+    };
+    assert_eq!(first.sequence, 1);
+    assert_eq!(payload.type_url, "type.googleapis.com/test.Chunk");
+    assert_eq!(payload.value, b"first");
+
+    let second = next_invocation_stream_item(&mut stream).await;
+    let Some(capability_invocation_stream_item::Item::Response(payload)) = second.item else {
+        panic!("expected second typed response: {second:?}");
+    };
+    assert_eq!(second.sequence, 2);
+    assert_eq!(payload.value, b"second");
+
+    let end = next_invocation_stream_item(&mut stream).await;
+    let Some(capability_invocation_stream_item::Item::StreamEnd(end)) = end.item else {
+        panic!("expected typed stream terminal: {end:?}");
+    };
+    assert_eq!(end.reason, 1);
+    assert_eq!(end.message, "capability invocation stream completed");
+
+    drop(stream);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_tck_slow_invocation_consumer_does_not_block_worker_cleanup() {
+    let mut server = TestServer::start(1).await;
+    let mut stream = server
+        .client
+        .invoke_capability_stream(streaming_invoke_request(Duration::from_millis(350)))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let first = next_invocation_stream_item(&mut stream).await;
+    assert!(matches!(
+        first.item,
+        Some(capability_invocation_stream_item::Item::Response(_))
+    ));
+
+    // Leave the bounded receiver unread while the worker has more output. The
+    // CES send path must observe the request deadline and cancel/clean up.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    drop(stream);
+    wait_until_idle(&server.service).await;
     server.shutdown().await;
 }
 
@@ -1139,6 +1222,40 @@ async fn service_tck_uses_platform_timeout_fallback_without_public_timeout_field
         panic!("expected generic timeout error: {response:?}");
     };
     assert_eq!(error.code, capability_execution_error::Code::Timeout as i32);
+    wait_until_idle(&server.service).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_tck_stream_fallback_timeout_delivers_error_after_worker_cleanup() {
+    let mut options = worker_options();
+    // The invocation lasts longer than the cleanup window. Starting the
+    // terminal-delivery window before invocation would turn Timeout into EOF.
+    // 调用时长超过清理窗口；终止事件的发送窗口必须从清理完成后开始。
+    options.default_invoke_timeout = Duration::from_millis(800);
+    options.shutdown_grace_period = Duration::from_millis(400);
+    let mut server = TestServer::start_with_options(4, options).await;
+    let mut stream = server
+        .client
+        .invoke_capability_stream(invoke_request_without_deadline(
+            "slow_operation",
+            serde_json::json!({ "delay_ms": 1100 }),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let terminal = tokio::time::timeout(
+        Duration::from_secs(5),
+        next_invocation_stream_item(&mut stream),
+    )
+    .await
+    .expect("fallback timeout must deliver a bounded terminal outcome");
+    let Some(capability_invocation_stream_item::Item::Error(error)) = terminal.item else {
+        panic!("expected typed timeout error, got {terminal:?}");
+    };
+    assert_eq!(terminal.sequence, 1);
+    assert_eq!(error.code, capability_execution_error::Code::Timeout as i32);
+    assert!(stream.message().await.unwrap().is_none());
     wait_until_idle(&server.service).await;
     server.shutdown().await;
 }

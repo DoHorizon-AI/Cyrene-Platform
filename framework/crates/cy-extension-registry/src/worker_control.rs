@@ -151,6 +151,7 @@ impl<'a> WorkerControlClient<'a> {
                 method: method.into(),
                 payload,
                 payload_type_url: String::new(),
+                stream_results: false,
                 request: None,
             },
             timeout,

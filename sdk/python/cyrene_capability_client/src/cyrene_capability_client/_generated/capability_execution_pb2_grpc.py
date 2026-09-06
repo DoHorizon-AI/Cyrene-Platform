@@ -46,6 +46,11 @@ class CapabilityExecutionServiceStub:
                 request_serializer=capability__execution__pb2.InvokeCapabilityRequest.SerializeToString,
                 response_deserializer=capability__execution__pb2.InvokeCapabilityResponse.FromString,
                 _registered_method=True)
+        self.InvokeCapabilityStream = channel.unary_stream(
+                '/cyrene.capability.v1.CapabilityExecutionService/InvokeCapabilityStream',
+                request_serializer=capability__execution__pb2.InvokeCapabilityRequest.SerializeToString,
+                response_deserializer=capability__execution__pb2.CapabilityInvocationStreamItem.FromString,
+                _registered_method=True)
         self.SubscribeCapabilityEvents = channel.unary_stream(
                 '/cyrene.capability.v1.CapabilityExecutionService/SubscribeCapabilityEvents',
                 request_serializer=capability__execution__pb2.SubscribeCapabilityEventsRequest.SerializeToString,
@@ -72,6 +77,16 @@ class CapabilityExecutionServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def InvokeCapabilityStream(self, request, context):
+        """Resolve, activate, invoke, and clean up one capability execution while
+        forwarding worker-produced typed chunks as they arrive. This additive
+        method keeps the unary InvokeCapability contract unchanged for operations
+        that do not expose a live result stream.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SubscribeCapabilityEvents(self, request, context):
         """Start one live capability application-event stream. The server allocates
         the opaque subscription identity returned in stream items; callers do not
@@ -88,6 +103,11 @@ def add_CapabilityExecutionServiceServicer_to_server(servicer, server):
                     servicer.InvokeCapability,
                     request_deserializer=capability__execution__pb2.InvokeCapabilityRequest.FromString,
                     response_serializer=capability__execution__pb2.InvokeCapabilityResponse.SerializeToString,
+            ),
+            'InvokeCapabilityStream': grpc.unary_stream_rpc_method_handler(
+                    servicer.InvokeCapabilityStream,
+                    request_deserializer=capability__execution__pb2.InvokeCapabilityRequest.FromString,
+                    response_serializer=capability__execution__pb2.CapabilityInvocationStreamItem.SerializeToString,
             ),
             'SubscribeCapabilityEvents': grpc.unary_stream_rpc_method_handler(
                     servicer.SubscribeCapabilityEvents,
@@ -129,6 +149,33 @@ class CapabilityExecutionService:
             '/cyrene.capability.v1.CapabilityExecutionService/InvokeCapability',
             capability__execution__pb2.InvokeCapabilityRequest.SerializeToString,
             capability__execution__pb2.InvokeCapabilityResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InvokeCapabilityStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/cyrene.capability.v1.CapabilityExecutionService/InvokeCapabilityStream',
+            capability__execution__pb2.InvokeCapabilityRequest.SerializeToString,
+            capability__execution__pb2.CapabilityInvocationStreamItem.FromString,
             options,
             channel_credentials,
             insecure,

@@ -77,6 +77,32 @@ class RecordingService(execution_pb2_grpc.CapabilityExecutionServiceServicer):
             return execution_pb2.InvokeCapabilityResponse()
         return execution_pb2.InvokeCapabilityResponse(response=AnyMessage(type_url=RESPONSE_TYPE, value=b"response"))
 
+    def InvokeCapabilityStream(self, request, context):  # noqa: N802 - generated gRPC API
+        self.requests.append(request)
+        self.started.set()
+        if self.behavior == "stream-activation-error":
+            yield execution_pb2.CapabilityInvocationStreamItem(
+                sequence=0,
+                error=execution_pb2.CapabilityExecutionError(
+                    code=execution_pb2.CapabilityExecutionError.CODE_ACTIVATION_FAILED,
+                    message="worker activation failed",
+                ),
+            )
+            return
+        yield execution_pb2.CapabilityInvocationStreamItem(
+            sequence=1,
+            response=AnyMessage(type_url=RESPONSE_TYPE, value=b"first"),
+        )
+        if self.behavior == "stream-eof":
+            return
+        yield execution_pb2.CapabilityInvocationStreamItem(
+            sequence=2,
+            stream_end=execution_pb2.CapabilityInvocationStreamEnd(
+                reason=execution_pb2.CapabilityInvocationStreamEnd.NORMAL_COMPLETION,
+                message="done",
+            ),
+        )
+
 
 @pytest.fixture
 def live_client():
@@ -171,6 +197,60 @@ def test_missing_result_is_protocol_error(live_client):
 
     with pytest.raises(CapabilityProtocolError):
         invoke(client)
+
+
+def test_typed_stream_forwards_chunks_and_terminal_marker(live_client):
+    client, service = live_client
+
+    chunks = list(
+        client.invoke_stream(
+            capability="example.v1",
+            interface_version="1",
+            method="run",
+            request=TypedPayload(REQUEST_TYPE, b"request"),
+            binding_id="binding-main",
+            deadline_seconds=2.0,
+        )
+    )
+
+    assert chunks == [TypedPayload(RESPONSE_TYPE, b"first")]
+    assert len(service.requests) == 1
+
+
+def test_typed_stream_rejects_eof_without_terminal_marker(live_client):
+    client, service = live_client
+    service.behavior = "stream-eof"
+
+    with pytest.raises(CapabilityProtocolError, match="terminal marker"):
+        list(
+            client.invoke_stream(
+                capability="example.v1",
+                interface_version="1",
+                method="run",
+                request=TypedPayload(REQUEST_TYPE, b"request"),
+                binding_id="binding-main",
+                deadline_seconds=2.0,
+            )
+        )
+
+
+def test_typed_stream_accepts_pre_execution_error_sequence_zero(live_client):
+    client, service = live_client
+    service.behavior = "stream-activation-error"
+
+    with pytest.raises(CapabilityExecutionFailure, match="worker activation failed") as captured:
+        list(
+            client.invoke_stream(
+                capability="example.v1",
+                interface_version="1",
+                method="run",
+                request=TypedPayload(REQUEST_TYPE, b"request"),
+                binding_id="binding-main",
+                deadline_seconds=2.0,
+            )
+        )
+
+    assert captured.value.code == execution_pb2.CapabilityExecutionError.CODE_ACTIVATION_FAILED
 
 
 def test_model_provider_projection_preserves_optional_presence_and_type_urls():
