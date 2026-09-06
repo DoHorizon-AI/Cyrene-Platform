@@ -2799,6 +2799,7 @@ impl LocalKernelAuthority {
                 "lease generation no longer has authority",
             ));
         }
+        let retrying_failed_cleanup = current.state == LeaseState::Failed;
         self.record_runtime(
             RuntimeJournalEvent::LeaseReleaseStarted,
             None,
@@ -2869,6 +2870,16 @@ impl LocalKernelAuthority {
                         .unwrap_or_else(|| worker_id.clone()),
                 )
             } else {
+                if retrying_failed_cleanup {
+                    let _ = self
+                        .runtime
+                        .daemon
+                        .fail_release(&releasing.name, fence_token);
+                    return Err(Self::rejection(
+                        "CLEANUP_INCOMPLETE",
+                        "a failed lease has no managed actor to prove physical cleanup",
+                    ));
+                }
                 (None, String::new())
             }
         };
