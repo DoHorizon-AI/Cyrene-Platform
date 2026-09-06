@@ -25,7 +25,8 @@
     },
     "manifest_digest": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Digest of a canonical multi-file directory index when the artifact is a directory; for a portable V2 directory this identifies the manifest bytes described by portable_directory_manifest.schema.json."
     }
   }
 }

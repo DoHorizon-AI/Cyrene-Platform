@@ -28,8 +28,11 @@ from typing import Any, Optional, Sequence, Tuple
 
 from .contracts import (
     ARTIFACT_MANIFEST_VERSION,
+    ArtifactDirectoryEntry,
     ArtifactKind,
     ArtifactRef,
+    PORTABLE_DIRECTORY_MANIFEST_VERSION,
+    PortableDirectoryManifest,
     ResolvedArtifact,
     StagedArtifact,
     _canonical_json,
@@ -37,6 +40,7 @@ from .contracts import (
     artifact_uri_for_digest,
     sha256_file,
     sha256_bytes,
+    _ascii_casefold_path,
 )
 
 
@@ -219,6 +223,108 @@ class LocalArtifactProvider:
             )
         raise ArtifactNotFoundError(f"artifact source does not exist: {source_path}")
 
+    def publish_portable_directory(
+        self,
+        source: str | Path,
+        *,
+        kind: ArtifactKind = ArtifactKind.GENERIC,
+    ) -> ArtifactRef:
+        """Publish a directory using the public portable V2 contract.
+
+        The complete tree is checked before any blob is committed.  The
+        resulting manifest contains only logical paths, raw blob digests and
+        sizes; producer metadata belongs in the separate ArtifactManifest.
+        """
+
+        source_path = Path(source)
+        if source_path.is_symlink() or not source_path.is_dir():
+            raise ArtifactError(f"portable directory source must be a real directory: {source_path}")
+
+        source_files = self._collect_portable_source_files(source_path)
+        entries: list[ArtifactDirectoryEntry] = []
+        for relative, path in source_files:
+            if path.is_symlink() or not path.is_file():
+                raise ArtifactError(f"portable directory member changed during publish: {path}")
+            digest, size_bytes = self._store_file(path)
+            entries.append(
+                ArtifactDirectoryEntry(
+                    path=relative,
+                    digest=digest,
+                    size_bytes=size_bytes,
+                )
+            )
+
+        manifest = PortableDirectoryManifest(
+            version=PORTABLE_DIRECTORY_MANIFEST_VERSION,
+            files=tuple(entries),
+            size_bytes=sum(entry.size_bytes for entry in entries),
+        )
+        digest = manifest.computed_digest()
+        self._commit_portable_manifest(manifest, digest)
+        return manifest.to_artifact_ref(kind)
+
+    @staticmethod
+    def _collect_portable_source_files(source: Path) -> list[tuple[str, Path]]:
+        """Preflight a directory tree before copying any member into the CAS."""
+
+        files: list[tuple[str, Path]] = []
+        for root, directories, names in os.walk(
+            source,
+            topdown=True,
+            onerror=LocalArtifactProvider._raise_walk_error,
+            followlinks=False,
+        ):
+            root_path = Path(root)
+            for directory in directories:
+                candidate = root_path / directory
+                if candidate.is_symlink():
+                    raise ArtifactError(f"symbolic links are not valid portable members: {candidate}")
+                if not candidate.is_dir():
+                    raise ArtifactError(f"portable directory member is not a directory: {candidate}")
+            for name in names:
+                candidate = root_path / name
+                if candidate.is_symlink():
+                    raise ArtifactError(f"symbolic links are not valid portable members: {candidate}")
+                if not candidate.is_file():
+                    raise ArtifactError(f"portable directory member is not a regular file: {candidate}")
+                relative = candidate.relative_to(source).as_posix()
+                ArtifactDirectoryEntry(
+                    path=relative,
+                    digest="sha256:" + "0" * 64,
+                    size_bytes=0,
+                )
+                files.append((relative, candidate))
+
+        files.sort(key=lambda item: item[0])
+        paths = [relative for relative, _ in files]
+        folded_prefixes: dict[str, str] = {}
+        exact = set(paths)
+        if len(paths) != len(exact):
+            raise ArtifactError("portable directory contains duplicate paths")
+        for path in paths:
+            prefix: list[str] = []
+            for component in path.split("/"):
+                prefix.append(component)
+                prefix_path = "/".join(prefix)
+                folded_path = _ascii_casefold_path(prefix_path)
+                previous = folded_prefixes.setdefault(folded_path, prefix_path)
+                if previous != prefix_path:
+                    raise ArtifactError(
+                        "portable directory contains an ASCII case-insensitive path collision: "
+                        f"{previous!r} and {prefix_path!r}"
+                    )
+                if prefix_path != path and prefix_path in exact:
+                    raise ArtifactError(
+                        f"portable directory has a file/directory path conflict at {prefix_path!r}"
+                    )
+        return files
+
+    @staticmethod
+    def _raise_walk_error(error: OSError) -> None:
+        """Turn an unreadable source directory into a failed publication."""
+
+        raise ArtifactError(f"cannot read portable directory: {error}") from error
+
     def publish_bytes(
         self,
         payload: bytes,
@@ -249,16 +355,43 @@ class LocalArtifactProvider:
             if not manifest_path.is_file():
                 raise ArtifactNotFoundError(f"artifact manifest is missing: {artifact_ref.uri}")
             try:
-                manifest = LocalDirectoryManifest.from_bytes(manifest_path.read_bytes())
+                payload = manifest_path.read_bytes()
+                wire = json.loads(payload.decode("utf-8"))
+                if wire.get("version") == PORTABLE_DIRECTORY_MANIFEST_VERSION:
+                    portable_manifest = PortableDirectoryManifest.from_bytes(payload)
+                    if payload != portable_manifest.canonical_bytes():
+                        raise ArtifactIntegrityError(
+                            f"portable artifact manifest is not canonical: {artifact_ref.uri}"
+                        )
+                    expected_digest = portable_manifest.computed_digest()
+                    if expected_digest != artifact_ref.manifest_digest:
+                        raise ArtifactIntegrityError(
+                            f"portable artifact manifest digest mismatch: {artifact_ref.uri}"
+                        )
+                    if (
+                        artifact_ref.digest != expected_digest
+                        or artifact_ref.size_bytes != portable_manifest.size_bytes
+                    ):
+                        raise ArtifactIntegrityError(f"artifact reference metadata mismatch: {artifact_ref.uri}")
+                    for portable_item in portable_manifest.files:
+                        self._verify_blob(portable_item.digest, portable_item.size_bytes)
+                    return ResolvedArtifact(
+                        artifact_ref=artifact_ref,
+                        location=manifest_path,
+                        manifest=portable_manifest,
+                    )
+                legacy_manifest = LocalDirectoryManifest.from_bytes(payload)
             except Exception as exc:
+                if isinstance(exc, ArtifactIntegrityError):
+                    raise
                 raise ArtifactIntegrityError(f"invalid artifact manifest: {manifest_path}") from exc
-            if manifest.digest != artifact_ref.manifest_digest or not manifest.verify_digest():
+            if legacy_manifest.digest != artifact_ref.manifest_digest or not legacy_manifest.verify_digest():
                 raise ArtifactIntegrityError(f"artifact manifest digest mismatch: {artifact_ref.uri}")
-            if manifest.uri != artifact_ref.uri or manifest.size_bytes != artifact_ref.size_bytes:
+            if legacy_manifest.uri != artifact_ref.uri or legacy_manifest.size_bytes != artifact_ref.size_bytes:
                 raise ArtifactIntegrityError(f"artifact reference metadata mismatch: {artifact_ref.uri}")
-            for item in manifest.files:
-                self._verify_blob(item.digest, item.size_bytes)
-            return ResolvedArtifact(artifact_ref=artifact_ref, location=manifest_path, manifest=manifest)
+            for legacy_item in legacy_manifest.files:
+                self._verify_blob(legacy_item.digest, legacy_item.size_bytes)
+            return ResolvedArtifact(artifact_ref=artifact_ref, location=manifest_path, manifest=legacy_manifest)
 
         blob_path = self._blob_path(artifact_ref.digest)
         self._verify_blob(artifact_ref.digest, artifact_ref.size_bytes)
@@ -371,6 +504,25 @@ class LocalArtifactProvider:
         finally:
             temp.unlink(missing_ok=True)
 
+    def _commit_portable_manifest(self, manifest: PortableDirectoryManifest, digest: str) -> None:
+        temp = self._new_temp_path("portable-manifest-")
+        try:
+            payload = manifest.canonical_bytes()
+            if sha256_bytes(payload) != digest:
+                raise ArtifactIntegrityError("portable directory manifest digest changed before commit")
+            with temp.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            final = self._manifest_path(digest)
+            self._atomic_commit(
+                temp,
+                final,
+                lambda path: self._verify_portable_manifest_at_path(path, digest),
+            )
+        finally:
+            temp.unlink(missing_ok=True)
+
     def _atomic_commit(self, temp: Path, final: Path, verify_existing) -> None:
         final.parent.mkdir(parents=True, exist_ok=True)
         if final.exists():
@@ -404,6 +556,17 @@ class LocalArtifactProvider:
         manifest = LocalDirectoryManifest.from_bytes(path.read_bytes())
         if manifest.digest != expected_digest or not manifest.verify_digest():
             raise ArtifactIntegrityError(f"artifact manifest digest mismatch: {path}")
+
+    @staticmethod
+    def _verify_portable_manifest_at_path(path: Path, expected_digest: str) -> None:
+        if path.is_symlink() or not path.is_file():
+            raise ArtifactNotFoundError(f"portable artifact manifest is missing: {path}")
+        payload = path.read_bytes()
+        manifest = PortableDirectoryManifest.from_bytes(payload)
+        if payload != manifest.canonical_bytes():
+            raise ArtifactIntegrityError(f"portable artifact manifest is not canonical: {path}")
+        if manifest.computed_digest() != expected_digest:
+            raise ArtifactIntegrityError(f"portable artifact manifest digest mismatch: {path}")
 
     def _blob_path(self, digest: str) -> Path:
         normalized = digest.split(":", 1)[-1]
@@ -449,7 +612,9 @@ class LocalArtifactStager:
             if target.is_file() and sha256_file(target, chunk_size=self.provider.chunk_size) == (digest, size_bytes):
                 return
             raise ArtifactIntegrityError(f"staged target does not match artifact: {target}")
-        temp = target.parent / f".{target.name}.stage-{next(tempfile._get_candidate_names())}"
+        temp_fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.stage-", dir=str(target.parent))
+        os.close(temp_fd)
+        temp = Path(temp_name)
         try:
             hasher = hashlib.sha256()
             copied = 0
@@ -467,7 +632,11 @@ class LocalArtifactStager:
         finally:
             temp.unlink(missing_ok=True)
 
-    def _stage_directory(self, manifest: LocalDirectoryManifest, target: Path) -> None:
+    def _stage_directory(
+        self,
+        manifest: LocalDirectoryManifest | PortableDirectoryManifest,
+        target: Path,
+    ) -> None:
         if target.is_symlink():
             raise ArtifactIntegrityError(f"staged target must not be a symbolic link: {target}")
         if target.exists():
@@ -484,7 +653,11 @@ class LocalArtifactStager:
             if temp.exists():
                 shutil.rmtree(temp)
 
-    def _verify_staged_directory(self, manifest: LocalDirectoryManifest, target: Path) -> None:
+    def _verify_staged_directory(
+        self,
+        manifest: LocalDirectoryManifest | PortableDirectoryManifest,
+        target: Path,
+    ) -> None:
         if not target.is_dir():
             raise ArtifactIntegrityError(f"staged target is not a directory: {target}")
         items = list(target.rglob("*"))

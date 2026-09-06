@@ -132,9 +132,51 @@ The same guarantee holds for the immutable resources: the reference inputs
 | `TrainingRevision`   | `manifests/training_revision.schema.json`   | `revision_id`         | `revision_id`        |
 | `CheckpointMetadata` | `manifests/checkpoint_metadata.schema.json` | `checkpoint_id`       | `checkpoint_id`      |
 | `ArtifactManifest`   | `manifests/artifact_manifest.schema.json`   | `artifact_id`         | `artifact_id`        |
+| `PortableDirectoryManifest` | `manifests/portable_directory_manifest.schema.json` | `sha256:<canonical-bytes>` | none (digest is external) |
 
 The three new immutable resources compute their id exactly as `RuntimeManifest`
 does: `id = "sha256:" + hex(sha256(canonical_bytes(record_without_its_id)))`.
 `WhyReport` and `ValidationResult` are not immutable and carry no published id,
 but the reference implementation still exposes `canonical_bytes()` /
 `canonical_sha256_hex()` for change detection.
+
+## 7. Portable directory identity | Portable 目录身份
+
+The public directory index in `manifests/portable_directory_manifest.schema.json`
+uses the explicit integer `version: 2`. Its hash preimage is the complete
+canonical object containing only `version`, the strictly path-sorted `files`
+array, and logical `size_bytes`:
+
+```text
+{"files":[{"digest":"sha256:<raw-blob>","path":"relative/name","size_bytes":N}],"size_bytes":N,"version":2}
+```
+
+`ArtifactRef.manifest_digest` and the directory `ArtifactRef.digest` identify
+this canonical index. `ArtifactRef.size_bytes` is the sum of raw member bytes;
+the byte length of the manifest is not included. A member digest is always
+computed from the exact CAS bytes, never from display metadata. The provider
+may keep `ArtifactManifest` for kind/source/lineage metadata because those
+fields do not belong in the portable directory preimage.
+
+The legacy Python `LocalDirectoryManifest` version 1 keeps its historical
+identity payload `{version, files, size_bytes}` and remains readable. New
+portable publication uses version 2 explicitly; implementations reject unsafe
+paths, duplicate/prefix-conflicting files, ASCII case-insensitive aliases at
+any directory prefix, symlinks, and any size or digest mismatch before
+publication or materialization. V2 is Linux-first: Unicode case mapping and
+normalization are not part of the identity or collision key. A materializer
+targeting Windows or another filesystem must apply that filesystem's own
+reserved-name, alternate-data-stream, trailing-space, and normalization rules.
+
+`manifests/portable_directory_manifest.schema.json` 中的公共目录索引使用明确的
+整数 `version: 2`。其哈希原像是只包含 `version`、严格按路径排序的 `files` 数组
+和逻辑 `size_bytes` 的完整 canonical 对象。目录 `ArtifactRef` 的 `digest` 与
+`manifest_digest` 标识该索引；`size_bytes` 是 raw 成员字节之和，不含 manifest
+文件长度。成员 digest 永远来自精确 CAS 字节，不来自展示元数据。
+
+旧 Python `LocalDirectoryManifest` V1 保留历史 `{version, files, size_bytes}` 身份
+并继续可读；新的 portable 发布显式使用 V2。发布或 materialize 前必须拒绝不安全
+路径、重复/前缀冲突、每个目录前缀上的 ASCII 大小写别名、符号链接以及
+size/digest 不匹配。V2 以 Linux 为优先目标，不把 Unicode 大小写映射或规范化
+写入身份/冲突规则；面向 Windows 或其他文件系统的 materializer 还必须执行目标
+文件系统自己的保留名、ADS、尾部空格和规范化限制。

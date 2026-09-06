@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "files": [
+    {
+      "path": "weights.bin",
+      "digest": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "size_bytes": 3
+    },
+    {
+      "path": "z/é.txt",
+      "digest": "sha256:06eb7d6a69ee19e5fbdf749018d3d2abfa04bcbd1365db312eb86dc7169389b8",
+      "size_bytes": 2
+    },
+    {
+      "path": "模型/空.txt",
+      "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    }
+  ],
+  "size_bytes": 5
+}

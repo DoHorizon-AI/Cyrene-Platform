@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cy-llm.dev/schemas/manifests/portable_directory_manifest.schema.json",
+  "title": "PortableDirectoryManifestV2",
+  "description": "A provider-neutral, content-addressed directory index. Its canonical identity is the JCS encoding of version, sorted files, and logical size_bytes. Provider metadata, URI, and the manifest byte length are outside the identity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "files", "size_bytes"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Portable directory contract version. Version 1 remains the legacy Python provider format."
+    },
+    "files": {
+      "type": "array",
+      "description": "Strictly path-sorted regular-file entries. Directories are implicit and symbolic links are forbidden.",
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Logical directory root size: the sum of raw file sizes. The canonical manifest byte length is not included."
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "digest", "size_bytes"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical POSIX-relative path. Runtime validation rejects absolute paths, '.', '..', backslashes, drive prefixes, controls, duplicates, prefix conflicts, and ASCII case-insensitive aliases at any directory prefix. V2 is Linux-first; a Windows materializer must additionally apply target-filesystem restrictions."
+        },
+        "digest": { "$ref": "#/$defs/digest" },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}
