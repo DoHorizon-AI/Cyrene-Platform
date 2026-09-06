@@ -485,10 +485,19 @@ impl KernelServiceAdapter {
             Some(lease_ref),
             "LEASE_RELEASE_STARTED",
         )?;
+        let retrying_failed_cleanup =
+            self.daemon.lease(&lease_ref.lease_name)?.state == cy_kernel_api::LeaseState::Failed;
         let releasing = self
             .daemon
             .begin_release(&lease_ref.lease_name, lease_ref.fence_token)?;
         let outcome = self.confirm_lease_cleanup(lease_ref).and_then(|cleaned| {
+            if retrying_failed_cleanup && cleaned.is_none() {
+                return Err(ProviderError::new(
+                    "kernel-daemon",
+                    "CLEANUP_INCOMPLETE",
+                    "a failed lease has no managed actor to prove physical cleanup",
+                ));
+            }
             self.record_runtime(
                 RuntimeJournalEvent::LeaseReleased,
                 cleaned.as_deref(),

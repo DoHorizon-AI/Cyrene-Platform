@@ -3695,6 +3695,32 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
         "a lease whose cleanup could not be confirmed must remain FAILED, not RELEASED"
     );
 
+    // A FAILED legacy lease cannot be released after its actor disappears:
+    // without a managed actor, a same-fence retry has no physical cleanup
+    // proof and must keep the allocation held.
+    adapter.instances.lock().unwrap().remove("stuck-instance");
+    let missing_actor_retry = runtime.block_on(adapter.release_lease(Request::new(
+        core_v1::ReleaseLeaseRequest {
+            mutation: None,
+            lease: Some(lease_identity.clone()),
+            fence_token,
+        },
+    )));
+    assert_eq!(
+        missing_actor_retry
+            .unwrap_err()
+            .metadata()
+            .get("x-cyrene-reason-code")
+            .and_then(|value| value.to_str().ok()),
+        Some("CLEANUP_INCOMPLETE"),
+        "a FAILED lease without an actor must fail closed"
+    );
+    assert_eq!(
+        adapter.daemon.lease(&lease_identity.id).unwrap().state,
+        cy_kernel_api::LeaseState::Failed,
+        "a missing actor must not make a FAILED lease reusable"
+    );
+
     // The half-cleaned resource must NOT be reacquired by another lease.
     let reacquire = runtime.block_on(adapter.acquire_lease(Request::new(
         core_v1::AcquireLeaseRequest {
