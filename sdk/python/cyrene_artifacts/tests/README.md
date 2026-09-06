@@ -21,6 +21,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | --- | --- | --- |
 | `conftest.py` | Python SDK, TCK, or test module. | Python SDK、TCK 或测试模块。 |
 | `test_contracts.py` | Python SDK, TCK, or test module. | Python SDK、TCK 或测试模块。 |
+| `test_portable_directory.py` | Cross-language portable directory contract and provider tests. | 跨语言 portable 目录契约与 provider 测试。 |
 | `fixtures/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.

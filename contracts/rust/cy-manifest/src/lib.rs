@@ -97,6 +97,8 @@ impl Manifest for ArtifactManifest {
     }
 }
 
+impl Manifest for PortableDirectoryManifest {}
+
 /// 计算 [`RuntimeManifest`]（运行时环境清单）的唯一内容标识符 `runtime_id`。
 ///
 /// 计算公式：`runtime_id = "sha256:" + hex(sha256(canonical_bytes(manifest_without_runtime_id)))`
@@ -117,6 +119,15 @@ pub fn checkpoint_id(manifest: &CheckpointMetadata) -> String {
 /// 计算 [`ArtifactManifest`]（产物清单）的唯一内容标识符 `artifact_id`。
 pub fn artifact_id(manifest: &ArtifactManifest) -> String {
     format!("sha256:{}", manifest.canonical_sha256_hex())
+}
+
+/// 计算 portable directory manifest 的内容标识符。
+///
+/// The caller should validate the manifest before publishing.  The digest is
+/// over the directory index itself; each entry's `digest` remains the raw CAS
+/// content digest and provider metadata is outside this preimage.
+pub fn portable_directory_id(manifest: &PortableDirectoryManifest) -> String {
+    manifest.computed_digest()
 }
 
 /// 从 JSON 字符串反序列化解析出 [`RuntimeManifest`]。
@@ -239,6 +250,35 @@ mod tests {
         wrong_dependency_location["optional_plugins"] = serde_json::json!(["bad-location"]);
         assert!(validate_plugin_schema(&wrong_dependency_location).is_err());
         assert!(serde_json::from_value::<PluginManifest>(wrong_dependency_location).is_err());
+    }
+
+    #[test]
+    fn portable_directory_fixture_passes_schema_and_rust_validation() {
+        let value: Value = serde_json::from_str(include_str!(
+            "../../../schemas/examples/portable_directory_manifest.example.json"
+        ))
+        .expect("portable directory fixture must be valid JSON");
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/manifests/portable_directory_manifest.schema.json"
+        ))
+        .expect("portable directory schema must be valid JSON");
+        let compiled = jsonschema::JSONSchema::compile(&schema)
+            .expect("portable directory schema must compile");
+        let errors: Vec<String> = compiled
+            .validate(&value)
+            .err()
+            .into_iter()
+            .flat_map(|items| items.map(|error| error.to_string()))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "portable directory fixture must pass JSON Schema: {errors:?}"
+        );
+        let manifest: PortableDirectoryManifest =
+            serde_json::from_value(value).expect("portable directory fixture must parse");
+        manifest
+            .validate()
+            .expect("portable directory fixture must pass semantic validation");
     }
 
     #[test]

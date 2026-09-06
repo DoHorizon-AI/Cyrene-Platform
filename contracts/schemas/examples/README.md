@@ -21,6 +21,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | --- | --- | --- |
 | `artifact_manifest.example.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `plugin_manifest.example.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
+| `portable_directory_manifest.example.json` | Cross-language portable directory manifest vector. | 跨语言 portable 目录 manifest 向量。 |
 | `runtime_manifest.example.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `runtime_manifest.example.yaml` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `training_revision.example.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
