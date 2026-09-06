@@ -1,0 +1,156 @@
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feat/*
+      - fix/*
+      - chore/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+- job: docs
+  displayName: 'Platform / Documentation Validation'
+  timeoutInMinutes: 10
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+  - script: python tooling/docs/validate_docs.py
+    displayName: 'Validate documentation links and indexes'
+
+- job: governance
+  displayName: 'Platform / Architecture Governance'
+  timeoutInMinutes: 10
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+  - script: |
+      python -m pip install pytest hypothesis
+      python tooling/ci/check_service_boundaries.py
+      python -m pytest tooling/ci/test_check_service_boundaries.py
+    displayName: 'Run architecture boundary guard'
+
+- job: jvm_boundary
+  displayName: 'Platform / JVM Authority Boundary'
+  timeoutInMinutes: 15
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - script: |
+      set -e
+      echo "Setting up Java 25 (Adoptium Temurin EA)..."
+      mkdir -p $HOME/jdk-25
+      curl -sL "https://api.adoptium.net/v3/binary/latest/25/ea/linux/x64/jdk/hotspot/normal/eclipse" | tar -xz -C $HOME/jdk-25 --strip-components=1
+      echo "##vso[task.setvariable variable=JAVA_HOME]$HOME/jdk-25"
+      echo "##vso[task.prependpath]$HOME/jdk-25/bin"
+    displayName: 'Setup Java 25'
+  - script: |
+      set -e
+      java -version
+      if [ -f "./gradlew" ]; then
+        ./gradlew --no-daemon -p framework/jvm test
+      elif command -v gradle >/dev/null 2>&1; then
+        gradle --no-daemon -p framework/jvm test
+      else
+        echo "Installing pinned Gradle 9.5.0..."
+        curl -sL https://services.gradle.org/distributions/gradle-9.5-bin.zip -o /tmp/gradle.zip
+        unzip -q /tmp/gradle.zip -d /tmp
+        /tmp/gradle-9.5/bin/gradle --no-daemon -p framework/jvm test
+      fi
+    displayName: 'Test JVM authority boundary'
+
+- job: python_sdk
+  displayName: 'Platform / Python SDKs & Tooling'
+  timeoutInMinutes: 20
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+  - script: |
+      python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0"
+      python -m pip install -e sdk/python/cyrene_artifacts
+      python -m pip install -e sdk/python/cyrene_environment
+      python -m pip install -e sdk/python/cyrene_preflight
+      python -m pip install -e sdk/python/cyrene_control_plane
+      python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
+    displayName: 'Install Python SDKs and dependencies'
+  - script: |
+      python sdk/python/cyrene_capability_client/scripts/generate_proto.py --check
+      python -m pytest sdk/python/cyrene_capability_client/tests
+      if [ -f "sdk/python/cyrene_worker_shim/test_stream_item_wire.py" ]; then
+        python -m pytest sdk/python/cyrene_worker_shim/test_stream_item_wire.py
+      fi
+      python -m pytest sdk/python/cyrene_artifacts/tests
+      python -m pytest sdk/python/cyrene_environment/tests
+      python -m pytest sdk/python/cyrene_preflight/tests
+      python -m pytest sdk/python/cyrene_control_plane/tests
+      python -m pytest tooling/workspace/tests
+      python -m pytest tooling/docs/tests
+      python -m pytest tooling/ci/tests
+    displayName: 'Run SDK unit tests'
+
+- job: platform_core
+  displayName: 'Platform / Core Rust Workspace'
+  timeoutInMinutes: 30
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - script: |
+      rustup update stable
+      rustup component add rustfmt clippy
+    displayName: 'Setup Rust toolchain'
+  - script: cargo fmt --check
+    displayName: 'Check Rust formatting'
+  - script: cargo check --locked --workspace --all-targets
+    displayName: 'Check Cargo workspace (--locked)'
+  - script: cargo clippy --locked --workspace --all-targets -- -D warnings
+    displayName: 'Run Clippy'
+  - script: cargo test --locked --workspace
+    displayName: 'Run Rust unit tests (--locked)'
+
+- job: platform_evidence
+  displayName: 'Platform / Assemble Evidence'
+  dependsOn:
+  - docs
+  - governance
+  - jvm_boundary
+  - python_sdk
+  - platform_core
+  condition: succeeded()
+  steps:
+  - script: |
+      mkdir -p ci/evidence
+      cat <<EOF > ci/evidence/platform-summary.json
+      {
+        "suite": "Cyrene-Platform",
+        "commit": "$(Build.SourceVersion)",
+        "build_id": "$(Build.BuildId)",
+        "status": "PASS",
+        "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      }
+      EOF
+    displayName: 'Generate Sanitized Platform Evidence'
+  - publish: ci/evidence
+    artifact: platform-evidence
+    displayName: 'Publish Platform Evidence Artifact'
