@@ -25,3 +25,8 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+
+Immediate cleanup reaps a tracked child even when its cgroup is already empty.
+This lets Kernel release the allocation after a model process exits during loading.
+
+立即清理也会回收空 cgroup 对应的子进程,使模型加载失败后的资源可以由 Kernel 释放。

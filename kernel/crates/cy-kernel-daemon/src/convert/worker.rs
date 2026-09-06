@@ -8,7 +8,7 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 use std::collections::BTreeMap;
 
-use cy_kernel_api::{semantic, ProviderError};
+use cy_kernel_api::{semantic, CgroupLimits, ProviderError};
 use cy_proto::{core_v1, semantic_v1};
 use tonic::Status;
 
@@ -20,6 +20,44 @@ use crate::{
     session::{ManagedProcess, WorkerHeartbeatConfig},
     watchdog::InstanceActorState,
 };
+
+/// Map supported generic Worker ceilings into enforced cgroup limits.
+/// Existing Lease ceilings can only be tightened, never discarded or relaxed.
+/// 将 Worker 执行上限映射到 cgroup; 既有 Lease 上限只能收紧。
+pub(crate) fn enforced_worker_limits(
+    lease: &CgroupLimits,
+    requested: &BTreeMap<String, semantic::Quantity>,
+) -> Result<CgroupLimits, semantic::Rejection> {
+    let mut limits = lease.clone();
+    for (name, quantity) in requested {
+        let reject = || semantic::Rejection {
+            reason_code: "WORKER_LIMIT_UNSUPPORTED".to_string(),
+            message: format!("unsupported Worker limit or unit: {name}"),
+        };
+        if quantity.value == 0 {
+            return Err(reject());
+        }
+        match (name.as_str(), quantity.unit.as_str()) {
+            ("memory.bytes", "byte") => {
+                limits.memory_max_bytes = Some(
+                    limits
+                        .memory_max_bytes
+                        .map_or(quantity.value, |value| value.min(quantity.value)),
+                );
+            }
+            ("cpu.time", "millicore") => {
+                let value = u32::try_from(quantity.value).map_err(|_| reject())?;
+                limits.cpu_max_millicores = Some(
+                    limits
+                        .cpu_max_millicores
+                        .map_or(value, |current| current.min(value)),
+                );
+            }
+            _ => return Err(reject()),
+        }
+    }
+    Ok(limits)
+}
 
 pub(crate) fn to_plugin_instance(
     daemon: &KernelDaemon,
@@ -205,4 +243,66 @@ pub(crate) fn inject_heartbeat_environment(
     }
     environment.extend(injected.map(|(key, value)| (key.to_string(), value)));
     Ok(environment)
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn worker_ceilings_never_relax_existing_lease_or_cpuset() {
+        let lease = CgroupLimits {
+            memory_max_bytes: Some(1024),
+            cpu_max_millicores: Some(2000),
+            cpuset_cpus: Some("0-1".to_string()),
+        };
+        let requested = BTreeMap::from([
+            (
+                "memory.bytes".to_string(),
+                semantic::Quantity {
+                    value: 4096,
+                    unit: "byte".to_string(),
+                },
+            ),
+            (
+                "cpu.time".to_string(),
+                semantic::Quantity {
+                    value: 500,
+                    unit: "millicore".to_string(),
+                },
+            ),
+        ]);
+        let actual = enforced_worker_limits(&lease, &requested).unwrap();
+        assert_eq!(actual.memory_max_bytes, Some(1024));
+        assert_eq!(actual.cpu_max_millicores, Some(500));
+        assert_eq!(actual.cpuset_cpus.as_deref(), Some("0-1"));
+        let no_lease_ceiling =
+            enforced_worker_limits(&CgroupLimits::default(), &requested).unwrap();
+        assert_eq!(no_lease_ceiling.memory_max_bytes, Some(4096));
+        assert_eq!(no_lease_ceiling.cpu_max_millicores, Some(500));
+    }
+
+    #[test]
+    fn unknown_units_limits_zero_and_overflow_are_rejected_before_launch() {
+        for (key, value, unit) in [
+            ("memory.bytes", 10, "gibibyte"),
+            ("memory.bytes", 0, "byte"),
+            ("cpu.time", u64::from(u32::MAX) + 1, "millicore"),
+            ("unknown.ceiling", 10, "byte"),
+        ] {
+            let requested = BTreeMap::from([(
+                key.to_string(),
+                semantic::Quantity {
+                    value,
+                    unit: unit.to_string(),
+                },
+            )]);
+            assert_eq!(
+                enforced_worker_limits(&CgroupLimits::default(), &requested)
+                    .unwrap_err()
+                    .reason_code,
+                "WORKER_LIMIT_UNSUPPORTED"
+            );
+        }
+    }
 }

@@ -300,7 +300,14 @@ impl KernelDaemon {
                 .enforcement
                 .into_iter()
                 .map(|report| core_v1::EnforcementReport {
-                    resource_kind: core_v1::ResourceKind::Accelerator as i32,
+                    // A process-tree cgroup report does not prove GPU device isolation.
+                    // 进程树监管不能作为 GPU 设备硬隔离证据。
+                    resource_kind: match report.resource_kind.as_str() {
+                        "cpu" | "compute.cpu" => core_v1::ResourceKind::Cpu,
+                        "memory" | "memory.ram" => core_v1::ResourceKind::Memory,
+                        "accelerator" => core_v1::ResourceKind::Accelerator,
+                        _ => core_v1::ResourceKind::Unspecified,
+                    } as i32,
                     mode: to_proto_enforcement(report.mode) as i32,
                     adapter_id: report.adapter_id,
                     reason_code: report.reason_code,

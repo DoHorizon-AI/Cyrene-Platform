@@ -11,3 +11,6 @@ cy-proto = { path = "../../../contracts/rust/cy-proto" }
 prost = "0.12"
 prost-types = "0.12"
 nix = { version = "0.29", features = ["socket", "user", "process"] }
+
+[dev-dependencies]
+tempfile = "3.8"

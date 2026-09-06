@@ -140,7 +140,11 @@ impl ResourceProvider for TestHardware {
         Ok(DeviceBinding {
             resource_id: resource.identity.id.clone(),
             nodes: Vec::new(),
-            environment: BTreeMap::new(),
+            environment: resource
+                .attributes
+                .get("test.binding.selector")
+                .map(|value| BTreeMap::from([("TEST_DEVICE_SELECTION".to_string(), value.clone())]))
+                .unwrap_or_default(),
             joinable_environment_keys: Default::default(),
             required_gids: Vec::new(),
             enforcement: EnforcementMode::Hard,
@@ -610,6 +614,109 @@ impl InstalledPluginResolver for TestWorkerResolver {
 
 fn semantic_worker_adapter() -> KernelServiceAdapter {
     semantic_worker_adapter_with_resources(vec![test_resource()])
+}
+
+#[test]
+fn canonical_start_worker_preserves_limits_and_runtime_owned_device_injection() {
+    struct CaptureSandbox(Mutex<Vec<CgroupLimits>>);
+    impl ProcessRuntime for CaptureSandbox {
+        fn preflight(&self) -> NodeCapabilities {
+            FakeSandbox.preflight()
+        }
+        fn launch(
+            &self,
+            plan: &LaunchPlan,
+            binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            // Exercise the real sandbox binding boundary, which rejects a second injection.
+            // 设备变量必须到运行时才注入,不能被误认为插件覆盖。
+            let environment = binding.merge_environment(&plan.environment)?;
+            assert_eq!(
+                environment.get("TEST_DEVICE_SELECTION").unwrap(),
+                "device-0"
+            );
+            self.0.lock().unwrap().push(plan.limits.clone());
+            FakeSandbox.launch(plan, binding)
+        }
+        fn stop(
+            &self,
+            handle: &ProcessHandle,
+            request: &StopRequest,
+        ) -> Result<CleanupReport, ProviderError> {
+            FakeSandbox.stop(handle, request)
+        }
+    }
+    impl SandboxBackend for CaptureSandbox {
+        fn backend_id(&self) -> &str {
+            "capture-limits"
+        }
+    }
+    let mut resource = test_resource();
+    resource
+        .attributes
+        .insert("test.binding.selector".to_string(), "device-0".to_string());
+    let resources = vec![resource];
+    let hardware = Arc::new(TestHardware {
+        resources: resources.clone(),
+    });
+    let sandbox = Arc::new(CaptureSandbox(Mutex::new(Vec::new())));
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", resources)),
+        sandbox.clone(),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
+    let authority = adapter.authority();
+    let context = scoped_authority_context("default", "worker-limits");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let identity = semantic::Identity {
+        id: "limited-worker".to_string(),
+        generation: 1,
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            identity.clone(),
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: Vec::new(),
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms() + 30_000,
+        )
+        .unwrap();
+    authority
+        .start_worker(
+            &context,
+            &principal,
+            semantic::Worker {
+                identity,
+                principal: principal.identity.clone(),
+                provider: semantic::Identity {
+                    id: "provider".to_string(),
+                    generation: 1,
+                },
+                lease: lease.identity,
+                state: semantic::WorkerState::Registered,
+                execution_ref: "opaque-installed-worker".to_string(),
+                limits: BTreeMap::from([(
+                    "memory.bytes".to_string(),
+                    semantic::Quantity {
+                        value: 24 * 1024 * 1024 * 1024,
+                        unit: "byte".to_string(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+    let observed = sandbox.0.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].memory_max_bytes, Some(24 * 1024 * 1024 * 1024));
 }
 
 fn semantic_worker_adapter_with_resources(
@@ -2786,7 +2893,23 @@ fn hardware_adapters_publish_separate_resource_only_provider_snapshots() {
         "the allocation ledger retains its independent aggregate generation"
     );
 
+    // Fresh unchanged observations must advance publication and retain resource identity.
+    // 硬件未变化的新采样仍需刷新发布代次及有效期,但不能更换资源身份。
+    std::thread::sleep(Duration::from_millis(2));
     adapter.sync_hardware_provider_facts().unwrap();
+    let records = authority.runtime.providers.lock().unwrap();
+    for (id, generation, resource_generation) in [("adapter-a", 41, 17), ("adapter-b", 58, 29)] {
+        let record = records
+            .get(&(NamespaceId::default(), id.to_string()))
+            .unwrap();
+        let snapshot = record.inventory.as_ref().unwrap();
+        assert!(snapshot.snapshot_generation > generation);
+        assert_eq!(
+            snapshot.resources[0].identity.generation,
+            resource_generation
+        );
+        assert_eq!(record.provider.state, semantic::ProviderState::Ready);
+    }
 }
 
 #[test]
