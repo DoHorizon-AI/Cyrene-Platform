@@ -1093,7 +1093,8 @@ impl KernelAuthority for LocalKernelAuthority {
         }
         let instance_name = Self::scoped_runtime_name("worker", &worker_object);
         plan.instance_name = instance_name.clone();
-        plan.limits = lease.limits.clone();
+        plan.limits =
+            crate::convert::worker::enforced_worker_limits(&lease.limits, &worker.limits)?;
         plan.environment = inject_heartbeat_environment(
             plan.environment,
             &self.runtime.heartbeat,

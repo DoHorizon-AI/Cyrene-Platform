@@ -5,6 +5,20 @@
 This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
 本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
 
+## Worker execution ceilings / Worker 执行上限
+
+Canonical `StartWorker` maps `Worker.limits` into the sandbox LaunchPlan before
+spawning. Supported limits are `memory.bytes` in `byte` and `cpu.time` in
+`millicore`, both positive. Unsupported names/units, zero and CPU overflow fail
+with `WORKER_LIMIT_UNSUPPORTED`. Existing Lease ceilings are retained or tightened;
+the Lease cpuset is preserved. These are execution ceilings, not a second resource
+allocation authority. Hardware binding strength remains independent.
+
+`StartWorker` 在启动前把上述通用执行上限传给 sandboxd。不会用默认 Lease 限额
+覆盖 Worker 的要求，也不会放宽已有 Lease 上限。资源依然由 Lease 分配；CPU/RAM
+cgroup 限制和 GPU 设备绑定强度分别报告。回归测试直接检查经过权威启动入口交给
+sandbox 的 LaunchPlan，防止只校验字段却不执行约束。
+
 ## Contents | 内容
 
 | Entry | Responsibility | 一句话职责 |

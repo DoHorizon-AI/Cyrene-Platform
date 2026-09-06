@@ -612,6 +612,98 @@ fn semantic_worker_adapter() -> KernelServiceAdapter {
     semantic_worker_adapter_with_resources(vec![test_resource()])
 }
 
+#[test]
+fn canonical_start_worker_delivers_declared_memory_limit_to_sandbox() {
+    struct CaptureSandbox(Mutex<Vec<CgroupLimits>>);
+    impl ProcessRuntime for CaptureSandbox {
+        fn preflight(&self) -> NodeCapabilities {
+            FakeSandbox.preflight()
+        }
+        fn launch(
+            &self,
+            plan: &LaunchPlan,
+            binding: &DeviceBinding,
+        ) -> Result<ProcessHandle, ProviderError> {
+            self.0.lock().unwrap().push(plan.limits.clone());
+            FakeSandbox.launch(plan, binding)
+        }
+        fn stop(
+            &self,
+            handle: &ProcessHandle,
+            request: &StopRequest,
+        ) -> Result<CleanupReport, ProviderError> {
+            FakeSandbox.stop(handle, request)
+        }
+    }
+    impl SandboxBackend for CaptureSandbox {
+        fn backend_id(&self) -> &str {
+            "capture-limits"
+        }
+    }
+    let resources = vec![test_resource()];
+    let hardware = Arc::new(TestHardware {
+        resources: resources.clone(),
+    });
+    let sandbox = Arc::new(CaptureSandbox(Mutex::new(Vec::new())));
+    let daemon = Arc::new(KernelDaemon::new(
+        hardware.clone(),
+        hardware,
+        Arc::new(InMemoryResourceManager::new("node", resources)),
+        sandbox.clone(),
+        "node",
+        7,
+    ));
+    let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
+    let authority = adapter.authority();
+    let context = scoped_authority_context("default", "worker-limits");
+    let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
+    let identity = semantic::Identity {
+        id: "limited-worker".to_string(),
+        generation: 1,
+    };
+    let lease = authority
+        .acquire_lease(
+            &context,
+            &principal,
+            identity.clone(),
+            semantic::ResourceQuery {
+                resource_class: "accelerator".to_string(),
+                count: 1,
+                required_capabilities: Vec::new(),
+                minimum_capacity: BTreeMap::new(),
+            },
+            now_unix_ms() + 30_000,
+        )
+        .unwrap();
+    authority
+        .start_worker(
+            &context,
+            &principal,
+            semantic::Worker {
+                identity,
+                principal: principal.identity.clone(),
+                provider: semantic::Identity {
+                    id: "provider".to_string(),
+                    generation: 1,
+                },
+                lease: lease.identity,
+                state: semantic::WorkerState::Registered,
+                execution_ref: "opaque-installed-worker".to_string(),
+                limits: BTreeMap::from([(
+                    "memory.bytes".to_string(),
+                    semantic::Quantity {
+                        value: 24 * 1024 * 1024 * 1024,
+                        unit: "byte".to_string(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+    let observed = sandbox.0.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].memory_max_bytes, Some(24 * 1024 * 1024 * 1024));
+}
+
 fn semantic_worker_adapter_with_resources(
     resources: Vec<semantic::Resource>,
 ) -> KernelServiceAdapter {
