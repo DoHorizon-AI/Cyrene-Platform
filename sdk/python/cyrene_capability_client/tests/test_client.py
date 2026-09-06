@@ -98,7 +98,7 @@ class RecordingService(execution_pb2_grpc.CapabilityExecutionServiceServicer):
         yield execution_pb2.CapabilityInvocationStreamItem(
             sequence=2,
             stream_end=execution_pb2.CapabilityInvocationStreamEnd(
-                reason=execution_pb2.CapabilityInvocationStreamEnd.NORMAL_COMPLETION,
+                reason=execution_pb2.CapabilityInvocationStreamEnd.REASON_NORMAL_COMPLETION,
                 message="done",
             ),
         )

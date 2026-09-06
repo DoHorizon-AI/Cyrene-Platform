@@ -249,12 +249,12 @@ class CapabilityExecutionClient:
                     raise CapabilityExecutionFailure(item.error.code, item.error.message)
                 if result_kind == "stream_end":
                     saw_terminal = True
-                    if item.stream_end.reason == execution_pb2.CapabilityInvocationStreamEnd.CANCELLED:
+                    if item.stream_end.reason == execution_pb2.CapabilityInvocationStreamEnd.REASON_CANCELLED:
                         raise CapabilityExecutionFailure(
                             execution_pb2.CapabilityExecutionError.CODE_CANCELLED,
                             item.stream_end.message,
                         )
-                    if item.stream_end.reason != execution_pb2.CapabilityInvocationStreamEnd.NORMAL_COMPLETION:
+                    if item.stream_end.reason != execution_pb2.CapabilityInvocationStreamEnd.REASON_NORMAL_COMPLETION:
                         raise CapabilityExecutionFailure(
                             execution_pb2.CapabilityExecutionError.CODE_EXECUTION_FAILURE,
                             item.stream_end.message,
