@@ -63,3 +63,9 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+
+Available-memory changes advance the inventory generation while preserving the
+UUID-addressed GPU resource identity. Loading a model must not make its leased
+device appear replaced.
+
+显存变化推进清单代次,但保留 GPU 的 UUID 资源身份,避免将模型加载误判为设备更换。

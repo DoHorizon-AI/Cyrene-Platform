@@ -2893,7 +2893,23 @@ fn hardware_adapters_publish_separate_resource_only_provider_snapshots() {
         "the allocation ledger retains its independent aggregate generation"
     );
 
+    // Fresh unchanged observations must advance publication and retain resource identity.
+    // 硬件未变化的新采样仍需刷新发布代次及有效期,但不能更换资源身份。
+    std::thread::sleep(Duration::from_millis(2));
     adapter.sync_hardware_provider_facts().unwrap();
+    let records = authority.runtime.providers.lock().unwrap();
+    for (id, generation, resource_generation) in [("adapter-a", 41, 17), ("adapter-b", 58, 29)] {
+        let record = records
+            .get(&(NamespaceId::default(), id.to_string()))
+            .unwrap();
+        let snapshot = record.inventory.as_ref().unwrap();
+        assert!(snapshot.snapshot_generation > generation);
+        assert_eq!(
+            snapshot.resources[0].identity.generation,
+            resource_generation
+        );
+        assert_eq!(record.provider.state, semantic::ProviderState::Ready);
+    }
 }
 
 #[test]

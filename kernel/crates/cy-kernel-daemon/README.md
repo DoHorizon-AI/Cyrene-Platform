@@ -47,3 +47,11 @@ exercises this same merge boundary together with the declared memory ceiling.
 
 语义 Worker 启动先校验插件环境，设备选择变量由 sandboxd 在执行边界注入一次。
 插件覆盖设备变量仍被拒绝；回归测试同时验证该边界及内存上限。
+
+Fresh hardware samples refresh the semantic inventory expiry using a separate
+publication generation, including when the observed facts are unchanged. Replayed
+samples do not extend liveness; resource identity and allocation checks retain
+their existing authority.
+
+新的硬件采样通过独立发布代次刷新有效期;事实未变化也需要刷新,重复缓存采样不能
+延长在线状态。资源身份与分配检查继续使用既有权威。

@@ -428,11 +428,10 @@ fn device_node(path: PathBuf, required: bool) -> DeviceNode {
 
 impl HostInventoryProvider for NvidiaSmiProvider {
     fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
-        let mut resources = <Self as ResourceProvider>::probe_resources(self)?;
+        let resources = <Self as ResourceProvider>::probe_resources(self)?;
         let generation = self.next_inventory_generation(&resources);
-        for resource in &mut resources {
-            resource.identity.generation = generation;
-        }
+        // Free memory changes the inventory, not the UUID-addressed device incarnation.
+        // 可用显存影响清单代次,不能把正在加载模型的同一 GPU 变成新设备。
         Ok(InventorySnapshot {
             generation,
             resources,
@@ -704,6 +703,8 @@ mod tests {
         let third = HostInventoryProvider::probe_inventory(&provider).unwrap();
         assert_eq!(first.generation, second.generation);
         assert!(third.generation > second.generation);
+        assert_eq!(first.resources[0].identity, third.resources[0].identity);
+        assert_ne!(first.resources[0].capacity, third.resources[0].capacity);
     }
 
     fn visibility_binding(resource_id: &str) -> DeviceBinding {
