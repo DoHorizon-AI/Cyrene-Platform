@@ -6,12 +6,12 @@
 expresses either one complete model artifact or exactly one base model plus one
 LoRA adapter. The schema is
 `contracts/schemas/manifests/model_version.schema.json`; the Python SDK helper
-is `cyrene_artifacts.ModelVersion`.
+is `cy_artifacts.ModelVersion`.
 
 `ModelVersion` 是不可变、与供应商无关的组合描述符。它表达一个完整模型
 Artifact，或严格表达一个 base model 加一个 LoRA adapter。schema 位于
 `contracts/schemas/manifests/model_version.schema.json`，Python SDK helper 是
-`cyrene_artifacts.ModelVersion`。
+`cy_artifacts.ModelVersion`。
 
 Platform owns the content-addressed descriptor and ArtifactRef semantics.
 Catalyst owns DatasetVersion business state; Yield owns TrainingRun business
