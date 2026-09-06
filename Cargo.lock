@@ -310,6 +310,7 @@ dependencies = [
  "cy-manifest",
  "jsonschema",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
