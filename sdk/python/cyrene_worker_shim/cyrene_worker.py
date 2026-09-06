@@ -719,7 +719,10 @@ class StreamItem:
         elif self.data_tag == 11:
             if not isinstance(self.data, bytes):
                 raise TypeError("StreamItem.binary_chunk must be bytes")
-            out.extend(encode_bytes_field(11, self.data))
+            # A oneof records presence independently of the bytes value.  The
+            # provider's role-only first chunk is valid even when its payload
+            # is empty, so do not use the proto3-default-eliding helper here.
+            out.extend(encode_len_delimited(11, self.data))
         elif self.data_tag == 12:
             if not isinstance(self.data, str):
                 raise TypeError("StreamItem.log_line must be text")

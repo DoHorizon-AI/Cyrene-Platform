@@ -445,6 +445,45 @@ fn test_capability_worker_typed_stream_forwards_ordered_chunks() {
 }
 
 #[test]
+fn test_capability_worker_typed_stream_preserves_empty_binary_chunk() {
+    let manifest = fixture_manifest();
+    let options = worker_options();
+    let mut client =
+        CapabilityWorkerActivator::activate_from_manifest(&manifest, &options).unwrap();
+    let mut chunks = Vec::new();
+
+    client
+        .invoke_typed_stream(
+            "test.capability.v1",
+            "stream_empty",
+            b"{}",
+            "type.googleapis.com/test.Request",
+            Duration::from_secs(2),
+            &NeverCancelled,
+            |chunk| {
+                chunks.push((chunk.payload_type_url, chunk.payload));
+                Ok(())
+            },
+        )
+        .expect("typed stream should preserve an empty binary chunk");
+
+    assert_eq!(
+        chunks,
+        vec![
+            (
+                "type.googleapis.com/test.Chunk".to_string(),
+                Vec::<u8>::new()
+            ),
+            (
+                "type.googleapis.com/test.Chunk".to_string(),
+                b"after-empty".to_vec()
+            ),
+        ]
+    );
+    client.shutdown(Duration::from_secs(1)).unwrap();
+}
+
+#[test]
 fn test_capability_worker_legacy_invoke_keeps_stream_payload_unary() {
     let manifest = fixture_manifest();
     let options = worker_options();

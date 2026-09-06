@@ -229,6 +229,24 @@ class GenericTckWorker(CyreneWorker):
                 )
             )
 
+        if capability == "test.capability.v1" and action == "stream_empty":
+            if not stream_results:
+                return True, b"legacy-unary-result"
+            return True, TypedCapabilityStream(
+                iter(
+                    (
+                        TypedCapabilityPayload(
+                            value=b"",
+                            type_url="type.googleapis.com/test.Chunk",
+                        ),
+                        TypedCapabilityPayload(
+                            value=b"after-empty",
+                            type_url="type.googleapis.com/test.Chunk",
+                        ),
+                    )
+                )
+            )
+
         try:
             req = json.loads(payload.decode("utf-8")) if payload else {}
         except Exception as e:

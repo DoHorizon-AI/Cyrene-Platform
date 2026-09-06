@@ -414,10 +414,17 @@ async fn next_invocation_stream_item(
 }
 
 fn streaming_invoke_request(timeout: Duration) -> Request<InvokeCapabilityRequest> {
+    streaming_invoke_request_for_method("stream", timeout)
+}
+
+fn streaming_invoke_request_for_method(
+    method: &str,
+    timeout: Duration,
+) -> Request<InvokeCapabilityRequest> {
     let mut request = Request::new(InvokeCapabilityRequest {
         capability: "test.capability.v1".to_string(),
         interface_version: "1".to_string(),
-        method: "stream".to_string(),
+        method: method.to_string(),
         request: Some(any_json(serde_json::json!({}))),
         binding_id: None,
     });
@@ -536,6 +543,45 @@ async fn service_tck_streams_typed_worker_chunks_and_terminal_outcome() {
     };
     assert_eq!(end.reason, 1);
     assert_eq!(end.message, "capability invocation stream completed");
+
+    drop(stream);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_tck_preserves_empty_typed_worker_chunk() {
+    let mut server = TestServer::start(2).await;
+    let mut stream = server
+        .client
+        .invoke_capability_stream(streaming_invoke_request_for_method(
+            "stream_empty",
+            Duration::from_secs(5),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let first = next_invocation_stream_item(&mut stream).await;
+    let Some(capability_invocation_stream_item::Item::Response(payload)) = first.item else {
+        panic!("expected first empty typed response: {first:?}");
+    };
+    assert_eq!(first.sequence, 1);
+    assert_eq!(payload.type_url, "type.googleapis.com/test.Chunk");
+    assert!(payload.value.is_empty());
+
+    let second = next_invocation_stream_item(&mut stream).await;
+    let Some(capability_invocation_stream_item::Item::Response(payload)) = second.item else {
+        panic!("expected second typed response after empty chunk: {second:?}");
+    };
+    assert_eq!(second.sequence, 2);
+    assert_eq!(payload.type_url, "type.googleapis.com/test.Chunk");
+    assert_eq!(payload.value, b"after-empty");
+
+    let end = next_invocation_stream_item(&mut stream).await;
+    let Some(capability_invocation_stream_item::Item::StreamEnd(end)) = end.item else {
+        panic!("expected typed stream terminal after empty chunk: {end:?}");
+    };
+    assert_eq!(end.reason, 1);
 
     drop(stream);
     server.shutdown().await;
