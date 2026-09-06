@@ -140,7 +140,11 @@ impl ResourceProvider for TestHardware {
         Ok(DeviceBinding {
             resource_id: resource.identity.id.clone(),
             nodes: Vec::new(),
-            environment: BTreeMap::new(),
+            environment: resource
+                .attributes
+                .get("test.binding.selector")
+                .map(|value| BTreeMap::from([("TEST_DEVICE_SELECTION".to_string(), value.clone())]))
+                .unwrap_or_default(),
             joinable_environment_keys: Default::default(),
             required_gids: Vec::new(),
             enforcement: EnforcementMode::Hard,
@@ -613,7 +617,7 @@ fn semantic_worker_adapter() -> KernelServiceAdapter {
 }
 
 #[test]
-fn canonical_start_worker_delivers_declared_memory_limit_to_sandbox() {
+fn canonical_start_worker_preserves_limits_and_runtime_owned_device_injection() {
     struct CaptureSandbox(Mutex<Vec<CgroupLimits>>);
     impl ProcessRuntime for CaptureSandbox {
         fn preflight(&self) -> NodeCapabilities {
@@ -624,6 +628,13 @@ fn canonical_start_worker_delivers_declared_memory_limit_to_sandbox() {
             plan: &LaunchPlan,
             binding: &DeviceBinding,
         ) -> Result<ProcessHandle, ProviderError> {
+            // Exercise the real sandbox binding boundary, which rejects a second injection.
+            // 设备变量必须到运行时才注入,不能被误认为插件覆盖。
+            let environment = binding.merge_environment(&plan.environment)?;
+            assert_eq!(
+                environment.get("TEST_DEVICE_SELECTION").unwrap(),
+                "device-0"
+            );
             self.0.lock().unwrap().push(plan.limits.clone());
             FakeSandbox.launch(plan, binding)
         }
@@ -640,7 +651,11 @@ fn canonical_start_worker_delivers_declared_memory_limit_to_sandbox() {
             "capture-limits"
         }
     }
-    let resources = vec![test_resource()];
+    let mut resource = test_resource();
+    resource
+        .attributes
+        .insert("test.binding.selector".to_string(), "device-0".to_string());
+    let resources = vec![resource];
     let hardware = Arc::new(TestHardware {
         resources: resources.clone(),
     });

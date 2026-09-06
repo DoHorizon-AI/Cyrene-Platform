@@ -39,3 +39,11 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+
+The semantic `StartWorker` boundary validates plugin environment keys without
+pre-injecting device selection. Sandboxd injects Adapter-owned keys exactly once;
+plugin attempts to override them still fail closed. The canonical launch test
+exercises this same merge boundary together with the declared memory ceiling.
+
+语义 Worker 启动先校验插件环境，设备选择变量由 sandboxd 在执行边界注入一次。
+插件覆盖设备变量仍被拒绝；回归测试同时验证该边界及内存上限。

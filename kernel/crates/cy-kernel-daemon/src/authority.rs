@@ -1102,7 +1102,9 @@ impl KernelAuthority for LocalKernelAuthority {
             lease.fence_token,
         )
         .map_err(Self::provider_rejection)?;
-        plan.environment = binding
+        // Validate plugin input here; the sandbox runtime injects Adapter-owned keys once.
+        // 此处只校验插件输入,设备变量由 sandboxd 在实际启动边界注入。
+        binding
             .merge_environment(&plan.environment)
             .map_err(Self::provider_rejection)?;
         let mut actor = InstanceActor::new(
