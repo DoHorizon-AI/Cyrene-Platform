@@ -77,10 +77,12 @@ Cyrene repo. Scope and rules (authority baseline):
 
 To keep `archive/legacy/backup = 0` and prevent silent resurrection:
 
-1. **Path-level CI check** (architecture-governance) fails if any of these patterns
-   reappear in committed source: `^legacy/`, `^archive/`, `test_legacy_`,
-   `plugin.legacy.toml`, `LEGACY_PLUGIN.md`, `*.legacy.toml`, `legacy-requirements/`
-   (outside the two enterprise Dockerfiles that still consume it).
+1. **Path-level CI check** fails if any of these patterns reappear in committed
+   source: `^legacy/`, `^archive/`, `test_legacy_`, `plugin.legacy.toml`,
+   `LEGACY_PLUGIN.md`, `*.legacy.toml`, `legacy-requirements/` (outside the two
+   enterprise Dockerfiles that still consume it). Reference implementation:
+   `tooling/ci/check-no-legacy-surface.sh` (wire into `architecture-governance.yml`
+   once all repos stabilize).
 2. **`compatibility/` is an explicit, governed adapter layer** — NOT a loophole.
    The conformance validator already rejects generic-implementation paths inside
    `compatibility/` and any import of `astrbot`/Yield/Reactor/Exchange/Navigator/
