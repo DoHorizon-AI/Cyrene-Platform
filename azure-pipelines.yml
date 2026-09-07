@@ -57,6 +57,8 @@ jobs:
       python tooling/ci/check_service_boundaries.py
       python -m pytest tooling/ci/test_check_service_boundaries.py
     displayName: 'Run architecture boundary guard'
+  - script: bash tooling/ci/check-no-legacy-surface.sh
+    displayName: 'Reject reintroduction of legacy/archive/backup surface'
 
 - job: jvm_boundary
   displayName: 'Platform / JVM Authority Boundary'
