@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  📄 cyrene-runtime                                                  │
+# │  Role: Stable shell entrypoint for the local GPU runtime bootstrap. │
+# │                                                                     │
+# │  脚本职责：提供固定的 runtime up/down/status 入口。                      │
+# └─────────────────────────────────────────────────────────────────────┘
+
+set -euo pipefail
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "${SCRIPT_DIRECTORY}/cyrene_runtime.py" "$@"
