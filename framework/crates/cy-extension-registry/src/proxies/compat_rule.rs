@@ -75,6 +75,7 @@ impl CompatRule for RemoteCompatRule {
             method: "evaluate_compatibility".to_string(),
             payload: Vec::new(),
             payload_type_url: String::new(),
+            stream_results: false,
             request: Some(cy_plugin_protocol::pb::invoke::Request::EvaluateCompat(
                 EvaluateCompatRequest {
                     hardware_manifest_json: hw_json,

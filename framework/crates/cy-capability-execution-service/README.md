@@ -9,6 +9,17 @@ forwarding, and application-event streams; it owns no Product payload fields.
 本 crate 是面向 Product 的 canonical 能力执行服务，负责通用 binding 解析、worker
 激活、取消、类型化 `Any` 透传和应用事件流，不拥有 Product payload 字段。
 
+`InvokeCapability` remains the compatibility unary path. The additive
+`InvokeCapabilityStream` method is used only when the worker handshake advertises
+`cyrene.worker.typed-invocation-stream.v1`; it sends an independent
+`Invoke.stream_results` flag and forwards ordered typed chunks with one terminal
+outcome. A chat payload's `stream` field never selects the worker transport.
+
+`InvokeCapability` 继续作为兼容 unary 路径。新增的 `InvokeCapabilityStream` 只有在
+worker 握手声明 `cyrene.worker.typed-invocation-stream.v1` 后才启用；它设置独立的
+`Invoke.stream_results` 标志，并透传有序类型化 chunk 与唯一 terminal outcome。chat
+payload 的 `stream` 字段不会选择 worker 传输方式。
+
 ## Contents | 内容
 
 | Entry | Responsibility | 一句话职责 |

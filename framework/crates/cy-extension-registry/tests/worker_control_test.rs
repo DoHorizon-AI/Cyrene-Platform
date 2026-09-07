@@ -123,6 +123,7 @@ async fn host_completes_generic_hello_configure_invoke_cancel_channel() {
                 payload,
                 payload_type_url,
                 request: None,
+                ..
             })) => {
                 assert_eq!(extension_point, "custom.capability");
                 assert_eq!(method, "run");

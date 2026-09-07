@@ -12,6 +12,7 @@ contract documents.
 | `astrbot-capability-worker-transition-v1.md` | Worker transition compatibility. | Worker 迁移兼容性 |
 | `media-processor-v1.md` | Media capability contract. | 媒体能力契约 |
 | `message-connector-v1.md` | Message connector contract. | 消息连接器契约 |
+| `model-version-composed-v1.md` | Immutable FULL_MODEL and one-base-plus-one-LoRA composition boundary. | 不可变 FULL_MODEL 与单 base 加单 LoRA 组合边界 |
 
 ## Suggested reading | 推荐顺序
 
@@ -19,4 +20,3 @@ Read the Kernel semantic contract first, then the component boundary and the
 capability-specific contracts.
 
 先读 Kernel 语义契约，再读组件边界和具体能力契约。
-

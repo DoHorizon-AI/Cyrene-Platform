@@ -31,10 +31,14 @@ use cy_proto::{
     },
     model_provider::{
         CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, CHAT_COMPLETION_METHOD,
-        CHAT_COMPLETION_REQUEST_TYPE_URL, CHAT_COMPLETION_RESPONSE_TYPE_URL, EMBEDDINGS_METHOD,
+        CHAT_COMPLETION_REQUEST_TYPE_URL, CHAT_COMPLETION_RESPONSE_TYPE_URL,
+        CHAT_COMPLETION_V2_INTERFACE_VERSION, CHAT_COMPLETION_V2_METHOD, EMBEDDINGS_METHOD,
         EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL, INTERFACE_VERSION,
     },
-    model_provider_v1::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, chat_message},
+    model_provider_v1::{
+        ChatCompletionRequest, ChatCompletionResponse, ChatFunction, ChatMessage, ChatTool,
+        ChatToolChoice, chat_message,
+    },
     model_provider_v1::{EmbeddingsRequest, EmbeddingsResponse, embeddings_response},
 };
 use prost::Message;
@@ -153,13 +157,31 @@ fn handle_upstream_connection(mut stream: TcpStream, signals: UpstreamSignals) {
     }
 
     let response = if is_chat {
-        serde_json::json!({
-            "choices": [{
-                "message": {"role": "assistant", "content": "real CES chat"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 2, "completion_tokens": 2}
-        })
+        if value.get("tools").is_some() {
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call-weather",
+                            "type": "function",
+                            "function": {"name": "weather", "arguments": "{\"city\":\"Paris\"}"}
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}
+            })
+        } else {
+            serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "real CES chat"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 2}
+            })
+        }
     } else {
         let model = value
             .get("model")
@@ -425,16 +447,64 @@ fn chat_request(model: Option<&str>) -> Request<InvokeCapabilityRequest> {
             content: "hello".to_string(),
             name: None,
             tool_call_id: None,
+            tool_calls: vec![],
         }],
         model: model.map(str::to_string),
         stream: false,
         temperature: None,
         max_tokens: None,
+        tools: vec![],
+        tool_choice: None,
+        parallel_tool_calls: None,
+        include_usage: None,
     };
     let mut request = Request::new(InvokeCapabilityRequest {
         capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
         interface_version: INTERFACE_VERSION.to_string(),
         method: CHAT_COMPLETION_METHOD.to_string(),
+        request: Some(Any {
+            type_url: CHAT_COMPLETION_REQUEST_TYPE_URL.to_string(),
+            value: payload.encode_to_vec(),
+        }),
+        binding_id: None,
+    });
+    request.set_timeout(Duration::from_secs(5));
+    request
+}
+
+fn structured_chat_request() -> Request<InvokeCapabilityRequest> {
+    let payload = ChatCompletionRequest {
+        messages: vec![ChatMessage {
+            role: chat_message::Role::User as i32,
+            content: "use weather".to_string(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: vec![],
+        }],
+        model: Some("selected-chat-model".to_string()),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        tools: vec![ChatTool {
+            r#type: "function".to_string(),
+            function: Some(ChatFunction {
+                name: "weather".to_string(),
+                description: Some("look up weather".to_string()),
+                parameters_json: "{\"type\":\"object\"}".to_string(),
+                strict: None,
+            }),
+        }],
+        tool_choice: Some(ChatToolChoice {
+            mode: "auto".to_string(),
+            function_name: None,
+        }),
+        parallel_tool_calls: Some(false),
+        include_usage: None,
+    };
+    let mut request = Request::new(InvokeCapabilityRequest {
+        capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
+        interface_version: CHAT_COMPLETION_V2_INTERFACE_VERSION.to_string(),
+        method: CHAT_COMPLETION_V2_METHOD.to_string(),
         request: Some(Any {
             type_url: CHAT_COMPLETION_REQUEST_TYPE_URL.to_string(),
             value: payload.encode_to_vec(),
@@ -509,6 +579,58 @@ async fn real_ces_provider_cancellation_chat_and_typed_method_support() {
     );
     assert_eq!(chat_response.chunks[0].prompt_tokens, Some(2));
     assert_eq!(chat_response.chunks[0].completion_tokens, Some(2));
+
+    let structured = server
+        .client
+        .invoke_capability(structured_chat_request())
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Response(structured)) = structured.result else {
+        panic!("structured chat request did not return a response");
+    };
+    assert_eq!(structured.type_url, CHAT_COMPLETION_RESPONSE_TYPE_URL);
+    let structured_response = ChatCompletionResponse::decode(structured.value.as_slice()).unwrap();
+    assert_eq!(
+        structured_response.chunks[0].role.as_deref(),
+        Some("assistant")
+    );
+    assert_eq!(
+        structured_response.chunks[0].tool_calls[0].id.as_deref(),
+        Some("call-weather")
+    );
+    assert_eq!(
+        structured_response.chunks[0].tool_calls[0]
+            .function_name
+            .as_deref(),
+        Some("weather")
+    );
+    assert_eq!(structured_response.chunks[0].total_tokens, Some(12));
+
+    // A provider release that only advertises interface 1 must not receive a
+    // structured request and silently drop its tool metadata. CES rejects the
+    // v2 requirement during canonical resolution before activating its worker.
+    let mut legacy_manifest = manifest.clone();
+    legacy_manifest.capability_descriptors.retain(|descriptor| {
+        descriptor.interface_version.version != CHAT_COMPLETION_V2_INTERFACE_VERSION
+    });
+    let mut legacy_server =
+        TestServer::start(legacy_manifest, worker_options(&plugins, &upstream, true)).await;
+    let legacy_response = legacy_server
+        .client
+        .invoke_capability(structured_chat_request())
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(invoke_capability_response::Result::Error(error)) = legacy_response.result else {
+        panic!("an interface-1-only provider must reject structured chat");
+    };
+    assert_eq!(
+        error.code,
+        cy_proto::capability_v1::capability_execution_error::Code::InvalidRequest as i32
+    );
+    assert!(error.message.contains("interface"));
+    legacy_server.shutdown().await;
 
     let mut wrong_type = chat_request(Some("wrong-type-model"));
     wrong_type

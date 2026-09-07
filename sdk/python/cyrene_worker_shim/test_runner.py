@@ -423,6 +423,34 @@ def test_request_type_url_handler_compatibility():
     print("test_request_type_url_handler_compatibility PASSED!")
 
 
+def test_stream_result_negotiation_is_independent_from_payload_fields():
+    wire_invoke = Invoke(
+        capability="example.stream.v1",
+        action="invoke",
+        payload=b'{"stream":true}',
+        stream_results=True,
+    )
+    decoded_invoke = Invoke.decode(wire_invoke.encode())
+    assert decoded_invoke.stream_results is True
+
+    legacy_worker = GenericCapabilityWorker(
+        instance=LegacyOnInvokeService(),
+        plugin_id="com.cyrene.test.legacy-stream",
+        capabilities=["example.stream.v1"],
+    )
+    ok, result = legacy_worker._invoke_request_with_type_url(
+        "stream-1",
+        "example.stream.v1",
+        "invoke",
+        decoded_invoke.payload,
+        decoded_invoke.payload_type_url,
+        decoded_invoke.stream_results,
+    )
+    assert ok is False
+    assert isinstance(result, PluginErrorPayload)
+    assert result.details == "TYPED_STREAM_HANDLER_REQUIRED"
+
+
 if __name__ == "__main__":
     test_generic_capability_worker_lifecycle()
     test_generic_capability_worker_application_events()

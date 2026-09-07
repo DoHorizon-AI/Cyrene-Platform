@@ -37,7 +37,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Plugins-Official
-          ref: 0cd9a64f43ebe3c61c9da15c3605b8a40277055d
+          ref: 261a78fd36c7cb2da85a504a89ec7c9c353ecc19
           path: .ci/plugins
           token: ${{ secrets.CYRENE_CROSS_REPO_TOKEN }}
 

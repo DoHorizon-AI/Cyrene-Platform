@@ -13,7 +13,7 @@
 //!   cy-manifest [--type <kind>] <input.json|input.yaml>   # `hash` is the default subcommand
 //!
 //! `<kind>` is one of: runtime (default), training-revision, checkpoint,
-//! artifact. Reads a JSON or YAML manifest of that type (format inferred from
+//! artifact, portable-directory. Reads a JSON or YAML manifest of that type (format inferred from
 //! the extension, with a JSON-then-YAML fallback) and prints the computed id
 //! ("sha256:<hex>") to stdout. This is the core reference implementation for
 //! manifest content identifiers.
@@ -22,8 +22,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cy_manifest::{
-    artifact_id, checkpoint_id, revision_id, runtime_id, ArtifactManifest, CheckpointMetadata,
-    RuntimeManifest, TrainingRevision,
+    artifact_id, checkpoint_id, portable_directory_id, revision_id, runtime_id, ArtifactManifest,
+    CheckpointMetadata, PortableDirectoryManifest, RuntimeManifest, TrainingRevision,
 };
 
 fn main() -> ExitCode {
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
         Some(p) => p.clone(),
         None => {
             eprintln!(
-                "usage: cy-manifest hash [--type runtime|training-revision|checkpoint|artifact] <input.json|input.yaml>"
+                "usage: cy-manifest hash [--type runtime|training-revision|checkpoint|artifact|portable-directory] <input.json|input.yaml>"
             );
             return ExitCode::from(2);
         }
@@ -85,9 +85,15 @@ fn main() -> ExitCode {
         "artifact" | "artifact-manifest" => {
             parse::<ArtifactManifest>(&path, &contents).map(|m| artifact_id(&m))
         }
+        "portable-directory" | "portable-directory-manifest" => {
+            parse::<PortableDirectoryManifest>(&path, &contents).and_then(|m| {
+                m.validate().map_err(|error| error.to_string())?;
+                Ok(portable_directory_id(&m))
+            })
+        }
         other => {
             eprintln!(
-                "error: unknown --type '{other}' (expected runtime|training-revision|checkpoint|artifact)"
+                "error: unknown --type '{other}' (expected runtime|training-revision|checkpoint|artifact|portable-directory)"
             );
             return ExitCode::from(2);
         }

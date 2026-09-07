@@ -46,6 +46,8 @@ pub(crate) const OPERATION_EVENT_SUBSCRIBER_CAPACITY: usize = 64;
 struct HardwareProviderTracker {
     session_generation: u64,
     last_snapshot_generation: Option<u64>,
+    last_sampled_at_unix_ms: Option<u64>,
+    publication_generation: u64,
     state: Option<semantic::ProviderState>,
 }
 
@@ -54,6 +56,8 @@ impl HardwareProviderTracker {
         Self {
             session_generation: kernel_epoch.max(1),
             last_snapshot_generation: None,
+            last_sampled_at_unix_ms: None,
+            publication_generation: 0,
             state: None,
         }
     }
@@ -67,6 +71,8 @@ impl HardwareProviderTracker {
             )
         })?;
         self.last_snapshot_generation = None;
+        self.last_sampled_at_unix_ms = None;
+        self.publication_generation = 0;
         Ok(())
     }
 }
@@ -260,7 +266,7 @@ impl KernelServiceAdapter {
         } else {
             semantic::ProviderState::Degraded
         };
-        let (identity, publish_snapshot) = {
+        let (identity, publish_snapshot, publication_generation) = {
             let mut providers = self
                 .hardware_providers
                 .lock()
@@ -283,9 +289,26 @@ impl KernelServiceAdapter {
             }
             let publish_snapshot = tracker
                 .last_snapshot_generation
-                .is_none_or(|generation| observation.snapshot.generation > generation);
+                .is_none_or(|generation| observation.snapshot.generation > generation)
+                || tracker
+                    .last_sampled_at_unix_ms
+                    .is_none_or(|sampled| observation.sampled_at_unix_ms > sampled);
             if publish_snapshot {
+                // A new actual sample refreshes liveness even when hardware facts are unchanged.
+                // 新采样刷新有效期;重复缓存采样不能伪造持续在线。
+                tracker.publication_generation = tracker
+                    .publication_generation
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            "kernel-hardware-provider",
+                            "PROVIDER_SNAPSHOT_GENERATION_EXHAUSTED",
+                            "hardware snapshot publication generation cannot advance",
+                        )
+                    })?
+                    .max(observation.snapshot.generation);
                 tracker.last_snapshot_generation = Some(observation.snapshot.generation);
+                tracker.last_sampled_at_unix_ms = Some(observation.sampled_at_unix_ms);
             }
             tracker.state = Some(state);
             (
@@ -294,6 +317,7 @@ impl KernelServiceAdapter {
                     generation: tracker.session_generation,
                 },
                 publish_snapshot,
+                tracker.publication_generation,
             )
         };
         let provider = semantic::Provider {
@@ -307,7 +331,8 @@ impl KernelServiceAdapter {
             .register_resource_facts_provider(&context, &principal, provider)
             .map_err(Self::hardware_provider_error)?;
         if publish_snapshot {
-            let snapshot = self.hardware_provider_snapshot(identity.clone(), observation);
+            let mut snapshot = self.hardware_provider_snapshot(identity.clone(), observation);
+            snapshot.snapshot_generation = publication_generation;
             self.authority
                 .publish_inventory(&context, &principal, snapshot)
                 .map_err(Self::hardware_provider_error)?;
@@ -460,10 +485,19 @@ impl KernelServiceAdapter {
             Some(lease_ref),
             "LEASE_RELEASE_STARTED",
         )?;
+        let retrying_failed_cleanup =
+            self.daemon.lease(&lease_ref.lease_name)?.state == cy_kernel_api::LeaseState::Failed;
         let releasing = self
             .daemon
             .begin_release(&lease_ref.lease_name, lease_ref.fence_token)?;
         let outcome = self.confirm_lease_cleanup(lease_ref).and_then(|cleaned| {
+            if retrying_failed_cleanup && cleaned.is_none() {
+                return Err(ProviderError::new(
+                    "kernel-daemon",
+                    "CLEANUP_INCOMPLETE",
+                    "a failed lease has no managed actor to prove physical cleanup",
+                ));
+            }
             self.record_runtime(
                 RuntimeJournalEvent::LeaseReleased,
                 cleaned.as_deref(),

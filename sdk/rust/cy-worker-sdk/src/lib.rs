@@ -553,6 +553,7 @@ mod tests {
                     method: "run".to_string(),
                     payload: b"opaque-request".to_vec(),
                     payload_type_url: String::new(),
+                    stream_results: false,
                     request: None,
                 }),
             ),

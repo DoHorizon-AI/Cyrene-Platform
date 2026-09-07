@@ -67,6 +67,7 @@ impl GatewayFilter for RemoteGatewayFilter {
             method: "filter_request".to_string(),
             payload: Vec::new(),
             payload_type_url: String::new(),
+            stream_results: false,
             request: Some(cy_plugin_protocol::pb::invoke::Request::FilterRequestData(
                 FilterRequest {
                     headers: headers.clone(),

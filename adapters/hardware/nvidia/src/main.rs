@@ -24,8 +24,13 @@ fn main() -> std::io::Result<()> {
     };
 
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
-    let (socket_path, allowed_client_uid, allowed_client_gid) =
-        adapter_arguments(env::args().skip(1))?;
+    let AdapterArguments {
+        socket_path,
+        allowed_client_uid,
+        allowed_client_gid,
+        nvidia_smi,
+        wsl_shared_device,
+    } = adapter_arguments(env::args().skip(1))?;
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -41,10 +46,9 @@ fn main() -> std::io::Result<()> {
     }
     let listener = UnixListener::bind(&socket_path)?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660))?;
-    // `nvidia` is the stable UDS adapter identity. `nvidia-smi` remains an
-    // implementation detail of this external process and never leaks into
-    // Kernel routing configuration.
-    let provider = NvidiaSmiProvider::new("nvidia");
+    // The executable and the existing provider identity are separate concerns.
+    // WSL must be explicitly selected; native binding continues to require BPF.
+    let provider = NvidiaSmiProvider::new(nvidia_smi).with_wsl_shared_device(wsl_shared_device);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -60,13 +64,23 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    struct AdapterArguments {
+        socket_path: PathBuf,
+        allowed_client_uid: Option<u32>,
+        allowed_client_gid: Option<u32>,
+        nvidia_smi: PathBuf,
+        wsl_shared_device: bool,
+    }
+
     fn adapter_arguments(
         arguments: impl Iterator<Item = String>,
-    ) -> std::io::Result<(PathBuf, Option<u32>, Option<u32>)> {
+    ) -> std::io::Result<AdapterArguments> {
         let mut arguments = arguments;
         let mut socket_path = PathBuf::from("/run/cyrene/nvidia-adapter.sock");
         let mut allowed_client_uid = None;
         let mut allowed_client_gid = None;
+        let mut nvidia_smi = PathBuf::from("nvidia-smi");
+        let mut wsl_shared_device = false;
         while let Some(argument) = arguments.next() {
             let mut value = || {
                 arguments.next().ok_or_else(|| {
@@ -78,6 +92,8 @@ fn main() -> std::io::Result<()> {
             };
             match argument.as_str() {
                 "--socket" => socket_path = PathBuf::from(value()?),
+                "--nvidia-smi" => nvidia_smi = PathBuf::from(value()?),
+                "--wsl-shared-device" => wsl_shared_device = true,
                 "--allowed-client-uid" => {
                     allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
                         std::io::Error::new(
@@ -96,7 +112,7 @@ fn main() -> std::io::Result<()> {
                 }
                 "--help" | "-h" => {
                     return Err(std::io::Error::other(
-                        "usage: cyrene-nvidia-adapter [--socket PATH] [--allowed-client-uid UID] [--allowed-client-gid GID]",
+                        "usage: cyrene-nvidia-adapter [--socket PATH] [--allowed-client-uid UID] [--allowed-client-gid GID] [--nvidia-smi PATH] [--wsl-shared-device]",
                     ));
                 }
                 _ => {
@@ -116,7 +132,13 @@ fn main() -> std::io::Result<()> {
                 "cyrene-nvidia-adapter requires at least one of --allowed-client-uid or --allowed-client-gid to enforce UDS admission",
             ));
         }
-        Ok((socket_path, allowed_client_uid, allowed_client_gid))
+        Ok(AdapterArguments {
+            socket_path,
+            allowed_client_uid,
+            allowed_client_gid,
+            nvidia_smi,
+            wsl_shared_device,
+        })
     }
 
     fn serve_one(mut stream: UnixStream, provider: &NvidiaSmiProvider) -> std::io::Result<()> {

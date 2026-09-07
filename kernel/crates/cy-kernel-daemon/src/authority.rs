@@ -1093,7 +1093,8 @@ impl KernelAuthority for LocalKernelAuthority {
         }
         let instance_name = Self::scoped_runtime_name("worker", &worker_object);
         plan.instance_name = instance_name.clone();
-        plan.limits = lease.limits.clone();
+        plan.limits =
+            crate::convert::worker::enforced_worker_limits(&lease.limits, &worker.limits)?;
         plan.environment = inject_heartbeat_environment(
             plan.environment,
             &self.runtime.heartbeat,
@@ -1101,7 +1102,9 @@ impl KernelAuthority for LocalKernelAuthority {
             lease.fence_token,
         )
         .map_err(Self::provider_rejection)?;
-        plan.environment = binding
+        // Validate plugin input here; the sandbox runtime injects Adapter-owned keys once.
+        // 此处只校验插件输入,设备变量由 sandboxd 在实际启动边界注入。
+        binding
             .merge_environment(&plan.environment)
             .map_err(Self::provider_rejection)?;
         let mut actor = InstanceActor::new(
@@ -2796,6 +2799,7 @@ impl LocalKernelAuthority {
                 "lease generation no longer has authority",
             ));
         }
+        let retrying_failed_cleanup = current.state == LeaseState::Failed;
         self.record_runtime(
             RuntimeJournalEvent::LeaseReleaseStarted,
             None,
@@ -2866,6 +2870,16 @@ impl LocalKernelAuthority {
                         .unwrap_or_else(|| worker_id.clone()),
                 )
             } else {
+                if retrying_failed_cleanup {
+                    let _ = self
+                        .runtime
+                        .daemon
+                        .fail_release(&releasing.name, fence_token);
+                    return Err(Self::rejection(
+                        "CLEANUP_INCOMPLETE",
+                        "a failed lease has no managed actor to prove physical cleanup",
+                    ));
+                }
                 (None, String::new())
             }
         };

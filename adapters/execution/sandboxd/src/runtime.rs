@@ -984,7 +984,7 @@ impl ProcessRuntime for CgroupV2Runtime {
             }
         }
         let before_oom = read_oom_kill_count(&handle.cgroup_path);
-        let mut exit_code = None;
+        let mut exit_code;
         if request.immediate {
             if self.config.dev_mode {
                 self.kill_pid(handle.pid);
@@ -992,8 +992,12 @@ impl ProcessRuntime for CgroupV2Runtime {
                     handle.pid,
                     request.grace_period.min(Duration::from_millis(500)),
                 );
-            } else if !self.cgroup_is_empty(&handle.cgroup_path) {
-                self.kill_cgroup(&handle.cgroup_path)?;
+            } else {
+                if !self.cgroup_is_empty(&handle.cgroup_path) {
+                    self.kill_cgroup(&handle.cgroup_path)?;
+                }
+                // An exited child leaves an empty cgroup but still needs reaping.
+                // 子进程退出后 cgroup 可能已空,仍须回收子进程才可释放 Lease。
                 exit_code = self.wait_child(handle.pid, request.grace_period);
                 wait_until_empty(
                     &handle.cgroup_path,
@@ -1087,6 +1091,47 @@ impl SandboxBackend for CgroupV2Runtime {
 mod transport_tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn immediate_cleanup_reaps_an_exited_child_when_cgroup_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let group = root.path().join("instance-exited");
+        fs::create_dir(&group).unwrap();
+        fs::write(group.join("cgroup.procs"), "").unwrap();
+        let runtime = CgroupV2Runtime::new(CgroupV2Config {
+            root: root.path().to_path_buf(),
+            transport_root: root.path().join("transport"),
+            device_bpf_enabled: false,
+            dev_mode: false,
+        });
+        let child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        runtime
+            .children
+            .lock()
+            .unwrap()
+            .insert(pid, TrackedChild::new(child, None));
+        let handle = ProcessHandle {
+            pid,
+            cgroup_path: group,
+            start_time_ticks: proc_start_time(pid),
+            transport_socket: None,
+        };
+        let report = runtime
+            .stop(
+                &handle,
+                &StopRequest {
+                    grace_period: Duration::from_secs(1),
+                    immediate: true,
+                },
+            )
+            .unwrap();
+        assert!(report.complete);
+        assert_eq!(report.exit_code, Some(0));
+        assert!(!runtime.children.lock().unwrap().contains_key(&pid));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
 
     #[test]
     fn worker_stdio_bridge_round_trips_bytes_without_protocol_knowledge() {

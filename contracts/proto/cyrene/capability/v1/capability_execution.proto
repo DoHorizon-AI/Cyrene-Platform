@@ -31,6 +31,13 @@ service CapabilityExecutionService {
   rpc InvokeCapability(InvokeCapabilityRequest)
       returns (InvokeCapabilityResponse);
 
+  // Resolve, activate, invoke, and clean up one capability execution while
+  // forwarding worker-produced typed chunks as they arrive. This additive
+  // method keeps the unary InvokeCapability contract unchanged for operations
+  // that do not expose a live result stream.
+  rpc InvokeCapabilityStream(InvokeCapabilityRequest)
+      returns (stream CapabilityInvocationStreamItem);
+
   // Start one live capability application-event stream. The server allocates
   // the opaque subscription identity returned in stream items; callers do not
   // choose or operate a worker subscription ID.
@@ -60,6 +67,36 @@ message InvokeCapabilityResponse {
     // status and from a capability/domain result encoded in response.
     CapabilityExecutionError error = 2;
   }
+}
+
+// One live typed result stream for a capability invocation. The capability
+// owns the response Any type; Platform only preserves ordering and terminal
+// outcome. Worker-produced response items start at sequence one and the
+// terminal item follows them. A pre-execution error/end item may use sequence
+// zero. A stream has exactly one terminal outcome and never replays chunks.
+message CapabilityInvocationStreamItem {
+  uint64 sequence = 1;
+
+  oneof item {
+    google.protobuf.Any response = 2;
+    CapabilityExecutionError error = 3;
+    CapabilityInvocationStreamEnd stream_end = 4;
+  }
+}
+
+message CapabilityInvocationStreamEnd {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_NORMAL_COMPLETION = 1;
+    REASON_CANCELLED = 2;
+    REASON_CAPABILITY_UNAVAILABLE = 3;
+    REASON_WORKER_CRASH = 4;
+    REASON_PROTOCOL_FAILURE = 5;
+    REASON_TIMEOUT = 6;
+  }
+
+  Reason reason = 1;
+  string message = 2;
 }
 
 message SubscribeCapabilityEventsRequest {

@@ -34,6 +34,8 @@ use prost::Message;
 const PROTOCOL_VERSION: u32 = 1;
 #[cfg(unix)]
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MIN_FORCED_CLEANUP_WAIT: Duration = Duration::from_millis(500);
+const RECOVERY_CLEANUP_WAIT: Duration = Duration::from_secs(10);
 
 /// Static configuration for the one privileged Sandbox Adapter Host used by a
 /// Kernel process. Its ID is a protocol identity, never a backend selector.
@@ -90,6 +92,14 @@ impl UdsSandboxAdapterClient {
         &self,
         body: sandbox_v1::sandbox_request::Body,
     ) -> Result<sandbox_v1::SandboxResponse, ProviderError> {
+        self.call_with_timeout(body, self.timeout)
+    }
+
+    fn call_with_timeout(
+        &self,
+        body: sandbox_v1::sandbox_request::Body,
+        timeout: Duration,
+    ) -> Result<sandbox_v1::SandboxResponse, ProviderError> {
         let request = sandbox_v1::SandboxRequest {
             protocol_version: PROTOCOL_VERSION,
             body: Some(body),
@@ -98,7 +108,7 @@ impl UdsSandboxAdapterClient {
         let payload = exchange(
             &self.adapter_id,
             &self.socket_path,
-            self.timeout,
+            timeout,
             self.peer_credentials,
             &payload,
         )?;
@@ -140,6 +150,10 @@ impl UdsSandboxAdapterClient {
             "SANDBOX_PROTOCOL_RESPONSE",
             &format!("sandbox adapter did not return {expected}"),
         )
+    }
+
+    fn cleanup_rpc_timeout(&self, cleanup_budget: Duration) -> Duration {
+        bounded_rpc_timeout(self.timeout, cleanup_budget)
     }
 }
 
@@ -191,13 +205,14 @@ impl ProcessRuntime for UdsSandboxAdapterClient {
         handle: &ProcessHandle,
         request: &StopRequest,
     ) -> Result<CleanupReport, ProviderError> {
-        let response = self.call(sandbox_v1::sandbox_request::Body::Stop(
-            sandbox_v1::SandboxStopRequest {
+        let response = self.call_with_timeout(
+            sandbox_v1::sandbox_request::Body::Stop(sandbox_v1::SandboxStopRequest {
                 handle: Some(handle_to_proto(handle)),
                 grace_period_ms: request.grace_period.as_millis().min(u128::from(u64::MAX)) as u64,
                 immediate: request.immediate,
-            },
-        ))?;
+            }),
+            self.cleanup_rpc_timeout(stop_cleanup_budget(request)),
+        )?;
         match response.body {
             Some(sandbox_v1::sandbox_response::Body::Cleanup(report)) => {
                 Ok(cleanup_from_proto(report))
@@ -244,11 +259,14 @@ impl SandboxBackend for UdsSandboxAdapterClient {
         &self,
         evidence: &RuntimeProcessEvidence,
     ) -> Result<CleanupReport, ProviderError> {
-        let response = self.call(sandbox_v1::sandbox_request::Body::RecoverStale(
-            sandbox_v1::SandboxRecoverStaleRequest {
-                evidence: Some(recovery_evidence_to_proto(evidence)),
-            },
-        ))?;
+        let response = self.call_with_timeout(
+            sandbox_v1::sandbox_request::Body::RecoverStale(
+                sandbox_v1::SandboxRecoverStaleRequest {
+                    evidence: Some(recovery_evidence_to_proto(evidence)),
+                },
+            ),
+            self.cleanup_rpc_timeout(recovery_cleanup_budget()),
+        )?;
         match response.body {
             Some(sandbox_v1::sandbox_response::Body::Cleanup(report)) => {
                 Ok(cleanup_from_proto(report))
@@ -256,6 +274,26 @@ impl SandboxBackend for UdsSandboxAdapterClient {
             _ => Err(self.protocol_response("a recovery cleanup report")),
         }
     }
+}
+
+fn stop_cleanup_budget(request: &StopRequest) -> Duration {
+    let forced_cleanup_wait = std::cmp::max(request.grace_period, MIN_FORCED_CLEANUP_WAIT);
+    if request.immediate {
+        request.grace_period.saturating_add(forced_cleanup_wait)
+    } else {
+        request
+            .grace_period
+            .saturating_add(request.grace_period)
+            .saturating_add(forced_cleanup_wait)
+    }
+}
+
+fn recovery_cleanup_budget() -> Duration {
+    RECOVERY_CLEANUP_WAIT.saturating_add(RECOVERY_CLEANUP_WAIT)
+}
+
+fn bounded_rpc_timeout(base_timeout: Duration, cleanup_budget: Duration) -> Duration {
+    base_timeout.saturating_add(cleanup_budget)
 }
 
 fn recovery_evidence_to_proto(
@@ -657,6 +695,49 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn cleanup_rpc_budget_matches_bounded_sandbox_runtime_phases() {
+        assert_eq!(
+            stop_cleanup_budget(&StopRequest {
+                grace_period: Duration::from_secs(1),
+                immediate: false,
+            }),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            stop_cleanup_budget(&StopRequest {
+                grace_period: Duration::from_secs(1),
+                immediate: true,
+            }),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            stop_cleanup_budget(&StopRequest {
+                grace_period: Duration::ZERO,
+                immediate: false,
+            }),
+            MIN_FORCED_CLEANUP_WAIT
+        );
+        assert_eq!(recovery_cleanup_budget(), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn cleanup_rpc_deadline_saturates_without_overflow() {
+        let request = StopRequest {
+            grace_period: Duration::MAX,
+            immediate: false,
+        };
+        assert_eq!(stop_cleanup_budget(&request), Duration::MAX);
+        assert_eq!(
+            bounded_rpc_timeout(Duration::MAX, Duration::MAX),
+            Duration::MAX
+        );
+        assert_eq!(
+            bounded_rpc_timeout(Duration::from_secs(2), Duration::MAX),
+            Duration::MAX
+        );
+    }
 }
 
 /// Real Unix-domain-socket coverage for the Kernel↔sandboxd peer-credential
@@ -667,12 +748,15 @@ mod linux_uds {
     use std::{
         fs,
         os::unix::net::{UnixListener, UnixStream},
+        path::PathBuf,
         sync::mpsc,
         time::Duration,
     };
 
     use cy_adapter_client::PeerCredentialExpectation;
-    use cy_kernel_api::ProcessRuntime;
+    use cy_kernel_api::{
+        ProcessHandle, ProcessRuntime, RuntimeProcessEvidence, SandboxBackend, StopRequest,
+    };
     use cy_proto::sandbox_v1;
     use prost::Message;
 
@@ -706,6 +790,85 @@ mod linux_uds {
         endpoint
     }
 
+    #[derive(Clone, Copy)]
+    enum ExpectedRequest {
+        Preflight,
+        Stop {
+            grace_period_ms: u64,
+            immediate: bool,
+        },
+        RecoverStale,
+    }
+
+    fn delayed_response_server(
+        socket: PathBuf,
+        delay: Duration,
+        expected: ExpectedRequest,
+    ) -> std::thread::JoinHandle<()> {
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let payload = read_frame(&mut stream).unwrap();
+            let request = sandbox_v1::SandboxRequest::decode(payload.as_slice()).unwrap();
+            match (expected, request.body) {
+                (
+                    ExpectedRequest::Preflight,
+                    Some(sandbox_v1::sandbox_request::Body::Preflight(_)),
+                ) => {}
+                (
+                    ExpectedRequest::Stop {
+                        grace_period_ms,
+                        immediate,
+                    },
+                    Some(sandbox_v1::sandbox_request::Body::Stop(request)),
+                ) => {
+                    assert_eq!(request.grace_period_ms, grace_period_ms);
+                    assert_eq!(request.immediate, immediate);
+                }
+                (
+                    ExpectedRequest::RecoverStale,
+                    Some(sandbox_v1::sandbox_request::Body::RecoverStale(request)),
+                ) => {
+                    let evidence = request.evidence.expect("recovery evidence");
+                    assert_eq!(evidence.cgroup_name, "instance-stale");
+                    assert_eq!(evidence.pid, 1234);
+                    assert_eq!(evidence.start_time_ticks, 5678);
+                }
+                _ => panic!("mock server received an unexpected sandbox request"),
+            }
+            std::thread::sleep(delay);
+            let response = match expected {
+                ExpectedRequest::Preflight => sandbox_v1::SandboxResponse {
+                    protocol_version: crate::PROTOCOL_VERSION,
+                    adapter_id: ADAPTER_ID.to_string(),
+                    body: Some(sandbox_v1::sandbox_response::Body::Capabilities(
+                        sandbox_v1::SandboxCapabilities {
+                            ready: true,
+                            facts: Vec::new(),
+                            enforcement: Vec::new(),
+                        },
+                    )),
+                },
+                ExpectedRequest::Stop { .. } | ExpectedRequest::RecoverStale => {
+                    sandbox_v1::SandboxResponse {
+                        protocol_version: crate::PROTOCOL_VERSION,
+                        adapter_id: ADAPTER_ID.to_string(),
+                        body: Some(sandbox_v1::sandbox_response::Body::Cleanup(
+                            sandbox_v1::SandboxCleanupReport {
+                                complete: true,
+                                exit_code: Some(0),
+                                oom_killed: false,
+                                conditions: Vec::new(),
+                                reason_code: "CLEANUP_COMPLETE".to_string(),
+                            },
+                        )),
+                    }
+                }
+            };
+            let _ = write_frame(&mut stream, &response.encode_to_vec());
+        })
+    }
+
     #[test]
     fn preflight_completes_when_sandboxd_peer_matches_configured_identity() {
         let endpoint = endpoint("positive", own_peer_credentials());
@@ -731,6 +894,126 @@ mod linux_uds {
         });
         let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
         assert!(client.preflight().ready);
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn ordinary_rpc_keeps_the_configured_timeout() {
+        let mut endpoint = endpoint("ordinary-timeout", PeerCredentialExpectation::default());
+        endpoint.timeout = Duration::from_millis(20);
+        let socket = endpoint.socket_path.clone();
+        let server = delayed_response_server(
+            socket.clone(),
+            Duration::from_millis(120),
+            ExpectedRequest::Preflight,
+        );
+        let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
+
+        let capabilities = client.preflight();
+        assert!(!capabilities.ready);
+        assert!(capabilities
+            .facts
+            .iter()
+            .any(|fact| fact.detail.contains("SANDBOX_READ_FAILED")));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn stop_rpc_allows_a_reply_past_the_ordinary_timeout_with_cleanup_budget() {
+        let mut endpoint = endpoint("stop-cleanup-budget", PeerCredentialExpectation::default());
+        endpoint.timeout = Duration::from_millis(20);
+        let socket = endpoint.socket_path.clone();
+        let server = delayed_response_server(
+            socket.clone(),
+            Duration::from_millis(120),
+            ExpectedRequest::Stop {
+                grace_period_ms: 80,
+                immediate: false,
+            },
+        );
+        let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
+
+        let report = client
+            .stop(
+                &ProcessHandle {
+                    pid: 1234,
+                    cgroup_path: PathBuf::from("/sys/fs/cgroup/instance-stale"),
+                    start_time_ticks: Some(5678),
+                    transport_socket: None,
+                },
+                &StopRequest {
+                    grace_period: Duration::from_millis(80),
+                    immediate: false,
+                },
+            )
+            .unwrap();
+        assert!(report.complete);
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn stop_rpc_expires_at_the_bounded_cleanup_deadline() {
+        let mut endpoint = endpoint(
+            "stop-cleanup-deadline",
+            PeerCredentialExpectation::default(),
+        );
+        endpoint.timeout = Duration::from_millis(20);
+        let socket = endpoint.socket_path.clone();
+        let server = delayed_response_server(
+            socket.clone(),
+            Duration::from_millis(700),
+            ExpectedRequest::Stop {
+                grace_period_ms: 0,
+                immediate: false,
+            },
+        );
+        let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
+
+        let error = client
+            .stop(
+                &ProcessHandle {
+                    pid: 1234,
+                    cgroup_path: PathBuf::from("/sys/fs/cgroup/instance-stale"),
+                    start_time_ticks: Some(5678),
+                    transport_socket: None,
+                },
+                &StopRequest {
+                    grace_period: Duration::ZERO,
+                    immediate: false,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.reason_code, "SANDBOX_READ_FAILED");
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn recover_stale_rpc_allows_a_reply_past_the_ordinary_timeout() {
+        let mut endpoint = endpoint(
+            "recover-cleanup-budget",
+            PeerCredentialExpectation::default(),
+        );
+        endpoint.timeout = Duration::from_millis(20);
+        let socket = endpoint.socket_path.clone();
+        let server = delayed_response_server(
+            socket.clone(),
+            Duration::from_millis(120),
+            ExpectedRequest::RecoverStale,
+        );
+        let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
+
+        let report = client
+            .recover_stale_process(&RuntimeProcessEvidence {
+                cgroup_name: "instance-stale".to_string(),
+                pid: 1234,
+                start_time_ticks: 5678,
+            })
+            .unwrap();
+        assert!(report.complete);
         server.join().unwrap();
         let _ = fs::remove_dir_all(socket.parent().unwrap());
     }

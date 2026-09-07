@@ -77,6 +77,8 @@ pub struct NvidiaSmiProvider {
     device_root: PathBuf,
     /// Sysfs 虚拟文件系统根目录（默认为 `/sys`）
     sysfs_root: PathBuf,
+    /// Explicit single-user WSL admission; never implies per-GPU device isolation.
+    wsl_shared_device: bool,
     /// Adapter 进程内维护的单调事实代次。相同快照不改变代次。
     inventory_generation: Mutex<InventoryGeneration>,
 }
@@ -95,6 +97,7 @@ impl NvidiaSmiProvider {
             command: command.into(),
             device_root: PathBuf::from("/dev"),
             sysfs_root: PathBuf::from("/sys"),
+            wsl_shared_device: false,
             inventory_generation: Mutex::new(InventoryGeneration::default()),
         }
     }
@@ -114,6 +117,16 @@ impl NvidiaSmiProvider {
     /// 自定义 Sysfs 根路径
     pub fn with_sysfs_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.sysfs_root = root.into();
+        self
+    }
+
+    /// Opt in to one NVIDIA GPU behind WSL's shared dxg device.
+    ///
+    /// Binding remains SOFT: CUDA visibility is cooperative, while the Kernel
+    /// still owns exclusive allocation, fencing and process supervision.
+    /// 多 GPU 或缺少真实 dxg 字符设备时拒绝，不能作为多租户硬隔离。
+    pub fn with_wsl_shared_device(mut self, enabled: bool) -> Self {
+        self.wsl_shared_device = enabled;
         self
     }
 
@@ -219,6 +232,10 @@ impl ResourceProvider for NvidiaSmiProvider {
                         ("family".to_string(), gpu.name),
                         ("pci.address".to_string(), gpu.pci_address.clone()),
                     ]);
+                    if self.wsl_shared_device {
+                        attributes
+                            .insert("device.binding".to_string(), "wsl-shared-soft".to_string());
+                    }
                     if let Some(numa_node) = self.numa_node(&gpu.pci_address) {
                         attributes.insert("numa.node".to_string(), numa_node.to_string());
                     }
@@ -274,8 +291,15 @@ impl ResourceProvider for NvidiaSmiProvider {
                 "resource was not published by this provider",
             ));
         }
-        let gpu = self
-            .query()?
+        let gpus = self.query()?;
+        if self.wsl_shared_device && gpus.len() != 1 {
+            return Err(ProviderError::new(
+                self.adapter_id(),
+                "WSL_MULTI_GPU_BINDING_UNSUPPORTED",
+                "WSL shared-device binding supports exactly one observed NVIDIA GPU",
+            ));
+        }
+        let gpu = gpus
             .into_iter()
             .find(|gpu| gpu.uuid == resource.identity.id)
             .ok_or_else(|| {
@@ -285,7 +309,31 @@ impl ResourceProvider for NvidiaSmiProvider {
                     "resource is absent",
                 )
             })?;
-        let nodes = self.nodes_for(gpu.index);
+        let nodes = if self.wsl_shared_device {
+            let path = self.device_root.join("dxg");
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if !std::fs::metadata(&path)
+                    .is_ok_and(|metadata| metadata.file_type().is_char_device())
+                {
+                    return Err(ProviderError::new(
+                        self.adapter_id(),
+                        "WSL_DXG_DEVICE_UNAVAILABLE",
+                        "WSL shared-device admission requires a real dxg character device",
+                    ));
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(ProviderError::new(
+                self.adapter_id(),
+                "WSL_HOST_UNSUPPORTED",
+                "WSL CUDA requires a Linux execution environment",
+            ));
+            vec![device_node(path, true)]
+        } else {
+            self.nodes_for(gpu.index)
+        };
         let missing = nodes
             .iter()
             .filter(|node| node.required && !node.path.exists())
@@ -318,9 +366,18 @@ impl ResourceProvider for NvidiaSmiProvider {
             environment,
             joinable_environment_keys: nvidia_visibility_join_keys(),
             required_gids: Vec::new(),
-            enforcement: cy_kernel_api::EnforcementMode::Hard,
+            enforcement: if self.wsl_shared_device {
+                cy_kernel_api::EnforcementMode::Soft
+            } else {
+                cy_kernel_api::EnforcementMode::Hard
+            },
             adapter_id: self.adapter_id().to_string(),
-            reason_code: "DEVICE_BPF_REQUIRED".to_string(),
+            reason_code: if self.wsl_shared_device {
+                "WSL_SHARED_DEVICE_SOFT_BINDING"
+            } else {
+                "DEVICE_BPF_REQUIRED"
+            }
+            .to_string(),
         })
     }
 
@@ -371,11 +428,10 @@ fn device_node(path: PathBuf, required: bool) -> DeviceNode {
 
 impl HostInventoryProvider for NvidiaSmiProvider {
     fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
-        let mut resources = <Self as ResourceProvider>::probe_resources(self)?;
+        let resources = <Self as ResourceProvider>::probe_resources(self)?;
         let generation = self.next_inventory_generation(&resources);
-        for resource in &mut resources {
-            resource.identity.generation = generation;
-        }
+        // Free memory changes the inventory, not the UUID-addressed device incarnation.
+        // 可用显存影响清单代次,不能把正在加载模型的同一 GPU 变成新设备。
         Ok(InventorySnapshot {
             generation,
             resources,
@@ -560,6 +616,59 @@ mod tests {
         assert_eq!(result.unwrap_err().reason_code, "PROBE_INCOMPLETE");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wsl_binding_requires_opt_in_and_reports_soft_visibility() {
+        let root = tempfile::tempdir().unwrap();
+        // A real character device exercises stat/rdev without requiring mknod.
+        std::os::unix::fs::symlink("/dev/null", root.path().join("dxg")).unwrap();
+        let provider = NvidiaSmiProvider::new("nvidia-smi")
+            .with_device_root(root.path())
+            .with_runner(Arc::new(FakeRunner {
+                output: CommandOutput {
+                    status: 0,
+                    stdout: "0, GPU-uuid, NVIDIA RTX, 00000000:01:00.0, 12227, 11000\n".into(),
+                    stderr: String::new(),
+                },
+            }));
+        let resource = provider.probe_resources().unwrap().remove(0);
+        assert_eq!(
+            provider.create_binding(&resource).unwrap_err().reason_code,
+            "DEVICE_NODE_MISSING"
+        );
+        let provider = provider.with_wsl_shared_device(true);
+        let binding = provider.create_binding(&resource).unwrap();
+        assert_eq!(binding.enforcement, cy_kernel_api::EnforcementMode::Soft);
+        assert_eq!(binding.reason_code, "WSL_SHARED_DEVICE_SOFT_BINDING");
+        assert_eq!(binding.environment["CUDA_VISIBLE_DEVICES"], "GPU-uuid");
+        assert_eq!(binding.nodes.len(), 1);
+        assert_eq!(binding.nodes[0].major, Some(1));
+        std::fs::remove_file(root.path().join("dxg")).unwrap();
+        std::fs::write(root.path().join("dxg"), b"not a device").unwrap();
+        assert_eq!(
+            provider.create_binding(&resource).unwrap_err().reason_code,
+            "WSL_DXG_DEVICE_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn wsl_binding_refuses_to_claim_per_gpu_isolation() {
+        let provider = NvidiaSmiProvider::new("nvidia-smi")
+            .with_wsl_shared_device(true)
+            .with_runner(Arc::new(FakeRunner {
+                output: CommandOutput {
+                    status: 0,
+                    stdout: "0, GPU-A, NVIDIA RTX, 00000000:01:00.0, 12227, 11000\n1, GPU-B, NVIDIA RTX, 00000000:02:00.0, 12227, 11000\n".into(),
+                    stderr: String::new(),
+                },
+            }));
+        let resource = provider.probe_resources().unwrap().remove(0);
+        assert_eq!(
+            provider.create_binding(&resource).unwrap_err().reason_code,
+            "WSL_MULTI_GPU_BINDING_UNSUPPORTED"
+        );
+    }
+
     #[test]
     fn topology_parser_returns_only_known_links() {
         let links = parse_nvidia_topology(
@@ -594,6 +703,8 @@ mod tests {
         let third = HostInventoryProvider::probe_inventory(&provider).unwrap();
         assert_eq!(first.generation, second.generation);
         assert!(third.generation > second.generation);
+        assert_eq!(first.resources[0].identity, third.resources[0].identity);
+        assert_ne!(first.resources[0].capacity, third.resources[0].capacity);
     }
 
     fn visibility_binding(resource_id: &str) -> DeviceBinding {

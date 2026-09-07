@@ -21,6 +21,7 @@ import dataclasses
 from collections import deque
 from enum import IntEnum
 import inspect
+import json
 import os
 import struct
 import sys
@@ -31,6 +32,7 @@ from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
 DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024  # 1 MiB
 CURRENT_PROTOCOL_VERSION = 1
+TYPED_INVOCATION_STREAM_FEATURE = "cyrene.worker.typed-invocation-stream.v1"
 
 
 # --- Pure-Python Zero-Dependency Protobuf Wire Helpers ---
@@ -564,6 +566,7 @@ class Invoke:
     payload_tag: int = 3
     payload: bytes = b""
     payload_type_url: str = ""
+    stream_results: bool = False
 
     def __init__(
         self,
@@ -574,12 +577,14 @@ class Invoke:
         capability: str = "",
         action: str = "",
         payload_type_url: str = "",
+        stream_results: bool = False,
     ):
         self.extension_point = extension_point or capability
         self.method = method or action
         self.payload_tag = payload_tag
         self.payload = payload
         self.payload_type_url = payload_type_url
+        self.stream_results = stream_results
 
     @property
     def capability(self) -> str:
@@ -604,6 +609,8 @@ class Invoke:
         if self.payload:
             out.extend(encode_bytes_field(self.payload_tag, self.payload))
         out.extend(encode_string_field(4, self.payload_type_url))
+        if self.stream_results:
+            out.extend(encode_uint32_field(5, 1))
         return bytes(out)
 
     @classmethod
@@ -630,6 +637,9 @@ class Invoke:
                 length, offset = decode_varint(data, offset)
                 inst.payload_type_url = data[offset:offset + length].decode("utf-8", "replace")
                 offset += length
+            elif field_num == 5 and wire_type == 0:
+                value, offset = decode_varint(data, offset)
+                inst.stream_results = bool(value)
             elif field_num >= 10 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = field_num
@@ -684,12 +694,94 @@ class InvokeResult:
         return inst
 
 
+@dataclasses.dataclass
+class StreamItem:
+    """One ordered worker result chunk for a live typed invocation."""
+
+    request_id: str = ""
+    sequence_number: int = 0
+    is_last: bool = False
+    payload_type_url: str = ""
+    data_tag: int = 0
+    data: bytes | str = b""
+
+    def encode(self) -> bytes:
+        out = bytearray()
+        out.extend(encode_string_field(1, self.request_id))
+        out.extend(encode_uint64_field(2, self.sequence_number))
+        if self.is_last:
+            out.extend(encode_uint32_field(3, 1))
+        out.extend(encode_string_field(4, self.payload_type_url))
+        if self.data_tag == 10:
+            if not isinstance(self.data, str):
+                raise TypeError("StreamItem.text_chunk must be text")
+            out.extend(encode_string_field(10, self.data))
+        elif self.data_tag == 11:
+            if not isinstance(self.data, bytes):
+                raise TypeError("StreamItem.binary_chunk must be bytes")
+            # A oneof records presence independently of the bytes value.  The
+            # provider's role-only first chunk is valid even when its payload
+            # is empty, so do not use the proto3-default-eliding helper here.
+            out.extend(encode_len_delimited(11, self.data))
+        elif self.data_tag == 12:
+            if not isinstance(self.data, str):
+                raise TypeError("StreamItem.log_line must be text")
+            out.extend(encode_string_field(12, self.data))
+        elif self.data_tag != 0:
+            raise ValueError(f"unsupported StreamItem data tag {self.data_tag}")
+        return bytes(out)
+
+    @classmethod
+    def decode(cls, data: bytes) -> "StreamItem":
+        inst = cls()
+        offset = 0
+        while offset < len(data):
+            tag, offset = decode_varint(data, offset)
+            field_num, wire_type = tag >> 3, tag & 7
+            if field_num in (1, 4) and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                value = data[offset : offset + length].decode("utf-8", "replace")
+                if field_num == 1:
+                    inst.request_id = value
+                else:
+                    inst.payload_type_url = value
+                offset += length
+            elif field_num == 2 and wire_type == 0:
+                inst.sequence_number, offset = decode_varint(data, offset)
+            elif field_num == 3 and wire_type == 0:
+                value, offset = decode_varint(data, offset)
+                inst.is_last = bool(value)
+            elif field_num in (10, 12) and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.data_tag = field_num
+                inst.data = data[offset : offset + length].decode("utf-8", "replace")
+                offset += length
+            elif field_num == 11 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.data_tag = field_num
+                inst.data = data[offset : offset + length]
+                offset += length
+            elif wire_type == 0:
+                _, offset = decode_varint(data, offset)
+            elif wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                offset += length
+        return inst
+
+
 @dataclasses.dataclass(frozen=True)
 class TypedCapabilityPayload:
     """Worker-owned payload bytes plus optional canonical Any type metadata."""
 
     value: bytes
     type_url: str
+
+
+@dataclasses.dataclass(frozen=True)
+class TypedCapabilityStream:
+    """Lazy typed payload sequence emitted by a live worker invocation."""
+
+    items: Any
 
 
 @dataclasses.dataclass
@@ -776,6 +868,8 @@ class Envelope:
                 out.extend(encode_len_delimited(20, self.payload.encode()))
             elif isinstance(self.payload, InvokeResult):
                 out.extend(encode_len_delimited(21, self.payload.encode()))
+            elif isinstance(self.payload, StreamItem):
+                out.extend(encode_len_delimited(22, self.payload.encode()))
             elif isinstance(self.payload, Subscribe):
                 out.extend(encode_len_delimited(23, self.payload.encode()))
             elif isinstance(self.payload, SubscribeAck):
@@ -867,6 +961,11 @@ class Envelope:
                 length, offset = decode_varint(data, offset)
                 inst.payload_tag = 21
                 inst.payload = InvokeResult.decode(data[offset:offset + length])
+                offset += length
+            elif field_num == 22 and wire_type == 2:
+                length, offset = decode_varint(data, offset)
+                inst.payload_tag = 22
+                inst.payload = StreamItem.decode(data[offset : offset + length])
                 offset += length
             elif field_num == 23 and wire_type == 2:
                 length, offset = decode_varint(data, offset)
@@ -1040,6 +1139,10 @@ class CyreneWorker:
     def capabilities_json(self) -> str:
         return "{}"
 
+    def protocol_features(self) -> List[str]:
+        """Return host/worker transport features supported by this shim."""
+        return [TYPED_INVOCATION_STREAM_FEATURE]
+
     def on_configure(self, settings: Dict[str, str]) -> Optional[str]:
         """Return None on success or an error message string on failure."""
         return None
@@ -1062,9 +1165,11 @@ class CyreneWorker:
         capability: str,
         action: str,
         payload: bytes,
+        request_type_url: str = "",
+        stream_results: bool = False,
     ) -> Tuple[bool, Any]:
         """Invoke one correlated request while preserving the public hook API."""
-        del request_id
+        del request_id, request_type_url, stream_results
         return self.on_invoke(capability, action, payload)
 
     def _invoke_request_with_type_url(
@@ -1074,6 +1179,7 @@ class CyreneWorker:
         action: str,
         payload: bytes,
         request_type_url: str,
+        stream_results: bool = False,
     ) -> Tuple[bool, Any]:
         """Dispatch request metadata without changing legacy worker overrides."""
         handler = self.on_invoke
@@ -1083,10 +1189,29 @@ class CyreneWorker:
             signature = None
         if signature is not None:
             request_type = signature.parameters.get("request_type_url")
+            stream_request = signature.parameters.get("stream_results")
             accepts_kwargs = any(
                 parameter.kind == inspect.Parameter.VAR_KEYWORD
                 for parameter in signature.parameters.values()
             )
+            if (
+                stream_results
+                and not accepts_kwargs
+                and not (
+                    stream_request is not None
+                    and stream_request.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                )
+            ):
+                return False, PluginErrorPayload(
+                    code=9,
+                    message="typed streaming invocation is not supported by this worker handler",
+                    details="TYPED_STREAM_HANDLER_REQUIRED",
+                )
+            keyword_args: Dict[str, Any] = {}
             if accepts_kwargs or (
                 request_type is not None
                 and request_type.kind
@@ -1095,13 +1220,30 @@ class CyreneWorker:
                     inspect.Parameter.KEYWORD_ONLY,
                 )
             ):
+                keyword_args["request_type_url"] = request_type_url
+            if accepts_kwargs or (
+                stream_request is not None
+                and stream_request.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            ):
+                keyword_args["stream_results"] = stream_results
+            if keyword_args:
                 return handler(
                     capability,
                     action,
                     payload,
-                    request_type_url=request_type_url,
+                    **keyword_args,
                 )
-        return self._invoke_request(request_id, capability, action, payload)
+        if stream_results:
+            return False, PluginErrorPayload(
+                code=9,
+                message="typed streaming invocation is not supported by this worker handler",
+                details="TYPED_STREAM_HANDLER_REQUIRED",
+            )
+        return self._invoke_request(request_id, capability, action, payload, request_type_url)
 
     def _finish_invocation(self, request_id: str) -> None:
         """Release invocation state after its response has been emitted."""
@@ -1420,6 +1562,31 @@ def _invoke_response_payload(ok: bool, result: object) -> object:
     return PluginErrorPayload(code=code, message=message)
 
 
+def _invoke_stream_payload(result: object) -> bool:
+    """Whether a successful worker result is a lazy typed stream."""
+    return isinstance(result, TypedCapabilityStream)
+
+
+def _handshake_capabilities_json(worker: CyreneWorker) -> str:
+    """Add standard transport features without taking ownership of plugin JSON."""
+    raw = worker.capabilities_json()
+    try:
+        metadata = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return raw
+    if not isinstance(metadata, dict):
+        return raw
+
+    advertised = metadata.get("protocol_features", [])
+    if not isinstance(advertised, list) or not all(isinstance(value, str) for value in advertised):
+        return raw
+    for feature in worker.protocol_features():
+        if feature not in advertised:
+            advertised.append(feature)
+    metadata["protocol_features"] = advertised
+    return json.dumps(metadata, separators=(",", ":"))
+
+
 def run_worker_stream(
     reader: BinaryIO,
     writer: BinaryIO,
@@ -1524,15 +1691,59 @@ def run_worker_stream(
                     inv.action,
                     inv.payload,
                     inv.payload_type_url,
+                    inv.stream_results,
                 )
-                response_payload = _invoke_response_payload(ok, result)
-                output.send(
-                    req_env.request_id,
-                    req_env.trace_id,
-                    req_env.generation,
-                    req_env.fence_token,
-                    response_payload,
-                )
+                if ok and _invoke_stream_payload(result) and not inv.stream_results:
+                    output.send(
+                        req_env.request_id,
+                        req_env.trace_id,
+                        req_env.generation,
+                        req_env.fence_token,
+                        PluginErrorPayload(
+                            code=9,
+                            message="worker returned a typed stream for legacy Invoke",
+                            details="TYPED_STREAM_REQUIRES_STREAM_RESULTS",
+                        ),
+                    )
+                elif ok and _invoke_stream_payload(result):
+                    sequence_number = 1
+                    for item in result.items:  # type: ignore[union-attr]
+                        if not isinstance(item, TypedCapabilityPayload):
+                            raise TypeError("TypedCapabilityStream items must be TypedCapabilityPayload")
+                        output.send(
+                            req_env.request_id,
+                            req_env.trace_id,
+                            req_env.generation,
+                            req_env.fence_token,
+                            StreamItem(
+                                request_id=req_env.request_id,
+                                sequence_number=sequence_number,
+                                payload_type_url=item.type_url,
+                                data_tag=11,
+                                data=item.value,
+                            ),
+                        )
+                        sequence_number += 1
+                    output.send(
+                        req_env.request_id,
+                        req_env.trace_id,
+                        req_env.generation,
+                        req_env.fence_token,
+                        StreamItem(
+                            request_id=req_env.request_id,
+                            sequence_number=sequence_number,
+                            is_last=True,
+                        ),
+                    )
+                else:
+                    response_payload = _invoke_response_payload(ok, result)
+                    output.send(
+                        req_env.request_id,
+                        req_env.trace_id,
+                        req_env.generation,
+                        req_env.fence_token,
+                        response_payload,
+                    )
             except SystemExit as error:
                 # A plugin explicitly exiting is a worker crash. Threads cannot
                 # propagate SystemExit to the process, so preserve subprocess
@@ -1682,7 +1893,7 @@ def run_worker_stream(
                                 api_version=worker.api_version(),
                                 declared_capabilities=worker.declared_capabilities(),
                                 metrics=worker.metrics(),
-                                capabilities_json=worker.capabilities_json(),
+                                capabilities_json=_handshake_capabilities_json(worker),
                             )
                     elif req_env.payload_tag == 14:  # HealthCheck
                         code, msg = worker.on_health_check()
