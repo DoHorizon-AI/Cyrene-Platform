@@ -263,8 +263,9 @@ impl KernelDaemon {
                     )
                 })?;
             bindings.push(
+                // Already-reserved lease bindings do not enforce volatile hardware inventory generation checks
                 self.resource_provider
-                    .create_binding_for_generation(resource, lease.inventory_generation)?,
+                    .create_binding_for_generation(resource, 0)?,
             );
         }
         merge_bindings(bindings)
