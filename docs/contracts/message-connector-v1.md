@@ -50,9 +50,8 @@ InvokeCapability(capability = "message.connector.v1",
 
 `ConversationScope` carries only vendor/protocol identity, connector account
 identity, a vendor-resolvable conversation identity, and the observed private,
-group, or channel kind. The first canonical vendor identifier is
-`onebot.v11`; NapCat is an implementation of that protocol, not a second
-contract identity.
+group, or channel kind. Vendor identifiers are owned by connector
+implementations; Platform does not register or prefer a concrete vendor.
 
 `InboundMessagePayload` contains vendor message identity, conversation facts,
 sender identity/display name, ordered content, one optional reply reference,
@@ -60,9 +59,8 @@ and one bounded vendor extension. It does not assign Product session or
 persistence identity.
 
 `MessageContentPart` preserves ordering for text, mentions, images, and files.
-Reply is deliberately absent from this `oneof`: OneBot represents reply as a
-segment, but the characterization did not prove segment position changes its
-cross-vendor meaning. `ReplyReference` is therefore the single authority on
+Reply is deliberately absent from this `oneof` so every connector maps its
+native reply representation to one cross-vendor `ReplyReference` authority on
 both inbound and outbound messages.
 
 `SendMessageRequest` identifies a target conversation and supplies ordered
@@ -128,7 +126,7 @@ termination and no durable replay guarantee from Capability Execution Service.
 
 The schema contains no wake/reply decision, authorization/admin policy,
 persona, Product session mapping, persistence, memory/RAG, model/tool routing,
-command semantics, Iris behavior, or Product lifecycle. A connector returns
+command semantics, application-specific behavior, or Product lifecycle. A connector returns
 protocol facts; the Product decides their meaning.
 
 ## Maturity and graduation
@@ -136,12 +134,10 @@ protocol facts; the Product decides their meaning.
 The contract remains **EXPERIMENTAL**. Graduation to
 **CONTRACT_CANDIDATE** requires all of the following objective evidence:
 
-1. an official OneBot v11/NapCat connector implementation;
-2. a real AstrBot no-fallback inbound and outbound E2E through
-   `CapabilityExecutionService`;
-3. a second-vendor proof, expected to be WeCom;
-4. the connector-specific TCK passing for both implementations; and
-5. no required breaking protobuf change discovered by those proofs.
+1. two independent vendor connector implementations owned outside Platform;
+2. a real no-fallback Product E2E through `CapabilityExecutionService`;
+3. the connector-specific TCK passing for both implementations; and
+4. no required breaking protobuf change discovered by those proofs.
 
 Stable status requires a later, explicit compatibility review and is not
 implied by meeting the candidate criteria.

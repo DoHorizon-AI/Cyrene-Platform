@@ -69,7 +69,6 @@ def test_repository_policy_matches_every_direct_python_sdk() -> None:
     assert {package.name for package in packages} == {
         "cyrene-artifacts",
         "cyrene-capability-client",
-        "cyrene-control-plane",
         "cyrene-environment",
         "cyrene-preflight",
         "cyrene-worker-shim",

@@ -1,7 +1,7 @@
 //! Product-neutral production lifecycle for immutable capability packages.
 //!
-//! Package descriptors and official manifests remain owned by Workspace and
-//! Official Plugins. This crate consumes those authorities, publishes verified
+//! Package descriptors and repository manifests remain owned by Workspace and
+//! plugin repositories. This crate consumes those authorities, publishes verified
 //! installations atomically, prepares locked dependencies, and delegates
 //! execution to the existing Platform capability worker runtime.
 

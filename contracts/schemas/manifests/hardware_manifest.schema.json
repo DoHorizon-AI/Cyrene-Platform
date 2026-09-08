@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/hardware_manifest.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 AI hardware projection; new code uses the generic Node resource inventory contract.",
   "title": "HardwareManifest",
   "description": "Deterministic description of a target machine's hardware and platform capabilities. Produced by the HardwareAnalyzer / Node Agent.",
   "type": "object",

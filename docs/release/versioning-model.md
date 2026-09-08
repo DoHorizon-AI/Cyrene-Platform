@@ -1,19 +1,11 @@
-# Cyrene Semantic Versioning & Compatibility Model
+# Platform Versioning and Compatibility
 
-This document defines how version numbers evolve across different architectural layers.
+Cyrene-Platform uses repository-scoped Semantic Versioning. A breaking public
+contract or SDK change increments the major version, a backward-compatible
+feature increments the minor version, and a compatible fix increments the
+patch version.
 
----
-
-## 1. Version Independence Rules
-
-1. **Component SemVer**: Each repository increments its version based on its own breaking changes, features, and fixes (`MAJOR.MINOR.PATCH`).
-2. **Distribution SemVer**: The Cyrene Distribution increments its version independently based on user-facing distribution milestones and profile capabilities.
-3. **Capability Interface Version**: Capability interfaces (e.g. `model.analyzer.v1`, `storage.provider.v1`) use explicit contract versioning independent of library patch versions.
-
----
-
-## 2. Public vs. Private Overlays
-
-- **Public Distribution**: Compiled purely from public component releases and public `ReleaseLock.json`.
-- **Private Commercial Distribution**: Produced in Azure DevOps by applying a **Private Commercial Overlay** (e.g. proprietary accelerator plugins, Enterprise SSO) onto a base Public ReleaseLock.
-- **Strict Separation**: Private overlays are never committed to public repositories.
+Capability interface major versions and schema versions remain explicit in
+the contract itself. Their compatibility does not imply that a consumer or
+plugin implementation is ready. Product, plugin, and distribution versions are
+independent and are recorded by their owners.

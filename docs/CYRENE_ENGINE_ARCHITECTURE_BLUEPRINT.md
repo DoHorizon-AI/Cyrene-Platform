@@ -553,7 +553,7 @@ cyrene-navigator/
 | ------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------- |
 | 根 `Cargo.toml` / `Cargo.lock`               | `cyrene-core/` 原路径                                       | 保持 Rust workspace 根入口                                   |
 | `kernel/crates/cy-*`                        | `cyrene-core/kernel/crates/cy-*`                         | 先增量扩展，不先拆现有 crate                                       |
-| `framework/jvm/README.md`                   | `cyrene-core/framework/jvm/*`                            | 按 Pure Kotlin Domain + Spring Boot Adapters 建 Gradle 工程 |
+| `framework/jvm`（已删除）                    | Product JVM 生命周期已迁至 Cyrene-Yield                       | Platform 只运行生成契约的 JVM TCK，不保留空工程或 Product 源码       |
 | `framework/crates/cy-extension-registry`    | 迁移期保留；长期由 Kotlin application/domain 接管                   | Kotlin shadow/conformance 通过前不得删除                       |
 | `framework/crates/cy-platform-api`          | `cyrene-core/sdk/rust/cy-platform-api`                   | 重新定位为 Rust SDK/受信任静态接口                                  |
 | `contracts/proto/plugin/v1/*`               | `cyrene-core/sdk/proto/cy/plugin/v1/*`                   | 原子迁移，保持 wire package                                    |
@@ -1565,7 +1565,7 @@ Python 的条件下验证；否则不能据此宣称“微内核 + Kotlin 框架
 | agents/node/cy-node-agent                      | 外层 node control、日志与升级进程；增加 daemon binary、mTLS/session、snapshot/reconcile | 不再把 handler unit test 当成可运行节点证明，且 Kernel crate 不依赖该 agent |
 | cy-platform-api                               | AI trait 移到 extension SDK；Core 只留通用插件契约                 | 移除官方 App 后 Core 仍能构建运行                                 |
 | cy-extension-registry                         | 迁移期保留为 compatibility layer，长期由 Kotlin catalog/router 接管 | Kotlin 行为覆盖后才删除                                        |
-| framework/jvm                                 | 建立 Pure Kotlin domain/application + Spring adapters     | Gradle build、架构测试、reconcile integration test 通过        |
+| framework/jvm（已删除）                        | Product JVM 生命周期由 Cyrene-Yield 持有                       | Platform 的 JVM 仅验证生成契约 consumer                        |
 | apps / shell                                  | 仅按方案 A 在相应服务仓创建或接入                                      | 先完成 Core API 与最小远程 mock plugin 闭环                      |
 
 contracts/ 与 sdk/ 不能长期双写。路径迁移必须同步更新 Cargo、Gradle、build.rs、

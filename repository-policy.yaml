@@ -12,10 +12,11 @@ ownership:
   owns:
   - Foundational contracts & Protobuf schemas
   - Rust Kernel, process isolation & cgroup sandboxing
-  - Product Control Plane primitives
+  - Product-neutral Kernel execution and resource-fact contracts
   - Generic daemon units and repository CI tooling
   does_not_own:
   - Product-specific AI state
+  - Product lifecycle, run, attempt, retry, and persistence state
   - Training epoch loops or Serving engine internals
   - Product deployment, edge configuration, adapters, or compatibility snapshots
   - Cross-repository Product and plugin catalogs
@@ -27,7 +28,6 @@ build:
   - gradle
 artifacts:
   package_units:
-  - cyrene-control-plane
   - cyrene-preflight
   - cyrene-artifacts
   - cyrene-environment

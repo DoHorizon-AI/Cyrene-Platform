@@ -37,12 +37,15 @@ jobs:
           python-version: "3.12"
       - name: Run architecture boundary guard
         run: |
-          python -m pip install pytest hypothesis
+          python -m pip install pytest hypothesis "pyyaml>=6.0"
           python tooling/ci/check_service_boundaries.py
           python -m pytest tooling/ci/test_check_service_boundaries.py
+          python tooling/governance/validate_repository_policy.py
+          python -m pytest tooling/governance/tests/test_repository_policy.py
+          bash tooling/ci/check-no-legacy-surface.sh
 
-  jvm-boundary:
-    name: ci / jvm-boundary
+  jvm-contracts:
+    name: ci / jvm-contracts
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -55,8 +58,23 @@ jobs:
         with:
           gradle-version: "9.5.0"
           cache-provider: basic
-      - name: Test JVM authority boundary
-        run: gradle --no-daemon -p framework/jvm test
+      - name: Test generated JVM contract consumer
+        run: gradle --no-daemon -p tck/model-provider-embedding-contract/jvm test
+
+  dotnet-contracts:
+    name: ci / dotnet-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build and run generated .NET contract consumers
+        run: |
+          dotnet build tck/capability-execution-service/dotnet/CapabilityExecutionServiceTck.csproj --configuration Release
+          dotnet run --project tck/message-connector-contract/dotnet/MessageConnectorContractTck.csproj --configuration Release
+          dotnet run --project tck/model-provider-embedding-contract/dotnet/ModelProviderEmbeddingContractTck.csproj --configuration Release
 
   python-sdk:
     name: ci / python-sdk
@@ -73,7 +91,6 @@ jobs:
           python -m pip install -e sdk/python/cyrene_artifacts
           python -m pip install -e sdk/python/cyrene_environment
           python -m pip install -e sdk/python/cyrene_preflight
-          python -m pip install -e sdk/python/cyrene_control_plane
           python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
       - name: Run SDK unit tests
         run: |
@@ -83,8 +100,6 @@ jobs:
           python -m pytest sdk/python/cyrene_artifacts/tests
           python -m pytest sdk/python/cyrene_environment/tests
           python -m pytest sdk/python/cyrene_preflight/tests
-          python -m pytest sdk/python/cyrene_control_plane/tests
-          python -m pytest tooling/workspace/tests
           python -m pytest tooling/docs/tests
           python -m pytest tooling/ci/tests
 

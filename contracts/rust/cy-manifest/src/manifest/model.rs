@@ -9,6 +9,11 @@
 //! 模型契约数据结构定义。
 //!
 //! 包含数值精度、权重格式、量化方法、显存预估及模型清单等静态规格定义。
+//!
+//! `MIGRATING_COMPATIBILITY`: these v0 model-planning records remain for the
+//! implemented typed SPI. New Product lifecycle fields belong to the owning
+//! Product and new capability payloads use versioned contracts outside this
+//! compatibility model.
 
 use serde::{Deserialize, Serialize};
 

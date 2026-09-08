@@ -9,7 +9,7 @@ const string inboundEventType = "inbound_message";
 
 var conversation = new ConversationScope
 {
-    Vendor = "onebot.v11",
+    Vendor = "example.messaging.v1",
     AccountId = "10001",
     ConversationId = "456",
     Kind = ConversationKind.Group,
@@ -24,7 +24,7 @@ var inbound = new InboundMessagePayload
     Reply = new ReplyReference { MessageId = "777" },
     VendorExtension = new VendorExtension
     {
-        Vendor = "onebot.v11",
+        Vendor = "example.messaging.v1",
         Facts =
         {
             new VendorFact { Name = "post_type", Value = "message" },
@@ -64,7 +64,7 @@ var applicationEvent = new CapabilityApplicationEvent
     EventType = inboundEventType,
     Payload = Any.Pack(inbound),
     Generation = 7,
-    SourceId = "onebot-connector",
+    SourceId = "example-connector",
 };
 if (!applicationEvent.Payload.Is(InboundMessagePayload.Descriptor))
 {

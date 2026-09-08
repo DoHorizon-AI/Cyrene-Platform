@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/runtime_manifest.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 AI runtime projection; new code uses generic runtime profiles and Product-owned manifests.",
   "title": "RuntimeManifest",
   "description": "The fully resolved runtime environment for a workload. Its `runtime_id` is a content hash of the manifest with the `runtime_id` field itself excluded (see schemas/CANONICALIZATION.md).",
   "type": "object",

@@ -21,7 +21,7 @@ use std::{
 use cy_manifest::PluginManifest;
 use cy_platform_api::{
     CapabilityBinding, CapabilityRegistry, CapabilityResolutionError, WorkerActivationOptions,
-    normalize_official_manifest,
+    normalize_repository_manifest,
 };
 
 use crate::{CapabilityExecutionConfig, CapabilityExecutionService};
@@ -74,13 +74,13 @@ impl From<String> for ConfigurationError {
     }
 }
 
-/// Load either a Platform manifest or an Official Plugins manifest.
+/// Load either a Platform manifest or a repository plugin manifest.
 pub fn load_manifest(path: &Path) -> Result<PluginManifest, ConfigurationError> {
     let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     if value.get("plugin").is_some() {
         Ok(serde_json::from_value(value)?)
     } else {
-        normalize_official_manifest(value).map_err(ConfigurationError::from)
+        normalize_repository_manifest(value).map_err(ConfigurationError::from)
     }
 }
 

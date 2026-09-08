@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/training_revision.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 training lifecycle projection; frozen pending Yield-owned replacement.",
   "title": "TrainingRevision",
   "description": "An immutable, non-overwritable record of a single controlled training adjustment. Its `revision_id` is a content hash of the record with the `revision_id` field itself excluded (see schemas/CANONICALIZATION.md).",
   "type": "object",

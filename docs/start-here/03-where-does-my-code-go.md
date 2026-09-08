@@ -27,8 +27,10 @@ Are you adding/modifying...
    ├── Node Agent, Process Sandbox, Hardware Discovery ─────────────► Cyrene-Platform (kernel/)
    ├── Orchestration Reconciler, PlanStep, Attempt, Lease ──────────► Cyrene-Platform (framework/ or sdk/)
    ├── Shared Python SDKs (artifacts, environment, preflight) ──────► Cyrene-Platform (sdk/python/)
-   ├── Shared Docker / K8s / Systemd assets ────────────────────────► Cyrene-Platform (infrastructure/)
-   └── Governance guards, CI scripts, workspace tools ──────────────► Cyrene-Platform (tooling/)
+   ├── Platform daemon systemd units ───────────────────────────────► Cyrene-Platform (infrastructure/systemd/)
+   └── Platform-local governance, CI, and codegen ──────────────────► Cyrene-Platform (tooling/)
+
+   Multi-repository checkout, profiles, and status ─────────────────► Cyrene-Workspace
 
 4. Enterprise Organization & Commercial features?
    ├── SSO, SAML, SCIM, Enterprise RBAC, Multi-Tenancy ───────────► Cyrene-Enterprise (Proposed)

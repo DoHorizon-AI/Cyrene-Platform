@@ -1,18 +1,16 @@
-# Repository Ownership Map
+# Platform Ownership Map
 
-This table defines the authoritative ownership, dependencies, and boundaries for every repository in the Cyrene software matrix.
+Cyrene-Platform owns only the generic foundation described by
+[`repository-policy.yaml`](../../repository-policy.yaml): versioned contracts,
+the Rust Kernel, process isolation and resource mechanisms, product-neutral
+execution control, Platform daemon units, and repository-local CI.
 
----
+It does not own Product lifecycle state, concrete AI engines, connector
+adapters, deployment templates, compatibility snapshots, or cross-repository
+catalogs. A new Product, plugin, or adapter must consume released Platform
+contracts without adding its identity to this repository.
 
-| Repository | Primary Responsibility (OWNS) | Must NEVER Own (DOES NOT OWN) | Depends On | Consumed By | Where to Start Reading |
-|---|---|---|---|---|---|
-| **`Cyrene-Platform`** | Foundational contracts, Rust Kernel, Control Plane, SDKs, Shared Infra & Tooling | Product-specific AI state, training semantics, serving engine internals | None (Root trust base) | All Services, Plugins, External Clients | [`Cyrene-Platform/README.md`](../../README.md), [`docs/start-here/00-what-is-cyrene.md`](00-what-is-cyrene.md) |
-| **`Cyrene-Plugins`** | Replaceable capability implementations, official catalog, manifest schemas, conformance tests | Product desired/observed state, generic Kernel lifecycle mechanisms | `Cyrene-Platform` contracts | `Cyrene-Yield`, `Cyrene-Reactor`, `Cyrene-Exchange` | [Cyrene-Plugins README](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/blob/main/README.md), [Catalog](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/blob/main/catalog/official/catalog.json) |
-| **`Cyrene-Yield`** | Model training product semantics, `TrainingRun`, epoch tracking, training orchestration | Generic resource lifecycle, low-level cgroups, concrete training engine internals | `Cyrene-Platform` (SDK, Contracts) | Training end-users, MLOps orchestration | [Cyrene-Yield README](https://github.com/DoHorizon-AI/Cyrene-Yield/blob/main/README.md), `training/core/` |
-| **`Cyrene-Reactor`** | Model serving & inference product semantics, deployment desired state, scaling policy | Generic GPU memory allocation, generic lease management | `Cyrene-Platform` (SDK, Contracts) | Inference API consumers, Web clients | [Cyrene-Reactor README](https://github.com/DoHorizon-AI/Cyrene-Reactor/blob/main/README.md), `runtime/core/` |
-| **`Cyrene-Exchange`** | API Gateway product & control semantics, model load balancing, endpoint routing | Language-specific gateway runtime internals | `Cyrene-Platform` | API clients, UI dashboards | [Cyrene-Exchange README](https://github.com/DoHorizon-AI/Cyrene-Exchange/blob/main/README.md) |
-| **`cyrene-navigator`** | Desktop client, local capability host, and unified cross-product workspace UI | Generic server-side control plane, training/serving execution | `Cyrene-Platform` (SDK, Contracts) | Desktop users, AI agent developers | [Cyrene-Navigator README](https://github.com/DoHorizon-AI/Cyrene-Navigator/blob/main/README.md) |
-| **`cyrene-echo`** | Model testing, evaluation suites, LLM judge scoring, comparison leaderboards | Model training loops, serving infrastructure | `Cyrene-Platform` (SDK, Contracts) | Model evaluators, QA engineers | [Cyrene-Echo README](https://github.com/DoHorizon-AI/Cyrene-Echo/blob/main/README.md) |
-| **`cyrene-catalyst`** | Data ingestion, cleaning, transformation, dataset lifecycle, and tokenization | Model training loops, serving infrastructure | `Cyrene-Platform` (SDK, Contracts) | Data engineers, pipeline operators | [Cyrene-Catalyst README](https://github.com/DoHorizon-AI/Cyrene-Catalyst/blob/main/README.md) |
-| **`cyrene-astrbot-rev`** | Multi-platform agent & instant messaging host service, Star system, session flows | Generic platform infrastructure, generic kernel worker supervision | `Cyrene-Platform`, `Cyrene-Plugins` | End users on IM platforms (Discord, QQ, WeCom) | [AstrBot-Rev README](https://github.com/DoHorizon-AI/AstrBot-Rev/blob/main/README.md) |
-| **`cyrene-dh-system-internal`** | Internal enterprise operations, WeCom agent hub, Azure DevOps task synchronization | Core AI execution primitives, public platform contracts | Internal connectors, Azure DevOps SDK | Internal operations teams | [DH-System-Internal README](https://github.com/DoHorizon-AI/cyrene-dh-system-internal/blob/main/README.md) |
+The current multi-repository map, target branches, and dependency pins are
+mutable integration data owned by
+[Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace). Consult
+that repository instead of copying its catalog here.

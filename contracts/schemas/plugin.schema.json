@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/plugin.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 typed plugin taxonomy; frozen while consumers move to generic capability descriptors.",
   "title": "PluginManifest",
   "description": "Canonical CYRENE plugin.toml manifest (spec_version 1.0). See docs/PLUGIN_SPEC.md. Supports single-plugin and multi-component bundle forms.",
   "type": "object",

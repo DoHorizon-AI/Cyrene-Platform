@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/artifact_manifest.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 AI artifact projection; frozen for compatibility and not a current Platform authority.",
   "title": "ArtifactManifest",
   "description": "An immutable description of a managed artifact (model snapshot, dataset, checkpoint, merged/quantized model, or report). Its `artifact_id` is a content hash of the record with the `artifact_id` field itself excluded (see schemas/CANONICALIZATION.md).",
   "type": "object",

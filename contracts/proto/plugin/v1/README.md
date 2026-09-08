@@ -2,8 +2,14 @@
 
 ## Purpose | 目录职责
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+`plugin_protocol.proto` provides the generic worker envelope. The other ten
+named SPI files are frozen `MIGRATING_COMPATIBILITY` v0 projections used only
+by `cy-extension-registry`; new capabilities use generic typed payloads over
+CES and must not add another named SPI file here.
+
+`plugin_protocol.proto` 提供通用 Worker envelope。其余十个命名 SPI 文件是冻结的
+`MIGRATING_COMPATIBILITY` v0 投影，只供 `cy-extension-registry` 使用；新能力通过
+CES 传递通用 typed payload，不得在这里增加新的命名 SPI。
 
 ## Contents | 内容
 

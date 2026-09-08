@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/model_manifest.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 model-analysis projection; frozen pending plugin or Product ownership.",
   "title": "ModelManifest",
   "description": "Deterministic description of a model's architecture, footprint and runtime requirements. Produced by the ModelAnalyzer.",
   "type": "object",

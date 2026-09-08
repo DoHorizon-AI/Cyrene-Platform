@@ -2,8 +2,15 @@
 
 ## Purpose | 目录职责
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+**Status: `MIGRATING_COMPATIBILITY`.** This implemented v0 typed proxy and
+registry layer is retained until Kotlin catalog/router conformance replaces it.
+It is not a supported extension point for new Platform or Product code, and it
+has no production dependents inside this repository. New capabilities use the
+generic resolver, CES, and WorkerControl contracts.
+
+**状态：`MIGRATING_COMPATIBILITY`。** 该 v0 强类型代理与注册层已有具体实现，在
+Kotlin catalog/router 完成一致性替代前暂时保留。新的 Platform 或 Product 代码不得
+依赖或扩展它；新能力使用通用 resolver、CES 与 WorkerControl 契约。
 
 ## Contents | 内容
 

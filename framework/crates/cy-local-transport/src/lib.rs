@@ -6,6 +6,12 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! `MIGRATING_COMPATIBILITY` direct stdio child-process transport.
+//!
+//! This implemented v0 transport is retained for compatibility tests only.
+//! Production workers use Kernel-managed process and sandbox boundaries. New
+//! code must not depend on this crate or call [`StdioTransport::spawn`].
+
 use async_trait::async_trait;
 use bytes::BytesMut;
 use cy_plugin_protocol::{Envelope, FramedCodec, ProtocolError};

@@ -10,6 +10,11 @@
 //!
 //! 包含插件版本级别、运行宿主形式、重启策略、启动配置、安全权限、资源限制、
 //! 元数据、依赖声明、能力清单、子组件及完整插件清单（PluginManifest）。
+//!
+//! `MIGRATING_COMPATIBILITY`: the controlled v0 plugin kinds and typed
+//! capability tables remain frozen for implemented consumers. New plugins use
+//! free capability identifiers, interface versions, and execution modes in
+//! `CapabilityDescriptor`; do not add another named kind here.
 
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 

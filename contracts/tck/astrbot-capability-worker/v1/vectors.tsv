@@ -1,6 +1,0 @@
-scenario	manifest_schema	component_class	extension_contract	api_version	host_contract	worker_contract	production	expected
-valid_v2	2	capability-plugin	cyrene.astrbot.capability-worker	1.0	capability-plugin|cyrene.astrbot.capability-worker|1.0	capability-plugin|cyrene.astrbot.capability-worker|1.0	true	accepted
-legacy_v1_development	1	-	-	-	-	-	false	legacy-permitted
-legacy_v1_production	1	-	-	-	-	-	true	rejected
-wrong_extension	2	capability-plugin	cyrene.example.other	1.0	capability-plugin|cyrene.astrbot.capability-worker|1.0	capability-plugin|cyrene.example.other|1.0	true	rejected
-hello_mismatch	2	capability-plugin	cyrene.astrbot.capability-worker	1.0	capability-plugin|cyrene.astrbot.capability-worker|1.0	capability-plugin|cyrene.astrbot.capability-worker|1.1	true	rejected

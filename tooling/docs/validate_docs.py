@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 Cyrene Documentation Validator
 Validates relative Markdown links, ADR references, and ensures no local C:\ paths exist.
 """
@@ -9,6 +9,7 @@ import re
 import sys
 from pathlib import Path
 
+
 def find_docs_root() -> Path:
     curr = Path.cwd().resolve()
     for parent in [curr] + list(curr.parents):
@@ -16,14 +17,15 @@ def find_docs_root() -> Path:
             return parent
     return curr
 
+
 def validate_docs(root: Path) -> list:
     errors = []
     docs_dir = root / "docs"
     md_files = list(docs_dir.rglob("*.md")) + [root / "README.md", root / "ARCHITECTURE.md", root / "CONTRIBUTING.md"]
 
-    link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
-    c_drive_pattern = re.compile(r'\b[A-Za-z]:[\\/]')
-    obsolete_paths = [re.compile(r'tools/ci/'), re.compile(r'infra/systemd/')]
+    link_pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    c_drive_pattern = re.compile(r"\b[A-Za-z]:[\\/]")
+    obsolete_paths = [re.compile(r"tools/ci/"), re.compile(r"infra/systemd/")]
 
     checked_links = 0
     for f in md_files:
@@ -51,7 +53,12 @@ def validate_docs(root: Path) -> list:
         # Check links
         for match in link_pattern.finditer(content):
             text, target = match.groups()
-            if target.startswith("http://") or target.startswith("https://") or target.startswith("mailto:") or target.startswith("#"):
+            if (
+                target.startswith("http://")
+                or target.startswith("https://")
+                or target.startswith("mailto:")
+                or target.startswith("#")
+            ):
                 continue
 
             clean_target = target.split("#")[0]
@@ -69,6 +76,7 @@ def validate_docs(root: Path) -> list:
 
     return errors
 
+
 def main():
     root = find_docs_root()
     print(f"Validating documentation in: {root}\n")
@@ -82,6 +90,7 @@ def main():
 
     print("[SUCCESS] All documentation links, ADRs, and paths validated 100% cleanly!")
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

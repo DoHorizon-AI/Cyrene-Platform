@@ -10,6 +10,11 @@
 //!
 //! 包含工作负载请求（WorkloadRequest）、决策原因报告（WhyReport）、
 //! 环境校验结果（ValidationResult）、训练修订版本（TrainingRevision）及检查点元数据（CheckpointMetadata）。
+//!
+//! `MIGRATING_COMPATIBILITY`: Product-owned training lifecycle types remain
+//! here only for the implemented v0 SPI and canonical-hash compatibility.
+//! Yield owns new TrainingRun, revision, and checkpoint business state. Do not
+//! extend these types for new Product behavior.
 
 use serde::{Deserialize, Serialize};
 

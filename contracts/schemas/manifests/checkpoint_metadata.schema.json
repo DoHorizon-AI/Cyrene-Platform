@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/checkpoint_metadata.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 Product checkpoint projection; frozen pending Yield-owned replacement.",
   "title": "CheckpointMetadata",
   "description": "An immutable description of a training checkpoint. Its `checkpoint_id` is a content hash of the record with the `checkpoint_id` field itself excluded (see schemas/CANONICALIZATION.md).",
   "type": "object",

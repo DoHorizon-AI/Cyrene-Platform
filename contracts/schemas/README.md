@@ -22,10 +22,9 @@ Read this guide first, then the direct files above in dependency order, and fina
 | `CANONICALIZATION.md` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `advanced-service.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `component-catalog.schema.json` | Schema for catalogs owned by Products, Plugins, or integration repositories. | 产品、Plugins 或集成仓库所拥有目录的 Schema。 |
-| `execution-plan-v1.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `media-processor-v1.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `plugin-set.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `plugin.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
+| `plugin.schema.json` | `MIGRATING_COMPATIBILITY` v0 typed plugin taxonomy. | `MIGRATING_COMPATIBILITY` v0 强类型插件分类。 |
 | `service.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `verified-installation-record.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
 | `examples/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |

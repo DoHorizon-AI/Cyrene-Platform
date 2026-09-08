@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use cy_platform_api::normalize_official_manifest;
+use cy_platform_api::normalize_repository_manifest;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
@@ -166,17 +166,17 @@ pub(crate) fn verify_source(
     let manifest_value = serde_json::from_slice(manifest_bytes).map_err(|error| {
         PackageRuntimeError::new(
             "MANIFEST_INVALID",
-            format!("invalid official manifest: {error}"),
+            format!("invalid repository plugin manifest: {error}"),
         )
     })?;
-    let manifest = normalize_official_manifest(manifest_value)
+    let manifest = normalize_repository_manifest(manifest_value)
         .map_err(|error| PackageRuntimeError::new("MANIFEST_INVALID", error))?;
     if manifest.plugin.id != inspected.inspection.package_id.as_str()
         || manifest.plugin.version != inspected.inspection.package_version.as_str()
     {
         return Err(PackageRuntimeError::new(
             "PACKAGE_IDENTITY_MISMATCH",
-            "official manifest identity does not match package descriptor",
+            "repository plugin manifest identity does not match package descriptor",
         ));
     }
     let manifest_capabilities = manifest
@@ -192,7 +192,7 @@ pub(crate) fn verify_source(
     {
         return Err(PackageRuntimeError::new(
             "PACKAGE_CAPABILITY_MISMATCH",
-            "package descriptor capability is absent from official manifest",
+            "package descriptor capability is absent from repository plugin manifest",
         ));
     }
 

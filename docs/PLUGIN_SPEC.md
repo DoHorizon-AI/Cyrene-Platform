@@ -1,11 +1,19 @@
 # CYRENE Plugin Manifest Specification (S1 + S2)
 
 - **spec_version:** `1.0`
-- **Status:** normative
+- **Status:** `MIGRATING_COMPATIBILITY` (frozen; no new kinds or capability vocabulary)
 - **Schema:** [`contracts/schemas/plugin.schema.json`](../contracts/schemas/plugin.schema.json)
 
-This document is the single source of truth for the shape of a CYRENE
-`plugin.toml`, the controlled taxonomy of plugin **kinds**, **editions**,
+This document preserves the implemented v0 `plugin.toml` contract while
+existing consumers migrate. New plugin repositories own their
+`plugin.manifest.json` and expose free capability identifiers, interface
+versions, and execution modes; Platform performs a loss-aware normalization
+without adding a named capability type. Do not extend the controlled taxonomy
+below.
+
+Within the v0 compatibility surface, this document is the source of truth for
+the shape of a CYRENE `plugin.toml`, the controlled taxonomy of plugin
+**kinds**, **editions**,
 **runtimes**, and the controlled **capability vocabulary** the host uses to match
 plugins against a workload. If the JSON Schema, the Rust model
 (`contracts/rust/cy-manifest/src/manifest/plugin.rs`), or a checked-in manifest disagree

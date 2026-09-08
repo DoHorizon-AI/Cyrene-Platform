@@ -68,18 +68,6 @@ if rg -n 'struct (ArtifactIdentity|Lease|Capability|Worker|Operation)\b' framewo
     printf 'Fabric implementation duplicates an existing canonical authority type\n' >&2
     exit 1
 fi
-if rg -n 'class NodeControlService|class NodeControlGrpcServer|activeNodes|usePlaintext\(' framework/jvm --glob '*.kt'; then
-    printf 'JVM target must not contain a second NodeControl owner or plaintext Agent transport\n' >&2
-    exit 1
-fi
-if rg -n 'NodeAgentGrpcClient|KernelOutboundAdapter|KernelCommandPort|MethodDescriptor<ByteArray|blockingUnaryCall' framework/jvm --glob '*.kt'; then
-    printf 'JVM target must not expose a fake or dynamically constructed Kernel execution path\n' >&2
-    exit 1
-fi
-if rg -n 'data class (Lease|Node|WorkerInstance|ArtifactReference)\b' framework/jvm/domain --glob '*.kt'; then
-    printf 'JVM target must reuse canonical Kernel and Artifact identities instead of defining parallel models\n' >&2
-    exit 1
-fi
 if rg -n 'legacy-local-ticket|legacy-local-compatibility|legacy-seed-peer' agents/runtime/cy-runtime-agent framework/crates/cy-execution-fabric; then
     printf 'Runtime Artifact staging contains a legacy authorization bypass\n' >&2
     exit 1

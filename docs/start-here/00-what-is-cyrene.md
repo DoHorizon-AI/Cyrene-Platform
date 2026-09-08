@@ -31,7 +31,7 @@ The fundamental principle governing Cyrene is **separation of concerns across di
 | Layer | Primary Responsibility | Example Components | What It Must NEVER Own |
 |---|---|---|---|
 | **Product Layer** | Owns user-facing AI semantics, desired/observed state, orchestration intent | `Cyrene-Yield`, `Cyrene-Reactor`, `Cyrene-Exchange` | Generic resource leasing, cgroup sandboxing |
-| **Control Plane** | Declarative reconciler, plan generation, idempotency, attempt retry | `cyrene_control_plane`, Step Runners | Direct hardware driver calls, model weight I/O |
+| **Product lifecycle** | Product-owned run state, plans, idempotency, and retry | Each Product repository | Kernel execution authority, plugin implementation |
 | **Platform / Kernel** | Generic process supervisor, lease manager, node telemetry, hardware abstraction | `cyrene-kernel`, `cy-node-agent`, `WorkerControl` | Training loss curves, prompt templates, billing |
 | **Plugin Layer** | Pluggable, interchangeable implementations behind standard Capability APIs | `cyrene.models.hf-analyzer`, `cyrene.data.memory` | Cluster orchestration, lease enforcement |
 

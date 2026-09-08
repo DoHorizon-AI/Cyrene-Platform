@@ -7,7 +7,7 @@ verification expectations.
 
 | File | Responsibility | 文件职责 |
 | --- | --- | --- |
-| `workspace-layout.md` | Multi-repository workspace layout. | 多仓库工作区布局 |
+| `workspace-layout.md` | Platform checkout and external workspace boundary. | Platform 检出与外部工作区边界 |
 | `branch-model.md` | Branch and integration model. | 分支与集成模型 |
 | `dependencies.md` | Dependency ownership and policy. | 依赖归属与策略 |
 | `local-verification.md` | Local verification entry points. | 本地验证入口 |
@@ -20,4 +20,3 @@ Read `workspace-layout.md`, then `branch-model.md`, `dependencies.md`, and
 
 依次阅读 `workspace-layout.md`、`branch-model.md`、`dependencies.md` 和
 `local-verification.md`。
-

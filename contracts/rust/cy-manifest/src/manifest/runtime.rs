@@ -9,6 +9,10 @@
 //! 运行时环境契约数据结构定义。
 //!
 //! 包含硬件画像、训练策略、验证等级阶梯及运行时环境清单（RuntimeManifest）。
+//!
+//! `MIGRATING_COMPATIBILITY`: the v0 AI-specific runtime projection is retained
+//! for existing hash and typed-SPI consumers. New execution uses generic
+//! Platform execution plans and Product-owned capability payloads.
 
 use std::collections::BTreeMap;
 

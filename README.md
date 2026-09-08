@@ -19,11 +19,11 @@ All platform development converges through the standard branch model:
 | Directory    | Responsibility                                                                                             |
 | ------------ | ---------------------------------------------------------------------------------------------------------- |
 | `kernel/`         | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
-| `framework/`      | Extension API, registry, and JVM boundary                                                                  |
+| `framework/`      | Generic execution services and quarantined v0 compatibility crates                                        |
 | `contracts/`      | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
 | `sdk/`            | Language client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`)                        |
 | `infrastructure/` | Generic systemd units for Platform-owned daemons and adapter hosts                                       |
-| `tooling/`        | Shared repository governance, CI boundary guards, codegen, and migration tooling archives                 |
+| `tooling/`        | Platform-local governance, CI boundary guards, code generation, and runtime bootstrap                    |
 | `examples/`       | Non-production plugin integration examples                                                                 |
 | `docs/`           | Architecture, protocol, and repository-boundary decisions                                                  |
 
@@ -57,16 +57,15 @@ only inside an adapter process, never as a public Kernel API.
 
 ## Current checkpoint
 
-This repository is a clean-history core candidate assembled from audited source.
-It excludes legacy products, backups, generated build output, local tooling
-state, and private service implementations. Preserved legacy applications in
-the advanced-services repository are not expected to build until their imports
-are migrated to released core contracts.
+This repository excludes Product lifecycle state, concrete capability
+implementations, Product deployment assets, generated build output, and local
+tooling state. Implemented v0 compatibility crates remain clearly quarantined
+and build-tested until their published migration gates complete.
 
 ## Documentation & Authoritative Contracts
 
 - **Authoritative Substrate API Specification**: [`docs/API.md`](docs/API.md)
-- **Canonical Capability & API Index**: [`docs/api/CAPABILITY_INDEX.md`](docs/api/CAPABILITY_INDEX.md)
+- **Platform Contract Index**: [`docs/api/CAPABILITY_INDEX.md`](docs/api/CAPABILITY_INDEX.md)
 - **Architecture Blueprint**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - **Repository Boundaries**: [`docs/REPOSITORY_BOUNDARIES.md`](docs/REPOSITORY_BOUNDARIES.md)
 - **Contributing & Governance**: [`CONTRIBUTING.md`](CONTRIBUTING.md)
