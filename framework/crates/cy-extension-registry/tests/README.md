@@ -19,7 +19,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `jvm_integration_test.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `training_control_consumer_test.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `transport_concurrency_test.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `worker_control_test.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |

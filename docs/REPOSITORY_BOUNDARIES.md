@@ -9,9 +9,9 @@ opened later after security, API stability, licensing, and documentation gates.
 ## Advanced-services repository - Azure DevOps
 
 The private repository contains the six first-party services, vendor/runtime
-plugins, enterprise bundles, service deployments, and preserved legacy product
-sources. Its pipeline checks out this core repository and verifies the referenced
-Rust workspace before auditing all six service manifests and preserved roots.
+plugins, enterprise bundles, service deployments, and preserved product
+migration sources. Its pipeline checks out this core repository and verifies the
+referenced Rust workspace before auditing service manifests and preserved roots.
 
 ## Migration rule
 
@@ -40,4 +40,4 @@ its repository toolchain.
 - configuring Azure DevOps service/deployment remotes;
 - claiming GPU support from source presence;
 - making every private legacy application build from its new path;
-- deleting legacy bundles or generated compatibility code.
+- defining Product deployment or compatibility ownership inside Platform.
