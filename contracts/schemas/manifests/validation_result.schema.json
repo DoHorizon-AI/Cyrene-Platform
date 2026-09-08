@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/validation_result.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 AI runtime validation projection; frozen pending Product ownership.",
   "title": "ValidationResult",
   "description": "Outcome of validating a runtime at a given level on the project's evidence ladder. Not an immutable resource: it carries no content id (a canonical hash may still be computed for change detection; see schemas/CANONICALIZATION.md).",
   "type": "object",

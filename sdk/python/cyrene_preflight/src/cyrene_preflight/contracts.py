@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 NODE_RESOURCE_INVENTORY_SOURCE = "cyrene.core.v1.node-resource-inventory"
@@ -50,8 +50,10 @@ class PreflightIssue:
 
     def to_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
-            "code": self.code, "severity": self.severity.value,
-            "message": self.message, "source": self.source,
+            "code": self.code,
+            "severity": self.severity.value,
+            "message": self.message,
+            "source": self.source,
         }
         if self.evidence:
             result["evidence"] = list(self.evidence)
@@ -94,17 +96,21 @@ class AcceleratorFacts:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "device_id": self.device_id, "kind": self.kind, "vendor": self.vendor,
-            "device_family": self.device_family, "total_memory_bytes": self.total_memory_bytes,
+            "device_id": self.device_id,
+            "kind": self.kind,
+            "vendor": self.vendor,
+            "device_family": self.device_family,
+            "total_memory_bytes": self.total_memory_bytes,
             "allocatable_memory_bytes": self.allocatable_memory_bytes,
-            "features": list(self.features), "health": self.health,
+            "features": list(self.features),
+            "health": self.health,
         }
 
 
 @dataclass(frozen=True)
 class HardwareFacts:
     """Canonical Node inventory projection; no host or vendor probing is allowed.
-    
+
     Invariant (ADR-006): HardwareFacts authority is strictly the Platform Node Agent
     resource inventory. Neither Services nor Plugins may execute ad-hoc host driver
     probes or independent nvidia-smi queries. Preflight evaluators accept immutable
@@ -131,15 +137,24 @@ class HardwareFacts:
 
     @classmethod
     def from_node_resource_inventory(
-        cls, *, node_id: str, inventory_generation: int, accelerators: Sequence[AcceleratorFacts],
-        architecture: Optional[str] = None, accelerator_runtime: Optional[str] = None,
-        driver_version: Optional[str] = None, collected_at: Optional[str] = None,
+        cls,
+        *,
+        node_id: str,
+        inventory_generation: int,
+        accelerators: Sequence[AcceleratorFacts],
+        architecture: Optional[str] = None,
+        accelerator_runtime: Optional[str] = None,
+        driver_version: Optional[str] = None,
+        collected_at: Optional[str] = None,
     ) -> "HardwareFacts":
         return cls(
-            node_id=node_id, inventory_generation=inventory_generation,
+            node_id=node_id,
+            inventory_generation=inventory_generation,
             source_ref=f"cyrene.core.v1/nodes/{node_id}/resource-inventory/{inventory_generation}",
-            accelerators=tuple(accelerators), architecture=architecture,
-            accelerator_runtime=accelerator_runtime, driver_version=driver_version,
+            accelerators=tuple(accelerators),
+            architecture=architecture,
+            accelerator_runtime=accelerator_runtime,
+            driver_version=driver_version,
             collected_at=collected_at,
         )
 
@@ -161,9 +176,13 @@ class HardwareFacts:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "source": self.source, "source_ref": self.source_ref, "node_id": self.node_id,
-            "inventory_generation": self.inventory_generation, "architecture": self.architecture,
-            "accelerator_runtime": self.accelerator_runtime, "driver_version": self.driver_version,
+            "source": self.source,
+            "source_ref": self.source_ref,
+            "node_id": self.node_id,
+            "inventory_generation": self.inventory_generation,
+            "architecture": self.architecture,
+            "accelerator_runtime": self.accelerator_runtime,
+            "driver_version": self.driver_version,
             "collected_at": self.collected_at,
             "accelerators": [item.to_dict() for item in self.accelerators],
         }
@@ -203,99 +222,10 @@ class PreflightResult:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "status": self.status.value, "issues": [item.to_dict() for item in self.issues],
+            "status": self.status.value,
+            "issues": [item.to_dict() for item in self.issues],
             "resolved_environment_identity": self.resolved_environment_identity,
             "hardware_reference": self.hardware_reference,
             "hardware": None if self.hardware is None else self.hardware.to_dict(),
             "analysis_evidence": dict(self.analysis_evidence),
         }
-
-
-class ModelAnalyzer(Protocol):
-    def analyze(self, request: "ModelAnalysisRequest") -> "ModelFacts": ...
-
-
-class CompatibilityEvaluator(Protocol):
-    def evaluate(self, request: "CompatibilityRequest") -> "CompatibilityAnalysis": ...
-
-
-@dataclass(frozen=True)
-class ModelAnalysisRequest:
-    model_id: str
-    precision: str
-    execution_kind: str
-    parameter_count: Optional[int] = None
-    context_length: Optional[int] = None
-    activation_memory_bytes: Optional[int] = None
-    accelerator_memory_bytes: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class VramEstimate:
-    lower_bytes: int
-    upper_bytes: int
-    confidence: str = "estimated"
-    uncertainty: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if self.lower_bytes < 0 or self.upper_bytes < self.lower_bytes:
-            raise ValueError("VRAM estimates must be a non-negative range")
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "lower_bytes": self.lower_bytes, "upper_bytes": self.upper_bytes,
-            "confidence": self.confidence, "uncertainty": self.uncertainty,
-        }
-
-
-@dataclass(frozen=True)
-class ModelFacts:
-    model_id: str
-    model_family: Optional[str]
-    parameter_count: Optional[int]
-    precision: str
-    vram_estimate: Optional[VramEstimate]
-    tensor_parallelism_recommendation: Optional[int] = None
-    evidence: Tuple[str, ...] = ()
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "model_id": self.model_id, "model_family": self.model_family,
-            "parameter_count": self.parameter_count, "precision": self.precision,
-            "vram_estimate": None if self.vram_estimate is None else self.vram_estimate.to_dict(),
-            "tensor_parallelism_recommendation": self.tensor_parallelism_recommendation,
-            "evidence": list(self.evidence),
-        }
-
-
-@dataclass(frozen=True)
-class EnvironmentCompatibility:
-    identity: Optional[str]
-    accelerator_runtime: Optional[str] = None
-    minimum_driver: Optional[str] = None
-    framework_versions: Mapping[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class CompatibilityRequest:
-    model: ModelFacts
-    environment: EnvironmentCompatibility
-    hardware: Optional[HardwareFacts]
-    execution_kind: str
-
-
-@dataclass(frozen=True)
-class CompatibilityAnalysis:
-    issues: Tuple[PreflightIssue, ...] = ()
-    evidence: Mapping[str, Any] = field(default_factory=dict)
-
-    def to_result(
-        self, *, environment_identity: Optional[str], hardware: Optional[HardwareFacts],
-        extra_issues: Sequence[PreflightIssue] = (),
-    ) -> PreflightResult:
-        issues = tuple(extra_issues) + tuple(self.issues)
-        return PreflightResult(
-            status=status_from_issues(issues), issues=issues,
-            resolved_environment_identity=environment_identity, hardware=hardware,
-            analysis_evidence=self.evidence,
-        )

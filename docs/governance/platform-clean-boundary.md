@@ -35,17 +35,19 @@ Kotlin catalog/router conformance removal gate passes. Current integrations use
 generic `CapabilityDescriptor`, CES typed payload forwarding, and WorkerControl.
 
 The same quarantine includes `cy-local-transport`, the ten named SPI Protobuf
-projections beside the generic worker envelope, `BuiltinInMemoryStorage`, and
-the AI-specific v0 model/training/runtime records in `cy-manifest`. These paths
-contain implemented compatibility behavior and therefore remain build-tested,
-but they are frozen and are not current Product or Platform authorities.
+projections beside the generic worker envelope, `BuiltinInMemoryStorage`, the
+v0 `plugin.toml` taxonomy, and the AI-specific v0 model/training/runtime records
+and JSON schemas in `cy-manifest`. These paths contain implemented
+compatibility behavior and therefore remain build-tested, but they are frozen
+and are not current Product or Platform authorities.
 
 The Python and Kotlin `ProductRun`/Attempt/retry/persistence implementations
 were moved to Cyrene-Yield, which is their only source consumer. Their shared
 Platform schema and fixture were moved with the Product lifecycle. Platform
-retains no Product run store or reconciler. The default model analyzer and
-compatibility evaluator moved behind Yield-owned replaceable ports; Platform
-`cyrene_preflight` now exposes only resource facts and capability contracts.
+retains no Product run store or reconciler. The default model analyzer,
+compatibility evaluator, and their Product request and result types moved
+behind Yield-owned replaceable ports. Platform `cyrene_preflight` now exposes
+only resource facts and generic preflight results.
 
 The media request adapter moved to Cyrene-Plugins-Official. Platform worker
 dispatch forwards generic payloads and does not know image/audio operation

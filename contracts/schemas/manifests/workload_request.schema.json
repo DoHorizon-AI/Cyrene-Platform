@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/workload_request.schema.json",
+  "$comment": "MIGRATING_COMPATIBILITY: implemented v0 training and serving request projection; frozen pending Product ownership.",
   "title": "WorkloadRequest",
   "description": "A user's request describing what to run and under which objective/constraints. Input to the CompatibilityResolver / RuntimeBuilder.",
   "type": "object",

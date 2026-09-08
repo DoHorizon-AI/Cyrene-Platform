@@ -117,6 +117,35 @@ if [ -n "$capability_specific_adapters" ]; then
   status=1
 fi
 
+product_preflight_contracts=$(
+  git grep -n -E 'class (ModelAnalyzer|CompatibilityEvaluator|ModelAnalysisRequest|ModelFacts|VramEstimate|CompatibilityRequest)' -- \
+    'sdk/python/cyrene_preflight/**' 2>/dev/null || true
+)
+if [ -n "$product_preflight_contracts" ]; then
+  echo "FORBIDDEN: Product model/preflight contract tracked by Platform Python SDK:"
+  echo "$product_preflight_contracts" | sed 's/^/  - /'
+  status=1
+fi
+
+frozen_v0_contracts=(
+  "contracts/schemas/plugin.schema.json"
+  "contracts/schemas/manifests/artifact_manifest.schema.json"
+  "contracts/schemas/manifests/checkpoint_metadata.schema.json"
+  "contracts/schemas/manifests/hardware_manifest.schema.json"
+  "contracts/schemas/manifests/model_manifest.schema.json"
+  "contracts/schemas/manifests/runtime_manifest.schema.json"
+  "contracts/schemas/manifests/training_revision.schema.json"
+  "contracts/schemas/manifests/validation_result.schema.json"
+  "contracts/schemas/manifests/why_report.schema.json"
+  "contracts/schemas/manifests/workload_request.schema.json"
+)
+for file in "${frozen_v0_contracts[@]}"; do
+  if ! rg -q 'MIGRATING_COMPATIBILITY' "$file"; then
+    echo "FORBIDDEN: frozen v0 contract lost its migration marker: $file"
+    status=1
+  fi
+done
+
 # Platform contracts and examples must remain consumer-neutral. These markers
 # identify concrete Product or connector bindings that have their own owners.
 consumer_markers='cyrene\.astrbot|onebot\.v11|CYRENE_TEXT_LIFECYCLE|com\.cyrene\.service\.(catalyst|yield|reactor|exchange|navigator|echo)'

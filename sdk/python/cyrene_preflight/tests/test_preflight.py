@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import cyrene_preflight
 from cyrene_preflight import (
     AcceleratorFacts,
     HardwareFacts,
@@ -60,3 +61,15 @@ def test_platform_preflight_has_no_product_imports():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.append(node.module)
         assert not any(item.split(".", 1)[0] in forbidden for item in imported)
+
+
+def test_platform_preflight_does_not_export_product_model_contracts():
+    for name in (
+        "CompatibilityEvaluator",
+        "CompatibilityRequest",
+        "ModelAnalysisRequest",
+        "ModelAnalyzer",
+        "ModelFacts",
+        "VramEstimate",
+    ):
+        assert not hasattr(cyrene_preflight, name)
