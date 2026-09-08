@@ -125,6 +125,25 @@ if [ -n "$product_preflight_contracts" ]; then
   status=1
 fi
 
+named_spi_protos=(
+  "contracts/proto/plugin/v1/compat_rule.proto"
+  "contracts/proto/plugin/v1/execution_engine.proto"
+  "contracts/proto/plugin/v1/gateway_filter.proto"
+  "contracts/proto/plugin/v1/model_analyzer.proto"
+  "contracts/proto/plugin/v1/notification.proto"
+  "contracts/proto/plugin/v1/probe.proto"
+  "contracts/proto/plugin/v1/quantization.proto"
+  "contracts/proto/plugin/v1/runtime_builder.proto"
+  "contracts/proto/plugin/v1/storage.proto"
+  "contracts/proto/plugin/v1/training_backend.proto"
+)
+for file in "${named_spi_protos[@]}"; do
+  if ! rg -q 'MIGRATING_COMPATIBILITY' "$file"; then
+    echo "FORBIDDEN: frozen named SPI lost its migration marker: $file"
+    status=1
+  fi
+done
+
 frozen_v0_contracts=(
   "contracts/schemas/plugin.schema.json"
   "contracts/schemas/manifests/artifact_manifest.schema.json"
