@@ -6,6 +6,7 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：版本化 Protobuf 线协议契约。
 // ╚══════════════════════════════════════════════════════════════════════╝
+// MIGRATING_COMPATIBILITY: frozen v0 named SPI; new code uses generic CES payloads.
 syntax = "proto3";
 
 package cy.plugin.v1;
