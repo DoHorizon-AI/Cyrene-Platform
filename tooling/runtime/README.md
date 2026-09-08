@@ -10,6 +10,13 @@ evidence fields.
 账号解析 UDS 身份，把二进制安装到显式 runtime home，检查启动状态，并写入私有的
 `runtime.json`。标准输出只包含可公开的白名单证据字段。
 
+The emitted manifest profile is `CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU`.
+Composite training, serving, gateway, or application profiles are defined by
+their consumers and do not change this Platform bootstrap contract.
+
+输出清单使用 `CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU`。训练、服务、网关或应用组合
+profile 由消费方定义，不改变 Platform bootstrap 契约。
+
 ```bash
 export CYRENE_RUNTIME_HOME=/var/lib/cyrene/reference-runtime
 tooling/runtime/cyrene-runtime up

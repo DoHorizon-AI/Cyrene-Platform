@@ -20,35 +20,33 @@
 //! 8. [`GatewayFilter`][]: 请求网关路由、鉴权与前置/后置过滤器；
 //! 9. [`Notification`][]: 告警、事件与状态通知管道；
 //! 10. [`Storage`][]: 产物（模型权重、数据集、检查点）存储读写适配器。
+//!
+//! ## Migration status
+//!
+//! `MIGRATING_COMPATIBILITY`: the ten named SPI traits below are retained only
+//! for existing compatibility consumers while the Kotlin catalog/router takes
+//! over. New capabilities use `CapabilityDescriptor` plus generic CES typed
+//! payload forwarding and must not add another named trait here.
 
 pub mod builtin;
-pub mod media;
-pub mod official_manifest;
 pub mod plugin;
+pub mod repository_manifest;
 pub mod worker;
 use async_trait::async_trait;
 pub use cy_manifest::*;
-pub use media::{
-    AudioInput, CancellationToken, CanonicalAudioProfile, EncodedAudio, EncodedImage,
-    INSPECT_IMAGE_OPERATION, ImageFormat, ImageInput, ImageInspection, ImageOrientation,
-    InspectImageRequest, MEDIA_PROCESSOR_INTERFACE_V1, MEDIA_PROCESSOR_V1, MediaProcessor,
-    MediaProcessorError, NORMALIZE_AUDIO_OPERATION, NeverCancelled, NormalizeAudioRequest,
-    NormalizedAudio, ResizeOptions, TRANSFORM_IMAGE_OPERATION, TransformImageRequest,
-    TransformedImage,
-};
-pub use official_manifest::{OfficialPluginManifest, normalize_official_manifest};
 pub use plugin::{
     CapabilityBinding, CapabilityRegistry, CapabilityResolutionError, CapabilityResolver,
     ResolvedCapabilityTarget,
 };
+pub use repository_manifest::{RepositoryPluginManifest, normalize_repository_manifest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 pub use worker::{
     ApplicationEventError, ApplicationEventStreamEndReason, ApplicationEventStreamTermination,
-    ApplicationEventSubscription, AtomicCancellationToken, CapabilityWorkerActivator,
-    CapabilityWorkerClient, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
-    MAX_APPLICATION_EVENT_BUFFER_CAPACITY, WorkerActivationOptions, WorkerApplicationEvent,
-    WorkerInvocationResult, WorkerMediaProcessor, WorkerTerminalError,
+    ApplicationEventSubscription, AtomicCancellationToken, CancellationToken,
+    CapabilityWorkerActivator, CapabilityWorkerClient, DEFAULT_APPLICATION_EVENT_BUFFER_CAPACITY,
+    MAX_APPLICATION_EVENT_BUFFER_CAPACITY, NeverCancelled, WorkerActivationOptions,
+    WorkerApplicationEvent, WorkerInvocationResult, WorkerTerminalError,
 };
 
 /// 规范化插件分类字典枚举 (`kind`)

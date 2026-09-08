@@ -28,10 +28,32 @@ or protocol-specific behavior is not a Platform gap.
 cross-repository component instances and Product-specific integration tests if
 they are added back to Platform.
 
+The implemented v0 typed SPI and `cy-extension-registry` are explicitly
+`MIGRATING_COMPATIBILITY`. They have no production dependents in this
+repository, accept no new capability-specific proxy, and remain only until the
+Kotlin catalog/router conformance removal gate passes. Current integrations use
+generic `CapabilityDescriptor`, CES typed payload forwarding, and WorkerControl.
+
+The same quarantine includes `cy-local-transport`, the ten named SPI Protobuf
+projections beside the generic worker envelope, `BuiltinInMemoryStorage`, and
+the AI-specific v0 model/training/runtime records in `cy-manifest`. These paths
+contain implemented compatibility behavior and therefore remain build-tested,
+but they are frozen and are not current Product or Platform authorities.
+
+The Python and Kotlin `ProductRun`/Attempt/retry/persistence implementations
+were moved to Cyrene-Yield, which is their only source consumer. Their shared
+Platform schema and fixture were moved with the Product lifecycle. Platform
+retains no Product run store or reconciler. The default model analyzer and
+compatibility evaluator moved behind Yield-owned replaceable ports; Platform
+`cyrene_preflight` now exposes only resource facts and capability contracts.
+
+The media request adapter moved to Cyrene-Plugins-Official. Platform worker
+dispatch forwards generic payloads and does not know image/audio operation
+names or capability-specific request classes.
+
 ## Evidence boundary
 
 The Astrbot deployment test proves ownership of the migrated deployment assets.
-It does not prove a live Kubernetes deployment. The removed JVM skeleton had no
-runnable worker fixture and therefore remains `NOT_RUN`; it must return only as
-an external environment gate with a real installation record and sandboxd
-fixture.
+It does not prove a live Kubernetes deployment. Hosted builds prove compilation,
+unit tests, and contract TCKs; real GPU, Kubernetes, and external-provider
+execution require their separate environment-specific acceptance evidence.

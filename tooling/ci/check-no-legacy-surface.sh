@@ -55,7 +55,22 @@ fi
 
 forbidden_owned_paths=(
   "contracts/registries/component-catalog.v1.json"
+  "contracts/tck/astrbot-capability-worker/**"
   "kernel/crates/cy-kernel-daemon/tests/*astrbot*"
+  "tooling/workspace/**"
+  "tooling/ci/integration.py"
+  "tooling/ci/tests/test_integration.py"
+  "tooling/ci/check_api_documentation.py"
+  "tooling/ci/test_check_api_documentation.py"
+  ".github/workflows/cross-repo.yml"
+  "framework/crates/cy-platform-api/tests/real_media_worker_test.rs"
+  "framework/crates/cy-capability-execution-service/tests/plugins_model_provider_tck.rs"
+  "framework/crates/cy-platform-api/src/media.rs"
+  "sdk/python/cyrene_control_plane/**"
+  "sdk/python/cyrene_preflight/src/cyrene_preflight/reference.py"
+  "framework/jvm/application/**"
+  "framework/jvm/domain/**"
+  "framework/jvm/bootstrap/**"
 )
 for glob in "${forbidden_owned_paths[@]}"; do
   matches=$(git ls-files "$glob")
@@ -65,6 +80,63 @@ for glob in "${forbidden_owned_paths[@]}"; do
     status=1
   fi
 done
+
+# The implemented v0 typed registry is migration-only. Keep it buildable, but
+# prevent it from becoming a dependency of another production crate.
+registry_consumers=$(
+  git grep -n 'cy-extension-registry' -- \
+    'framework/crates/*/Cargo.toml' \
+    'kernel/crates/*/Cargo.toml' 2>/dev/null \
+    | grep -v '^framework/crates/cy-extension-registry/Cargo.toml:' || true
+)
+if [ -n "$registry_consumers" ]; then
+  echo "FORBIDDEN: new production dependency on MIGRATING cy-extension-registry:"
+  echo "$registry_consumers" | sed 's/^/  - /'
+  status=1
+fi
+
+local_transport_consumers=$(
+  git grep -n 'cy-local-transport' -- \
+    'framework/crates/*/Cargo.toml' \
+    'kernel/crates/*/Cargo.toml' 2>/dev/null \
+    | grep -v '^framework/crates/cy-local-transport/Cargo.toml:' || true
+)
+if [ -n "$local_transport_consumers" ]; then
+  echo "FORBIDDEN: new production dependency on MIGRATING cy-local-transport:"
+  echo "$local_transport_consumers" | sed 's/^/  - /'
+  status=1
+fi
+
+capability_specific_adapters=$(
+  git grep -n -E 'WorkerMediaProcessor|def _build_request_object' -- \
+    'framework/**' 'sdk/**' 2>/dev/null || true
+)
+if [ -n "$capability_specific_adapters" ]; then
+  echo "FORBIDDEN: capability-specific execution adapter tracked by Platform:"
+  echo "$capability_specific_adapters" | sed 's/^/  - /'
+  status=1
+fi
+
+# Platform contracts and examples must remain consumer-neutral. These markers
+# identify concrete Product or connector bindings that have their own owners.
+consumer_markers='cyrene\.astrbot|onebot\.v11|CYRENE_TEXT_LIFECYCLE|com\.cyrene\.service\.(catalyst|yield|reactor|exchange|navigator|echo)'
+consumer_marker_matches=$(
+  git grep -n -i -E "$consumer_markers" -- \
+    'contracts/proto/**' \
+    'contracts/rust/**' \
+    'contracts/schemas/**' \
+    'examples/**' \
+    'framework/**' \
+    'kernel/**' \
+    'sdk/**' \
+    'tooling/**' \
+    ':(exclude)tooling/ci/check-no-legacy-surface.sh' || true
+)
+if [ -n "$consumer_marker_matches" ]; then
+  echo "FORBIDDEN: consumer-specific identity leaked into Platform source or contracts:"
+  echo "$consumer_marker_matches" | sed 's/^/  - /'
+  status=1
+fi
 
 if [ "$status" -eq 0 ]; then
   echo "OK: no legacy surface or consumer-owned Platform adaptation is tracked."

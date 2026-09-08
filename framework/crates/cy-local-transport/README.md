@@ -2,8 +2,13 @@
 
 ## Purpose | 目录职责
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+**Status: `MIGRATING_COMPATIBILITY`.** This implemented v0 stdio transport is
+retained for compatibility tests only. It has no production dependents in this
+repository. Production workers use Kernel-managed process and sandbox
+boundaries; new code must not depend on this crate.
+
+**状态：`MIGRATING_COMPATIBILITY`。** 该 v0 stdio transport 只为兼容测试保留，
+仓内没有生产依赖。生产 Worker 使用 Kernel 管理的进程和沙箱边界，新代码不得依赖本 crate。
 
 ## Contents | 内容
 

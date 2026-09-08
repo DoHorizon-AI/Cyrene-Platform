@@ -18,7 +18,6 @@ standard I/O framing protocol loop.
 from __future__ import annotations
 
 import argparse
-import base64
 import dataclasses
 import importlib
 import inspect
@@ -185,8 +184,7 @@ class GenericCapabilityWorker(CyreneWorker):
                 )
             ]
             accepts_varargs = any(
-                parameter.kind == inspect.Parameter.VAR_POSITIONAL
-                for parameter in signature.parameters.values()
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in signature.parameters.values()
             )
             if not accepts_varargs and len(positional) < 4:
                 return handler(subscription_id, capability, filter_payload)
@@ -263,8 +261,7 @@ class GenericCapabilityWorker(CyreneWorker):
                 request_type = signature.parameters.get("request_type_url")
                 stream_request = signature.parameters.get("stream_results")
                 accepts_kwargs = any(
-                    parameter.kind == inspect.Parameter.VAR_KEYWORD
-                    for parameter in signature.parameters.values()
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
                 )
                 keyword_args: Dict[str, Any] = {}
                 if cancellation is not None and cancellation.kind in (
@@ -339,20 +336,16 @@ class GenericCapabilityWorker(CyreneWorker):
             )
 
         try:
-            req_obj = self._build_request_object(action, raw_req)
-            if req_obj is not None:
-                result = handler(req_obj, cancellation=token)
-            else:
+            try:
+                result = handler(raw_req, cancellation=token)
+            except TypeError:
                 try:
-                    result = handler(raw_req, cancellation=token)
+                    result = handler(**raw_req, cancellation=token)
                 except TypeError:
                     try:
-                        result = handler(**raw_req, cancellation=token)
+                        result = handler(raw_req)
                     except TypeError:
-                        try:
-                            result = handler(raw_req)
-                        except TypeError:
-                            result = handler(**raw_req)
+                        result = handler(**raw_req)
 
             if isinstance(result, TypedCapabilityPayload):
                 return True, result
@@ -389,11 +382,7 @@ class GenericCapabilityWorker(CyreneWorker):
                     code_val = 8
             elif "CANCELLED" in err_text:
                 code_val = 6
-            elif (
-                "INVALID_INPUT" in err_text
-                or "UNSUPPORTED_INPUT" in err_text
-                or "METHOD_NOT_SUPPORTED" in err_text
-            ):
+            elif "INVALID_INPUT" in err_text or "UNSUPPORTED_INPUT" in err_text or "METHOD_NOT_SUPPORTED" in err_text:
                 code_val = 3
             elif isinstance(err, (ValueError, TypeError, KeyError)):
                 code_val = 3
@@ -406,94 +395,6 @@ class GenericCapabilityWorker(CyreneWorker):
                 message=formatted_msg,
                 details=str(err),
             )
-
-    def _build_request_object(self, action: str, req_dict: dict) -> Any:
-        """Helper to build typed request objects for known canonical capabilities."""
-        if action == "inspect_image" and "input" in req_dict:
-            from media_processor import (
-                CallerOwnedImageFile,
-                InlineImageBytes,
-                InspectImageRequest,
-            )
-            raw_input = req_dict["input"]
-            if raw_input.get("kind") == "bytes":
-                data = base64.b64decode(raw_input.get("data_base64", ""))
-                inp = InlineImageBytes(data=data, media_type=raw_input.get("media_type"))
-            elif raw_input.get("kind") == "file":
-                inp = CallerOwnedImageFile(
-                    path=Path(raw_input.get("path", "")),
-                    media_type=raw_input.get("media_type"),
-                )
-            else:
-                return None
-            return InspectImageRequest(input=inp)
-
-        if action == "transform_image" and "input" in req_dict:
-            from media_processor import (
-                CallerOwnedImageFile,
-                InlineImageBytes,
-                ResizeOptions,
-                TransformImageRequest,
-            )
-            raw_input = req_dict["input"]
-            if raw_input.get("kind") == "bytes":
-                data = base64.b64decode(raw_input.get("data_base64", ""))
-                inp = InlineImageBytes(data=data, media_type=raw_input.get("media_type"))
-            elif raw_input.get("kind") == "file":
-                inp = CallerOwnedImageFile(
-                    path=Path(raw_input.get("path", "")),
-                    media_type=raw_input.get("media_type"),
-                )
-            else:
-                return None
-
-            resize_obj = None
-            if "resize" in req_dict and req_dict["resize"] is not None:
-                r = req_dict["resize"]
-                resize_obj = ResizeOptions(
-                    width=r.get("width", 0),
-                    height=r.get("height", 0),
-                    preserve_aspect_ratio=r.get("preserve_aspect_ratio", False),
-                )
-
-            return TransformImageRequest(
-                input=inp,
-                resize=resize_obj,
-                output_format=req_dict.get("output_format"),
-                quality=req_dict.get("quality"),
-                normalize_orientation=req_dict.get("normalize_orientation", False),
-            )
-
-        if action == "normalize_audio" and "input" in req_dict:
-            from media_processor import (
-                CallerOwnedAudioFile,
-                CanonicalAudioProfile,
-                InlineAudioBytes,
-                NormalizeAudioRequest,
-            )
-
-            raw_input = req_dict["input"]
-            if raw_input.get("kind") == "bytes":
-                data = base64.b64decode(raw_input.get("data_base64", ""))
-                inp = InlineAudioBytes(data=data, media_type=raw_input.get("media_type"))
-            elif raw_input.get("kind") == "file":
-                inp = CallerOwnedAudioFile(
-                    path=Path(raw_input.get("path", "")),
-                    media_type=raw_input.get("media_type"),
-                )
-            else:
-                return None
-            try:
-                profile = CanonicalAudioProfile(req_dict.get("target_profile", ""))
-            except ValueError as error:
-                from media_processor import MediaProcessorError
-
-                raise MediaProcessorError.unsupported_input(
-                    "unsupported canonical audio profile"
-                ) from error
-            return NormalizeAudioRequest(input=inp, target_profile=profile)
-
-        return None
 
 
 def main() -> None:

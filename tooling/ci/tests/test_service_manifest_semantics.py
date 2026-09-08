@@ -9,23 +9,12 @@ except ImportError:
     jsonschema = None
 
 
-def find_manifest_layout() -> tuple[Path, Path]:
-    """Locate the workspace services and the Platform schema root.
-
-    The full Cyrene workspace keeps Platform under ``Cyrene-Platform/`` while
-    standalone CI checks out this repository as its own root.  Both layouts
-    must exercise the same schema assertions rather than manufacturing a
-    path that exists only in the umbrella checkout.
-    """
+def find_platform_root() -> Path:
+    """Locate the standalone Platform contract root."""
     current = Path(__file__).resolve().parent
     for parent in [current, *current.parents]:
-        platform_root = parent / "Cyrene-Platform"
-        if (platform_root / "contracts/schemas/advanced-service.schema.json").is_file() and (
-            parent / "services"
-        ).is_dir():
-            return parent, platform_root
         if (parent / "contracts/schemas/advanced-service.schema.json").is_file():
-            return parent, parent
+            return parent
     raise AssertionError("Could not locate the Platform schema root")
 
 
@@ -35,66 +24,41 @@ def load_schema(platform_root: Path) -> dict:
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
-def service_manifest_paths(workspace_root: Path, platform_root: Path) -> list[Path]:
-    """Return product manifests for an umbrella or standalone checkout."""
-    services_root = workspace_root / "services"
-    if services_root.is_dir():
-        return [
-            services_root / name / "service.json"
-            for name in (
-                "cyrene-catalyst",
-                "Cyrene-Yield",
-                "cyrene-reactor",
-                "cyrene-exchange",
-                "cyrene-navigator",
-                "cyrene-echo",
-            )
-        ]
-
-    # The standalone repository owns the schema and this checked-in example;
-    # validate it as the local product-manifest fixture.
-    return [platform_root / "examples/advanced-service/service.json"]
-
-
-def test_all_product_service_manifests_conform_to_schema():
-    """Verify that every product service.json in the workspace strictly conforms to advanced-service.schema.json."""
-    root, platform_root = find_manifest_layout()
+def test_neutral_example_conforms_to_schema():
+    """Verify the Platform-owned example without discovering consumer repositories."""
+    platform_root = find_platform_root()
     schema = load_schema(platform_root)
+    manifest_path = platform_root / "examples/advanced-service/service.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    for manifest_path in service_manifest_paths(root, platform_root):
-        assert manifest_path.exists(), f"Missing service.json at {manifest_path}"
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-        if jsonschema is not None:
-            jsonschema.validate(instance=data, schema=schema)
-        else:
-            # Fallback basic structural checks if jsonschema is not installed
-            assert "schema_version" in data
-            assert "core" in data
-            assert "extension_points" in data["core"]
-            assert isinstance(data["core"]["extension_points"], list)
+    if jsonschema is not None:
+        jsonschema.validate(instance=data, schema=schema)
+    else:
+        assert "schema_version" in data
+        assert "core" in data
+        assert isinstance(data["core"]["extension_points"], list)
 
 
 def test_planned_extension_points_manifest_semantics():
     """Verify that planned_extension_points is accepted by schema and distinct from runtime extension_points."""
-    _, platform_root = find_manifest_layout()
+    platform_root = find_platform_root()
     schema = load_schema(platform_root)
 
     fixture_manifest = {
         "schema_version": 1,
-        "id": "com.cyrene.service.catalyst",
-        "name": "Catalyst",
-        "service": "catalyst",
+        "id": "com.cyrene.service.example-host",
+        "name": "Example Service Host",
+        "service": "example-host",
         "visibility": "private",
         "distribution": "advanced-service-plugin",
-        "status": "preserved-source",
+        "status": "experimental",
         "core": {
             "protocol_version": 1,
             "minimum_core_version": "0.1.0",
             "extension_points": ["model.analyzer.v1", "media.processor.v1"],
             "planned_extension_points": ["data.processor.v1", "model.registry.v1"],
         },
-        "source_roots": ["legacy/CY_LLM_Training"],
+        "source_roots": ["src"],
     }
 
     if jsonschema is not None:
@@ -111,7 +75,10 @@ def test_planned_extension_points_manifest_semantics():
     assert "data.processor.v1" in planned_candidates
 
     # Resolver query simulation
-    available_plugins = {"model.analyzer.v1": "cyrene.models.hf-analyzer", "media.processor.v1": "cyrene.tools.media"}
+    available_plugins = {
+        "model.analyzer.v1": "example.model-analyzer",
+        "media.processor.v1": "example.media-processor",
+    }
 
     # Assert all runtime requirements resolve
     for req in runtime_required:

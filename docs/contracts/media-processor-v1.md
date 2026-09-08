@@ -32,7 +32,7 @@ operation; it has no persistence authority and must not delete caller files.
 
 ## Resolver and lifecycle
 
-The Official Plugins repository keeps one canonical `plugin.manifest.json`.
+The implementing plugin repository keeps one canonical `plugin.manifest.json`.
 The Platform resolver normalizes that repository-facing shape into the existing
 `PluginManifest` registry model, then applies exact capability/interface
 matching and deterministic execution-mode selection. This normalization is an
@@ -43,6 +43,6 @@ transport-neutral: `INVALID_INPUT`, `UNSUPPORTED_INPUT`, `CANCELLED`, and
 `EXECUTION_FAILED`. Product adapters may map those categories to their own
 transport, retry, or user-facing policy.
 
-The contract schema is
-`contracts/schemas/media-processor-v1.schema.json`; the Platform Rust types
-are in `framework/crates/cy-platform-api/src/media.rs`.
+The contract schema is `contracts/schemas/media-processor-v1.schema.json`.
+Implementations and typed language adapters are owned by the plugin or
+consuming Product repository; Platform owns no media execution adapter.

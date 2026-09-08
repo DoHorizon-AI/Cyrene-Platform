@@ -9,7 +9,6 @@ This directory contains checked-in compatibility fixtures used to make contract 
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `control-plane-v1/` | Core v1 compatibility fixture. | Core v1 兼容性 fixture。 |
 | `core/` | Core contract fixtures. | Core 契约 fixture。 |
 | `semantic/` | Semantic contract fixtures. | 语义契约 fixture。 |
 
@@ -17,4 +16,3 @@ This directory contains checked-in compatibility fixtures used to make contract 
 
 Read the semantic fixture first, then the core and control-plane projections.
 先读语义 fixture，再读 Core 与 control-plane 投影。
-

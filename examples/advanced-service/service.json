@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "id": "com.cyrene.service.catalyst",
-  "name": "Catalyst",
-  "service": "catalyst",
+  "id": "com.cyrene.service.example-host",
+  "name": "Example Service Host",
+  "service": "example-host",
   "visibility": "private",
   "distribution": "advanced-service-plugin",
-  "status": "preserved-source",
+  "status": "experimental",
   "core": {
     "protocol_version": 1,
     "minimum_core_version": "0.1.0",
-    "extension_points": ["data.prepare"]
+    "extension_points": ["model.provider.v1"]
   },
   "source_roots": ["."]
 }

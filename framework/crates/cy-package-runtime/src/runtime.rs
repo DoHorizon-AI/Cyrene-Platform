@@ -960,10 +960,10 @@ fn read_platform_manifest(payload: &Path) -> Result<PluginManifest, PackageRunti
     let value = serde_json::from_slice(&bytes).map_err(|error| {
         PackageRuntimeError::new(
             "MANIFEST_INVALID",
-            format!("invalid official manifest: {error}"),
+            format!("invalid repository plugin manifest: {error}"),
         )
     })?;
-    cy_platform_api::normalize_official_manifest(value)
+    cy_platform_api::normalize_repository_manifest(value)
         .map_err(|error| PackageRuntimeError::new("MANIFEST_INVALID", error))
 }
 
@@ -976,7 +976,7 @@ fn validate_installed_manifest(
     {
         return Err(PackageRuntimeError::new(
             "PACKAGE_IDENTITY_MISMATCH",
-            "installed official manifest does not match verified package identity",
+            "installed repository plugin manifest does not match verified package identity",
         ));
     }
     Ok(())

@@ -28,7 +28,6 @@ payload 的 `stream` 字段不会选择 worker 传输方式。
 | `src/main.rs` | Production process entrypoint for one manifest and one or more configured bindings. | 单 manifest、多配置 binding 的正式进程入口。 |
 | `src/binding_config.rs` | Shared manifest/binding configuration loader. | 共享 manifest/binding 配置加载器。 |
 | `tests/service_tck.rs` | Repository-local CES lifecycle TCK. | 仓内 CES 生命周期 TCK。 |
-| `tests/plugins_model_provider_tck.rs` | Explicitly ignored cross-repository provider TCK, run by the required cross-repo workflow. | 由 required 跨仓工作流显式运行的 ignored provider TCK。 |
 
 ## Process configuration | 进程配置
 

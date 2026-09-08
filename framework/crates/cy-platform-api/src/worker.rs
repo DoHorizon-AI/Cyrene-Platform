@@ -40,11 +40,6 @@ use prost::Message;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::media::{
-    ImageInspection, InspectImageRequest, MediaProcessor, MediaProcessorError,
-    NormalizeAudioRequest, NormalizedAudio, TransformImageRequest, TransformedImage,
-};
-
 /// Cooperative cancellation token passed to worker operations.
 pub trait CancellationToken: Send + Sync {
     fn is_cancelled(&self) -> bool;
@@ -737,7 +732,6 @@ pub struct CapabilityWorkerClient {
     api_version: String,
     declared_capabilities: Vec<String>,
     protocol_features: Vec<String>,
-    options: WorkerActivationOptions,
     is_shut_down: bool,
 }
 
@@ -839,7 +833,6 @@ impl CapabilityWorkerClient {
             api_version,
             declared_capabilities,
             protocol_features: Vec::new(),
-            options,
             is_shut_down: false,
         })
     }
@@ -1739,125 +1732,5 @@ impl CapabilityWorkerActivator {
         }
 
         Ok(client)
-    }
-}
-
-/// Generic adapter that implements `MediaProcessor` on top of an active `CapabilityWorkerClient`.
-pub struct WorkerMediaProcessor {
-    client: Arc<Mutex<CapabilityWorkerClient>>,
-}
-
-impl WorkerMediaProcessor {
-    pub fn new(client: CapabilityWorkerClient) -> Self {
-        Self {
-            client: Arc::new(Mutex::new(client)),
-        }
-    }
-}
-
-impl MediaProcessor for WorkerMediaProcessor {
-    fn inspect_image(
-        &self,
-        request: &InspectImageRequest,
-        cancellation: &dyn CancellationToken,
-    ) -> Result<ImageInspection, MediaProcessorError> {
-        let payload = serde_json::to_vec(request).map_err(|e| {
-            MediaProcessorError::invalid_input(format!("failed to serialize request: {e}"))
-        })?;
-
-        let mut client = self.client.lock().map_err(|_| {
-            MediaProcessorError::ExecutionFailed("worker client lock poisoned".into())
-        })?;
-
-        let timeout = client.options.default_invoke_timeout;
-        let response_bytes = client
-            .invoke(
-                "media.processor.v1",
-                "inspect_image",
-                &payload,
-                timeout,
-                cancellation,
-            )
-            .map_err(map_worker_error_to_media)?;
-
-        serde_json::from_slice::<ImageInspection>(&response_bytes).map_err(|e| {
-            MediaProcessorError::ExecutionFailed(format!(
-                "failed to deserialize ImageInspection response: {e}"
-            ))
-        })
-    }
-
-    fn transform_image(
-        &self,
-        request: &TransformImageRequest,
-        cancellation: &dyn CancellationToken,
-    ) -> Result<TransformedImage, MediaProcessorError> {
-        request.validate()?;
-        let payload = serde_json::to_vec(request).map_err(|e| {
-            MediaProcessorError::invalid_input(format!("failed to serialize request: {e}"))
-        })?;
-
-        let mut client = self.client.lock().map_err(|_| {
-            MediaProcessorError::ExecutionFailed("worker client lock poisoned".into())
-        })?;
-
-        let timeout = client.options.default_invoke_timeout;
-        let response_bytes = client
-            .invoke(
-                "media.processor.v1",
-                "transform_image",
-                &payload,
-                timeout,
-                cancellation,
-            )
-            .map_err(map_worker_error_to_media)?;
-
-        serde_json::from_slice::<TransformedImage>(&response_bytes).map_err(|e| {
-            MediaProcessorError::ExecutionFailed(format!(
-                "failed to deserialize TransformedImage response: {e}"
-            ))
-        })
-    }
-
-    fn normalize_audio(
-        &self,
-        request: &NormalizeAudioRequest,
-        cancellation: &dyn CancellationToken,
-    ) -> Result<NormalizedAudio, MediaProcessorError> {
-        let payload = serde_json::to_vec(request).map_err(|error| {
-            MediaProcessorError::invalid_input(format!("failed to serialize request: {error}"))
-        })?;
-        let mut client = self.client.lock().map_err(|_| {
-            MediaProcessorError::ExecutionFailed("worker client lock poisoned".into())
-        })?;
-        let timeout = client.options.default_invoke_timeout;
-        let response_bytes = client
-            .invoke(
-                "media.processor.v1",
-                "normalize_audio",
-                &payload,
-                timeout,
-                cancellation,
-            )
-            .map_err(map_worker_error_to_media)?;
-        serde_json::from_slice::<NormalizedAudio>(&response_bytes).map_err(|error| {
-            MediaProcessorError::ExecutionFailed(format!(
-                "failed to deserialize NormalizedAudio response: {error}"
-            ))
-        })
-    }
-}
-
-fn map_worker_error_to_media(err: WorkerTerminalError) -> MediaProcessorError {
-    match err {
-        WorkerTerminalError::Cancelled(_) => MediaProcessorError::Cancelled,
-        WorkerTerminalError::InvalidRequest(msg) => {
-            if msg.contains("UNSUPPORTED_INPUT") {
-                MediaProcessorError::UnsupportedInput(msg)
-            } else {
-                MediaProcessorError::InvalidInput(msg)
-            }
-        }
-        other => MediaProcessorError::ExecutionFailed(other.to_string()),
     }
 }

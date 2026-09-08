@@ -37,7 +37,7 @@ enum ConversationKind {
 }
 
 message ConversationScope {
-  // Canonical vendor/protocol identifier, for example "onebot.v11".
+  // Canonical vendor/protocol identifier, for example "example.messaging.v1".
   string vendor = 1;
   // Vendor account or bot identity that owns this conversation.
   string account_id = 2;

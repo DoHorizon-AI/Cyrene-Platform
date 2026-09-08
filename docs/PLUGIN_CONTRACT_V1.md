@@ -25,9 +25,9 @@ Existing manifest fields remain compatible with the pre-v1 plugin schema.
   artifact, and compatibility evidence selected by the resolver.
 - `PluginSetLock` sorts those records deterministically and carries a
   content-derived SHA-256 lock digest.
-- `media.processor.v1` is the first narrow typed capability port in
-  `framework/crates/cy-platform-api/src/media.rs`; its normative JSON schema is
-  `contracts/schemas/media-processor-v1.schema.json`.
+- `media.processor.v1` has a normative wire schema at
+  `contracts/schemas/media-processor-v1.schema.json`; its implementation and
+  typed language adapters belong outside Platform.
 
 ## Registry and resolver MVP
 
@@ -44,14 +44,14 @@ silent fallback.
 
 ## `media.processor.v1` first slice
 
-The Platform-owned media port contains only `inspect_image` and
-`transform_image`. Inputs distinguish caller-provided bytes from a caller-owned
+The Platform-owned media wire schema contains bounded `inspect_image`,
+`transform_image`, and `normalize_audio` payloads. Inputs distinguish caller-provided bytes from a caller-owned
 file path; the contract has no URL, data-URI, stream, or opaque-handle string.
 The transform surface is limited to resize, format conversion, codec quality,
 and orientation normalization. Products retain attachment records, storage,
 deduplication, authorization, persona/emotion semantics, and workflow policy.
 
-The resolver accepts the existing Official Plugins `plugin.manifest.json`
+The resolver accepts repository-facing `plugin.manifest.json` files
 through a normalization adapter in `cy-platform-api`. That adapter feeds the
 same `CapabilityRegistry` and `CapabilityResolver`; it is not a second manifest
 authority or a direct-instantiation test shortcut.

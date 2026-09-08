@@ -8,9 +8,4 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention")
 }
 
-rootProject.name = "cyrene-control-plane"
-
-include("domain")
-include("application")
-include("bootstrap")
-include("architecture-tests")
+rootProject.name = "cyrene-platform-jvm-tooling"

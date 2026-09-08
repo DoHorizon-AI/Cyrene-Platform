@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
-"""
-Cyrene Repository Policy Validator
-Validates machine-readable repository-policy.yaml files and local lifecycle docs across all repositories.
-"""
+"""Validate the policy and lifecycle document of this Platform checkout."""
 
-import os
 import sys
-import yaml
 from pathlib import Path
 
-def find_workspace_root() -> Path:
-    curr = Path.cwd().resolve()
-    for parent in [curr] + list(curr.parents):
-        if (parent / "Cyrene-Platform").exists() and (parent / "plugins").exists():
-            return parent
-    return curr
+import yaml
+
 
 VALID_CLASSES = {
+    "PRIVATE_FOUNDATION",
     "PUBLIC_FOUNDATION",
     "PUBLIC_PRODUCT",
     "PUBLIC_COMPONENT_COLLECTION",
@@ -32,94 +24,72 @@ VALID_ROLES = {
     "MULTI_COMPONENT_COLLECTION",
 }
 
-def validate_all_repository_policies(workspace_root: Path) -> list:
-    errors = []
 
-    # A public repository CI checkout has only its own policy file; validate
-    # that repository directly instead of inventing missing sibling roots.
-    # 公共仓库 CI checkout 只包含当前仓库的 policy 文件，应直接校验当前仓库，
-    # 不要把不存在的兄弟目录伪装成 workspace 仓库。
-    if (workspace_root / "repository-policy.yaml").is_file() and not (
-        workspace_root / "Cyrene-Platform"
-    ).is_dir():
-        repo_dirs = [workspace_root]
+def find_repository_root(start_path: Path | None = None) -> Path:
+    """Locate the current repository without discovering sibling checkouts."""
+    current = (start_path or Path(__file__)).resolve()
+    for parent in [current, *current.parents]:
+        if (parent / "repository-policy.yaml").is_file():
+            return parent
+    raise RuntimeError("Could not locate repository-policy.yaml")
+
+
+def validate_repository_policy(repository_root: Path) -> list[str]:
+    """Validate one repository policy against its local lifecycle document."""
+    errors: list[str] = []
+    policy_file = repository_root / "repository-policy.yaml"
+    lifecycle_doc = repository_root / "docs" / "REPOSITORY-LIFECYCLE.md"
+
+    try:
+        policy = yaml.safe_load(policy_file.read_text(encoding="utf-8")) or {}
+    except Exception as error:
+        return [f"Failed to parse repository-policy.yaml: {error}"]
+
+    repository = policy.get("repository", {})
+    lifecycle_class = repository.get("lifecycle_class")
+    visibility = repository.get("visibility")
+    if lifecycle_class not in VALID_CLASSES:
+        errors.append(f"Invalid lifecycle_class '{lifecycle_class}'")
+
+    role = policy.get("distribution", {}).get("role")
+    if role not in VALID_ROLES:
+        errors.append(f"Invalid distribution.role '{role}'")
+
+    ci_authority = policy.get("authorities", {}).get("ci")
+    if visibility == "public" and ci_authority != "github":
+        errors.append(f"Public repository must have ci_authority 'github', found '{ci_authority}'")
+
+    if visibility == "public" and policy.get("trust", {}).get("public_requires_private", False):
+        errors.append("Public repository must not declare public_requires_private=True")
+
+    if not lifecycle_doc.exists():
+        errors.append("Missing docs/REPOSITORY-LIFECYCLE.md")
     else:
-        repo_dirs = [workspace_root / "Cyrene-Platform", workspace_root / "plugins"]
-
-    # Discover repos
-    services_dir = workspace_root / "services"
-    if services_dir.exists():
-        for s in services_dir.iterdir():
-            if s.is_dir() and (s / ".git").exists():
-                # Skip secondary linked git worktrees (e.g. -worktree)
-                if s.name.endswith("-worktree") or (s / ".git").is_file():
-                    continue
-                repo_dirs.append(s)
-
-
-    print(f"Discovered {len(repo_dirs)} repositories in workspace: {workspace_root}\n")
-
-    for r in repo_dirs:
-        rel_name = str(r.relative_to(workspace_root))
-        policy_file = r / "repository-policy.yaml"
-        lifecycle_doc = r / "docs" / "REPOSITORY-LIFECYCLE.md"
-
-        if not policy_file.exists():
-            errors.append(f"Missing repository-policy.yaml in {rel_name}")
-            continue
-
-        try:
-            policy = yaml.safe_load(policy_file.read_text(encoding="utf-8"))
-        except Exception as e:
-            errors.append(f"Failed to parse YAML in {rel_name}/repository-policy.yaml: {e}")
-            continue
-
-        # Check required fields
-        repo_info = policy.get("repository", {})
-        lclass = repo_info.get("lifecycle_class")
-        vis = repo_info.get("visibility")
-        if lclass not in VALID_CLASSES:
-            errors.append(f"{rel_name}: Invalid lifecycle_class '{lclass}'")
-
-        dist = policy.get("distribution", {})
-        role = dist.get("role")
-        if role not in VALID_ROLES:
-            errors.append(f"{rel_name}: Invalid distribution.role '{role}'")
-
-        auth = policy.get("authorities", {})
-        ci_auth = auth.get("ci")
-        if vis == "public" and ci_auth != "github":
-            errors.append(f"{rel_name}: Public repository must have ci_authority 'github', found '{ci_auth}'")
-
-        trust = policy.get("trust", {})
-        if vis == "public" and trust.get("public_requires_private", False) is True:
-            errors.append(f"{rel_name}: Public repository must not declare public_requires_private=True")
-
-        # Check lifecycle doc exists
-        if not lifecycle_doc.exists():
-            errors.append(f"Missing docs/REPOSITORY-LIFECYCLE.md in {rel_name}")
-        else:
-            doc_text = lifecycle_doc.read_text(encoding="utf-8")
-            if lclass not in doc_text:
-                errors.append(f"{rel_name}: docs/REPOSITORY-LIFECYCLE.md does not match lifecycle_class '{lclass}'")
-            if role not in doc_text:
-                errors.append(f"{rel_name}: docs/REPOSITORY-LIFECYCLE.md does not match distribution.role '{role}'")
+        lifecycle_text = lifecycle_doc.read_text(encoding="utf-8")
+        if lifecycle_class not in lifecycle_text:
+            errors.append(f"docs/REPOSITORY-LIFECYCLE.md does not match lifecycle_class '{lifecycle_class}'")
+        if role not in lifecycle_text:
+            errors.append(f"docs/REPOSITORY-LIFECYCLE.md does not match distribution.role '{role}'")
+        if ci_authority not in lifecycle_text:
+            errors.append(f"docs/REPOSITORY-LIFECYCLE.md does not match authorities.ci '{ci_authority}'")
 
     return errors
 
-def main():
-    root = find_workspace_root()
-    print(f"Validating Repository Policies in: {root}\n")
-    errors = validate_all_repository_policies(root)
+
+def main() -> int:
+    repository_root = find_repository_root()
+    print(f"Validating repository policy in: {repository_root}\n")
+    errors = validate_repository_policy(repository_root)
 
     if errors:
         print(f"[ERROR] Found {len(errors)} repository policy error(s):")
-        for e in errors:
-            print("  ", e)
-        sys.exit(1)
+        for error in errors:
+            print(f"   {error}")
+        return 1
 
-    print("[SUCCESS] All repository-policy.yaml files and local lifecycle docs validated 100% cleanly!")
-    sys.exit(0)
+    print("[SUCCESS] Repository policy and lifecycle document validated cleanly!")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -19,6 +19,14 @@
 //! 3. **强类型注册表 ([`ExtensionRegistry`])**：
 //!    按扩展点分类（`Probe`, `Storage`, `Notification` 等）分别索引并提供类型安全的高效注册、按 ID 查询
 //!    与批量枚举能力。
+//!
+//! ## Migration status
+//!
+//! `MIGRATING_COMPATIBILITY`: this crate preserves implemented v0 typed
+//! proxies until Kotlin catalog/router conformance replaces them. It has no
+//! production dependents in this repository. New Platform or Product code
+//! must use the generic resolver, CES, and WorkerControl boundaries instead of
+//! adding dependencies or capability-specific proxies here.
 
 pub mod helper;
 pub(crate) mod proxies;

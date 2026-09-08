@@ -6,10 +6,12 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
-//! 内置默认插件实现 (Built-in Plugins).
+//! `MIGRATING_COMPATIBILITY` v0 built-in plugin implementation.
 //!
-//! 提供仅供开发和测试使用的非硬件基础实现：
-//! [`BuiltinInMemoryStorage`]：内置纯内存产物存储适配器。
+//! [`BuiltinInMemoryStorage`] is retained with the implemented v0 typed SPI
+//! until that compatibility surface is removed. New code must use the
+//! Artifact Plane and must not treat this in-memory adapter as storage
+//! authority.
 
 use crate::{
     ArtifactManifest, PLUGIN_API_VERSION, Plugin, PluginCapabilities, PluginError, PluginKind,

@@ -2,7 +2,7 @@
 
 `cy-package-runtime` is the Platform/Control Plane production seam for generic
 capability package lifecycle. It consumes the existing Workspace Package Spec
-descriptor and the existing Official Plugins `plugin.manifest.json`; it does
+descriptor and a repository-owned `plugin.manifest.json`; it does
 not define another manifest, catalog, registry, or Product policy model.
 
 The runtime supports inspection, verification, installation, durable get/list,
@@ -30,7 +30,7 @@ CES remains the Product-facing capability execution boundary.
 ## Install transaction
 
 Installation validates the published descriptor, archive digest, member paths,
-symlink policy, extracted artifact digest, official manifest identity, and
+symlink policy, extracted artifact digest, repository manifest identity, and
 dependency lock digest. It then prepares dependencies from the exact lock,
 writes verification and preparation evidence inside an invisible staging
 directory, fsyncs it, and atomically renames it beneath `installations/`.

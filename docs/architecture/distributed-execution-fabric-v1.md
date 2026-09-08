@@ -50,7 +50,7 @@ The v1 design is constrained by authorities already present on
 | Outbound agent control stream | `contracts/proto/cyrene/core/v1/node_control.proto`, `NodeControlService.Connect` | v1 adds an additive Execution Agent branch to this stream instead of creating another control protocol/service. |
 | Host Agent | `agents/node/cy-node-agent/` | `HOST_AGENT` adapts this component; no second Node Agent is created. |
 | Provider observations | `contracts/proto/cyrene/provider/v1/kernel_provider.proto`, semantic `ProviderSnapshot` | Provider-managed observation reuses Provider/Resource/Worker snapshots and reconciliation. |
-| Product-neutral plan/run/attempt reconciliation | `sdk/python/cyrene_control_plane/`, `framework/jvm/domain/` and `framework/jvm/application/` | Product Run and Attempt remain above Kernel Operation and Runtime. |
+| Product-owned run/attempt reconciliation | Product repositories; Yield owns its training implementation | Product Run and Attempt remain above Kernel Operation and Runtime and are not Platform state. |
 | Generic process supervision | `cy-kernel-api::service`, `ServiceSupervisor`, `ProcessRuntime` | Runtime Agent reuses the lifecycle shape but remains an unprivileged outer agent, not a Kernel authority noun. |
 | Package/binding runtime lifecycle | `framework/crates/cy-package-runtime/` | Package install/binding/runtime state is not copied into the fabric. |
 | Artifact identity and local CAS | `contracts/rust/cy-manifest`, `contracts/schemas/manifests/artifact_*.schema.json`, `sdk/python/cyrene_artifacts/` | Transfer adds replicas/sessions/checkpoints around `ArtifactRef`; it does not redefine Artifact identity. |

@@ -39,9 +39,9 @@ fn unpack<M: Message + Default>(value: &Any, expected_type_url: &str) -> M {
     M::decode(value.value.as_slice()).expect("typed Any payload must decode")
 }
 
-fn onebot_group_scope() -> ConversationScope {
+fn example_group_scope() -> ConversationScope {
     ConversationScope {
-        vendor: "onebot.v11".to_string(),
+        vendor: "example.messaging.v1".to_string(),
         account_id: "10001".to_string(),
         conversation_id: "456".to_string(),
         kind: ConversationKind::Group as i32,
@@ -50,7 +50,7 @@ fn onebot_group_scope() -> ConversationScope {
 
 fn vendor_extension() -> VendorExtension {
     VendorExtension {
-        vendor: "onebot.v11".to_string(),
+        vendor: "example.messaging.v1".to_string(),
         facts: vec![
             VendorFact {
                 name: "post_type".to_string(),
@@ -67,7 +67,7 @@ fn vendor_extension() -> VendorExtension {
 fn inbound_fixture() -> InboundMessagePayload {
     InboundMessagePayload {
         message_id: "9002".to_string(),
-        conversation: Some(onebot_group_scope()),
+        conversation: Some(example_group_scope()),
         sender_id: "123".to_string(),
         sender_display_name: "Alice".to_string(),
         content: vec![
@@ -98,7 +98,7 @@ fn inbound_fixture() -> InboundMessagePayload {
                     reference: Some(AttachmentReference {
                         location: Some(attachment_reference::Location::VendorMedia(
                             VendorMediaReference {
-                                vendor: "onebot.v11".to_string(),
+                                vendor: "example.messaging.v1".to_string(),
                                 account_id: "10001".to_string(),
                                 media_id: "report.pdf".to_string(),
                             },
@@ -179,8 +179,8 @@ fn typed_any_payloads_round_trip_through_capability_execution_contract() {
         event_type: INBOUND_MESSAGE_EVENT_TYPE.to_string(),
         payload: Some(pack(INBOUND_MESSAGE_TYPE_URL, &inbound)),
         generation: 7,
-        source_id: "onebot-connector".to_string(),
-        binding_id: "qq-main".to_string(),
+        source_id: "example-connector".to_string(),
+        binding_id: "channel-main".to_string(),
     };
 
     let unpacked: InboundMessagePayload =
@@ -188,7 +188,7 @@ fn typed_any_payloads_round_trip_through_capability_execution_contract() {
     assert_eq!(unpacked, inbound);
 
     let send = SendMessageRequest {
-        conversation: Some(onebot_group_scope()),
+        conversation: Some(example_group_scope()),
         content: vec![MessageContentPart {
             kind: Some(message_content_part::Kind::Text(TextContent {
                 text: "answer".to_string(),
@@ -204,7 +204,7 @@ fn typed_any_payloads_round_trip_through_capability_execution_contract() {
         interface_version: INTERFACE_VERSION.to_string(),
         method: SEND_MESSAGE_METHOD.to_string(),
         request: Some(pack(SEND_MESSAGE_REQUEST_TYPE_URL, &send)),
-        binding_id: Some("qq-main".to_string()),
+        binding_id: Some("channel-main".to_string()),
     };
     let unpacked_send: SendMessageRequest = unpack(
         invoke.request.as_ref().unwrap(),
@@ -322,7 +322,6 @@ fn schema_has_one_reply_authority_no_service_and_no_product_policy_fields() {
         "model_routing",
         "tool_routing",
         "command_semantics",
-        "iris",
         "product_lifecycle",
     ] {
         assert!(

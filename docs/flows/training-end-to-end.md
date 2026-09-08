@@ -18,7 +18,8 @@ sequenceDiagram
     participant Artifacts as Artifact Provider
 
     User->>Yield: Submit TrainingSpec (Model, Dataset, Hyperparams)
-    Yield->>Preflight: Evaluate Hardware & VRAM Estimation
+    Yield->>Preflight: Read Platform HardwareFacts contracts
+    Yield->>Plugins: Resolve model analysis and compatibility capabilities
     Preflight-->>Yield: Verification OK (Ready)
     Yield->>Control: Compile into ExecutionPlan (Steps, Attempts)
     loop Reconciliation Loop
