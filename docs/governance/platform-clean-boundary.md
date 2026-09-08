@@ -2,7 +2,7 @@
 
 Status: **Normative**
 Baseline: the commit that introduces this document and its CI guard
-Validated consumer: `Astrbot-Rev develop@d14d60858a9c6b43b0b68a69a01ac76b69739b8b`
+Validated deployment consumer: `Astrbot-Rev develop@685978cdff6fb06150e05e7aa9f66ebb87c85f0f`
 
 Platform owns the generic semantic contracts, Kernel and Node Agent behavior,
 managed process and adapter-host boundaries, CES, Lease/Fence rules, SDKs, and
@@ -12,9 +12,20 @@ Product manifests, compatibility source snapshots, or an ecosystem component
 catalog.
 
 The validated Astrbot consumer owns its Docker image, Kubernetes manifests,
-NapCat composition, NGINX configuration and renderer. Its deployment control
-plane suite passed 57 tests at the exact revision above before the corresponding
-Platform copies were removed.
+NapCat composition, NGINX configuration and renderer. Azure build 443 passed
+at the exact accepted revision above, including the .NET and PostgreSQL suite,
+after the corresponding Platform copies were removed.
+
+The other accepted migration destinations are:
+
+- `Cyrene-Plugins-Official develop@4f730e1f13fbc64b04b533dbf7f4e90d06460604`
+  owns the installable media worker adapter. Azure build 448 passed for its
+  task head before normal merge and canonical ancestry read-back.
+- `Cyrene-Yield develop@0f402e0fff5d07a001d90f97c35e211ffd1875b0`
+  owns Product run, attempt, retry, persistence, model analysis, and
+  compatibility-evaluation policy. Azure build 461 passed for task head
+  `292971f6907294d59184d3a390c97974804b33aa` before normal merge; that head is
+  an ancestor of the accepted revision.
 
 ## Extension rule
 
