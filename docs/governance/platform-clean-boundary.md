@@ -49,6 +49,10 @@ compatibility evaluator, and their Product request and result types moved
 behind Yield-owned replaceable ports. Platform `cyrene_preflight` now exposes
 only resource facts and generic preflight results.
 
+The empty `framework/jvm` Gradle shell was removed after its Product source
+moved. Platform's JVM gate now builds only a generated contract consumer under
+`tck/`; a new Product JVM application must live in its Product repository.
+
 The media request adapter moved to Cyrene-Plugins-Official. Platform worker
 dispatch forwards generic payloads and does not know image/audio operation
 names or capability-specific request classes.

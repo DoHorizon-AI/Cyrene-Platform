@@ -68,9 +68,7 @@ forbidden_owned_paths=(
   "framework/crates/cy-platform-api/src/media.rs"
   "sdk/python/cyrene_control_plane/**"
   "sdk/python/cyrene_preflight/src/cyrene_preflight/reference.py"
-  "framework/jvm/application/**"
-  "framework/jvm/domain/**"
-  "framework/jvm/bootstrap/**"
+  "framework/jvm/**"
 )
 for glob in "${forbidden_owned_paths[@]}"; do
   matches=$(git ls-files "$glob")
