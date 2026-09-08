@@ -41,7 +41,32 @@ if [ -n "$lr" ]; then
   status=1
 fi
 
+# Platform owns only units for its own daemons under infrastructure/. Product
+# deployment templates, edge configuration, observability dashboards and
+# compatibility snapshots must stay with the consuming repository.
+non_platform_infrastructure=$(
+  git ls-files 'infrastructure/**' | grep -v '^infrastructure/systemd/' || true
+)
+if [ -n "$non_platform_infrastructure" ]; then
+  echo "FORBIDDEN: consumer-owned infrastructure tracked by Platform:"
+  echo "$non_platform_infrastructure" | sed 's/^/  - /'
+  status=1
+fi
+
+forbidden_owned_paths=(
+  "contracts/registries/component-catalog.v1.json"
+  "kernel/crates/cy-kernel-daemon/tests/*astrbot*"
+)
+for glob in "${forbidden_owned_paths[@]}"; do
+  matches=$(git ls-files "$glob")
+  if [ -n "$matches" ]; then
+    echo "FORBIDDEN: consumer-owned catalog, adapter, or integration test:"
+    echo "$matches" | sed 's/^/  - /'
+    status=1
+  fi
+done
+
 if [ "$status" -eq 0 ]; then
-  echo "OK: no legacy/archive/backup surface patterns in committed source."
+  echo "OK: no legacy surface or consumer-owned Platform adaptation is tracked."
 fi
 exit "$status"

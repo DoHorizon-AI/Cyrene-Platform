@@ -149,7 +149,3 @@ impl LocalTransport for StdioTransport {
         Ok(())
     }
 }
-
-// Transport placeholder types for future optional socket-based local IPC
-pub struct UnixSocketTransport;
-pub struct WindowsNamedPipeTransport;

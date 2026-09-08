@@ -1,1 +1,0 @@
-{"schemaVersion":"0.1","id":"io.cyrene.infrastructure.nginx","name":"CYRENE NGINX Edge Templates","version":"0.1.0","kind":"service-plugin","execution":"out-of-process","capabilities":["edge.reverse-proxy","edge.tls-termination"],"storage":{"directDatabaseAccess":false},"contract":{"status":"compatibility-snapshot","authority":"CYRENE gateway contract"}}

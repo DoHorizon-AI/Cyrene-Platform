@@ -2,17 +2,20 @@
 
 ## Purpose | 目录职责
 
-This directory stores checked-in component catalog and registration metadata.
-本目录存放已纳入版本控制的组件目录与注册元数据。
+Platform does not store Product or ecosystem component instances here. Owning
+Product, Plugins, and integration repositories maintain their own catalogs.
+Platform only publishes generic schemas and admission contracts.
+Platform 不在此存储产品或生态组件实例。产品、Plugins 与集成仓库各自维护目录；
+Platform 只发布通用 Schema 与准入契约。
 
 ## Contents | 内容
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `component-catalog.v1.json` | Versioned component catalog. | 版本化组件目录。 |
+| No tracked registry | Product additions require no Platform change. | 产品新增不要求修改 Platform。 |
 
 ## Suggested reading / execution order | 推荐阅读 / 执行顺序
 
-Read the catalog schema before using the registry data in a resolver.
-在解析器使用注册数据前先阅读对应目录 Schema。
-
+Read `contracts/schemas/component-catalog.schema.json` before implementing an
+external catalog.
+实现外部组件目录前请阅读 `contracts/schemas/component-catalog.schema.json`。

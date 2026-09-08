@@ -22,7 +22,7 @@ All platform development converges through the standard branch model:
 | `framework/`      | Extension API, registry, and JVM boundary                                                                  |
 | `contracts/`      | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
 | `sdk/`            | Language client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`)                        |
-| `infrastructure/` | Shared Docker/Compose, Kubernetes, Nginx, Observability, and systemd runtime assets                        |
+| `infrastructure/` | Generic systemd units for Platform-owned daemons and adapter hosts                                       |
 | `tooling/`        | Shared repository governance, CI boundary guards, codegen, and migration tooling archives                 |
 | `examples/`       | Non-production plugin integration examples                                                                 |
 | `docs/`           | Architecture, protocol, and repository-boundary decisions                                                  |
@@ -38,6 +38,11 @@ back into the kernel.
 service.json describes a first-party service bundle. plugin.toml describes an
 installable component inside the signed package; these are metadata levels, not
 two package or installation protocols.
+
+Product deployment templates, edge configuration, product component catalogs,
+and compatibility snapshots are owned by their Product or integration
+repository. Adding or changing a Product must not require a Platform source
+change.
 
 ## Hardware boundary
 

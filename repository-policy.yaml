@@ -1,10 +1,10 @@
 schema_version: cyrene.repository-policy.v1
 repository:
   logical_name: Cyrene-Platform
-  lifecycle_class: PUBLIC_FOUNDATION
-  visibility: public
+  lifecycle_class: PRIVATE_FOUNDATION
+  visibility: private
   source_owner: Platform Core Team
-  remote_default_branch: develop
+  remote_default_branch: main
   integration_branch: develop
   release_branch: main
   default_branch: develop
@@ -13,10 +13,12 @@ ownership:
   - Foundational contracts & Protobuf schemas
   - Rust Kernel, process isolation & cgroup sandboxing
   - Product Control Plane primitives
-  - Shared infrastructure and CI/CD tooling
+  - Generic daemon units and repository CI tooling
   does_not_own:
   - Product-specific AI state
   - Training epoch loops or Serving engine internals
+  - Product deployment, edge configuration, adapters, or compatibility snapshots
+  - Cross-repository Product and plugin catalogs
 build:
   independent: true
   build_systems:
@@ -38,17 +40,13 @@ distribution:
   role: COMPONENT_RELEASE
   profiles:
   - core
-  - training
-  - serving
-  - gateway
-  - full
   standalone_user_product: false
 integration:
   multi_repo_required: false
 authorities:
-  ci: github
+  ci: azure_devops
   release: github_releases
-  deployment: community
+  deployment: consuming_repository
 trust:
   public_requires_private: false
 versioning:

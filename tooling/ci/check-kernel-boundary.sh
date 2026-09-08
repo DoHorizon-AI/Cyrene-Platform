@@ -36,10 +36,20 @@ if rg -n 'pub enum Accelerator|pub struct AcceleratorDevice|trait AcceleratorPro
   failed=1
 fi
 
-if rg -n 'unsafe\s*\{|unsafe extern|libc::|\bCommand\b|/sys/fs/cgroup|/proc/self/cgroup|BPF_' kernel --glob '*.rs' --glob '!*tests.rs' --glob '!**/tests/**'; then
-  echo "Kernel production code must remain pure-safe and must not contain privileged sandbox implementation details" >&2
-  failed=1
-fi
+while IFS= read -r rust_file; do
+  first_test_line="$(rg -n '^#\[cfg\(test\)\]' "$rust_file" | head -n 1 | cut -d: -f1 || true)"
+  if [[ -n "$first_test_line" ]]; then
+    production_end=$((first_test_line - 1))
+  else
+    production_end="$(wc -l < "$rust_file")"
+  fi
+
+  if head -n "$production_end" "$rust_file" | rg -n \
+    'unsafe\s*\{|unsafe extern|libc::|\bCommand\b|/sys/fs/cgroup|/proc/self/cgroup|BPF_'; then
+    echo "Kernel production code contains privileged sandbox implementation details: $rust_file" >&2
+    failed=1
+  fi
+done < <(rg --files kernel --glob '*.rs' --glob '!*tests.rs' --glob '!**/tests/**')
 
 if rg -n 'cy-hardware-discovery' kernel Cargo.toml; then
   echo "Kernel workspace still depends on the retired discovery crate" >&2

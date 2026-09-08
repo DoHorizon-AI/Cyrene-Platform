@@ -19,7 +19,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `astrbot_platform_hosting_e2e.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `service_supervision_tck.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.

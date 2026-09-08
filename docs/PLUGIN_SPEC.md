@@ -302,9 +302,10 @@ recommended per component; `capabilities` (free-form array), `license_gate`,
 This specification governs only an installable `capability-plugin` or an
 installable component within a `service-bundle`. It is not a manifest format for
 the Kernel, Control Plane, Adapter Host, product Service, infrastructure asset or
-an extracted compatibility snapshot. Their classification is normative in
-[`Platform Component Boundary v1`](contracts/platform-component-boundary-v1.md)
-and [`component-catalog.v1.json`](../contracts/registries/component-catalog.v1.json).
+an extracted compatibility snapshot. Their classification rules are normative
+in [`Platform Component Boundary v1`](contracts/platform-component-boundary-v1.md).
+Concrete classifications remain in the owning Product, Plugins, or integration
+repository; Platform does not maintain a cross-repository component catalog.
 
 A `compatibility-snapshot` must not be made discoverable merely by adding a
 `plugin.toml`: it first needs a versioned extension contract, out-of-process

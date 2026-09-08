@@ -26,7 +26,7 @@ Platform, Node Agent and authenticated Adapter Hosts can invoke Kernel actions.
 
 | Class | Purpose | Runtime boundary | May use Kernel semantic API |
 |---|---|---|---|
-| `platform` | Kernel, Control Plane, catalog, policy and Plugin Host | trusted platform processes | Yes, by role |
+| `platform` | Kernel, Control Plane, generic policy and Plugin Host | trusted platform processes | Yes, by role |
 | `adapter-host` | sandbox or hardware implementation detail | separate authenticated local process | Yes, restricted ingress |
 | `capability-plugin` | reusable business capability | out-of-process worker or network service | No |
 | `service` | user-facing or product-specific executable | independently deployed application | No |
@@ -50,9 +50,9 @@ the Control Plane, but the Platform alone obtains and fences a Lease.
 - A `service-bundle` can carry `service.json` and several installable
   `plugin.toml` components in one signed OCI artifact. These are metadata of
   one installation path, not two independent installers.
-- `compatibility-snapshot` and `infrastructure-asset` are catalogued but not
-  discoverable/activatable by the Plugin Host. They must not declare a fictitious
-  executable runtime or capability.
+- `compatibility-snapshot` and `infrastructure-asset` are owned and catalogued
+  outside Platform. They are not discoverable or activatable by the Plugin Host
+  and must not declare a fictitious executable runtime or capability.
 - C ABI and JVM SPI versions remain independent from a plugin contract version
   and `cy.plugin.v1` protocol version. They are client bindings, not plugin APIs.
 
@@ -73,19 +73,17 @@ not an independent semantic authority. Before any C ABI or JVM SPI is published:
    Control Plane, Services and business plugins must not load third-party
    Providers in process.
 
-## 5. Current AstrBot alignment
+## 5. Consumer-owned migration surfaces
 
-`services/cyrene-astrbot-rev` is a `service`. Its Dashboard, IM adapters,
-authentication, native chat pipeline, provider routing, Iris behavior and
-persistence remain application-owned. The extracted Agent, model, memory,
-storage, content-policy, conversation, media, Skill and IM source trees are
-currently `compatibility-snapshot` artifacts until each has an external
-contract, a runnable worker/service, activation path and TCK.
+Products own their application behavior, deployment templates, protocol
+adapters and compatibility snapshots. Reusable capabilities belong in the
+Plugins repository only after they have an external contract, a runnable
+worker or service, an activation path and a TCK. Platform does not retain a
+copy while that extraction is in progress.
 
-The Python capability worker is a useful transition seam, but it is a
-service/plugin worker protocol rather than the CYRENE C ABI or JVM SPI. It must
-gain a normalised request/effect/error/event contract before any snapshot is
-declared installable.
+A Product-specific worker may use the generic process and capability contracts,
+but its protocol and lifecycle remain consumer-owned until standardized. A
+single consumer is not sufficient reason to add a Platform API.
 
 ## 6. Admission gates
 
@@ -101,5 +99,6 @@ only when all conditions hold:
    permissions and failure isolation.
 5. A Service invokes it through the Plugin Host rather than importing its code.
 
-The authoritative present-state classifications are in
-[`contracts/registries/component-catalog.v1.json`](../../contracts/registries/component-catalog.v1.json).
+Present-state classifications belong to the repository that owns or composes
+the component. Platform publishes the generic catalog schema but does not keep
+an ecosystem-wide component instance registry.
