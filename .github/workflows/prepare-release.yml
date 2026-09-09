@@ -38,7 +38,7 @@ jobs:
       - name: Install Tooling Dependencies
         run: |
           python -m pip install --upgrade pip build hypothesis pytest pyyaml setuptools twine wheel
-          python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
+          python -m pip install -e sdk/python/cyrene_artifacts -e sdk/python/cyrene_preflight
 
       # STEP 1: Pre-validation of requested version and policy BEFORE doing anything
       - name: Step 1 - Pre-validate Release Version & Tag Safety
