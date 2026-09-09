@@ -40,12 +40,6 @@ pub mod cyrene {
         }
     }
 
-    pub mod capability {
-        pub mod v1 {
-            tonic::include_proto!("cyrene.capability.v1");
-        }
-    }
-
     pub mod hardware {
         pub mod v1 {
             tonic::include_proto!("cyrene.hardware.v1");
@@ -77,8 +71,6 @@ pub mod cyrene {
     }
 }
 
-/// Product-facing language-neutral capability execution service.
-pub use cyrene::capability::v1 as capability_v1;
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
 pub use cyrene::core::v1 as core_v1;
 /// Core v2 authority projection with explicit namespace scope.

@@ -1,78 +1,55 @@
 # Platform clean boundary
 
 Status: **Normative**
-Baseline: the commit that introduces this document and its CI guard
-Validated deployment consumer: `Astrbot-Rev develop@685978cdff6fb06150e05e7aa9f66ebb87c85f0f`
+Baseline: the canonical merge commit produced by this remediation
 
-Platform owns generic semantic and control contracts, Kernel and Node Agent
-behavior, managed process and adapter-host boundaries, Lease/Fence rules, and
-systemd units for Platform-owned daemons. Capability payload contracts, typed
-SDKs and TCKs belong to Plugins or the Product owner. Platform does not own
-Product deployment templates, edge configuration, observability composition,
-protocol adapters, Product manifests, compatibility source snapshots, or an
-ecosystem component catalog.
+Platform owns generic Kernel semantics, Node and Runtime supervision,
+Lease/Fence enforcement, Artifact identity/transfer, workspace execution, and
+the control-plane portion of Plugin installation, compatibility, activation,
+health, permissions, and endpoint discovery.
 
-The validated Astrbot consumer owns its Docker image, Kubernetes manifests,
-NapCat composition, NGINX configuration and renderer. Azure build 443 passed
-at the exact accepted revision above, including the .NET and PostgreSQL suite,
-after the corresponding Platform copies were removed.
+Platform never owns capability payload schemas, Product lifecycle/state,
+Product manifests, ecosystem catalogs, protocol adapters, deployment templates,
+compatibility source snapshots, or business examples. It may return an opaque
+`connection_ref`; it may not proxy, parse, route, persist, or transform the
+business request or response carried by that endpoint.
 
-The other accepted migration destinations are:
+## Zero-change extension rule
 
-- `Cyrene-Plugins-Official develop@4f730e1f13fbc64b04b533dbf7f4e90d06460604`
-  owns the installable media worker adapter. Azure build 448 passed for its
-  task head before normal merge and canonical ancestry read-back.
-- `Cyrene-Yield develop@0f402e0fff5d07a001d90f97c35e211ffd1875b0`
-  owns Product run, attempt, retry, persistence, model analysis, and
-  compatibility-evaluation policy. Azure build 461 passed for task head
-  `292971f6907294d59184d3a390c97974804b33aa` before normal merge; that head is
-  an ancestor of the accepted revision.
+A Product or Plugin consumes the published Platform contracts without a
+Platform source change. A proposed Platform addition must identify at least two
+independent consumers or a Kernel-level invariant and must include a generic
+contract test. One Product's convenience, language, protocol, deployment shape,
+or vocabulary is insufficient.
 
-## Extension rule
+Repository-owned `plugin.manifest.json` files define Plugin identity,
+capabilities, methods, payload schema references, runtime language, and
+protocol. Platform normalizes only the fields needed for generic compatibility
+selection. For a managed service package, the package supplies a language-
+neutral launch command. Platform starts that verified process, validates the
+readiness identity, and returns its opaque endpoint.
 
-A Product or plugin must consume the published Platform contracts without a
-Platform source change. If a generic primitive is missing, a `PLATFORM_GAP`
-proposal must identify either two independent consumers or a Kernel-level
-invariant and provide a contract test. Product convenience, deployment shape,
-or protocol-specific behavior is not a Platform gap.
+## Removed compatibility surfaces
 
-`tooling/ci/check-no-legacy-surface.sh` rejects consumer-owned infrastructure,
-cross-repository component instances, Product-specific integration tests, and
-business-payload operations in the package runtime if they are added back to
-Platform.
+The following implemented legacy surfaces were removed after reverse-dependency
+checks and owner migration:
 
-The unused v0 named SPI, `cy-extension-registry`, `cy-local-transport`, ten
-capability-specific Protobuf projections and `BuiltinInMemoryStorage` were
-removed after repository-wide reverse-dependency checks found no production
-consumer. Their old `Invoke` and `InvokeResult` field names and tag numbers are
-reserved. The package runtime supervises a Plugin-owned service, validates its
-readiness identity, and returns an opaque `connection_ref`; its control protocol
-contains no invoke, subscribe, request, response, or event payload operation.
+- ten named v0 capability SPI Protobuf contracts and their Rust adapters;
+- `cy-extension-registry`, `cy-local-transport`, and `BuiltinInMemoryStorage`;
+- Capability Execution Service, its client SDK/TCK, stdio worker protocol, and
+  worker SDK/shim;
+- model-provider and message-connector payload contracts;
+- Product run/environment/model-version implementations;
+- AI model, hardware, training, runtime, checkpoint, validation, planning, and
+  Artifact-lineage manifests;
+- v0 `plugin.toml`, Product service manifests/catalogs, and the Platform copy of
+  `media.processor.v1`.
 
-The remaining migration quarantine covers the v0 `plugin.toml` taxonomy and
-AI-specific model/training/runtime records and JSON schemas in `cy-manifest`.
-They remain frozen only until their current consumers move to their owner.
-
-The Python and Kotlin `ProductRun`/Attempt/retry/persistence implementations
-were moved to Cyrene-Yield, which is their only source consumer. Their shared
-Platform schema and fixture were moved with the Product lifecycle. Platform
-retains no Product run store or reconciler. The default model analyzer,
-compatibility evaluator, and their Product request and result types moved
-behind Yield-owned replaceable ports. Platform `cyrene_preflight` now exposes
-only resource facts and generic preflight results.
-
-The empty `framework/jvm` Gradle shell was removed after its Product source
-moved. Platform's JVM gate now builds only a generated contract consumer under
-`tck/`; a new Product JVM application must live in its Product repository.
-
-The media request adapter moved to Cyrene-Plugins-Official. Product code calls
-the Plugin-owned endpoint directly. Platform does not know image/audio
-operation names, capability-specific request classes, or their serialized
-payloads.
+`tooling/ci/check-no-legacy-surface.sh` prevents those paths, symbols, Product
+identities, and package data-plane operations from returning.
 
 ## Evidence boundary
 
-The Astrbot deployment test proves ownership of the migrated deployment assets.
-It does not prove a live Kubernetes deployment. Hosted builds prove compilation,
-unit tests, and contract TCKs; real GPU, Kubernetes, and external-provider
-execution require their separate environment-specific acceptance evidence.
+A local or Hosted build proves only the checks it actually ran. GPU, external
+provider, Kubernetes, and complete Product lifecycle evidence remain separate
+and must not be inferred from Platform compilation.

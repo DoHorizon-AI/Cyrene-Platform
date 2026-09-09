@@ -671,12 +671,8 @@ impl FilesystemPackageRuntime {
         let dependency_root = self.dependency_path(&record.dependencies.lock_digest);
         let mut options = self.base_service_options.clone();
         options.working_dir = Some(payload.clone());
-        options.python_path.push(payload.join("src"));
-        for path in &record.dependencies.python_paths {
-            options.python_path.push(dependency_root.join(path));
-        }
-        if let Some(executable) = &record.dependencies.python_executable {
-            options.python_executable = Some(
+        if let Some(executable) = &record.dependencies.runtime_executable {
+            options.runtime_executable = Some(
                 dependency_root
                     .join(executable)
                     .to_string_lossy()
@@ -688,9 +684,14 @@ impl FilesystemPackageRuntime {
             "CYRENE_CAPABILITY_BINDING_ID".to_string(),
             request.binding_id.to_string(),
         );
-        options
-            .environment
-            .insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
+        options.environment.insert(
+            "CYRENE_PACKAGE_ROOT".to_string(),
+            payload.to_string_lossy().to_string(),
+        );
+        options.environment.insert(
+            "CYRENE_DEPENDENCY_ROOT".to_string(),
+            dependency_root.to_string_lossy().to_string(),
+        );
         self.service_supervisor()?.activate(
             &request.binding_id,
             &request.installation_id,
@@ -792,22 +793,12 @@ impl FilesystemPackageRuntime {
                 "prepared dependency evidence differs from the installation record",
             ));
         }
-        if let Some(executable) = &evidence.python_executable
+        if let Some(executable) = &evidence.runtime_executable
             && !dependency_root.join(executable).is_file()
         {
             return Err(PackageRuntimeError::new(
                 "DEPENDENCY_RUNTIME_CORRUPT",
-                "prepared Python executable is missing",
-            ));
-        }
-        if evidence
-            .python_paths
-            .iter()
-            .any(|path| !dependency_root.join(path).exists())
-        {
-            return Err(PackageRuntimeError::new(
-                "DEPENDENCY_RUNTIME_CORRUPT",
-                "prepared Python path is missing",
+                "prepared runtime executable is missing",
             ));
         }
         Ok(())
@@ -950,15 +941,18 @@ fn validate_installed_manifest_record(
 fn validate_relative_evidence_paths(
     evidence: &DependencyPreparationEvidence,
 ) -> Result<(), PackageRuntimeError> {
-    let paths = evidence
-        .python_executable
-        .iter()
-        .chain(evidence.python_paths.iter());
-    if paths.clone().any(|path| {
-        path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
+    if evidence.runtime_executable.iter().any(|path| {
+        path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::CurDir
+                )
+            })
     }) {
         return Err(PackageRuntimeError::new(
             "DEPENDENCY_EVIDENCE_INVALID",

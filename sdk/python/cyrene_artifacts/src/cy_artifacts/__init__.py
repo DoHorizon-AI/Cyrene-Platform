@@ -9,15 +9,11 @@
 """Provider-neutral Artifact Plane MVP."""
 
 from .contracts import (
-    ARTIFACT_MANIFEST_VERSION,
-    ARTIFACT_SCHEMA_VERSION,
     ARTIFACT_URI_PREFIX,
     JCS_SAFE_INTEGER_MAX,
     PORTABLE_DIRECTORY_MANIFEST_VERSION,
     ArtifactDirectoryEntry,
-    ArtifactLineage,
     ArtifactKind,
-    ArtifactManifest,
     ArtifactProvider,
     ArtifactRef,
     ArtifactStager,
@@ -39,17 +35,13 @@ from .local import (
 )
 
 __all__ = [
-    "ARTIFACT_MANIFEST_VERSION",
-    "ARTIFACT_SCHEMA_VERSION",
     "ARTIFACT_URI_PREFIX",
     "JCS_SAFE_INTEGER_MAX",
     "PORTABLE_DIRECTORY_MANIFEST_VERSION",
     "ArtifactError",
     "ArtifactIntegrityError",
     "ArtifactDirectoryEntry",
-    "ArtifactLineage",
     "ArtifactKind",
-    "ArtifactManifest",
     "ArtifactNotFoundError",
     "ArtifactProvider",
     "ArtifactRef",

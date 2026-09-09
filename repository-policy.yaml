@@ -28,13 +28,10 @@ build:
   build_systems:
   - cargo
   - pyproject
-  - gradle
 artifacts:
   package_units:
   - cyrene-preflight
   - cyrene-artifacts
-  - cyrene-worker-shim
-  - cyrene-capability-client
   native_binaries:
   - cy-kernel-daemon
   - cy-node-agent

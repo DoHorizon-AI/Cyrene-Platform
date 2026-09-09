@@ -21,12 +21,11 @@ lint:
     # consumers during a Core v1 contract change.
     - PACKAGE_SAME_JAVA_MULTIPLE_FILES
     - PACKAGE_SAME_JAVA_PACKAGE
-  # `google.rpc.Status` and `cy.plugin.v1` are imported compatibility
-  # contracts. Core v1 is the governed module; these external/frozen packages
-  # cannot be renamed merely to satisfy its lint profile.
+  # `google.rpc.Status` is an imported compatibility contract. Core v1 is the
+  # governed module; the external package cannot be renamed merely to satisfy
+  # its lint profile.
   ignore:
     - google/rpc/status.proto
-    - plugin/v1
 
 breaking:
   use:

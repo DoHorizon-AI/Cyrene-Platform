@@ -19,7 +19,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `cy-capability-execution-service/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-installation-resolver/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-package-runtime/` | Generic package install, activation, supervision, and opaque connection facts; no capability payload routing. | 通用包安装、激活、监督与不透明连接事实；不路由能力业务载荷。 |
 | `cy-platform-api/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |

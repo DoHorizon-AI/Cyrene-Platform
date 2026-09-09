@@ -4,12 +4,15 @@
 installation, locked dependency preparation, binding activation, process
 supervision, status, upgrade, rollback, and cleanup.
 
-For a running service binding it returns an opaque `connection_ref`. The
-Product opens that endpoint with the Plugin-owned versioned protocol. This
-crate has no invoke, stream, subscribe, request/response payload, or domain
-error API.
+A package supplies a language-neutral launch command. A configured external
+adapter prepares language dependencies through
+`cyrene.package-dependency-preparer.v1`; Platform validates its bounded JSON
+evidence without knowing Python, Java, .NET, or another toolchain. The
+supervisor then executes a verified package-relative binary or the prepared
+runtime executable, appends the generic readiness arguments, and returns an
+opaque `connection_ref`. Language adapters and capability protocols stay in the
+package repository.
 
-The current built-in launcher starts a Python package that carries the
-Plugins-owned `cyrene_plugin_runtime`. Adding a model, media processor, message
-connector, or other Python capability changes the Plugin package and Product
-adapter only; it does not require a Platform source change.
+The Product opens `connection_ref` using the Plugin-owned versioned client.
+This crate has no invoke, stream, subscribe, method, request/response payload,
+or domain-error API.

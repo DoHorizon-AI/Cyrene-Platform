@@ -38,7 +38,7 @@ def publish_fixture(export_root: Path) -> None:
     (source / "模型" / "空.txt").write_bytes(b"")
 
     provider = LocalArtifactProvider(work_root / "cas")
-    artifact = provider.publish_portable_directory(source, kind=ArtifactKind.MODEL)
+    artifact = provider.publish_portable_directory(source, kind=ArtifactKind("model"))
     manifest_path = provider._manifest_path(artifact.digest)
 
     blobs_root = export_root / "blobs"

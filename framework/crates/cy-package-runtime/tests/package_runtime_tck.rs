@@ -15,7 +15,7 @@ use std::{
 use cy_package_runtime::{
     ActivationRequest, ArtifactDigest, BindingId, DependencyPreparationEvidence,
     DependencyPreparer, FilesystemPackageRuntime, InstallationState, PackageId,
-    PackageRuntimeError, PackageSource, PackageVersion, PythonPluginServiceSupervisor,
+    PackageRuntimeError, PackageSource, PackageVersion, ProcessPluginServiceSupervisor,
     RuntimeState, ServiceActivationOptions,
 };
 use serde_json::json;
@@ -108,15 +108,14 @@ impl DependencyPreparer for FixtureDependencyPreparer {
             prepared_at_unix_ms: 1,
             lock_digest: lock_digest.clone(),
             runtime_digest: digest_bytes(b"generic-tck-runtime"),
-            python_executable: None,
-            python_paths: Vec::new(),
+            runtime_executable: None,
         })
     }
 }
 
 fn service_options() -> ServiceActivationOptions {
     ServiceActivationOptions {
-        python_executable: Some(if cfg!(windows) {
+        runtime_executable: Some(if cfg!(windows) {
             "python".to_string()
         } else {
             "python3".to_string()
@@ -131,7 +130,7 @@ fn open_runtime(root: &Path, preparer: FixtureDependencyPreparer) -> FilesystemP
     FilesystemPackageRuntime::open(
         root,
         Arc::new(preparer),
-        Box::new(PythonPluginServiceSupervisor::default()),
+        Box::new(ProcessPluginServiceSupervisor::default()),
         service_options(),
     )
     .unwrap()
@@ -162,7 +161,15 @@ fn build_package_with_entry(
         "runtime": {
             "language": "python",
             "entrypoint": "package_service:PackageService",
-            "protocol": "cyrene.plugin.runtime.v1.DirectPluginRuntime"
+            "protocol": "cyrene.plugin.runtime.v1.DirectPluginRuntime",
+            "launch": {
+                "executable": "prepared-runtime",
+                "args": [
+                    "src/cyrene_plugin_runtime/server.py",
+                    "--entrypoint",
+                    "package_service:PackageService"
+                ]
+            }
         }
     }))
     .unwrap();

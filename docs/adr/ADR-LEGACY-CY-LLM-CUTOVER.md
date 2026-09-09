@@ -17,8 +17,8 @@ Proto files, generated binding, and transition allowlist. Any reintroduction
 of the former names in runtime or contract source is now a governance
 failure.
 
-The separate `cy.plugin.v1` stdio protocol was intentionally left outside this
-cutover.
+The separate `cy.plugin.v1` stdio protocol was outside the original cutover and
+was removed later when Plugins-owned direct endpoints replaced it.
 
 ## Non-goals
 

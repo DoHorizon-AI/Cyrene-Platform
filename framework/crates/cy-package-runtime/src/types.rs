@@ -136,7 +136,6 @@ pub struct PackageInspection {
     pub archive_digest: ArtifactDigest,
     pub dependency_lock_digest: ArtifactDigest,
     pub capabilities: Vec<CapabilityId>,
-    pub entrypoint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,8 +162,7 @@ pub struct DependencyPreparationEvidence {
     pub prepared_at_unix_ms: u128,
     pub lock_digest: ArtifactDigest,
     pub runtime_digest: ArtifactDigest,
-    pub python_executable: Option<PathBuf>,
-    pub python_paths: Vec<PathBuf>,
+    pub runtime_executable: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

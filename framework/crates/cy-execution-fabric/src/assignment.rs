@@ -84,9 +84,8 @@ impl RuntimeAssignmentBuilder {
     /// projection of the placement request; replica selection and ticket
     /// issuance remain outside Framework.
     ///
-    /// Zero-byte local Artifacts remain valid. Remote transfers still require a
-    /// positive-size Generic Artifact because that is the only Artifact kind
-    /// representable by `ArtifactTransferSpec`.
+    /// Zero-byte local Artifacts remain valid. Remote transfers require a
+    /// positive size and preserve the producer-owned opaque category.
     pub fn validate_artifact_projection(
         &self,
         placement: &ExecutionPlacementRequest,
@@ -194,12 +193,6 @@ impl RuntimeAssignmentBuilder {
                         return Err(FabricContractError::new(
                             "ARTIFACT_ZERO_BYTE_TRANSFER_UNSUPPORTED",
                             format!("zero-byte remote Artifact cannot be projected for transfer: {digest}"),
-                        ));
-                    }
-                    if artifact.kind != ArtifactKind::Generic {
-                        return Err(FabricContractError::new(
-                            "ARTIFACT_TYPE_UNREPRESENTABLE",
-                            format!("Core v1 transfer projection cannot preserve Artifact type for {digest}"),
                         ));
                     }
                     let spec = assignments.get(&digest).ok_or_else(|| {
@@ -365,45 +358,18 @@ fn index_artifact_quotes(
     Ok(indexed)
 }
 
-fn artifact_kind_to_proto(kind: ArtifactKind) -> &'static str {
-    match kind {
-        ArtifactKind::Generic => "generic",
-        ArtifactKind::Model => "model",
-        ArtifactKind::Dataset => "dataset",
-        ArtifactKind::Checkpoint => "checkpoint",
-        ArtifactKind::TrainingSpec => "training_spec",
-        ArtifactKind::Metrics => "metrics",
-        ArtifactKind::Merged => "merged",
-        ArtifactKind::Quantized => "quantized",
-        ArtifactKind::Report => "report",
-    }
+#[cfg(test)]
+fn artifact_kind_to_proto(kind: &ArtifactKind) -> &str {
+    kind.as_str()
 }
 
 pub(crate) fn artifact_kind_from_proto(value: &str) -> Result<ArtifactKind, FabricContractError> {
-    let kind = match value {
-        "generic" => ArtifactKind::Generic,
-        "model" => ArtifactKind::Model,
-        "dataset" => ArtifactKind::Dataset,
-        "checkpoint" => ArtifactKind::Checkpoint,
-        "training_spec" => ArtifactKind::TrainingSpec,
-        "metrics" => ArtifactKind::Metrics,
-        "merged" => ArtifactKind::Merged,
-        "quantized" => ArtifactKind::Quantized,
-        "report" => ArtifactKind::Report,
-        _ => {
-            return Err(FabricContractError::new(
-                "ARTIFACT_KIND_INVALID",
-                format!("unknown or non-canonical Artifact kind: {value}"),
-            ));
-        }
-    };
-    if artifact_kind_to_proto(kind) != value {
-        return Err(FabricContractError::new(
+    ArtifactKind::new(value).map_err(|message| {
+        FabricContractError::new(
             "ARTIFACT_KIND_INVALID",
-            format!("Artifact kind is not canonical snake_case: {value}"),
-        ));
-    }
-    Ok(kind)
+            format!("Artifact kind is invalid: {message}"),
+        )
+    })
 }
 
 fn artifact_ref_from_local_input(
@@ -433,7 +399,7 @@ fn artifact_ref_from_transfer_spec(
         uri: spec.artifact_uri.clone(),
         digest: spec.digest.clone(),
         size_bytes: spec.size_bytes,
-        kind: ArtifactKind::Generic,
+        kind: artifact_kind_from_proto(&spec.artifact_kind)?,
         manifest_digest: (!spec.manifest_digest.is_empty()).then(|| spec.manifest_digest.clone()),
     };
     artifact.validate().map_err(|message| {
@@ -537,7 +503,7 @@ mod tests {
             uri: format!("artifact://sha256/{hex}"),
             digest: format!("sha256:{hex}"),
             size_bytes,
-            kind: ArtifactKind::Generic,
+            kind: ArtifactKind::generic(),
             manifest_digest: None,
         }
     }
@@ -675,6 +641,7 @@ mod tests {
                 }]
             },
             destination_peer_id: destination_peer_id.to_string(),
+            artifact_kind: artifact.kind.as_str().to_string(),
             ..Default::default()
         }
     }
@@ -684,7 +651,7 @@ mod tests {
             artifact_uri: artifact.uri.clone(),
             digest: artifact.digest.clone(),
             size_bytes: artifact.size_bytes,
-            artifact_kind: artifact_kind_to_proto(artifact.kind).to_string(),
+            artifact_kind: artifact_kind_to_proto(&artifact.kind).to_string(),
             manifest_digest: artifact.manifest_digest.clone().unwrap_or_default(),
         }
     }
@@ -851,7 +818,7 @@ mod tests {
     fn local_projection_rejects_bad_kind_and_cross_projection_duplicates() {
         let artifact = artifact('e', 4);
         let mut bad_kind = local_input(&artifact);
-        bad_kind.artifact_kind = "TrainingSpec".to_string();
+        bad_kind.artifact_kind = "bad\nkind".to_string();
         let bad_kind_result = builder()
             .with_local_artifacts(vec![bad_kind])
             .validate_artifact_projection(
@@ -876,21 +843,14 @@ mod tests {
     }
 
     #[test]
-    fn every_canonical_artifact_kind_round_trips_through_local_projection() {
+    fn producer_owned_artifact_kinds_round_trip_through_local_projection() {
         for kind in [
-            ArtifactKind::Generic,
-            ArtifactKind::Model,
-            ArtifactKind::Dataset,
-            ArtifactKind::Checkpoint,
-            ArtifactKind::TrainingSpec,
-            ArtifactKind::Metrics,
-            ArtifactKind::Merged,
-            ArtifactKind::Quantized,
-            ArtifactKind::Report,
+            ArtifactKind::generic(),
+            ArtifactKind::new("product.snapshot.v2").unwrap(),
         ] {
             assert_eq!(
-                artifact_kind_from_proto(artifact_kind_to_proto(kind)),
-                Ok(kind)
+                artifact_kind_from_proto(artifact_kind_to_proto(&kind)),
+                Ok(kind.clone())
             );
         }
     }
@@ -911,18 +871,15 @@ mod tests {
     }
 
     #[test]
-    fn non_generic_remote_artifact_type_fails_closed() {
+    fn producer_owned_remote_artifact_type_is_preserved() {
         let mut artifact = artifact('0', 4);
-        artifact.kind = ArtifactKind::Model;
+        artifact.kind = ArtifactKind::new("product.snapshot.v2").unwrap();
         let result = builder_with_artifacts(vec![transfer_spec(&artifact, "peer-1")])
             .validate_artifact_projection(
                 &placement(vec![artifact.clone()]),
                 &candidate(vec![transfer_quote(&artifact, "peer-1")], "peer-1"),
             );
 
-        assert_eq!(
-            result.unwrap_err().reason_code,
-            "ARTIFACT_TYPE_UNREPRESENTABLE"
-        );
+        result.expect("opaque Artifact categories must survive remote assignment");
     }
 }

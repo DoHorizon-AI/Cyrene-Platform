@@ -4,7 +4,6 @@ members = [
     # 1. 契约层 (Contracts)
     "contracts/rust/cy-manifest",
     "contracts/rust/cy-kernel-contract",
-    "contracts/rust/cy-plugin-protocol",
     "contracts/rust/cy-proto",
 
     # 2. 内核层 (Kernel Crates)
@@ -18,11 +17,9 @@ members = [
     "framework/crates/cy-installation-resolver",
     "framework/crates/cy-package-runtime",
     "framework/crates/cy-platform-api",
-    "framework/crates/cy-capability-execution-service",
     "framework/crates/cy-execution-fabric",
     "framework/crates/cy-execution-control",
     "framework/crates/cy-workspace-fabric",
-    "sdk/rust/cy-worker-sdk",
     "sdk/rust/cy-artifact-transfer",
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）

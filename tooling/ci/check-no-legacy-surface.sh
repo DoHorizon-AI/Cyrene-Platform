@@ -72,6 +72,15 @@ forbidden_owned_paths=(
   "framework/crates/cy-extension-registry/**"
   "framework/crates/cy-local-transport/**"
   "framework/crates/cy-platform-api/src/builtin.rs"
+  "framework/crates/cy-capability-execution-service/**"
+  "framework/crates/cy-platform-api/src/worker.rs"
+  "sdk/python/cyrene_capability_client/**"
+  "sdk/python/cyrene_worker_shim/**"
+  "sdk/rust/cy-worker-sdk/**"
+  "contracts/proto/cyrene/capability/**"
+  "contracts/proto/plugin/**"
+  "contracts/rust/cy-plugin-protocol/**"
+  "tck/capability-execution-service/**"
   "contracts/proto/cyrene/model/**"
   "contracts/proto/cyrene/message/**"
   "contracts/rust/cy-proto/src/model_provider.rs"
@@ -82,6 +91,27 @@ forbidden_owned_paths=(
   "sdk/python/cyrene_capability_client/src/cyrene_capability_client/_generated/model_provider_pb2.py"
   "sdk/python/cyrene_environment/**"
   "contracts/schemas/manifests/model_version.schema.json"
+  "contracts/schemas/plugin.schema.json"
+  "contracts/schemas/manifests/artifact_manifest.schema.json"
+  "contracts/schemas/manifests/checkpoint_metadata.schema.json"
+  "contracts/schemas/manifests/hardware_manifest.schema.json"
+  "contracts/schemas/manifests/model_manifest.schema.json"
+  "contracts/schemas/manifests/runtime_manifest.schema.json"
+  "contracts/schemas/manifests/training_revision.schema.json"
+  "contracts/schemas/manifests/validation_result.schema.json"
+  "contracts/schemas/manifests/why_report.schema.json"
+  "contracts/schemas/manifests/workload_request.schema.json"
+  "contracts/schemas/media-processor-v1.schema.json"
+  "contracts/schemas/advanced-service.schema.json"
+  "contracts/schemas/component-catalog.schema.json"
+  "contracts/schemas/service.schema.json"
+  "contracts/rust/cy-manifest/src/manifest/hardware.rs"
+  "contracts/rust/cy-manifest/src/manifest/model.rs"
+  "contracts/rust/cy-manifest/src/manifest/runtime.rs"
+  "contracts/rust/cy-manifest/src/manifest/training.rs"
+  "docs/PLUGIN_SPEC.md"
+  "docs/contracts/media-processor-v1.md"
+  "docs/flows/training-end-to-end.md"
   "docs/contracts/model-version-composed-v1.md"
   "tck/model-provider-embedding-contract/**"
   "tck/message-connector-contract/**"
@@ -117,12 +147,46 @@ if [ -n "$product_preflight_contracts" ]; then
 fi
 
 product_model_contracts=$(
-  git grep -n -E 'class ModelVersion|MODEL_VERSION_SCHEMA_VERSION|MODEL_VERSION_URI_PREFIX' -- \
+  git grep -n -E 'class (ModelVersion|ArtifactManifest|ArtifactLineage)|MODEL_VERSION_SCHEMA_VERSION|MODEL_VERSION_URI_PREFIX' -- \
     'sdk/python/cyrene_artifacts/**' 2>/dev/null || true
 )
 if [ -n "$product_model_contracts" ]; then
-  echo "FORBIDDEN: Yield-owned ModelVersion contract returned to Platform Artifact SDK:"
+  echo "FORBIDDEN: Product-owned manifest or lineage contract returned to Platform Artifact SDK:"
   echo "$product_model_contracts" | sed 's/^/  - /'
+  status=1
+fi
+
+product_manifest_symbols='(HardwareManifest|ModelManifest|RuntimeManifest|TrainingRevision|CheckpointMetadata|WhyReport|WorkloadRequest|ValidationResult|ArtifactManifest|ArtifactLineage)'
+product_manifest_matches=$(
+  git grep -n -E "$product_manifest_symbols" -- \
+    'contracts/rust/cy-manifest/**' \
+    'sdk/python/cyrene_artifacts/**' 2>/dev/null || true
+)
+if [ -n "$product_manifest_matches" ]; then
+  echo "FORBIDDEN: Product-owned AI or lifecycle manifest returned to Platform contracts:"
+  echo "$product_manifest_matches" | sed 's/^/  - /'
+  status=1
+fi
+
+platform_owned_plugin_runtime=$(
+  git grep -n -E 'cyrene_plugin_runtime|cyrene_worker(_shim)?|PythonVenvDependencyPreparer|requirements\.lock|PYTHONPATH|PYTHONDONTWRITEBYTECODE|uv (venv|pip)' -- \
+    'framework/crates/cy-package-runtime/src/**' 2>/dev/null || true
+)
+if [ -n "$platform_owned_plugin_runtime" ]; then
+  echo "FORBIDDEN: Platform Package Runtime hard-codes a language or Plugin-owned runtime:"
+  echo "$platform_owned_plugin_runtime" | sed 's/^/  - /'
+  status=1
+fi
+
+legacy_plugin_manifest_symbols='(PluginCapabilitiesManifest|PluginPackageManifest|PluginDependenciesManifest|PluginComponentsManifest|DescriptorImplementation.*entrypoint)'
+legacy_plugin_manifest_matches=$(
+  git grep -n -E "$legacy_plugin_manifest_symbols" -- \
+    'contracts/rust/cy-manifest/**' \
+    'framework/crates/cy-package-runtime/src/**' 2>/dev/null || true
+)
+if [ -n "$legacy_plugin_manifest_matches" ]; then
+  echo "FORBIDDEN: legacy implementation-specific Plugin manifest model returned to Platform:"
+  echo "$legacy_plugin_manifest_matches" | sed 's/^/  - /'
   status=1
 fi
 
@@ -150,11 +214,6 @@ named_spi_matches=$(git grep -n -E "$named_spi_symbols" -- 'framework/**' 'kerne
 if [ -n "$named_spi_matches" ]; then
   echo "FORBIDDEN: removed named capability SPI returned to Platform:"
   echo "$named_spi_matches" | sed 's/^/  - /'
-  status=1
-fi
-
-if ! rg -q 'reserved 10 to 20;' contracts/proto/plugin/v1/plugin_protocol.proto; then
-  echo "FORBIDDEN: removed v0 Invoke tags are no longer reserved"
   status=1
 fi
 
@@ -189,56 +248,6 @@ if ! rg -q 'opaque `connection_ref`' framework/crates/cy-package-runtime/README.
   echo "FORBIDDEN: package runtime no longer documents its opaque connection-only boundary"
   status=1
 fi
-
-# CES is a measured compatibility service while existing consumers migrate to
-# direct Plugin endpoints. No other Platform package may turn it back into a
-# production routing dependency, and every retained public surface must keep a
-# visible migration marker.
-ces_production_consumers=$(
-  git grep -n -E 'cy[_-]capability[_-]execution[_-]service|CapabilityExecutionService' -- \
-    'framework/**' 'kernel/**' 'runtime/**' 'sdk/**' \
-    ':(exclude)framework/crates/cy-capability-execution-service/**' \
-    ':(exclude)sdk/python/cyrene_capability_client/**' \
-    ':(exclude)**/tests/**' \
-    ':(exclude)**/README.md' 2>/dev/null || true
-)
-if [ -n "$ces_production_consumers" ]; then
-  echo "FORBIDDEN: a new Platform production consumer depends on compatibility CES:"
-  echo "$ces_production_consumers" | sed 's/^/  - /'
-  status=1
-fi
-
-for file in \
-  contracts/proto/cyrene/capability/v1/capability_execution.proto \
-  framework/crates/cy-capability-execution-service/src/lib.rs \
-  sdk/python/cyrene_capability_client/README.md; do
-  if [[ ! -e "$file" ]]; then
-    continue
-  fi
-  if ! rg -q 'MIGRATING_COMPATIBILITY' "$file"; then
-    echo "FORBIDDEN: compatibility CES surface lost its migration marker: $file"
-    status=1
-  fi
-done
-
-frozen_v0_contracts=(
-  "contracts/schemas/plugin.schema.json"
-  "contracts/schemas/manifests/artifact_manifest.schema.json"
-  "contracts/schemas/manifests/checkpoint_metadata.schema.json"
-  "contracts/schemas/manifests/hardware_manifest.schema.json"
-  "contracts/schemas/manifests/model_manifest.schema.json"
-  "contracts/schemas/manifests/runtime_manifest.schema.json"
-  "contracts/schemas/manifests/training_revision.schema.json"
-  "contracts/schemas/manifests/validation_result.schema.json"
-  "contracts/schemas/manifests/why_report.schema.json"
-  "contracts/schemas/manifests/workload_request.schema.json"
-)
-for file in "${frozen_v0_contracts[@]}"; do
-  if ! rg -q 'MIGRATING_COMPATIBILITY' "$file"; then
-    echo "FORBIDDEN: frozen v0 contract lost its migration marker: $file"
-    status=1
-  fi
-done
 
 # Platform contracts and examples must remain consumer-neutral. These markers
 # identify concrete Product or connector bindings that have their own owners.

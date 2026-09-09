@@ -319,23 +319,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-capability-execution-service"
-version = "0.1.0"
-dependencies = [
- "cy-manifest",
- "cy-platform-api",
- "cy-proto",
- "futures-core",
- "prost",
- "prost-types",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tonic",
- "uuid",
-]
-
-[[package]]
 name = "cy-execution-control"
 version = "0.1.0"
 dependencies = [
@@ -380,7 +363,6 @@ name = "cy-installation-resolver"
 version = "0.1.0"
 dependencies = [
  "cy-kernel-api",
- "cy-manifest",
  "serde",
  "serde_json",
  "tempfile",
@@ -467,25 +449,10 @@ dependencies = [
 name = "cy-platform-api"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "cy-manifest",
- "cy-plugin-protocol",
- "prost",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
-name = "cy-plugin-protocol"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
  "thiserror 1.0.69",
 ]
 
@@ -538,20 +505,6 @@ dependencies = [
  "cy-proto",
  "nix",
  "prost",
-]
-
-[[package]]
-name = "cy-worker-sdk"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "cy-kernel-api",
- "cy-kernel-daemon",
- "cy-plugin-protocol",
- "libc",
- "prost",
- "tempfile",
- "thiserror 1.0.69",
 ]
 
 [[package]]

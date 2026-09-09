@@ -1,6 +1,6 @@
 # CYRENE Engine 初始架构与协议蓝图
 
-- 状态：Normative / P2 boundary implemented in Core
+- 状态：Superseded / Historical；当前权威见 `docs/governance/platform-clean-boundary.md`
 - 日期：2026-08-10
 - 范围：多仓库规划、内核与框架边界、分布式控制契约
 - 本轮变更：冻结 Kernel Semantic Contract v1；落实硬件适配器进程外化、版本化 UDS 协议和 Kernel 边界门禁；不将厂商 C ABI 放入 Kernel

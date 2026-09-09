@@ -1162,7 +1162,7 @@ fn artifact_ref(value: &[u8]) -> ArtifactRef {
         uri: format!("artifact://sha256/{}", &digest[7..]),
         digest,
         size_bytes: value.len() as u64,
-        kind: ArtifactKind::Generic,
+        kind: ArtifactKind::generic(),
         manifest_digest: None,
     }
 }

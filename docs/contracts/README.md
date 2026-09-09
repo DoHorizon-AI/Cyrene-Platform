@@ -9,7 +9,6 @@ contract documents.
 | --- | --- | --- |
 | `kernel-semantic-contract-v1.md` | Normative Kernel semantic authority. | Kernel 规范语义权威 |
 | `platform-component-boundary-v1.md` | Platform component ownership. | Platform 组件归属 |
-| `media-processor-v1.md` | Media capability contract. | 媒体能力契约 |
 
 ## Suggested reading | 推荐顺序
 

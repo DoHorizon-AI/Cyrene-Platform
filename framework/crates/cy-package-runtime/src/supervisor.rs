@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     io::{BufRead, BufReader, Read},
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
@@ -19,8 +19,7 @@ const READY_LINE_MAX_BYTES: usize = 16 * 1024;
 #[derive(Debug, Clone)]
 pub struct ServiceActivationOptions {
     pub working_dir: Option<PathBuf>,
-    pub python_path: Vec<PathBuf>,
-    pub python_executable: Option<String>,
+    pub runtime_executable: Option<String>,
     pub environment: HashMap<String, String>,
     pub startup_timeout: Duration,
     pub shutdown_grace_period: Duration,
@@ -30,8 +29,7 @@ impl Default for ServiceActivationOptions {
     fn default() -> Self {
         Self {
             working_dir: None,
-            python_path: Vec::new(),
-            python_executable: None,
+            runtime_executable: None,
             environment: HashMap::new(),
             startup_timeout: Duration::from_secs(5),
             shutdown_grace_period: Duration::from_secs(2),
@@ -73,13 +71,13 @@ struct SupervisedService {
     shutdown_grace_period: Duration,
 }
 
-/// Starts the Plugins-owned Python direct runtime and supervises only its
-/// process lifecycle and readiness descriptor.
-pub struct PythonPluginServiceSupervisor {
+/// Starts a package-owned process and supervises only its lifecycle and
+/// readiness descriptor.
+pub struct ProcessPluginServiceSupervisor {
     services: HashMap<BindingId, SupervisedService>,
 }
 
-impl PythonPluginServiceSupervisor {
+impl ProcessPluginServiceSupervisor {
     pub fn new() -> Self {
         Self {
             services: HashMap::new(),
@@ -87,13 +85,13 @@ impl PythonPluginServiceSupervisor {
     }
 }
 
-impl Default for PythonPluginServiceSupervisor {
+impl Default for ProcessPluginServiceSupervisor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PluginServiceSupervisor for PythonPluginServiceSupervisor {
+impl PluginServiceSupervisor for ProcessPluginServiceSupervisor {
     fn activate(
         &mut self,
         binding_id: &BindingId,
@@ -104,29 +102,21 @@ impl PluginServiceSupervisor for PythonPluginServiceSupervisor {
     ) -> Result<String, PackageRuntimeError> {
         self.deactivate(binding_id)?;
         let (capability, interface_version) = direct_contract(manifest)?;
-        let entrypoint = manifest
-            .plugin
-            .entrypoint
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                PackageRuntimeError::new(
-                    "PLUGIN_ENTRYPOINT_MISSING",
-                    format!("Plugin {} has no service entrypoint", manifest.plugin.id),
-                )
-            })?;
-        let python = options.python_executable.as_deref().ok_or_else(|| {
+        let launch = manifest.plugin.launch.as_ref().ok_or_else(|| {
             PackageRuntimeError::new(
-                "PLUGIN_RUNTIME_UNAVAILABLE",
-                "Python Plugin activation requires a prepared interpreter",
+                "PLUGIN_LAUNCH_MISSING",
+                format!(
+                    "Plugin {} has no package launch command",
+                    manifest.plugin.id
+                ),
             )
         })?;
+        let executable = resolve_executable(launch.executable.as_str(), &options)?;
 
-        let mut command = Command::new(python);
+        let mut command = Command::new(executable);
         command
             .env_clear()
-            .args(["-m", "cyrene_plugin_runtime.server"])
-            .args(["--entrypoint", entrypoint])
+            .args(&launch.args)
             .args(["--capability", capability])
             .args(["--interface-version", interface_version])
             .args(["--listen", "127.0.0.1:0"])
@@ -136,18 +126,6 @@ impl PluginServiceSupervisor for PythonPluginServiceSupervisor {
         if let Some(working_dir) = &options.working_dir {
             command.current_dir(working_dir);
         }
-        let mut python_paths = options.python_path.clone();
-        if let Some(working_dir) = &options.working_dir {
-            python_paths.push(working_dir.clone());
-        }
-        let python_path = std::env::join_paths(python_paths).map_err(|error| {
-            PackageRuntimeError::new(
-                "PLUGIN_RUNTIME_INVALID",
-                format!("could not construct Plugin PYTHONPATH: {error}"),
-            )
-        })?;
-        command.env("PYTHONPATH", python_path);
-        command.env("PYTHONUNBUFFERED", "1");
         for (name, value) in &options.environment {
             command.env(name, value);
         }
@@ -155,7 +133,7 @@ impl PluginServiceSupervisor for PythonPluginServiceSupervisor {
         let mut child = command.spawn().map_err(|error| {
             PackageRuntimeError::new(
                 "PLUGIN_RUNTIME_UNAVAILABLE",
-                format!("could not start Python Plugin runtime: {error}"),
+                format!("could not start Plugin package process: {error}"),
             )
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
@@ -287,7 +265,62 @@ impl PluginServiceSupervisor for PythonPluginServiceSupervisor {
     }
 }
 
-impl Drop for PythonPluginServiceSupervisor {
+fn resolve_executable(
+    requested: &str,
+    options: &ServiceActivationOptions,
+) -> Result<PathBuf, PackageRuntimeError> {
+    if requested == "prepared-runtime" {
+        return options
+            .runtime_executable
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                PackageRuntimeError::new(
+                    "PLUGIN_RUNTIME_UNAVAILABLE",
+                    "package requested a prepared runtime executable but none was produced",
+                )
+            });
+    }
+
+    let relative = Path::new(requested);
+    if requested.trim().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
+                    | Component::CurDir
+            )
+        })
+    {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_LAUNCH_INVALID",
+            "package launch executable must be prepared-runtime or a safe package-relative path",
+        ));
+    }
+    let root = options.working_dir.as_ref().ok_or_else(|| {
+        PackageRuntimeError::new(
+            "PLUGIN_LAUNCH_INVALID",
+            "a package-relative launch executable requires a package root",
+        )
+    })?;
+    let executable = root.join(relative);
+    if !executable.is_file() {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_RUNTIME_UNAVAILABLE",
+            format!(
+                "package launch executable does not exist: {}",
+                executable.display()
+            ),
+        ));
+    }
+    Ok(executable)
+}
+
+impl Drop for ProcessPluginServiceSupervisor {
     fn drop(&mut self) {
         for (_, mut service) in self.services.drain() {
             let _ = terminate(&mut service.child, service.shutdown_grace_period);

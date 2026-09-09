@@ -13,9 +13,9 @@ mod supervisor;
 mod types;
 
 pub use control::{ControlCommand, ControlRequest, ControlResponse, PackageRuntimeControlServer};
-pub use dependency::{DependencyPreparer, PythonVenvDependencyPreparer};
+pub use dependency::{CommandDependencyPreparer, DependencyPreparer};
 pub use runtime::FilesystemPackageRuntime;
 pub use supervisor::{
-    PluginServiceSupervisor, PythonPluginServiceSupervisor, ServiceActivationOptions,
+    PluginServiceSupervisor, ProcessPluginServiceSupervisor, ServiceActivationOptions,
 };
 pub use types::*;

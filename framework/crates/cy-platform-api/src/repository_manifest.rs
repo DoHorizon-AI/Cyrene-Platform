@@ -14,9 +14,8 @@
 //! second capability registry.
 
 use cy_manifest::{
-    CapabilityDescriptor, CapabilityId, CapabilityInterfaceVersion, Edition, ExecutionMode,
-    PluginCapabilitiesManifest, PluginDependencies, PluginManifest, PluginMetadata, RestartPolicy,
-    Runtime,
+    CapabilityDescriptor, CapabilityId, CapabilityInterfaceVersion, ExecutionMode, PluginLaunch,
+    PluginManifest, PluginMetadata, Runtime,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,8 +30,10 @@ pub struct RepositoryPluginManifest {
     name: String,
     version: String,
     #[serde(default)]
-    description: Option<String>,
-    kind: String,
+    #[serde(rename = "description")]
+    _description: Option<String>,
+    #[serde(rename = "kind")]
+    _kind: String,
     capabilities: Vec<String>,
     #[serde(default)]
     methods: Vec<RepositoryPluginMethod>,
@@ -52,9 +53,18 @@ struct RepositoryPluginMethod {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RepositoryPluginRuntime {
-    language: String,
+    #[serde(rename = "language")]
+    _language: String,
     #[serde(default)]
-    entrypoint: Option<String>,
+    launch: Option<RepositoryPluginLaunch>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepositoryPluginLaunch {
+    executable: String,
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 impl RepositoryPluginManifest {
@@ -172,37 +182,20 @@ impl RepositoryPluginManifest {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        let runtime = parse_runtime(
-            &self.runtime.language,
-            has_explicit_service_semantics && !has_worker_or_inline_semantics,
-        )?;
+        let runtime = (has_explicit_service_semantics && !has_worker_or_inline_semantics)
+            .then_some(Runtime::Service);
+        let launch = self.runtime.launch.map(|launch| PluginLaunch {
+            executable: launch.executable,
+            args: launch.args,
+        });
         Ok(PluginManifest {
             plugin: PluginMetadata {
                 id: plugin_id,
                 name: self.name,
                 version: plugin_version,
-                api_version: "1.0".to_string(),
-                kind: self.kind,
-                edition: Edition::Community,
-                runtime: Some(runtime),
-                license_gate: false,
-                entrypoint: self.runtime.entrypoint,
-                description: self.description,
-                author: None,
-                license: None,
-                source_target: None,
-                status: Some("active".to_string()),
-                protocol_version: None,
-                scope: None,
-                restart_policy: RestartPolicy::Never,
+                runtime,
+                launch,
             },
-            capabilities: PluginCapabilitiesManifest::default(),
-            dependencies: PluginDependencies::default(),
-            components: Vec::new(),
-            launch: None,
-            permissions: None,
-            resources: None,
-            package: None,
             capability_descriptors,
             artifact: None,
         })
@@ -216,20 +209,6 @@ fn parse_execution_mode(value: &str) -> Result<ExecutionMode, String> {
         "service" => Ok(ExecutionMode::Service),
         unsupported => Err(format!(
             "repository plugin execution mode `{unsupported}` is not supported by the Platform resolver"
-        )),
-    }
-}
-
-fn parse_runtime(value: &str, is_service_only: bool) -> Result<Runtime, String> {
-    if is_service_only {
-        return Ok(Runtime::Service);
-    }
-    match value.trim().to_ascii_lowercase().as_str() {
-        "python" => Ok(Runtime::SubprocessPython),
-        "java" => Ok(Runtime::SubprocessJvm),
-        "service" => Ok(Runtime::Service),
-        unsupported => Err(format!(
-            "repository plugin runtime language `{unsupported}` is not supported by the Platform resolver"
         )),
     }
 }
@@ -280,6 +259,7 @@ mod tests {
             manifest.capability_descriptors[0].execution_modes,
             vec![ExecutionMode::Worker]
         );
+        assert_eq!(manifest.plugin.runtime, None);
     }
 
     #[test]
@@ -325,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_csharp_worker_without_service_manifest_semantics() {
+    fn worker_language_is_opaque_to_platform() {
         let manifest = json!({
             "schemaVersion": 1,
             "id": "cyrene.example.csharp-worker",
@@ -338,9 +318,13 @@ mod tests {
             ],
             "runtime": {"language": "csharp", "entrypoint": "Worker.dll"}
         });
-        let error = normalize_repository_manifest(manifest).unwrap_err();
-        assert!(error.contains("csharp"));
-        assert!(error.contains("not supported"));
+        assert_eq!(
+            normalize_repository_manifest(manifest)
+                .unwrap()
+                .plugin
+                .runtime,
+            None
+        );
     }
 
     #[test]
@@ -367,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_python_runtime_keeps_worker_activation() {
+    fn mixed_runtime_does_not_select_a_platform_service_launcher() {
         let manifest = json!({
             "schemaVersion": 1,
             "id": "example.mixed-python",
@@ -386,7 +370,7 @@ mod tests {
                 .unwrap()
                 .plugin
                 .runtime,
-            Some(Runtime::SubprocessPython)
+            None
         );
     }
 }

@@ -25,20 +25,8 @@ if ! grep -q "Superseded / Historical" docs/adr/ADR-PLUGIN-RUNTIME.md; then
   failed=1
 fi
 
-if rg -n --fixed-strings "in-proc-rust" \
-    contracts/schemas/plugin.schema.json \
-    contracts/rust/cy-manifest/src/manifest/plugin.rs; then
-  echo "installable schema or Rust manifest model exposes in-proc-rust"
-  failed=1
-fi
-
-if rg -n '^\|[^|]*in-proc-rust[^|]*\|' docs/PLUGIN_SPEC.md; then
-  echo "PLUGIN_SPEC still lists in-proc-rust as a runtime"
-  failed=1
-fi
-
-if rg -n --fixed-strings '"crate"' contracts/schemas/plugin.schema.json; then
-  echo "plugin schema still exposes the installable crate field"
+if rg -n --fixed-strings "in-proc-rust" contracts/rust/cy-manifest/src/manifest/plugin.rs; then
+  echo "Platform manifest model exposes in-proc-rust"
   failed=1
 fi
 

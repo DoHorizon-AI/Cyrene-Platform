@@ -496,7 +496,7 @@ mod tests {
             uri: format!("artifact://sha256/{}", "0".repeat(64)),
             digest: format!("sha256:{}", "0".repeat(64)),
             size_bytes,
-            kind: cy_manifest::ArtifactKind::Generic,
+            kind: cy_manifest::ArtifactKind::generic(),
             manifest_digest: None,
         }
     }

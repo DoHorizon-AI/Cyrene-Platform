@@ -12,14 +12,11 @@ contracts, framework boundary, examples, conformance tooling, and governance
 documentation. It does not contain Catalyst, Yield, Reactor, Exchange,
 Navigator, Echo, vendor runtimes, enterprise bundles, or product UI source.
 
-The advanced-services repository owns first-party service implementations,
-service bundles, deployment assets, and preserved legacy source. Each service
-consumes a released Core contract and records the exact dependency in its
-core.lock.
-
-service.json is service-bundle metadata. plugin.toml is the manifest of an
-installable component. They describe different levels of the same signed
-artifact and are not separate installation channels.
+Each Product repository owns its service implementation, Product manifest,
+deployment assets, and migration source. Cyrene-Plugins-Official owns reusable
+capability manifests, payload contracts, packages, SDKs, implementations, and
+TCKs. Consumers record exact released Platform dependencies in their own lock
+or build configuration.
 
 ## Branch and release policy
 

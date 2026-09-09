@@ -1,18 +1,23 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
+
+use serde::Deserialize;
 
 use crate::{
-    ArtifactDigest, DependencyPreparationEvidence, PackageRuntimeError,
-    descriptor::{digest_bytes, unix_ms},
+    ArtifactDigest, DependencyPreparationEvidence, PackageRuntimeError, descriptor::unix_ms,
 };
 
-/// Prepares one immutable runtime from the package's exact dependency lock.
+const PREPARER_PROTOCOL: &str = "cyrene.package-dependency-preparer.v1";
+const MAX_PREPARER_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Prepares one immutable runtime from a package's exact dependency lock.
 ///
-/// Implementations write only beneath `runtime_root`. The package runtime
-/// publishes that directory atomically and persists the returned evidence.
+/// Implementations are injected at the Platform boundary. Language-specific
+/// preparation belongs to the Plugin repository or deployment integration.
 pub trait DependencyPreparer: Send + Sync {
     fn prepare(
         &self,
@@ -22,166 +27,159 @@ pub trait DependencyPreparer: Send + Sync {
     ) -> Result<DependencyPreparationEvidence, PackageRuntimeError>;
 }
 
-/// Production Python dependency preparation using a dedicated virtualenv and
-/// exact, no-dependency-resolution lock consumption.
+/// Invokes a configured out-of-process dependency adapter.
+///
+/// Platform owns the process boundary and evidence validation. The adapter
+/// owns language tooling and writes only below the supplied staging directory.
 #[derive(Debug, Clone)]
-pub struct PythonVenvDependencyPreparer {
-    python_executable: PathBuf,
-    uv_executable: PathBuf,
-    offline: bool,
-    wheelhouse: Option<PathBuf>,
+pub struct CommandDependencyPreparer {
+    executable: PathBuf,
+    args: Vec<OsString>,
 }
 
-impl PythonVenvDependencyPreparer {
-    pub fn new(python_executable: impl Into<PathBuf>) -> Self {
+impl CommandDependencyPreparer {
+    pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
-            python_executable: python_executable.into(),
-            uv_executable: PathBuf::from("uv"),
-            offline: false,
-            wheelhouse: None,
+            executable: executable.into(),
+            args: Vec::new(),
         }
     }
 
-    pub fn with_uv_executable(mut self, uv_executable: impl Into<PathBuf>) -> Self {
-        self.uv_executable = uv_executable.into();
-        self
-    }
-
-    pub fn offline(mut self, wheelhouse: impl Into<PathBuf>) -> Self {
-        self.offline = true;
-        self.wheelhouse = Some(wheelhouse.into());
+    pub fn with_args(mut self, args: impl IntoIterator<Item = OsString>) -> Self {
+        self.args = args.into_iter().collect();
         self
     }
 }
 
-impl DependencyPreparer for PythonVenvDependencyPreparer {
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparationResult {
+    protocol: String,
+    preparer: String,
+    runtime_digest: String,
+    #[serde(default)]
+    runtime_executable: Option<PathBuf>,
+}
+
+impl DependencyPreparer for CommandDependencyPreparer {
     fn prepare(
         &self,
         package_root: &Path,
         runtime_root: &Path,
         lock_digest: &ArtifactDigest,
     ) -> Result<DependencyPreparationEvidence, PackageRuntimeError> {
-        let lock = package_root.join("requirements.lock");
-        let lock_bytes = fs::read(&lock).map_err(|error| {
-            PackageRuntimeError::new(
-                "DEPENDENCY_LOCK_MISSING",
-                format!("could not read {}: {error}", lock.display()),
-            )
-        })?;
-        if digest_bytes(&lock_bytes) != *lock_digest {
+        if self.executable.as_os_str().is_empty() {
             return Err(PackageRuntimeError::new(
-                "DEPENDENCY_LOCK_CORRUPT",
-                "dependency lock changed before preparation",
+                "DEPENDENCY_PREPARER_UNAVAILABLE",
+                "dependency preparer executable is empty",
             ));
         }
-        validate_exact_requirements(&lock_bytes)?;
         fs::create_dir_all(runtime_root).map_err(|error| {
             PackageRuntimeError::new(
                 "DEPENDENCY_PREPARE_FAILED",
                 format!("could not create runtime root: {error}"),
             )
         })?;
-        let output = Command::new(&self.uv_executable)
-            .env("UV_CACHE_DIR", runtime_root.join(".uv-cache"))
-            .arg("venv")
-            .arg("--allow-existing")
-            .arg("--python")
-            .arg(&self.python_executable)
+        let output = Command::new(&self.executable)
+            .args(&self.args)
+            .arg("--package-root")
+            .arg(package_root)
+            .arg("--runtime-root")
             .arg(runtime_root)
+            .arg("--lock-digest")
+            .arg(lock_digest.as_str())
+            .stdin(Stdio::null())
             .output()
             .map_err(|error| {
                 PackageRuntimeError::new(
-                    "DEPENDENCY_PREPARE_FAILED",
-                    format!("could not start uv virtualenv preparation: {error}"),
+                    "DEPENDENCY_PREPARER_UNAVAILABLE",
+                    format!("could not start configured dependency preparer: {error}"),
                 )
             })?;
         if !output.status.success() {
-            return Err(command_failure("uv venv", &output));
-        }
-
-        let relative_python = if cfg!(windows) {
-            PathBuf::from("Scripts/python.exe")
-        } else {
-            PathBuf::from("bin/python")
-        };
-        let runtime_python = runtime_root.join(&relative_python);
-        let mut command = Command::new(&self.uv_executable);
-        command.env("UV_CACHE_DIR", runtime_root.join(".uv-cache"));
-        command.args(["pip", "install", "--python"]);
-        command.arg(&runtime_python);
-        command.args(["--no-deps", "--requirement"]);
-        command.arg(&lock);
-        if self.offline {
-            command.arg("--no-index");
-            let wheelhouse = self.wheelhouse.as_ref().ok_or_else(|| {
-                PackageRuntimeError::new(
-                    "DEPENDENCY_PREPARE_FAILED",
-                    "offline dependency preparation requires a wheelhouse",
-                )
-            })?;
-            command.arg("--find-links").arg(wheelhouse);
-        }
-        let output = command.output().map_err(|error| {
-            PackageRuntimeError::new(
+            return Err(PackageRuntimeError::new(
                 "DEPENDENCY_PREPARE_FAILED",
-                format!("could not start locked dependency installation: {error}"),
-            )
-        })?;
-        if !output.status.success() {
-            return Err(command_failure("uv pip install", &output));
+                format!(
+                    "configured dependency preparer exited with status {}",
+                    output.status
+                ),
+            ));
         }
-
-        let runtime_digest =
-            digest_bytes(format!("python-venv-v1\n{}\n", lock_digest.as_str()).as_bytes());
+        if output.stdout.len() > MAX_PREPARER_OUTPUT_BYTES {
+            return Err(PackageRuntimeError::new(
+                "DEPENDENCY_EVIDENCE_INVALID",
+                "dependency preparer output exceeds 64 KiB",
+            ));
+        }
+        let result: PreparationResult =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                PackageRuntimeError::new(
+                    "DEPENDENCY_EVIDENCE_INVALID",
+                    format!("dependency preparer returned invalid JSON evidence: {error}"),
+                )
+            })?;
+        if result.protocol != PREPARER_PROTOCOL {
+            return Err(PackageRuntimeError::new(
+                "DEPENDENCY_EVIDENCE_INVALID",
+                format!("dependency preparer protocol must be {PREPARER_PROTOCOL}"),
+            ));
+        }
+        if result.preparer.trim().is_empty()
+            || result.preparer.len() > 128
+            || result.preparer.chars().any(char::is_control)
+        {
+            return Err(PackageRuntimeError::new(
+                "DEPENDENCY_EVIDENCE_INVALID",
+                "dependency preparer identity is invalid",
+            ));
+        }
         Ok(DependencyPreparationEvidence {
-            preparer: "python-uv-venv-v1".to_string(),
+            preparer: result.preparer,
             prepared_at_unix_ms: unix_ms(),
             lock_digest: lock_digest.clone(),
-            runtime_digest,
-            python_executable: Some(relative_python),
-            python_paths: Vec::new(),
+            runtime_digest: ArtifactDigest::new(result.runtime_digest)?,
+            runtime_executable: result.runtime_executable,
         })
     }
 }
 
-fn validate_exact_requirements(content: &[u8]) -> Result<(), PackageRuntimeError> {
-    let text = std::str::from_utf8(content).map_err(|error| {
-        PackageRuntimeError::new(
-            "DEPENDENCY_LOCK_INVALID",
-            format!("dependency lock is not UTF-8: {error}"),
-        )
-    })?;
-    let requirements = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect::<Vec<_>>();
-    if requirements.is_empty() {
-        return Err(PackageRuntimeError::new(
-            "DEPENDENCY_LOCK_INVALID",
-            "dependency lock contains no exact pins",
-        ));
-    }
-    if requirements.iter().any(|line| {
-        !line.contains("==")
-            || line.contains(['<', '>', '*', '@'])
-            || line.contains("!=")
-            || line.to_ascii_lowercase().contains("latest")
-    }) {
-        return Err(PackageRuntimeError::new(
-            "DEPENDENCY_LOCK_INVALID",
-            "dependency lock must contain exact, immutable pins only",
-        ));
-    }
-    Ok(())
-}
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
 
-fn command_failure(operation: &str, output: &std::process::Output) -> PackageRuntimeError {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let detail = format!("{} {}", stdout.trim(), stderr.trim());
-    PackageRuntimeError::new(
-        "DEPENDENCY_PREPARE_FAILED",
-        format!("{operation} failed: {}", detail.trim()),
-    )
+    use super::*;
+
+    const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn command_adapter_accepts_only_versioned_generic_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let package_root = temporary.path().join("package");
+        let runtime_root = temporary.path().join("runtime");
+        fs::create_dir(&package_root).unwrap();
+        let script = temporary.path().join("prepare.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nmkdir -p \"$4/bin\"\nprintf '#!/bin/sh\\n' > \"$4/bin/runtime\"\nprintf '%s\\n' '{{\"protocol\":\"{PREPARER_PROTOCOL}\",\"preparer\":\"test-adapter\",\"runtime_digest\":\"{DIGEST}\",\"runtime_executable\":\"bin/runtime\"}}'\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let evidence = CommandDependencyPreparer::new(script)
+            .prepare(
+                &package_root,
+                &runtime_root,
+                &ArtifactDigest::new(DIGEST).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(evidence.preparer, "test-adapter");
+        assert_eq!(evidence.runtime_digest.as_str(), DIGEST);
+        assert_eq!(
+            evidence.runtime_executable,
+            Some(PathBuf::from("bin/runtime"))
+        );
+    }
 }

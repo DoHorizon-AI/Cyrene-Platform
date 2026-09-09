@@ -470,7 +470,7 @@ fn artifact(seed: char, size_bytes: u64) -> ArtifactRef {
         uri: format!("artifact://sha256/{hex}"),
         digest: format!("sha256:{hex}"),
         size_bytes,
-        kind: ArtifactKind::Generic,
+        kind: ArtifactKind::generic(),
         manifest_digest: None,
     }
 }

@@ -66,21 +66,6 @@ jobs:
   - script: bash tooling/ci/check-no-legacy-surface.sh
     displayName: 'Reject reintroduction of legacy/archive/backup surface'
 
-- job: dotnet_contracts
-  displayName: 'Platform / .NET Compatibility Contract TCK'
-  timeoutInMinutes: 15
-  steps:
-  - checkout: self
-    displayName: 'Checkout repository'
-  - task: UseDotNet@2
-    inputs:
-      packageType: 'sdk'
-      version: '10.0.x'
-    displayName: 'Setup .NET 10 SDK'
-  - script: |
-      dotnet build tck/capability-execution-service/dotnet/CapabilityExecutionServiceTck.csproj --configuration Release
-    displayName: 'Build generated .NET control contract consumer'
-
 - job: python_sdk
   displayName: 'Platform / Python SDKs & Tooling'
   timeoutInMinutes: 20
@@ -95,14 +80,8 @@ jobs:
       python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0" ruff==0.16.5
       python -m pip install -e sdk/python/cyrene_artifacts
       python -m pip install -e sdk/python/cyrene_preflight
-      python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
     displayName: 'Install Python SDKs and dependencies'
   - script: |
-      python sdk/python/cyrene_capability_client/scripts/generate_proto.py --check
-      python -m pytest sdk/python/cyrene_capability_client/tests
-      if [ -f "sdk/python/cyrene_worker_shim/test_stream_item_wire.py" ]; then
-        python -m pytest sdk/python/cyrene_worker_shim/test_stream_item_wire.py
-      fi
       python -m pytest sdk/python/cyrene_artifacts/tests
       python -m pytest sdk/python/cyrene_preflight/tests
       python -m pytest tooling/docs/tests
@@ -168,7 +147,6 @@ jobs:
   dependsOn:
   - docs
   - governance
-  - dotnet_contracts
   - python_sdk
   - platform_core
   condition: succeeded()
@@ -181,7 +159,7 @@ jobs:
         "commit": "$(Build.SourceVersion)",
         "build_id": "$(Build.BuildId)",
         "result": "HOSTED_SOURCE_GATES_COMPLETED",
-        "scope": "documentation, architecture governance, .NET compatibility contract TCK, Python SDKs and tooling, Rust workspace",
+        "scope": "documentation, architecture governance, Python SDKs and tooling, Rust workspace",
         "gpu_runtime": "NOT_RUN_BY_DEFAULT",
         "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
       }

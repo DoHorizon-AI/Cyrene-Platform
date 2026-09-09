@@ -370,7 +370,7 @@ mod tests {
             uri: format!("artifact://sha256/{}", &digest[7..]),
             digest: digest.clone(),
             size_bytes: bytes.len() as u64,
-            kind: ArtifactKind::Generic,
+            kind: ArtifactKind::generic(),
             manifest_digest: None,
         };
         let manifest = TransferManifest {
