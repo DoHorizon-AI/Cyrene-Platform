@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Require cross-repo credentials
         env:
@@ -34,7 +34,7 @@ jobs:
           fi
 
       - name: Checkout exact Plugins runtime for cross-repository TCK
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: DoHorizon-AI/Cyrene-Plugins-Official
           ref: 261a78fd36c7cb2da85a504a89ec7c9c353ecc19

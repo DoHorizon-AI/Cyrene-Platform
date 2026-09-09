@@ -18,7 +18,7 @@ jobs:
     environment: public-release
     steps:
       - name: Checkout Source at Default Branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: main
@@ -28,7 +28,7 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -63,7 +63,7 @@ jobs:
           python -m twine check --strict release-dist/*
 
       - name: Preserve Verified Release Candidates
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cyrene-platform-python-sdks-${{ steps.release-source.outputs.sha }}
           path: release-dist/*
