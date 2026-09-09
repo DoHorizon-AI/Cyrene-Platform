@@ -322,6 +322,7 @@ dependencies = [
 name = "cy-execution-control"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cy-execution-fabric",
  "cy-kernel-api",
  "cy-kernel-contract",
