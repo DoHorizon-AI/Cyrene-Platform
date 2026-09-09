@@ -26,7 +26,7 @@ if _version_not_supported:
 
 
 class CapabilityExecutionServiceStub:
-    """Product-facing capability execution boundary.
+    """Frozen compatibility capability execution boundary.
 
     This service exposes capability semantics only. Resolution, activation,
     worker lifecycle, protocol framing, and process details remain inside the
@@ -59,7 +59,7 @@ class CapabilityExecutionServiceStub:
 
 
 class CapabilityExecutionServiceServicer:
-    """Product-facing capability execution boundary.
+    """Frozen compatibility capability execution boundary.
 
     This service exposes capability semantics only. Resolution, activation,
     worker lifecycle, protocol framing, and process details remain inside the
@@ -123,7 +123,7 @@ def add_CapabilityExecutionServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class CapabilityExecutionService:
-    """Product-facing capability execution boundary.
+    """Frozen compatibility capability execution boundary.
 
     This service exposes capability semantics only. Resolution, activation,
     worker lifecycle, protocol framing, and process details remain inside the

@@ -24,7 +24,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 | `checkpoint_metadata.schema.json` | `MIGRATING_COMPATIBILITY` v0 Product checkpoint projection. | `MIGRATING_COMPATIBILITY` v0 Product checkpoint 投影。 |
 | `hardware_manifest.schema.json` | `MIGRATING_COMPATIBILITY` v0 AI hardware projection. | `MIGRATING_COMPATIBILITY` v0 AI 硬件投影。 |
 | `model_manifest.schema.json` | `MIGRATING_COMPATIBILITY` v0 model-analysis projection. | `MIGRATING_COMPATIBILITY` v0 模型分析投影。 |
-| `model_version.schema.json` | Immutable FULL_MODEL or one-base-plus-one-LoRA composition consumed by Products. | 由 Product 消费的不可变 FULL_MODEL 或单 base 加单 LoRA 组合。 |
 | `portable_directory_manifest.schema.json` | Cross-language V2 directory artifact index; paths and raw CAS digests are validated by Rust/Python implementations. | 跨语言 V2 目录 Artifact 索引；路径和 raw CAS digest 由 Rust/Python 实现校验。 |
 | `runtime_manifest.schema.json` | `MIGRATING_COMPATIBILITY` v0 AI runtime projection. | `MIGRATING_COMPATIBILITY` v0 AI 运行时投影。 |
 | `training_revision.schema.json` | `MIGRATING_COMPATIBILITY` v0 training lifecycle projection. | `MIGRATING_COMPATIBILITY` v0 训练生命周期投影。 |

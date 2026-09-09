@@ -94,7 +94,6 @@ jobs:
   - script: |
       python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0" ruff==0.16.5
       python -m pip install -e sdk/python/cyrene_artifacts
-      python -m pip install -e sdk/python/cyrene_environment
       python -m pip install -e sdk/python/cyrene_preflight
       python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
     displayName: 'Install Python SDKs and dependencies'
@@ -105,7 +104,6 @@ jobs:
         python -m pytest sdk/python/cyrene_worker_shim/test_stream_item_wire.py
       fi
       python -m pytest sdk/python/cyrene_artifacts/tests
-      python -m pytest sdk/python/cyrene_environment/tests
       python -m pytest sdk/python/cyrene_preflight/tests
       python -m pytest tooling/docs/tests
       python -m pytest tooling/ci/tests

@@ -2,8 +2,8 @@
 
 Cyrene-Platform is the shared execution substrate for Products and capability
 plugins. Its public surface is product-neutral: Kernel execution, isolation,
-resource observations, capability resolution, Artifact references, environment
-locks, and versioned wire contracts.
+resource observations, capability resolution, Artifact references, and versioned
+wire contracts.
 
 ## Repository ownership
 
@@ -14,7 +14,7 @@ Platform owns:
 - canonical Node resource observations and immutable HardwareFacts projections;
 - generic capability package resolution and language-neutral worker/service
   runtime selection;
-- Artifact identity, CAS mechanisms, environment locks, and contract TCKs.
+- Artifact identity, CAS mechanisms, and generic contract TCKs.
 
 Products own their run, attempt, retry, workflow, draft, result, and persistence
 state. Plugins own capability implementations and conversion between generic
@@ -33,7 +33,6 @@ Cyrene-Plugins-Official. These are no longer Platform APIs.
 | WorkerControl | kernel_authority.proto | IMPLEMENTED | Generic supervised worker lifecycle. |
 | HardwareFacts | cyrene_preflight and Node resource inventory | IMPLEMENTED | Immutable Platform resource projection. |
 | ArtifactRef | cyrene_artifacts and manifest schemas | IMPLEMENTED | Immutable digest-addressed artifact reference. |
-| EnvironmentLock | cyrene_environment | IMPLEMENTED | Reproducible resolved environment identity. |
 | CapabilityRequirement | plugin manifest schema | IMPLEMENTED | Capability/interface and execution-mode requirement. |
 
 cyrene_preflight exposes contracts and resource facts. It does not choose model
@@ -56,7 +55,6 @@ identity.
 | Rust Kernel supervision and isolation | IMPLEMENTED | Workspace Cargo gates build all targets. |
 | Node resource observation | IMPLEMENTED | Node Agent is the resource-fact authority. |
 | Artifact Plane | IMPLEMENTED | Generic CAS and ArtifactRef contracts. |
-| Environment lock | IMPLEMENTED | Product-neutral environment resolution. |
 | Preflight contracts | IMPLEMENTED | Facts and replaceable capability interfaces only. |
 | Capability package runtime | IMPLEMENTED | Language-neutral worker/service dispatch. |
 | Product lifecycle | EXTERNAL | Owned by each Product repository. |

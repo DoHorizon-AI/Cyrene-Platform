@@ -132,7 +132,6 @@ The same guarantee holds for the immutable resources: the reference inputs
 | `TrainingRevision`   | `manifests/training_revision.schema.json`   | `revision_id`         | `revision_id`        |
 | `CheckpointMetadata` | `manifests/checkpoint_metadata.schema.json` | `checkpoint_id`       | `checkpoint_id`      |
 | `ArtifactManifest`   | `manifests/artifact_manifest.schema.json`   | `artifact_id`         | `artifact_id`        |
-| `ModelVersion`       | `manifests/model_version.schema.json`      | `model-version://sha256/<canonical-bytes>` | `id`                 |
 | `PortableDirectoryManifest` | `manifests/portable_directory_manifest.schema.json` | `sha256:<canonical-bytes>` | none (digest is external) |
 
 RuntimeManifest, TrainingRevision, CheckpointMetadata, and ArtifactManifest
@@ -141,26 +140,6 @@ compute their id exactly as `RuntimeManifest` does:
 `WhyReport` and `ValidationResult` are not immutable and carry no published id,
 but the reference implementation still exposes `canonical_bytes()` /
 `canonical_sha256_hex()` for change detection.
-
-`ModelVersion` uses the same member ordering, UTF-8 encoding, and computed-id
-exclusion rule. Its public id is a model-version URI rather than an Artifact
-digest:
-
-```text
-id = "model-version://sha256/" + hex(sha256(canonical_bytes(model_version_without_id)))
-```
-
-ModelVersion V1 accepts no floating-point values. The supported value subset is
-therefore byte-stable with the existing Python `canonical_json_bytes` helper;
-future implementations must preserve the same JCS bytes. Its descriptor has
-no Product lifecycle state, runtime/backend selection, or PEFT rank/alpha/
-target-module authority.
-
-`ModelVersion` 使用相同的成员排序、UTF-8 编码和计算 ID 排除规则，但公共 ID
-使用 model-version URI，而不是 Artifact digest。V1 禁止浮点值，因此与现有
-Python `canonical_json_bytes` 辅助函数的值子集保持跨语言字节稳定。描述符不包含
-Product 生命周期状态、runtime/backend 选择，也不复制 PEFT 的 rank/alpha/
-target_modules authority。
 
 ## 7. Portable directory identity | Portable 目录身份
 

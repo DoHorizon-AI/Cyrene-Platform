@@ -21,7 +21,7 @@ All platform development converges through the standard branch model:
 | `kernel/`         | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
 | `framework/`      | Generic execution services and quarantined v0 compatibility crates                                        |
 | `contracts/`      | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
-| `sdk/`            | Language client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`)                        |
+| `sdk/`            | Language client SDKs for Artifact, hardware-fact, and compatibility control contracts                     |
 | `infrastructure/` | Generic systemd units for Platform-owned daemons and adapter hosts                                       |
 | `tooling/`        | Platform-local governance, CI boundary guards, code generation, and runtime bootstrap                    |
 | `examples/`       | Non-production plugin integration examples                                                                 |

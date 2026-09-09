@@ -10,7 +10,6 @@ contract documents.
 | `kernel-semantic-contract-v1.md` | Normative Kernel semantic authority. | Kernel 规范语义权威 |
 | `platform-component-boundary-v1.md` | Platform component ownership. | Platform 组件归属 |
 | `media-processor-v1.md` | Media capability contract. | 媒体能力契约 |
-| `model-version-composed-v1.md` | Immutable FULL_MODEL and one-base-plus-one-LoRA composition boundary. | 不可变 FULL_MODEL 与单 base 加单 LoRA 组合边界 |
 
 ## Suggested reading | 推荐顺序
 

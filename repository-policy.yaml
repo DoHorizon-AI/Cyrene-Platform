@@ -33,7 +33,6 @@ artifacts:
   package_units:
   - cyrene-preflight
   - cyrene-artifacts
-  - cyrene-environment
   - cyrene-worker-shim
   - cyrene-capability-client
   native_binaries:

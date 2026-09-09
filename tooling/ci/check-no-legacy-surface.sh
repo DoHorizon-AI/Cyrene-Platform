@@ -80,6 +80,9 @@ forbidden_owned_paths=(
   "contracts/rust/cy-proto/tests/message_connector_*"
   "sdk/python/cyrene_capability_client/src/cyrene_capability_client/model_provider_v1.py"
   "sdk/python/cyrene_capability_client/src/cyrene_capability_client/_generated/model_provider_pb2.py"
+  "sdk/python/cyrene_environment/**"
+  "contracts/schemas/manifests/model_version.schema.json"
+  "docs/contracts/model-version-composed-v1.md"
   "tck/model-provider-embedding-contract/**"
   "tck/message-connector-contract/**"
   "examples/plugins/jvm/poc/**"
@@ -110,6 +113,16 @@ product_preflight_contracts=$(
 if [ -n "$product_preflight_contracts" ]; then
   echo "FORBIDDEN: Product model/preflight contract tracked by Platform Python SDK:"
   echo "$product_preflight_contracts" | sed 's/^/  - /'
+  status=1
+fi
+
+product_model_contracts=$(
+  git grep -n -E 'class ModelVersion|MODEL_VERSION_SCHEMA_VERSION|MODEL_VERSION_URI_PREFIX' -- \
+    'sdk/python/cyrene_artifacts/**' 2>/dev/null || true
+)
+if [ -n "$product_model_contracts" ]; then
+  echo "FORBIDDEN: Yield-owned ModelVersion contract returned to Platform Artifact SDK:"
+  echo "$product_model_contracts" | sed 's/^/  - /'
   status=1
 fi
 
