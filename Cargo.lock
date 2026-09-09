@@ -376,24 +376,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-extension-registry"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "cy-kernel-api",
- "cy-kernel-daemon",
- "cy-manifest",
- "cy-platform-api",
- "cy-plugin-protocol",
- "prost",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "cy-installation-resolver"
 version = "0.1.0"
 dependencies = [
@@ -435,18 +417,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-local-transport"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "cy-plugin-protocol",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "cy-manifest"
 version = "0.1.0"
 dependencies = [
@@ -482,7 +452,6 @@ dependencies = [
 name = "cy-package-runtime"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "cy-manifest",
  "cy-platform-api",
  "serde",
@@ -498,7 +467,6 @@ dependencies = [
 name = "cy-platform-api"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "cy-manifest",
  "cy-plugin-protocol",

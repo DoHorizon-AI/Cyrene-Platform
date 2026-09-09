@@ -1190,7 +1190,6 @@ impl CapabilityWorkerClient {
                 payload: payload.to_vec(),
                 payload_type_url: request_type_url.to_string(),
                 stream_results: false,
-                request: None,
             })),
         };
 
@@ -1327,7 +1326,6 @@ impl CapabilityWorkerClient {
                 payload: payload.to_vec(),
                 payload_type_url: request_type_url.to_string(),
                 stream_results: true,
-                request: None,
             })),
         };
         self.write_envelope(&invoke_env)?;

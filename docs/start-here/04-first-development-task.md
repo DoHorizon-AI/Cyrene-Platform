@@ -24,7 +24,6 @@ cargo fmt --check
 cargo check --locked --workspace --all-targets
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-bash tck/model-provider-embedding-contract/run-jvm-tck.sh --no-daemon
 ```
 
 The hosted Azure pipeline is the remote source gate. Record local and hosted

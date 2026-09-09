@@ -281,16 +281,6 @@ mod tests {
             .expect("portable directory fixture must pass semantic validation");
     }
 
-    #[test]
-    fn reference_jvm_manifest_uses_supported_runtime() {
-        let manifest = include_str!("../../../../examples/plugins/jvm/poc/plugin.toml");
-
-        assert!(manifest
-            .lines()
-            .any(|line| line.trim() == r#"runtime = "subprocess-jvm""#));
-        assert!(!manifest.contains("in-proc-rust"));
-    }
-
     /// Known-answer for `schemas/examples/runtime_manifest.example.json`.
     ///
     /// If the sample or canonicalization scheme changes, update this value and

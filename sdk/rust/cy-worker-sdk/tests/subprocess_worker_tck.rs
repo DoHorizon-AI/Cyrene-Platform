@@ -24,10 +24,7 @@ use cy_kernel_api::{
 use cy_kernel_daemon::watchdog::{InstanceActor, InstanceActorState};
 use cy_worker_sdk::{
     health_status,
-    pb::{
-        invoke::Request as InvokeReq, invoke_result::Response as InvokeResp, DetectHardwareRequest,
-        Envelope, HealthCheck, Hello, Invoke, Shutdown,
-    },
+    pb::{Envelope, HealthCheck, Hello, Invoke, Shutdown},
     read_frame, write_frame, Payload, DEFAULT_MAX_MESSAGE_BYTES,
 };
 
@@ -86,7 +83,9 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         Some(Payload::HelloAck(ack)) => {
             assert_eq!(ack.plugin_id, "com.cyrene.test.rust-echo-worker");
             assert_eq!(ack.selected_protocol_version, 1);
-            assert!(ack.declared_capabilities.contains(&"Probe".to_string()));
+            assert!(ack
+                .declared_capabilities
+                .contains(&"test.echo.v1".to_string()));
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }
@@ -126,12 +125,11 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         generation: 1,
         fence_token: 1,
         payload: Some(Payload::Invoke(Invoke {
-            extension_point: "Probe".to_string(),
-            method: "detect_hardware".to_string(),
-            payload: Vec::new(),
-            payload_type_url: String::new(),
+            extension_point: "test.echo.v1".to_string(),
+            method: "echo".to_string(),
+            payload: b"rust-direct-payload".to_vec(),
+            payload_type_url: "type.googleapis.com/test.echo.v1.EchoRequest".to_string(),
             stream_results: false,
-            request: Some(InvokeReq::DetectHardware(DetectHardwareRequest {})),
         })),
     };
     write_frame(&mut writer, &invoke_env, DEFAULT_MAX_MESSAGE_BYTES)?;
@@ -140,12 +138,13 @@ fn test_rust_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std::e
         .expect("expected InvokeResult from Rust worker");
     assert_eq!(invoke_resp.request_id, "req-rust-invoke");
     match invoke_resp.payload {
-        Some(Payload::InvokeResult(res)) => match res.response {
-            Some(InvokeResp::DetectHardware(dh)) => {
-                assert!(dh.hardware_manifest_json.contains("rust"));
-            }
-            other => panic!("expected DetectHardware response, got {other:?}"),
-        },
+        Some(Payload::InvokeResult(res)) => {
+            assert_eq!(res.payload, b"rust-direct-payload");
+            assert_eq!(
+                res.payload_type_url,
+                "type.googleapis.com/test.echo.v1.EchoRequest"
+            );
+        }
         other => panic!("expected InvokeResult, got {other:?}"),
     }
 
@@ -263,7 +262,7 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         other => panic!("expected HealthStatus, got {other:?}"),
     }
 
-    // 3. Invoke: Send Invoke (DetectHardware) -> Receive InvokeResult
+    // 3. Invoke: send an opaque capability payload -> receive InvokeResult
     let invoke_env = Envelope {
         request_id: "req-py-invoke".to_string(),
         trace_id: "tr-py-1".to_string(),
@@ -274,12 +273,11 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
         generation: 1,
         fence_token: 1,
         payload: Some(Payload::Invoke(Invoke {
-            extension_point: "Probe".to_string(),
-            method: "detect_hardware".to_string(),
-            payload: Vec::new(),
-            payload_type_url: String::new(),
+            extension_point: "test.echo.v1".to_string(),
+            method: "echo".to_string(),
+            payload: b"python-direct-payload".to_vec(),
+            payload_type_url: "type.googleapis.com/test.echo.v1.EchoRequest".to_string(),
             stream_results: false,
-            request: Some(InvokeReq::DetectHardware(DetectHardwareRequest {})),
         })),
     };
     write_frame(&mut writer, &invoke_env, DEFAULT_MAX_MESSAGE_BYTES)?;
@@ -287,10 +285,10 @@ fn test_python_worker_real_subprocess_lifecycle_tck() -> Result<(), Box<dyn std:
     let invoke_resp = read_frame(&mut reader, DEFAULT_MAX_MESSAGE_BYTES)?
         .expect("expected InvokeResult from Python worker");
     assert_eq!(invoke_resp.request_id, "req-py-invoke");
-    assert!(
-        matches!(invoke_resp.payload, Some(Payload::InvokeResult(_))),
-        "expected InvokeResult from Python worker"
-    );
+    let Some(Payload::InvokeResult(result)) = invoke_resp.payload else {
+        panic!("expected InvokeResult from Python worker");
+    };
+    assert_eq!(result.payload, b"python-direct-payload");
 
     // 4. Shutdown: Send Shutdown -> Receive Shutdown ACK -> Child process cleanly terminates
     let shutdown_env = Envelope {

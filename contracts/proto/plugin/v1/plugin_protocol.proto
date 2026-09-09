@@ -10,17 +10,6 @@ syntax = "proto3";
 
 package cy.plugin.v1;
 
-import "plugin/v1/probe.proto";
-import "plugin/v1/model_analyzer.proto";
-import "plugin/v1/compat_rule.proto";
-import "plugin/v1/runtime_builder.proto";
-import "plugin/v1/execution_engine.proto";
-import "plugin/v1/training_backend.proto";
-import "plugin/v1/quantization.proto";
-import "plugin/v1/gateway_filter.proto";
-import "plugin/v1/notification.proto";
-import "plugin/v1/storage.proto";
-
 message Envelope {
   string request_id = 1;
   string trace_id = 2;
@@ -130,11 +119,17 @@ message PluginErrorPayload {
 }
 
 message Invoke {
+  reserved 10 to 20;
+  reserved "detect_hardware", "analyze_model", "evaluate_compat",
+      "build_runtime", "execute_inference", "run_training_step",
+      "quantize_model", "filter_request_data", "send_notification",
+      "store_artifact", "fetch_artifact";
+
   string extension_point = 1;
   string method = 2;
 
-  // Opaque capability request bytes for generic worker-control consumers.
-  // Typed extension requests remain available below for existing adapters.
+  // Opaque capability request bytes. Products connect to the worker endpoint
+  // directly; Platform lifecycle services never inspect these bytes.
   bytes payload = 3;
 
   // Canonical protobuf Any type URL for the opaque request payload. This is
@@ -147,22 +142,15 @@ message Invoke {
   // callers leave it false and continue to receive one InvokeResult.
   bool stream_results = 5;
 
-  oneof request {
-    DetectHardwareRequest detect_hardware = 10;
-    AnalyzeModelRequest analyze_model = 11;
-    EvaluateCompatRequest evaluate_compat = 12;
-    BuildRuntimeRequest build_runtime = 13;
-    ExecuteInferenceRequest execute_inference = 14;
-    RunTrainingStepRequest run_training_step = 15;
-    QuantizeModelRequest quantize_model = 16;
-    FilterRequest filter_request_data = 17;
-    SendNotificationRequest send_notification = 18;
-    StoreArtifactRequest store_artifact = 19;
-    FetchArtifactRequest fetch_artifact = 20;
-  }
 }
 
 message InvokeResult {
+  reserved 10 to 20;
+  reserved "detect_hardware", "analyze_model", "evaluate_compat",
+      "build_runtime", "execute_inference", "run_training_step",
+      "quantize_model", "filter_response_data", "send_notification",
+      "store_artifact", "fetch_artifact";
+
   // Opaque capability result bytes for generic worker-control consumers.
   bytes payload = 3;
 
@@ -171,19 +159,6 @@ message InvokeResult {
   // empty value preserves the legacy opaque response projection.
   string payload_type_url = 4;
 
-  oneof response {
-    DetectHardwareResponse detect_hardware = 10;
-    AnalyzeModelResponse analyze_model = 11;
-    EvaluateCompatResponse evaluate_compat = 12;
-    BuildRuntimeResponse build_runtime = 13;
-    ExecuteInferenceResponse execute_inference = 14;
-    RunTrainingStepResponse run_training_step = 15;
-    QuantizeModelResponse quantize_model = 16;
-    FilterResponse filter_response_data = 17;
-    SendNotificationResponse send_notification = 18;
-    StoreArtifactResponse store_artifact = 19;
-    FetchArtifactResponse fetch_artifact = 20;
-  }
 }
 
 message StreamItem {

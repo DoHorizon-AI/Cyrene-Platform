@@ -493,7 +493,6 @@ mod tests {
                 Ok(InvokeResult {
                     payload: b"opaque-result".to_vec(),
                     payload_type_url: String::new(),
-                    response: None,
                 })
             }
             fn on_cancel(&mut self, target_request_id: &str, _reason: &str) {
@@ -554,7 +553,6 @@ mod tests {
                     payload: b"opaque-request".to_vec(),
                     payload_type_url: String::new(),
                     stream_results: false,
-                    request: None,
                 }),
             ),
             DEFAULT_MAX_MESSAGE_BYTES,

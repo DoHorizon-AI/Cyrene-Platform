@@ -526,6 +526,8 @@ impl ServiceSupervisor {
                 schema_id: endpoint_spec.schema_id.clone(),
                 capabilities: Vec::new(),
                 public_attributes: attrs,
+                connection_ref: endpoint_spec.connection_ref.clone(),
+                credential_ref: endpoint_spec.credential_ref.clone(),
             };
             self.published_endpoint = Some(endpoint);
         }

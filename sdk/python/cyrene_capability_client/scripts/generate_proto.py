@@ -21,12 +21,10 @@ import grpc_tools
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_ROOT = Path(__file__).resolve().parents[4]
 CAPABILITY_PROTO = PLATFORM_ROOT / "contracts/proto/cyrene/capability/v1/capability_execution.proto"
-MODEL_PROVIDER_PROTO = PLATFORM_ROOT / "contracts/proto/cyrene/model/provider/v1/model_provider.proto"
 OUTPUT = PACKAGE_ROOT / "src/cyrene_capability_client/_generated"
 GENERATED_FILES = (
     "capability_execution_pb2.py",
     "capability_execution_pb2_grpc.py",
-    "model_provider_pb2.py",
 )
 
 
@@ -54,7 +52,6 @@ def _run_protoc(proto: Path, destination: Path, *, grpc_service: bool) -> None:
 
 def _generate(destination: Path) -> None:
     _run_protoc(CAPABILITY_PROTO, destination, grpc_service=True)
-    _run_protoc(MODEL_PROVIDER_PROTO, destination, grpc_service=False)
 
     grpc_projection = destination / "capability_execution_pb2_grpc.py"
     source = grpc_projection.read_text(encoding="utf-8")

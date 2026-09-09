@@ -69,6 +69,20 @@ forbidden_owned_paths=(
   "sdk/python/cyrene_control_plane/**"
   "sdk/python/cyrene_preflight/src/cyrene_preflight/reference.py"
   "framework/jvm/**"
+  "framework/crates/cy-extension-registry/**"
+  "framework/crates/cy-local-transport/**"
+  "framework/crates/cy-platform-api/src/builtin.rs"
+  "contracts/proto/cyrene/model/**"
+  "contracts/proto/cyrene/message/**"
+  "contracts/rust/cy-proto/src/model_provider.rs"
+  "contracts/rust/cy-proto/src/message_connector.rs"
+  "contracts/rust/cy-proto/tests/model_provider_*"
+  "contracts/rust/cy-proto/tests/message_connector_*"
+  "sdk/python/cyrene_capability_client/src/cyrene_capability_client/model_provider_v1.py"
+  "sdk/python/cyrene_capability_client/src/cyrene_capability_client/_generated/model_provider_pb2.py"
+  "tck/model-provider-embedding-contract/**"
+  "tck/message-connector-contract/**"
+  "examples/plugins/jvm/poc/**"
 )
 for glob in "${forbidden_owned_paths[@]}"; do
   matches=$(git ls-files "$glob")
@@ -78,32 +92,6 @@ for glob in "${forbidden_owned_paths[@]}"; do
     status=1
   fi
 done
-
-# The implemented v0 typed registry is migration-only. Keep it buildable, but
-# prevent it from becoming a dependency of another production crate.
-registry_consumers=$(
-  git grep -n 'cy-extension-registry' -- \
-    'framework/crates/*/Cargo.toml' \
-    'kernel/crates/*/Cargo.toml' 2>/dev/null \
-    | grep -v '^framework/crates/cy-extension-registry/Cargo.toml:' || true
-)
-if [ -n "$registry_consumers" ]; then
-  echo "FORBIDDEN: new production dependency on MIGRATING cy-extension-registry:"
-  echo "$registry_consumers" | sed 's/^/  - /'
-  status=1
-fi
-
-local_transport_consumers=$(
-  git grep -n 'cy-local-transport' -- \
-    'framework/crates/*/Cargo.toml' \
-    'kernel/crates/*/Cargo.toml' 2>/dev/null \
-    | grep -v '^framework/crates/cy-local-transport/Cargo.toml:' || true
-)
-if [ -n "$local_transport_consumers" ]; then
-  echo "FORBIDDEN: new production dependency on MIGRATING cy-local-transport:"
-  echo "$local_transport_consumers" | sed 's/^/  - /'
-  status=1
-fi
 
 capability_specific_adapters=$(
   git grep -n -E 'WorkerMediaProcessor|def _build_request_object' -- \
@@ -138,8 +126,84 @@ named_spi_protos=(
   "contracts/proto/plugin/v1/training_backend.proto"
 )
 for file in "${named_spi_protos[@]}"; do
+  if [[ -e "$file" ]]; then
+    echo "FORBIDDEN: removed capability payload contract returned to Platform: $file"
+    status=1
+  fi
+done
+
+named_spi_symbols='pub trait (Probe|ModelAnalyzer|CompatRule|RuntimeBuilder|ExecutionEngine|TrainingBackend|Quantization|GatewayFilter|Notification|Storage)|BuiltinInMemoryStorage'
+named_spi_matches=$(git grep -n -E "$named_spi_symbols" -- 'framework/**' 'kernel/**' 'sdk/**' 2>/dev/null || true)
+if [ -n "$named_spi_matches" ]; then
+  echo "FORBIDDEN: removed named capability SPI returned to Platform:"
+  echo "$named_spi_matches" | sed 's/^/  - /'
+  status=1
+fi
+
+if ! rg -q 'reserved 10 to 20;' contracts/proto/plugin/v1/plugin_protocol.proto; then
+  echo "FORBIDDEN: removed v0 Invoke tags are no longer reserved"
+  status=1
+fi
+
+endpoint_payload_fields=$(
+  sed -n '/^message Endpoint {/,/^}/p' contracts/proto/cyrene/semantic/v1/kernel_contract.proto \
+    | tail -n +2 \
+    | rg -n -i '^[[:space:]]*(optional[[:space:]]+)?(bytes|string)[[:space:]]+(payload|request|response|body|prompt|message)[[:space:]]*=' || true
+)
+if [ -n "$endpoint_payload_fields" ]; then
+  echo "FORBIDDEN: control-plane Endpoint contains a business payload field:"
+  echo "$endpoint_payload_fields" | sed 's/^/  - /'
+  status=1
+fi
+
+if ! rg -q 'Capability payload contracts, generated capability SDKs, or capability TCKs' repository-policy.yaml; then
+  echo "FORBIDDEN: repository policy no longer excludes capability payload authority"
+  status=1
+fi
+
+package_runtime_data_plane=$(
+  git grep -n -E 'RuntimeInvocationResult|RuntimeApplicationEvent|invoke_typed|payload_base64|payload_type_url|ControlCommand::(Invoke|Subscribe|NextEvent|Unsubscribe)' -- \
+    'framework/crates/cy-package-runtime/**' \
+    ':(exclude)framework/crates/cy-package-runtime/README.md' 2>/dev/null || true
+)
+if [ -n "$package_runtime_data_plane" ]; then
+  echo "FORBIDDEN: Platform Package Runtime contains a business data-plane operation:"
+  echo "$package_runtime_data_plane" | sed 's/^/  - /'
+  status=1
+fi
+
+if ! rg -q 'opaque `connection_ref`' framework/crates/cy-package-runtime/README.md; then
+  echo "FORBIDDEN: package runtime no longer documents its opaque connection-only boundary"
+  status=1
+fi
+
+# CES is a measured compatibility service while existing consumers migrate to
+# direct Plugin endpoints. No other Platform package may turn it back into a
+# production routing dependency, and every retained public surface must keep a
+# visible migration marker.
+ces_production_consumers=$(
+  git grep -n -E 'cy[_-]capability[_-]execution[_-]service|CapabilityExecutionService' -- \
+    'framework/**' 'kernel/**' 'runtime/**' 'sdk/**' \
+    ':(exclude)framework/crates/cy-capability-execution-service/**' \
+    ':(exclude)sdk/python/cyrene_capability_client/**' \
+    ':(exclude)**/tests/**' \
+    ':(exclude)**/README.md' 2>/dev/null || true
+)
+if [ -n "$ces_production_consumers" ]; then
+  echo "FORBIDDEN: a new Platform production consumer depends on compatibility CES:"
+  echo "$ces_production_consumers" | sed 's/^/  - /'
+  status=1
+fi
+
+for file in \
+  contracts/proto/cyrene/capability/v1/capability_execution.proto \
+  framework/crates/cy-capability-execution-service/src/lib.rs \
+  sdk/python/cyrene_capability_client/README.md; do
+  if [[ ! -e "$file" ]]; then
+    continue
+  fi
   if ! rg -q 'MIGRATING_COMPATIBILITY' "$file"; then
-    echo "FORBIDDEN: frozen named SPI lost its migration marker: $file"
+    echo "FORBIDDEN: compatibility CES surface lost its migration marker: $file"
     status=1
   fi
 done

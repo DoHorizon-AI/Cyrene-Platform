@@ -253,6 +253,8 @@ impl ServiceSupervisionManager {
             port: e.port.map(|p| p as u16),
             path: e.path,
             attributes: e.attributes.into_iter().collect(),
+            connection_ref: e.connection_ref,
+            credential_ref: e.credential_ref,
         });
 
         Ok(DomainServiceSpec {

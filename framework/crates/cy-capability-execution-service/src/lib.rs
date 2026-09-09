@@ -6,13 +6,12 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
-//! Product-facing, language-neutral capability execution service.
+//! `MIGRATING_COMPATIBILITY` language-neutral capability proxy.
 //!
-//! The service is intentionally a small adapter around the existing Platform
-//! resolver and generic worker runtime. Products see only capability identity,
-//! `google.protobuf.Any` payloads, and stable execution/stream outcomes. The
-//! `cy.plugin.v1` envelope, worker subscription IDs, process handles, and
-//! executable details remain private to this crate and `cy-platform-api`.
+//! Existing Astrbot and Exchange consumers are migrating to Plugin-owned
+//! direct endpoints. New consumers must use the generic Platform Endpoint and
+//! EndpointGrant control contracts, then invoke the Plugin without a Platform
+//! service carrying the capability payload.
 
 mod binding_config;
 
@@ -1531,14 +1530,13 @@ mod tests {
             "send_message",
             WorkerInvocationResult {
                 payload: vec![1, 2, 3],
-                payload_type_url: "type.googleapis.com/cyrene.message.connector.v1.DeliveryResult"
-                    .into(),
+                payload_type_url: "type.googleapis.com/example.capability.v1.Result".into(),
             },
         );
 
         assert_eq!(
             response.type_url,
-            "type.googleapis.com/cyrene.message.connector.v1.DeliveryResult"
+            "type.googleapis.com/example.capability.v1.Result"
         );
         assert_eq!(response.value, vec![1, 2, 3]);
     }

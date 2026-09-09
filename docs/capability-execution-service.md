@@ -1,13 +1,17 @@
 # Capability Execution Service v1
 
-`cyrene.capability.v1.CapabilityExecutionService` is the Product-facing,
-language-neutral boundary over the existing Platform capability runtime. It is
-implemented by the Platform and transported with protobuf/gRPC. Products do
-not launch workers and do not implement `cy.plugin.v1` framing.
+Status: **`MIGRATING_COMPATIBILITY`**
 
-The service is intentionally small. Resolution and activation are transparent
-to the caller and there is no public `Resolve`, `Activate`, `StartWorker`,
-`StopWorker`, `Heartbeat`, or `Close` method.
+`cyrene.capability.v1.CapabilityExecutionService` is a measured compatibility
+bridge for existing Astrbot and Exchange consumers. New Product integrations
+must resolve and authorize a generic Endpoint through Platform, then exchange
+business payloads directly with that Plugin endpoint using the Plugin-owned
+contract. CES accepts no new consumer and will be removed after those two
+consumers migrate.
+
+The service remains build-tested while those consumers move. It is not the
+default Product data plane and does not establish a central execution service
+as a Platform design goal.
 
 ## Frozen public API
 

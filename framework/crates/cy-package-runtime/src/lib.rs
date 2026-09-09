@@ -3,7 +3,7 @@
 //! Package descriptors and repository manifests remain owned by Workspace and
 //! plugin repositories. This crate consumes those authorities, publishes verified
 //! installations atomically, prepares locked dependencies, and delegates
-//! execution to the existing Platform capability worker runtime.
+//! Plugin process supervision to a Product-neutral service supervisor.
 
 mod control;
 mod dependency;
@@ -15,5 +15,7 @@ mod types;
 pub use control::{ControlCommand, ControlRequest, ControlResponse, PackageRuntimeControlServer};
 pub use dependency::{DependencyPreparer, PythonVenvDependencyPreparer};
 pub use runtime::FilesystemPackageRuntime;
-pub use supervisor::{PlatformWorkerSupervisor, WorkerSupervisor};
+pub use supervisor::{
+    PluginServiceSupervisor, PythonPluginServiceSupervisor, ServiceActivationOptions,
+};
 pub use types::*;

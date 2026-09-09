@@ -7,10 +7,7 @@
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
 use cy_worker_sdk::{
-    pb::{
-        invoke_result::Response as InvokeResp, DetectHardwareResponse, Invoke, InvokeResult,
-        PluginErrorPayload,
-    },
+    pb::{Invoke, InvokeResult, PluginErrorPayload},
     run_worker_stdio, CyreneWorker, WorkerError,
 };
 
@@ -30,16 +27,13 @@ impl CyreneWorker for EchoWorker {
     }
 
     fn declared_capabilities(&self) -> Vec<String> {
-        vec!["Probe".to_string()]
+        vec!["test.echo.v1".to_string()]
     }
 
-    fn on_invoke(&mut self, _invoke: Invoke) -> Result<InvokeResult, PluginErrorPayload> {
+    fn on_invoke(&mut self, invoke: Invoke) -> Result<InvokeResult, PluginErrorPayload> {
         Ok(InvokeResult {
-            payload: Vec::new(),
-            payload_type_url: String::new(),
-            response: Some(InvokeResp::DetectHardware(DetectHardwareResponse {
-                hardware_manifest_json: "{\"status\": \"ok\", \"engine\": \"rust\"}".to_string(),
-            })),
+            payload: invoke.payload,
+            payload_type_url: invoke.payload_type_url,
         })
     }
 }

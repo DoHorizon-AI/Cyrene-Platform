@@ -12,21 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let proto_dir = manifest_dir.join("../../proto");
-    let plugin_dir = proto_dir.join("plugin/v1");
-    let proto_files = [
-        "plugin_protocol.proto",
-        "probe.proto",
-        "model_analyzer.proto",
-        "compat_rule.proto",
-        "runtime_builder.proto",
-        "execution_engine.proto",
-        "training_backend.proto",
-        "quantization.proto",
-        "gateway_filter.proto",
-        "notification.proto",
-        "storage.proto",
-    ]
-    .map(|file| plugin_dir.join(file));
+    let proto_files = [proto_dir.join("plugin/v1/plugin_protocol.proto")];
 
     for path in &proto_files {
         println!("cargo:rerun-if-changed={}", path.display());

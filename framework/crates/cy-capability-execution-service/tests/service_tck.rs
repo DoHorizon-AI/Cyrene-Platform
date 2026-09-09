@@ -26,14 +26,6 @@ use cy_proto::capability_v1::{
     capability_execution_service_client::CapabilityExecutionServiceClient,
     capability_invocation_stream_item, invoke_capability_response,
 };
-use cy_proto::{
-    model_provider::{
-        CAPABILITY_ID as MODEL_PROVIDER_CAPABILITY_ID, EMBEDDINGS_METHOD,
-        EMBEDDINGS_REQUEST_TYPE_URL, EMBEDDINGS_RESPONSE_TYPE_URL,
-    },
-    model_provider_v1::{EmbeddingsRequest, EmbeddingsResponse, embeddings_response},
-};
-use prost::Message;
 use prost_types::Any;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -99,12 +91,6 @@ fn fixture_manifest() -> PluginManifest {
                 vec![ExecutionMode::Worker],
             )
             .unwrap(),
-            CapabilityDescriptor::new(
-                CapabilityId::new(MODEL_PROVIDER_CAPABILITY_ID).unwrap(),
-                CapabilityInterfaceVersion::new("1").unwrap(),
-                vec![ExecutionMode::Worker],
-            )
-            .unwrap(),
         ],
         artifact: None,
     }
@@ -139,33 +125,6 @@ fn worker_options_for_instance(instance_id: &str) -> WorkerActivationOptions {
     options.environment.insert(
         "CYRENE_TEST_INSTANCE_ID".to_string(),
         instance_id.to_string(),
-    );
-    options
-}
-
-/// Configures one binding that serves both operations with distinct defaults.
-fn worker_options_with_operation_defaults(
-    instance_id: &str,
-    chat_default: &str,
-    embeddings_default: &str,
-) -> WorkerActivationOptions {
-    let mut options = worker_options_for_instance(instance_id);
-    options.environment.insert(
-        "CYRENE_TEST_CHAT_DEFAULT_MODEL".to_string(),
-        chat_default.to_string(),
-    );
-    options.environment.insert(
-        "CYRENE_TEST_EMBEDDINGS_DEFAULT_MODEL".to_string(),
-        embeddings_default.to_string(),
-    );
-    options
-}
-
-fn worker_options_without_embeddings(instance_id: &str) -> WorkerActivationOptions {
-    let mut options = worker_options_for_instance(instance_id);
-    options.environment.insert(
-        "CYRENE_TEST_EMBEDDINGS_SUPPORTED".to_string(),
-        "0".to_string(),
     );
     options
 }
@@ -315,63 +274,6 @@ fn invoke_request_without_deadline_for_binding(
         request: Some(any_json(payload)),
         binding_id: binding_id.map(str::to_string),
     })
-}
-
-fn embedding_invoke_request(binding_id: Option<&str>) -> Request<InvokeCapabilityRequest> {
-    embedding_invoke_request_with_model(binding_id, None)
-}
-
-fn embedding_invoke_request_with_model(
-    binding_id: Option<&str>,
-    model: Option<&str>,
-) -> Request<InvokeCapabilityRequest> {
-    let payload = EmbeddingsRequest {
-        inputs: vec!["deterministic".to_string()],
-        model: model.map(str::to_string),
-    };
-    let mut request = Request::new(InvokeCapabilityRequest {
-        capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
-        interface_version: "1".to_string(),
-        method: EMBEDDINGS_METHOD.to_string(),
-        request: Some(Any {
-            type_url: EMBEDDINGS_REQUEST_TYPE_URL.to_string(),
-            value: payload.encode_to_vec(),
-        }),
-        binding_id: binding_id.map(str::to_string),
-    });
-    request.set_timeout(Duration::from_secs(5));
-    request
-}
-
-fn model_provider_json_invoke_request(
-    binding_id: Option<&str>,
-    method: &str,
-    payload: serde_json::Value,
-) -> Request<InvokeCapabilityRequest> {
-    let mut request = Request::new(InvokeCapabilityRequest {
-        capability: MODEL_PROVIDER_CAPABILITY_ID.to_string(),
-        interface_version: "1".to_string(),
-        method: method.to_string(),
-        request: Some(any_json(payload)),
-        binding_id: binding_id.map(str::to_string),
-    });
-    request.set_timeout(Duration::from_secs(5));
-    request
-}
-
-fn embedding_model(response: cy_proto::capability_v1::InvokeCapabilityResponse) -> String {
-    let Some(invoke_capability_response::Result::Response(payload)) = response.result else {
-        panic!("expected typed embedding response: {response:?}");
-    };
-    assert_eq!(payload.type_url, EMBEDDINGS_RESPONSE_TYPE_URL);
-    let response = EmbeddingsResponse::decode(payload.value.as_slice()).unwrap();
-    let Some(embeddings_response::Result::Embeddings(batch)) = response.result else {
-        panic!("expected embedding batch");
-    };
-    assert_eq!(batch.vectors.len(), 1);
-    assert_eq!(batch.dimensions, 3);
-    assert_eq!(batch.vectors[0].values, [1.0, 2.0, 3.0]);
-    batch.model
 }
 
 fn subscribe_request(mode: &str) -> Request<SubscribeCapabilityEventsRequest> {
@@ -859,190 +761,6 @@ async fn configured_binding_capability_mismatch_is_deterministic() {
             .message
             .contains("does not expose capability missing.capability.v1")
     );
-    server.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedding_tck_single_binding_keeps_implicit_compatibility() {
-    let mut server = TestServer::start_with_bindings(
-        4,
-        worker_options(),
-        vec![(
-            "openai-main".to_string(),
-            worker_options_for_instance("openai-main"),
-        )],
-    )
-    .await;
-    let response = server
-        .client
-        .invoke_capability(embedding_invoke_request(None))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(embedding_model(response), "openai-main");
-    server.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedding_tck_two_bindings_require_explicit_target_and_are_isolated() {
-    let bindings = vec![
-        (
-            "openai-main".to_string(),
-            worker_options_for_instance("openai-main"),
-        ),
-        (
-            "ollama-local".to_string(),
-            worker_options_for_instance("ollama-local"),
-        ),
-    ];
-    let mut server = TestServer::start_with_bindings(4, worker_options(), bindings).await;
-
-    let ambiguous = server
-        .client
-        .invoke_capability(embedding_invoke_request(None))
-        .await
-        .unwrap()
-        .into_inner();
-    let Some(invoke_capability_response::Result::Error(error)) = ambiguous.result else {
-        panic!("implicit embedding target must not first-match");
-    };
-    assert_eq!(
-        error.code,
-        capability_execution_error::Code::InvalidRequest as i32
-    );
-    assert!(error.message.contains("ambiguous"));
-
-    for binding_id in ["openai-main", "ollama-local"] {
-        let response = server
-            .client
-            .invoke_capability(embedding_invoke_request(Some(binding_id)))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(embedding_model(response), binding_id);
-    }
-    server.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedding_tck_unknown_binding_is_deterministic() {
-    let mut server = TestServer::start_with_bindings(
-        4,
-        worker_options(),
-        vec![(
-            "openai-main".to_string(),
-            worker_options_for_instance("openai-main"),
-        )],
-    )
-    .await;
-    let response = server
-        .client
-        .invoke_capability(embedding_invoke_request(Some("missing")))
-        .await
-        .unwrap()
-        .into_inner();
-    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
-        panic!("unknown embedding binding must fail");
-    };
-    assert_eq!(
-        error.code,
-        capability_execution_error::Code::CapabilityUnavailable as i32
-    );
-    assert!(
-        error
-            .message
-            .contains("unknown configured capability binding: missing")
-    );
-    server.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedding_tck_unsupported_method_is_generic_invalid_request() {
-    let mut server = TestServer::start_with_bindings(
-        4,
-        worker_options(),
-        vec![(
-            "chat-only".to_string(),
-            worker_options_without_embeddings("chat-only"),
-        )],
-    )
-    .await;
-    let response = server
-        .client
-        .invoke_capability(embedding_invoke_request(Some("chat-only")))
-        .await
-        .unwrap()
-        .into_inner();
-    let Some(invoke_capability_response::Result::Error(error)) = response.result else {
-        panic!("unsupported embeddings method must fail generically");
-    };
-    assert_eq!(
-        error.code,
-        capability_execution_error::Code::InvalidRequest as i32
-    );
-    assert!(error.message.contains("not supported by this binding"));
-    server.shutdown().await;
-}
-
-/// A binding may serve `chat_completion` and `embeddings` with different
-/// default models. An embedding request that omits the model selector must
-/// resolve the embeddings default and must never inherit the chat default;
-/// an explicit selector still overrides both.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedding_tck_omitted_model_uses_binding_operation_default() {
-    let mut server = TestServer::start_with_bindings(
-        4,
-        worker_options(),
-        vec![(
-            "dual-operation".to_string(),
-            worker_options_with_operation_defaults(
-                "dual-operation",
-                "chat-default-model",
-                "embeddings-default-model",
-            ),
-        )],
-    )
-    .await;
-
-    let chat = server
-        .client
-        .invoke_capability(model_provider_json_invoke_request(
-            Some("dual-operation"),
-            "chat_completion",
-            serde_json::json!({}),
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    let Some(invoke_capability_response::Result::Response(payload)) = chat.result else {
-        panic!("chat_completion must stay supported on the same binding: {chat:?}");
-    };
-    let chat_model: serde_json::Value = serde_json::from_slice(&payload.value).unwrap();
-    assert_eq!(chat_model["model"], "chat-default-model");
-
-    let response = server
-        .client
-        .invoke_capability(embedding_invoke_request(Some("dual-operation")))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(
-        embedding_model(response),
-        "embeddings-default-model",
-        "an omitted embedding model must resolve the embeddings operation default"
-    );
-
-    let explicit = server
-        .client
-        .invoke_capability(embedding_invoke_request_with_model(
-            Some("dual-operation"),
-            Some("caller-selected-model"),
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(embedding_model(explicit), "caller-selected-model");
-
     server.shutdown().await;
 }
 

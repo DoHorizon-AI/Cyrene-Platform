@@ -175,7 +175,6 @@ mod tests {
                 payload: b"opaque-request".to_vec(),
                 payload_type_url: "type.googleapis.com/example.Request".to_string(),
                 stream_results: false,
-                request: None,
             })),
         };
 

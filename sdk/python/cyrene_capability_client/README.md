@@ -1,13 +1,16 @@
 # Cyrene Capability Client | Cyrene 能力执行客户端
 
-This package is the Platform-owned Python projection of
+Status: **`MIGRATING_COMPATIBILITY`**. Existing Exchange integration only; new
+Products use Plugin-owned direct clients and a Platform EndpointGrant.
+
+This package is the frozen Platform Python projection of
 `cyrene.capability.v1.CapabilityExecutionService`. Products use it to invoke a
 configured capability binding without learning plugin entrypoints, worker
 processes, or runtime generations.
 
-本包是 Platform 对 `cyrene.capability.v1.CapabilityExecutionService` 的 Python
-权威投影。Product 可通过稳定 binding 调用能力，但不会接触插件入口、worker
-进程或 runtime generation。
+本包是 Platform 对 `cyrene.capability.v1.CapabilityExecutionService` 的冻结兼容
+投影，仅供现有 Exchange 迁移。新 Product 使用 Plugin 所有的直连客户端及 Platform
+返回的 EndpointGrant。
 
 The checked-in protobuf files are generated from
 `contracts/proto/cyrene/capability/v1/capability_execution.proto`. Regenerate or

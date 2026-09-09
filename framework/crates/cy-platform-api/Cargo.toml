@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-trait = "0.1.91"
 bytes = "1.0"
 cy-manifest = { version = "0.1.0", path = "../../../contracts/rust/cy-manifest" }
 cy-plugin-protocol = { path = "../../../contracts/rust/cy-plugin-protocol" }

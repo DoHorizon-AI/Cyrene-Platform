@@ -28,17 +28,6 @@ from cyrene_capability_client._generated import (
 from cyrene_capability_client._generated import (
     capability_execution_pb2_grpc as execution_pb2_grpc,
 )
-from cyrene_capability_client.model_provider_v1 import (
-    CHAT_COMPLETION_REQUEST_TYPE_URL,
-    CHAT_COMPLETION_RESPONSE_TYPE_URL,
-    ChatCompletionChunk,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatMessage,
-    pack_chat_request,
-    unpack_chat_response,
-)
-
 
 REQUEST_TYPE = "type.googleapis.com/example.Request"
 RESPONSE_TYPE = "type.googleapis.com/example.Response"
@@ -251,52 +240,6 @@ def test_typed_stream_accepts_pre_execution_error_sequence_zero(live_client):
         )
 
     assert captured.value.code == execution_pb2.CapabilityExecutionError.CODE_ACTIVATION_FAILED
-
-
-def test_model_provider_projection_preserves_optional_presence_and_type_urls():
-    request = ChatCompletionRequest(
-        messages=[
-            ChatMessage(
-                role=ChatMessage.ROLE_USER,
-                content="hello",
-                name="operator",
-            )
-        ],
-        model="local-model",
-        stream=True,
-        temperature=0.0,
-        max_tokens=16,
-    )
-
-    packed = pack_chat_request(request)
-    decoded_request = ChatCompletionRequest.FromString(packed.value)
-    response = ChatCompletionResponse(
-        chunks=[
-            ChatCompletionChunk(
-                delta="world",
-                finish_reason="stop",
-                prompt_tokens=1,
-                completion_tokens=2,
-            )
-        ]
-    )
-    decoded_response = unpack_chat_response(
-        TypedPayload(
-            CHAT_COMPLETION_RESPONSE_TYPE_URL,
-            response.SerializeToString(),
-        )
-    )
-
-    assert packed.type_url == CHAT_COMPLETION_REQUEST_TYPE_URL
-    assert decoded_request.messages[0].role == ChatMessage.ROLE_USER
-    assert decoded_request.HasField("temperature")
-    assert decoded_request.temperature == 0.0
-    assert decoded_response == response
-
-
-def test_model_provider_projection_rejects_wrong_response_type():
-    with pytest.raises(CapabilityProtocolError):
-        unpack_chat_response(TypedPayload("type.googleapis.com/example.Wrong", b""))
 
 
 @pytest.mark.parametrize("target", ["0.0.0.0:50051", "ces.example.com:443", "missing-port"])

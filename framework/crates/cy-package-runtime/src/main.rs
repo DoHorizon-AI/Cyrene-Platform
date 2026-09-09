@@ -7,10 +7,9 @@ use std::{
 };
 
 use cy_package_runtime::{
-    FilesystemPackageRuntime, PackageRuntimeControlServer, PlatformWorkerSupervisor,
-    PythonVenvDependencyPreparer,
+    FilesystemPackageRuntime, PackageRuntimeControlServer, PythonPluginServiceSupervisor,
+    PythonVenvDependencyPreparer, ServiceActivationOptions,
 };
-use cy_platform_api::WorkerActivationOptions;
 
 fn main() -> ExitCode {
     match run() {
@@ -30,16 +29,16 @@ fn run() -> Result<(), String> {
     if let Some(wheelhouse) = configuration.offline_wheelhouse {
         dependency_preparer = dependency_preparer.offline(wheelhouse);
     }
-    let worker_options = WorkerActivationOptions {
+    let service_options = ServiceActivationOptions {
         python_executable: Some(configuration.python_executable),
-        python_path: configuration.worker_python_paths,
-        ..WorkerActivationOptions::default()
+        python_path: configuration.plugin_python_paths,
+        ..ServiceActivationOptions::default()
     };
     let runtime = FilesystemPackageRuntime::open(
         configuration.root,
         Arc::new(dependency_preparer),
-        Box::new(PlatformWorkerSupervisor::default()),
-        worker_options,
+        Box::new(PythonPluginServiceSupervisor::default()),
+        service_options,
     )
     .map_err(|error| error.to_string())?;
     PackageRuntimeControlServer::new(runtime)
@@ -52,7 +51,7 @@ struct Configuration {
     python_executable: String,
     uv_executable: String,
     offline_wheelhouse: Option<PathBuf>,
-    worker_python_paths: Vec<PathBuf>,
+    plugin_python_paths: Vec<PathBuf>,
 }
 
 impl Configuration {
@@ -61,7 +60,7 @@ impl Configuration {
         let mut python_executable = "python3".to_string();
         let mut uv_executable = "uv".to_string();
         let mut offline_wheelhouse = None;
-        let mut worker_python_paths = Vec::new();
+        let mut plugin_python_paths = Vec::new();
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             let value = |arguments: &mut std::iter::Peekable<_>| {
@@ -76,12 +75,12 @@ impl Configuration {
                 "--offline-wheelhouse" => {
                     offline_wheelhouse = Some(PathBuf::from(value(&mut arguments)?));
                 }
-                "--worker-python-path" => {
-                    worker_python_paths.push(PathBuf::from(value(&mut arguments)?));
+                "--plugin-python-path" => {
+                    plugin_python_paths.push(PathBuf::from(value(&mut arguments)?));
                 }
                 "--help" | "-h" => {
                     return Err(
-                        "usage: cy-package-runtime --root PATH [--python PATH] [--offline-wheelhouse PATH] [--worker-python-path PATH]".to_string(),
+                        "usage: cy-package-runtime --root PATH [--python PATH] [--offline-wheelhouse PATH] [--plugin-python-path PATH]".to_string(),
                     );
                 }
                 _ => return Err(format!("unknown argument: {argument}")),
@@ -92,7 +91,7 @@ impl Configuration {
             python_executable,
             uv_executable,
             offline_wheelhouse,
-            worker_python_paths,
+            plugin_python_paths,
         })
     }
 }

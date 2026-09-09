@@ -2,12 +2,14 @@
 
 ## Purpose | 目录职责
 
-This crate is the canonical Product-facing capability execution service. It
-owns generic binding resolution, worker activation, cancellation, typed `Any`
-forwarding, and application-event streams; it owns no Product payload fields.
+Status: **`MIGRATING_COMPATIBILITY`**.
 
-本 crate 是面向 Product 的 canonical 能力执行服务，负责通用 binding 解析、worker
-激活、取消、类型化 `Any` 透传和应用事件流，不拥有 Product payload 字段。
+This crate is the frozen CES proxy for measured Astrbot and Exchange
+consumers. New Products resolve and authorize a generic Platform endpoint and
+then invoke the Plugin directly with its owner contract.
+
+本 crate 是仅供现有 Astrbot 与 Exchange 迁移的冻结 CES 代理。新 Product 通过
+Platform 获取通用 endpoint 与授权，然后使用 Plugin owner 契约直接调用插件。
 
 `InvokeCapability` remains the compatibility unary path. The additive
 `InvokeCapabilityStream` method is used only when the worker handshake advertises
@@ -24,7 +26,7 @@ payload 的 `stream` 字段不会选择 worker 传输方式。
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `src/lib.rs` | Canonical CES implementation and gRPC projection. | canonical CES 实现及 gRPC 投影。 |
+| `src/lib.rs` | Frozen CES compatibility implementation and gRPC projection. | 冻结 CES 兼容实现及 gRPC 投影。 |
 | `src/main.rs` | Production process entrypoint for one manifest and one or more configured bindings. | 单 manifest、多配置 binding 的正式进程入口。 |
 | `src/binding_config.rs` | Shared manifest/binding configuration loader. | 共享 manifest/binding 配置加载器。 |
 | `tests/service_tck.rs` | Repository-local CES lifecycle TCK. | 仓内 CES 生命周期 TCK。 |

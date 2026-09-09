@@ -211,24 +211,7 @@ pub struct RuntimeStatus {
     pub state: RuntimeState,
     pub failure_code: Option<String>,
     pub failure_message: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeInvocationResult {
-    pub payload: Vec<u8>,
-    pub payload_type_url: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeApplicationEvent {
-    pub subscription_id: String,
-    pub capability: String,
-    pub event_sequence: u64,
-    pub event_type: String,
-    pub payload: Vec<u8>,
-    pub payload_type_url: String,
-    pub generation: u64,
-    pub source_id: String,
+    pub connection_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

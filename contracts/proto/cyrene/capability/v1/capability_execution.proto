@@ -8,6 +8,10 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 syntax = "proto3";
 
+// MIGRATING_COMPATIBILITY: frozen CES proxy contract for measured Astrbot and
+// Exchange consumers. New Products resolve a generic Endpoint/EndpointGrant
+// and invoke the Plugin-owned protocol directly.
+
 package cyrene.capability.v1;
 
 import "google/protobuf/any.proto";
@@ -17,7 +21,7 @@ option java_package = "io.cyrene.proto.capability.v1";
 option java_outer_classname = "CapabilityExecutionProto";
 option csharp_namespace = "Cyrene.Capability.V1";
 
-// Product-facing capability execution boundary.
+// Frozen compatibility capability execution boundary.
 //
 // This service exposes capability semantics only. Resolution, activation,
 // worker lifecycle, protocol framing, and process details remain inside the

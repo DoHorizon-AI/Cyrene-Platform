@@ -1255,6 +1255,8 @@ mod tests {
             schema_id: "cyrene.endpoint.v1".to_string(),
             capabilities: Vec::new(),
             public_attributes: BTreeMap::new(),
+            connection_ref: "uds://runtime/direct-worker".to_string(),
+            credential_ref: None,
         };
         authority_n
             .publish_endpoint(
@@ -1807,6 +1809,8 @@ mod tests {
             schema_id: "schema.v1".to_string(),
             capabilities: Vec::new(),
             public_attributes: BTreeMap::new(),
+            connection_ref: "uds://runtime/direct-worker".to_string(),
+            credential_ref: None,
         };
         authority_n
             .publish_endpoint(&context("ep-c"), &principal, endpoint_n.clone())
