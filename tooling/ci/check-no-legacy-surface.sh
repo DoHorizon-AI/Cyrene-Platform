@@ -156,6 +156,11 @@ if [ -n "$product_model_contracts" ]; then
   status=1
 fi
 
+if ! python3 -c 'import json, pathlib; schema=json.loads(pathlib.Path("contracts/schemas/artifact_transfer.schema.json").read_text(encoding="utf-8")); kind=schema["$defs"]["artifactIdentity"]["properties"]["kind"]; assert kind.get("type") == "string"; assert "enum" not in kind; assert kind.get("minLength") == 1; assert kind.get("maxLength") == 128; assert kind.get("pattern")'; then
+  echo "FORBIDDEN: Artifact transfer schema closed the producer-owned kind taxonomy"
+  status=1
+fi
+
 product_manifest_symbols='(HardwareManifest|ModelManifest|RuntimeManifest|TrainingRevision|CheckpointMetadata|WhyReport|WorkloadRequest|ValidationResult|ArtifactManifest|ArtifactLineage)'
 product_manifest_matches=$(
   git grep -n -E "$product_manifest_symbols" -- \
@@ -267,6 +272,22 @@ consumer_marker_matches=$(
 if [ -n "$consumer_marker_matches" ]; then
   echo "FORBIDDEN: consumer-specific identity leaked into Platform source or contracts:"
   echo "$consumer_marker_matches" | sed 's/^/  - /'
+  status=1
+fi
+
+product_name_matches=$(
+  git grep -n -E '\b(AstrBot|Catalyst|Yield|Reactor|Exchange|Navigator|Echo)\b' -- \
+    'contracts/proto/**' \
+    'contracts/rust/**' \
+    'contracts/schemas/**' \
+    'examples/**' \
+    'framework/**' \
+    'kernel/**' \
+    'sdk/**' || true
+)
+if [ -n "$product_name_matches" ]; then
+  echo "FORBIDDEN: Product name leaked into Platform source or contracts:"
+  echo "$product_name_matches" | sed 's/^/  - /'
   status=1
 fi
 

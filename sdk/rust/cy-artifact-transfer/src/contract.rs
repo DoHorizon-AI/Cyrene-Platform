@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn artifact_identity_cannot_be_a_source_path() {
         let mut artifact = identity(4);
-        artifact.uri = "/mnt/private/model.bin".to_string();
+        artifact.uri = "/mnt/private/payload.bin".to_string();
         assert!(matches!(
             validate_transfer_artifact_ref(&artifact),
             Err(TransferError::Contract(_))
@@ -556,6 +556,26 @@ mod tests {
     }
 
     #[test]
+    fn transfer_schema_accepts_a_producer_owned_artifact_kind() {
+        let mut artifact = identity(4);
+        artifact.kind = cy_manifest::ArtifactKind::new("producer.bundle.v2").unwrap();
+        let replica = ArtifactReplica {
+            replica_id: "replica-producer-kind".to_string(),
+            artifact,
+            peer_id: "seed-peer-1".to_string(),
+            protocol: TransferProtocol::HttpsRangeV1,
+            locator: "https://artifact.example.test/value".to_string(),
+            region: None,
+            priority: 0,
+            expires_at_unix_ms: None,
+        };
+
+        assert!(compiled_schema()
+            .validate(&serde_json::to_value(replica).unwrap())
+            .is_ok());
+    }
+
+    #[test]
     fn multi_source_plan_serialization_matches_the_frozen_schema() {
         let artifact = identity(4);
         let source = TransferSource {
@@ -566,7 +586,7 @@ mod tests {
                 residency: "us-east".to_string(),
                 trust_domain: "workspace-1".to_string(),
                 classifications: BTreeSet::from(["internal".to_string()]),
-                policy_tags: BTreeSet::from(["training".to_string()]),
+                policy_tags: BTreeSet::from(["restricted".to_string()]),
                 healthy: true,
                 latency_ms: 10,
                 bandwidth_mbps: 1_000,
@@ -752,7 +772,7 @@ mod tests {
                 residency: "us-east".to_string(),
                 trust_domain: "workspace-1".to_string(),
                 classifications: BTreeSet::from(["internal".to_string()]),
-                policy_tags: BTreeSet::from(["training".to_string()]),
+                policy_tags: BTreeSet::from(["restricted".to_string()]),
                 healthy: true,
                 latency_ms,
                 bandwidth_mbps,

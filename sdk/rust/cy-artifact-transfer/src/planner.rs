@@ -251,7 +251,7 @@ mod tests {
                 residency: "us".to_string(),
                 trust_domain: "workspace".to_string(),
                 classifications: BTreeSet::from(["internal".to_string()]),
-                policy_tags: BTreeSet::from(["training".to_string()]),
+                policy_tags: BTreeSet::from(["restricted".to_string()]),
                 healthy: true,
                 latency_ms,
                 bandwidth_mbps: 100,
@@ -297,7 +297,7 @@ mod tests {
             allowed_residencies: BTreeSet::from(["us".to_string()]),
             allowed_trust_domains: BTreeSet::from(["workspace".to_string()]),
             classification: "internal".to_string(),
-            required_policy_tags: BTreeSet::from(["training".to_string()]),
+            required_policy_tags: BTreeSet::from(["restricted".to_string()]),
         }
     }
 

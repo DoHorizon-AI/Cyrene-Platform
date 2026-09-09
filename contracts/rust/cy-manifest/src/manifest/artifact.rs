@@ -468,7 +468,7 @@ mod tests {
     fn portable_directory_builds_a_directory_artifact_ref() {
         let manifest = portable_fixture();
         let artifact = manifest
-            .artifact_ref(ArtifactKind::new("model").unwrap())
+            .artifact_ref(ArtifactKind::new("producer.bundle").unwrap())
             .expect("valid portable manifest should produce a ref");
         assert_eq!(artifact.size_bytes, 5);
         assert_eq!(artifact.digest, manifest.computed_digest());
