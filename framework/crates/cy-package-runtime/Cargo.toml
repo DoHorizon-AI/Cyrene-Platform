@@ -10,7 +10,6 @@ name = "cy-package-runtime"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.22"
 cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
 cy-platform-api = { path = "../cy-platform-api" }
 serde = { version = "1", features = ["derive"] }

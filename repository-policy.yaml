@@ -10,11 +10,14 @@ repository:
   default_branch: develop
 ownership:
   owns:
-  - Foundational contracts & Protobuf schemas
+  - Product-neutral control, lifecycle, resource, ArtifactRef, and transport contracts
   - Rust Kernel, process isolation & cgroup sandboxing
   - Product-neutral Kernel execution and resource-fact contracts
+  - Generic plugin installation, resolution, admission, health, and endpoint grants
   - Generic daemon units and repository CI tooling
   does_not_own:
+  - Capability payload contracts, generated capability SDKs, or capability TCKs
+  - Concrete plugin implementations, provider adapters, or business request routing
   - Product-specific AI state
   - Product lifecycle, run, attempt, retry, and persistence state
   - Training epoch loops or Serving engine internals
@@ -25,14 +28,10 @@ build:
   build_systems:
   - cargo
   - pyproject
-  - gradle
 artifacts:
   package_units:
   - cyrene-preflight
   - cyrene-artifacts
-  - cyrene-environment
-  - cyrene-worker-shim
-  - cyrene-capability-client
   native_binaries:
   - cy-kernel-daemon
   - cy-node-agent

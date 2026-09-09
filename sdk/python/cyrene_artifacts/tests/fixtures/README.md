@@ -1,25 +1,7 @@
-# fixtures Directory Guide | sdk/python/cyrene_artifacts/tests/fixtures 目录指南
+# Artifact SDK fixtures | Artifact SDK fixture
 
-## Purpose | 目录职责
+This directory currently has no Product manifest fixtures. Portable directory
+fixtures are shared from `contracts/schemas/examples`.
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
-
-## Contents | 内容
-
-| Entry | Responsibility | 一句话职责 |
-| --- | --- | --- |
-
-## Suggested reading / execution order | 推荐阅读 / 执行顺序
-
-Read this guide first, then the direct files above in dependency order, and finally the nested directory guides.
-先读本指南，再按依赖顺序阅读上方直接文件，最后进入嵌套目录指南。
-
-## Contents snapshot | 内容快照
-
-| Entry | Responsibility | 一句话职责 |
-| --- | --- | --- |
-| `artifact_manifest.example.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-
-This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
-本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+本目录不再保存 Product 清单 fixture；portable directory fixture 复用
+`contracts/schemas/examples` 中的权威样例。

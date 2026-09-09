@@ -45,40 +45,28 @@ def verify_governance() -> bool:
     test_gov = PLATFORM_ROOT / "tooling" / "ci" / "test_check_service_boundaries.py"
     policy_tool = PLATFORM_ROOT / "tooling" / "governance" / "validate_repository_policy.py"
     test_policy = PLATFORM_ROOT / "tooling" / "governance" / "tests" / "test_repository_policy.py"
-    test_manifest = PLATFORM_ROOT / "tooling" / "ci" / "tests" / "test_service_manifest_semantics.py"
     ok1 = run_step("Service Boundary Governance Guard", [sys.executable, str(gov_tool)])
     ok2 = run_step("Governance Pytest Suite", [sys.executable, "-m", "pytest", str(test_gov)])
     ok3 = run_step("Repository Ownership Guard", ["bash", str(legacy_guard)])
-    ok4 = run_step("Service Manifest Semantics Pytest", [sys.executable, "-m", "pytest", str(test_manifest)])
-    ok5 = run_step("Repository Policy Validation Guard", [sys.executable, str(policy_tool)])
-    ok6 = run_step("Repository Policy Pytest Suite", [sys.executable, "-m", "pytest", str(test_policy)])
-    return ok1 and ok2 and ok3 and ok4 and ok5 and ok6
+    ok4 = run_step("Repository Policy Validation Guard", [sys.executable, str(policy_tool)])
+    ok5 = run_step("Repository Policy Pytest Suite", [sys.executable, "-m", "pytest", str(test_policy)])
+    return ok1 and ok2 and ok3 and ok4 and ok5
 
 
 def verify_python() -> bool:
     tests = [
-        PLATFORM_ROOT / "sdk/python/cyrene_capability_client/tests",
         PLATFORM_ROOT / "sdk/python/cyrene_preflight/tests",
         PLATFORM_ROOT / "sdk/python/cyrene_artifacts/tests",
-        PLATFORM_ROOT / "sdk/python/cyrene_environment/tests",
         PLATFORM_ROOT / "tooling/docs/tests",
         PLATFORM_ROOT / "tooling/governance/tests",
         PLATFORM_ROOT / "tooling/ci/tests",
     ]
     existing = [str(t) for t in tests if t.exists()]
-    generated = run_step(
-        "Capability Client Generated Bindings",
-        [
-            sys.executable,
-            str(PLATFORM_ROOT / "sdk/python/cyrene_capability_client/scripts/generate_proto.py"),
-            "--check",
-        ],
-    )
     tested = run_step(
         "Python SDKs & Tooling Unit Tests",
         [sys.executable, "-m", "pytest"] + existing,
     )
-    return generated and tested
+    return tested
 
 
 def verify_rust() -> bool:

@@ -16,7 +16,7 @@ pub trait WorkspaceApi: Send + Sync + 'static {
     async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse;
 }
 
-/// LOCAL connectivity adapter for in-process Navigator/CLI composition.
+/// LOCAL connectivity adapter for in-process client and CLI composition.
 #[derive(Clone)]
 pub struct LocalWorkspaceClient {
     api: Arc<dyn WorkspaceApi>,

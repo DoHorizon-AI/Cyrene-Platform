@@ -105,6 +105,10 @@ message ServiceEndpointSpec {
   optional uint32 port = 3;
   optional string path = 4;
   map<string, string> attributes = 5;
+  // Opaque Product-side direct connection reference.
+  string connection_ref = 6;
+  // Secret-provider reference; never inline credentials.
+  optional string credential_ref = 7;
 }
 
 message ServiceSpec {

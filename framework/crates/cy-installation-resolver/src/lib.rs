@@ -121,21 +121,31 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
                     &error.to_string(),
                 )
             })?;
-            let manifest: cy_manifest::PluginManifest = serde_json::from_str(&manifest_content)
-                .map_err(|error| {
+            let manifest: serde_json::Value =
+                serde_json::from_str(&manifest_content).map_err(|error| {
                     ProviderError::new(
                         "filesystem-plugin-resolver",
                         "INSTALLATION_MANIFEST_INVALID",
                         &error.to_string(),
                     )
                 })?;
-            if manifest.plugin.id != record.installation_name {
+            let manifest_id = manifest
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        "filesystem-plugin-resolver",
+                        "INSTALLATION_MANIFEST_INVALID",
+                        "repository Plugin manifest id is required",
+                    )
+                })?;
+            if manifest_id != record.installation_name {
                 return Err(ProviderError::new(
                     "filesystem-plugin-resolver",
                     "INSTALLATION_MANIFEST_ID_MISMATCH",
                     &format!(
                         "manifest id {} does not match installation name {}",
-                        manifest.plugin.id, record.installation_name
+                        manifest_id, record.installation_name
                     ),
                 ));
             }
@@ -443,15 +453,13 @@ mod tests {
         );
 
         let manifest_content = r#"{
-            "plugin": {
-                "id": "demo-plugin",
-                "name": "Demo Plugin",
-                "version": "1.0.0",
-                "api_version": "1.0",
-                "kind": "probe",
-                "edition": "community",
-                "runtime": "subprocess-python"
-            }
+            "schemaVersion": 1,
+            "id": "demo-plugin",
+            "name": "Demo Plugin",
+            "version": "1.0.0",
+            "kind": "capability-plugin",
+            "capabilities": ["example.v1"],
+            "runtime": {"language": "python"}
         }"#;
         std::fs::write(
             directory.path().join("demo-plugin").join("manifest.json"),

@@ -48,7 +48,7 @@ def test_portable_manifest_fixture_has_byte_stable_jcs_identity() -> None:
         b'"path":"\xe6\xa8\xa1\xe5\x9e\x8b/\xe7\xa9\xba.txt","size_bytes":0}],"size_bytes":5,"version":2}'
     )
     assert manifest.computed_digest() == EXPECTED_DIGEST
-    assert manifest.to_artifact_ref(ArtifactKind.MODEL).manifest_digest == EXPECTED_DIGEST
+    assert manifest.to_artifact_ref(ArtifactKind("producer.bundle")).manifest_digest == EXPECTED_DIGEST
 
 
 def test_portable_manifest_rejects_paths_layout_and_size_errors() -> None:
@@ -188,7 +188,7 @@ def test_python_publish_stage_and_rust_validate_the_same_manifest(tmp_path: Path
     (source / "模型" / "空.txt").write_bytes(b"")
 
     provider = LocalArtifactProvider(tmp_path / "cas")
-    artifact = provider.publish_portable_directory(source, kind=ArtifactKind.MODEL)
+    artifact = provider.publish_portable_directory(source, kind=ArtifactKind("producer.bundle"))
     assert artifact.digest == EXPECTED_DIGEST
     staged = provider.stage(artifact, tmp_path / "staged")
     assert Path(staged.local_path, "weights.bin").read_bytes() == b"abc"
@@ -226,7 +226,7 @@ def test_legacy_v1_directory_publish_and_resolution_remain_compatible(tmp_path: 
     (source / "weights.bin").write_bytes(b"legacy")
     provider = LocalArtifactProvider(tmp_path / "cas")
 
-    artifact = provider.publish(source, kind=ArtifactKind.MODEL)
+    artifact = provider.publish(source, kind=ArtifactKind("producer.bundle"))
     resolved = provider.resolve(artifact)
     assert isinstance(resolved.manifest, LocalDirectoryManifest)
     assert resolved.manifest.version == 1

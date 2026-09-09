@@ -34,6 +34,8 @@ pub(crate) fn semantic_endpoint_from_proto(
             })
             .collect(),
         public_attributes: endpoint.public_attributes.into_iter().collect(),
+        connection_ref: endpoint.connection_ref,
+        credential_ref: (!endpoint.credential_ref.is_empty()).then_some(endpoint.credential_ref),
     };
     endpoint.validate().map_err(|error| {
         Status::invalid_argument(format!("{}: {}", error.reason_code, error.message))
@@ -58,6 +60,8 @@ pub(crate) fn to_semantic_proto_endpoint(endpoint: &semantic::Endpoint) -> seman
             })
             .collect(),
         public_attributes: endpoint.public_attributes.clone().into_iter().collect(),
+        connection_ref: endpoint.connection_ref.clone(),
+        credential_ref: endpoint.credential_ref.clone().unwrap_or_default(),
     }
 }
 

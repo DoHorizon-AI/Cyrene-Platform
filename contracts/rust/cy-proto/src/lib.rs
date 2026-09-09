@@ -22,9 +22,6 @@
 // precedence over hand-boxing generated variants in this projection crate.
 #![allow(clippy::large_enum_variant)]
 
-pub mod message_connector;
-pub mod model_provider;
-
 pub mod google {
     pub mod rpc {
         tonic::include_proto!("google.rpc");
@@ -40,28 +37,6 @@ pub mod cyrene {
 
         pub mod v2 {
             tonic::include_proto!("cyrene.core.v2");
-        }
-    }
-
-    pub mod capability {
-        pub mod v1 {
-            tonic::include_proto!("cyrene.capability.v1");
-        }
-    }
-
-    pub mod message {
-        pub mod connector {
-            pub mod v1 {
-                tonic::include_proto!("cyrene.message.connector.v1");
-            }
-        }
-    }
-
-    pub mod model {
-        pub mod provider {
-            pub mod v1 {
-                tonic::include_proto!("cyrene.model.provider.v1");
-            }
         }
     }
 
@@ -96,18 +71,12 @@ pub mod cyrene {
     }
 }
 
-/// Product-facing language-neutral capability execution service.
-pub use cyrene::capability::v1 as capability_v1;
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
 pub use cyrene::core::v1 as core_v1;
 /// Core v2 authority projection with explicit namespace scope.
 pub use cyrene::core::v2 as core_v2;
 /// Versioned local protocol between the Kernel and external hardware adapters.
 pub use cyrene::hardware::v1 as hardware_v1;
-/// EXPERIMENTAL typed payloads for `message.connector.v1`.
-pub use cyrene::message::connector::v1 as message_connector_v1;
-/// EXPERIMENTAL typed payloads for `model.provider.v1`.
-pub use cyrene::model::provider::v1 as model_provider_v1;
 /// Dedicated local Provider lifecycle and reconciliation projection.
 pub use cyrene::provider::v1 as provider_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.

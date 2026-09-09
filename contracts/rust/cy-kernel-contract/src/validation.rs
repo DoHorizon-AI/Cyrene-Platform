@@ -25,6 +25,7 @@ pub const MAX_RESOURCES_PER_LEASE: usize = 256;
 pub const MAX_WORKERS_PER_SNAPSHOT: usize = 4_096;
 pub const MAX_ENDPOINTS_PER_SNAPSHOT: usize = 4_096;
 pub const MAX_EXECUTION_REF_BYTES: usize = 512;
+pub const MAX_CONNECTION_REF_BYTES: usize = 512;
 pub const MAX_ERROR_MESSAGE_BYTES: usize = 1_024;
 pub const MAX_EVENT_BODY_BYTES: usize = 64 * 1_024;
 pub const MAX_EVENTS_PER_PAGE: usize = 256;

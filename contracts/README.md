@@ -5,14 +5,14 @@ semantic authority is [Kernel Semantic Contract v1](../docs/contracts/kernel-sem
 wire schemas and language libraries are projections of that authority.
 
 - `proto/cyrene/semantic/v1/` defines the language-neutral Kernel vocabulary.
-- the remaining `proto/` packages define transport-specific control and plugin
+- the remaining `proto/` packages define transport-specific Platform control
   messages that import or map to that vocabulary.
 - `schemas/` defines manifests and canonical resources.
 - `rust/` contains Rust mirrors and generated bindings.
 - `tck/kernel-semantic/v1/` contains the Python/Kotlin/Rust acceptance vectors
   for revision negotiation, validation, matching, lifecycle, authority and
-  event replay. `tck/worker-control/v1/` separately covers the legacy live
-  Worker control compatibility channel; new SDKs use the paired
+  event replay. `tck/worker-control/v1/` separately covers the Kernel
+  Worker control channel; clients use the paired
   `KernelAuthorityService` and restricted `WorkerControlService` projections.
 
 Advanced services may depend on released contract artifacts or a checked-out
@@ -35,5 +35,5 @@ conformance conditions listed in the normative document.
 
 The former version-0 package and agent service were removed in the P1 cutover.
 Runtime source and contract source must not reintroduce those names. The
-separate `cy.plugin.v1` protocol remains the local out-of-process plugin stdio
-contract and is not part of Core RPC.
+former local stdio data-plane contract was removed. Plugin-owned endpoint
+protocols remain outside Platform and are not part of Core RPC.

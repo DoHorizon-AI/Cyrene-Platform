@@ -17,41 +17,39 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Optional, Protocol, Sequence, Tuple
 
 
 SHA256_PREFIX = "sha256:"
 ARTIFACT_URI_PREFIX = "artifact://sha256/"
-ARTIFACT_MANIFEST_VERSION = 1
-ARTIFACT_SCHEMA_VERSION = "1"
 PORTABLE_DIRECTORY_MANIFEST_VERSION = 2
 JCS_SAFE_INTEGER_MAX = 9_007_199_254_740_991
-MODEL_VERSION_SCHEMA_VERSION = "1"
-MODEL_VERSION_URI_PREFIX = "model-version://sha256/"
 
 
-class ArtifactKind(str, Enum):
-    GENERIC = "generic"
-    TRAINING_SPEC = "training_spec"
-    DATASET = "dataset"
-    MODEL = "model"
-    CHECKPOINT = "checkpoint"
-    METRICS = "metrics"
-    REPORT = "report"
-    MERGED = "merged"
-    QUANTIZED = "quantized"
+class ArtifactKind(str):
+    """Opaque category owned by the Artifact producer.
+
+    Platform validates the identifier shape and does not maintain a Product
+    category taxonomy. New Product categories therefore need no Platform
+    release.
+    """
+
+    GENERIC: "ArtifactKind"
+
+    def __new__(cls, value: object) -> "ArtifactKind":
+        text = str(value)
+        if not text.strip() or len(text) > 128 or any(ord(character) < 32 for character in text):
+            raise ValueError("artifact kind must be a bounded non-empty identifier")
+        return str.__new__(cls, text)
+
+    @property
+    def value(self) -> str:
+        return str(self)
 
 
-_MODEL_VERSION_ID_PATTERN = re.compile(r"^model-version://sha256/[0-9a-f]{64}$")
-_RESOURCE_URI_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$")
-_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+ArtifactKind.GENERIC = ArtifactKind("generic")
 
 
 def _validate_digest(value: str) -> str:
@@ -203,455 +201,6 @@ class ArtifactRef:
             manifest_digest=data.get("manifest_digest"),
             name=data.get("name"),
         )
-
-
-@dataclass(frozen=True)
-class ArtifactLineage:
-    """Canonical lineage projection of cy-manifest::Lineage."""
-
-    base_model_revision: Optional[str] = None
-    dataset_digest: Optional[str] = None
-    runtime_id: Optional[str] = None
-    revision_chain: Tuple[str, ...] = ()
-    checkpoint_id: Optional[str] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"revision_chain": list(self.revision_chain)}
-        if self.base_model_revision is not None:
-            payload["base_model_revision"] = self.base_model_revision
-        if self.dataset_digest is not None:
-            payload["dataset_digest"] = self.dataset_digest
-        if self.runtime_id is not None:
-            payload["runtime_id"] = self.runtime_id
-        if self.checkpoint_id is not None:
-            payload["checkpoint_id"] = self.checkpoint_id
-        return payload
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ArtifactLineage":
-        return cls(
-            base_model_revision=data.get("base_model_revision"),
-            dataset_digest=data.get("dataset_digest"),
-            runtime_id=data.get("runtime_id"),
-            revision_chain=tuple(str(item) for item in data.get("revision_chain") or []),
-            checkpoint_id=data.get("checkpoint_id"),
-        )
-
-
-@dataclass(frozen=True)
-class ArtifactManifest:
-    """Canonical public manifest projection of cy-manifest::ArtifactManifest."""
-
-    kind: ArtifactKind
-    integrity: str
-    lineage: ArtifactLineage
-    schema_version: Optional[str] = None
-    artifact_id: Optional[str] = None
-    source: Optional[str] = None
-    size_bytes: Optional[int] = None
-    ref_count: Optional[int] = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", ArtifactKind(self.kind))
-        _validate_digest(self.integrity)
-        if self.artifact_id is not None:
-            _validate_digest(self.artifact_id)
-        if self.size_bytes is not None and self.size_bytes < 0:
-            raise ValueError("artifact manifest size must be non-negative")
-        if self.ref_count is not None and self.ref_count < 0:
-            raise ValueError("artifact manifest ref_count must be non-negative")
-
-    def identity_payload(self) -> dict[str, Any]:
-        """Return the cy-manifest record without its computed artifact_id."""
-
-        return self.to_dict(include_artifact_id=False)
-
-    def computed_artifact_id(self) -> str:
-        return sha256_bytes(_canonical_json(self.identity_payload()))
-
-    def verify_artifact_id(self) -> bool:
-        return bool(self.artifact_id) and self.artifact_id == self.computed_artifact_id()
-
-    def to_dict(self, *, include_artifact_id: bool = True) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "kind": self.kind.value,
-            "integrity": self.integrity,
-            "lineage": self.lineage.to_dict(),
-        }
-        if self.schema_version is not None:
-            payload["schema_version"] = self.schema_version
-        if include_artifact_id and self.artifact_id is not None:
-            payload["artifact_id"] = self.artifact_id
-        if self.source is not None:
-            payload["source"] = self.source
-        if self.size_bytes is not None:
-            payload["size_bytes"] = self.size_bytes
-        if self.ref_count is not None:
-            payload["ref_count"] = self.ref_count
-        return payload
-
-    def to_bytes(self) -> bytes:
-        return _canonical_json(self.to_dict())
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ArtifactManifest":
-        return cls(
-            kind=ArtifactKind(data.get("kind") or ArtifactKind.GENERIC.value),
-            integrity=str(data["integrity"]),
-            lineage=ArtifactLineage.from_dict(data.get("lineage") or {}),
-            schema_version=data.get("schema_version"),
-            artifact_id=data.get("artifact_id"),
-            source=data.get("source"),
-            size_bytes=int(data["size_bytes"]) if data.get("size_bytes") is not None else None,
-            ref_count=int(data["ref_count"]) if data.get("ref_count") is not None else None,
-        )
-
-    @classmethod
-    def from_bytes(cls, payload: bytes) -> "ArtifactManifest":
-        return cls.from_dict(json.loads(payload.decode("utf-8")))
-
-
-def _as_json_object(value: Any, field_name: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{field_name} must be a JSON object")
-    result = dict(value)
-    if any(not isinstance(key, str) for key in result):
-        raise ValueError(f"{field_name} object keys must be strings")
-    return result
-
-
-def _expect_json_keys(
-    value: Mapping[str, Any],
-    *,
-    required: set[str],
-    optional: set[str],
-    field_name: str,
-) -> None:
-    keys = set(value)
-    unknown = keys - required - optional
-    missing = required - keys
-    if unknown:
-        raise ValueError(f"{field_name} has unknown fields: {sorted(unknown)!r}")
-    if missing:
-        raise ValueError(f"{field_name} is missing fields: {sorted(missing)!r}")
-
-
-def _reject_floats(value: Any, *, path: str = "$") -> None:
-    """Reject values that cannot be represented without JCS number drift.
-
-    ModelVersion V1 intentionally carries only strings, booleans, integers,
-    arrays, objects, and null.  This keeps the Python canonical serializer
-    byte-compatible with the JCS value subset used by the platform manifests.
-    """
-
-    if isinstance(value, float):
-        raise ValueError(f"{path} must not contain floating-point numbers")
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            _reject_floats(child, path=f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _reject_floats(child, path=f"{path}[{index}]")
-
-
-def _validate_resource_uri(value: Any, field_name: str) -> str:
-    if not isinstance(value, str) or not value or not _RESOURCE_URI_PATTERN.fullmatch(value):
-        raise ValueError(f"{field_name} must be a non-empty opaque URI")
-    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in value):
-        raise ValueError(f"{field_name} must not contain control characters")
-    return value
-
-
-def _normalize_artifact_ref(
-    value: Any,
-    *,
-    field_name: str,
-    require_portable_model: bool = False,
-) -> dict[str, Any]:
-    data = _as_json_object(value, field_name)
-    _expect_json_keys(
-        data,
-        required={"uri", "digest", "size_bytes", "kind"},
-        optional={"manifest_digest"},
-        field_name=field_name,
-    )
-
-    uri = data["uri"]
-    digest = data["digest"]
-    if not isinstance(uri, str) or not isinstance(digest, str):
-        raise ValueError(f"{field_name}.uri and .digest must be strings")
-    _validate_lowercase_digest(digest)
-    if uri != artifact_uri_for_digest(digest):
-        raise ValueError(f"{field_name}.uri must match its digest")
-
-    size_bytes = _safe_integer(data["size_bytes"], f"{field_name}.size_bytes")
-    kind_value = data["kind"]
-    if not isinstance(kind_value, str):
-        raise ValueError(f"{field_name}.kind must be a string")
-    try:
-        kind = ArtifactKind(kind_value)
-    except ValueError as exc:
-        raise ValueError(f"{field_name}.kind is not a supported ArtifactKind") from exc
-
-    has_manifest_digest = "manifest_digest" in data
-    manifest_digest = data.get("manifest_digest")
-    if has_manifest_digest:
-        if not isinstance(manifest_digest, str) or not manifest_digest:
-            raise ValueError(f"{field_name}.manifest_digest must be a non-empty string")
-        _validate_lowercase_digest(manifest_digest)
-
-    if require_portable_model:
-        if kind is not ArtifactKind.MODEL:
-            raise ValueError(f"{field_name} must use kind 'model'")
-        if manifest_digest != digest:
-            raise ValueError(f"{field_name} must reference a portable directory with manifest_digest equal to digest")
-
-    normalized: dict[str, Any] = {
-        "uri": uri,
-        "digest": digest,
-        "size_bytes": size_bytes,
-        "kind": kind.value,
-    }
-    if has_manifest_digest:
-        normalized["manifest_digest"] = manifest_digest
-    return normalized
-
-
-def _normalize_override(value: Any, *, field_name: str) -> dict[str, Any]:
-    data = _as_json_object(value, field_name)
-    _expect_json_keys(
-        data,
-        required={"mode"},
-        optional={"artifact"},
-        field_name=field_name,
-    )
-    mode = data["mode"]
-    if mode == "INHERIT":
-        if "artifact" in data:
-            raise ValueError(f"{field_name}.artifact is forbidden when mode is INHERIT")
-        return {"mode": mode}
-    if mode == "OVERRIDE":
-        if "artifact" not in data:
-            raise ValueError(f"{field_name}.artifact is required when mode is OVERRIDE")
-        return {
-            "mode": mode,
-            "artifact": _normalize_artifact_ref(data["artifact"], field_name=f"{field_name}.artifact"),
-        }
-    raise ValueError(f"{field_name}.mode must be INHERIT or OVERRIDE")
-
-
-def _normalize_lineage(value: Any) -> dict[str, Any]:
-    data = _as_json_object(value, "lineage")
-    _expect_json_keys(
-        data,
-        required=set(),
-        optional={"trainingRun", "datasetVersion", "inputArtifacts", "derivedFromModelVersion"},
-        field_name="lineage",
-    )
-    normalized: dict[str, Any] = {}
-    if "trainingRun" in data:
-        normalized["trainingRun"] = _validate_resource_uri(data["trainingRun"], "lineage.trainingRun")
-    if "datasetVersion" in data:
-        normalized["datasetVersion"] = _validate_resource_uri(data["datasetVersion"], "lineage.datasetVersion")
-    if "inputArtifacts" in data:
-        input_artifacts = data["inputArtifacts"]
-        if not isinstance(input_artifacts, list):
-            raise ValueError("lineage.inputArtifacts must be an array")
-        normalized["inputArtifacts"] = [
-            _normalize_artifact_ref(item, field_name=f"lineage.inputArtifacts[{index}]")
-            for index, item in enumerate(input_artifacts)
-        ]
-    if "derivedFromModelVersion" in data:
-        derived = data["derivedFromModelVersion"]
-        if not isinstance(derived, str) or not _MODEL_VERSION_ID_PATTERN.fullmatch(derived):
-            raise ValueError("lineage.derivedFromModelVersion must be a model-version://sha256/<hex> URI")
-        normalized["derivedFromModelVersion"] = derived
-    return normalized
-
-
-def _normalize_base_model(value: Any) -> dict[str, Any]:
-    data = _as_json_object(value, "baseModel")
-    _expect_json_keys(
-        data,
-        required={"artifact", "source"},
-        optional=set(),
-        field_name="baseModel",
-    )
-    source = _as_json_object(data["source"], "baseModel.source")
-    _expect_json_keys(
-        source,
-        required={"repository", "revision"},
-        optional=set(),
-        field_name="baseModel.source",
-    )
-    repository = source["repository"]
-    revision = source["revision"]
-    if not isinstance(repository, str) or not _REPOSITORY_PATTERN.fullmatch(repository):
-        raise ValueError("baseModel.source.repository must use the owner/repo form")
-    if not isinstance(revision, str) or not _REVISION_PATTERN.fullmatch(revision):
-        raise ValueError("baseModel.source.revision must be a lowercase 40-hex revision")
-    return {
-        "artifact": _normalize_artifact_ref(
-            data["artifact"], field_name="baseModel.artifact", require_portable_model=True
-        ),
-        "source": {"repository": repository, "revision": revision},
-    }
-
-
-def _normalize_model_version_payload(
-    payload: Any,
-    *,
-    require_id: bool,
-) -> dict[str, Any]:
-    _reject_floats(payload)
-    data = _as_json_object(payload, "model version")
-    common_required = {"schemaVersion", "composition", "tokenizer", "chatTemplate", "lineage"}
-    common_optional = {"id"}
-    composition = data.get("composition")
-    if composition == "FULL_MODEL":
-        _expect_json_keys(
-            data,
-            required=common_required | {"fullModelArtifact"} | ({"id"} if require_id else set()),
-            optional=common_optional if not require_id else set(),
-            field_name="model version",
-        )
-    elif composition == "BASE_PLUS_LORA":
-        _expect_json_keys(
-            data,
-            required=common_required | {"baseModel", "adapterArtifact"} | ({"id"} if require_id else set()),
-            optional=common_optional if not require_id else set(),
-            field_name="model version",
-        )
-    else:
-        raise ValueError("model version composition must be FULL_MODEL or BASE_PLUS_LORA")
-
-    schema_version = data["schemaVersion"]
-    if schema_version != MODEL_VERSION_SCHEMA_VERSION:
-        raise ValueError(f"model version schemaVersion must be {MODEL_VERSION_SCHEMA_VERSION!r}")
-    if not isinstance(composition, str):
-        raise ValueError("model version composition must be a string")
-
-    normalized: dict[str, Any] = {
-        "schemaVersion": schema_version,
-        "composition": composition,
-    }
-    if require_id:
-        model_id = data["id"]
-        if not isinstance(model_id, str) or not _MODEL_VERSION_ID_PATTERN.fullmatch(model_id):
-            raise ValueError("model version id must be a model-version://sha256/<hex> URI")
-        normalized["id"] = model_id
-
-    if composition == "FULL_MODEL":
-        normalized["fullModelArtifact"] = _normalize_artifact_ref(
-            data["fullModelArtifact"],
-            field_name="fullModelArtifact",
-            require_portable_model=True,
-        )
-    else:
-        normalized["baseModel"] = _normalize_base_model(data["baseModel"])
-        normalized["adapterArtifact"] = _normalize_artifact_ref(
-            data["adapterArtifact"],
-            field_name="adapterArtifact",
-            require_portable_model=True,
-        )
-        if normalized["baseModel"]["artifact"]["digest"] == normalized["adapterArtifact"]["digest"]:
-            raise ValueError("baseModel.artifact and adapterArtifact must be different artifacts")
-
-    normalized["tokenizer"] = _normalize_override(data["tokenizer"], field_name="tokenizer")
-    normalized["chatTemplate"] = _normalize_override(data["chatTemplate"], field_name="chatTemplate")
-    normalized["lineage"] = _normalize_lineage(data["lineage"])
-    return normalized
-
-
-def _freeze_json(value: Any) -> Any:
-    if isinstance(value, dict):
-        return MappingProxyType({key: _freeze_json(child) for key, child in value.items()})
-    if isinstance(value, list):
-        return tuple(_freeze_json(child) for child in value)
-    return value
-
-
-def _thaw_json(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _thaw_json(child) for key, child in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_json(child) for child in value]
-    return value
-
-
-def _model_version_id(identity_payload: Mapping[str, Any]) -> str:
-    digest = hashlib.sha256(canonical_json_bytes(identity_payload)).hexdigest()
-    return MODEL_VERSION_URI_PREFIX + digest
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class ModelVersion:
-    """Immutable canonical model composition consumed by Product contracts.
-
-    This helper owns only the content-addressed descriptor.  TrainingRun is
-    owned by Yield and DatasetVersion is owned by Catalyst; both appear here
-    only as opaque lineage references.  LoRA rank, alpha, and target modules
-    remain in the adapter payload and are intentionally absent from this
-    descriptor.
-    """
-
-    _payload: Mapping[str, Any] = field(repr=False, compare=False)
-    _id: str = field(repr=False)
-
-    def __new__(cls, *_args: Any, **_kwargs: Any) -> "ModelVersion":
-        raise TypeError("ModelVersion instances must be created with create() or from_dict()")
-
-    @classmethod
-    def _from_normalized(cls, payload: Mapping[str, Any]) -> "ModelVersion":
-        """Build an instance after create/from_dict have completed validation."""
-
-        model_id = payload["id"]
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "_payload", _freeze_json(dict(payload)))
-        object.__setattr__(instance, "_id", model_id)
-        return instance
-
-    @classmethod
-    def create(cls, payload_without_id: Mapping[str, Any]) -> "ModelVersion":
-        data = _as_json_object(payload_without_id, "model version")
-        if "id" in data:
-            raise ValueError("ModelVersion.create expects the id field to be omitted")
-        normalized = _normalize_model_version_payload(data, require_id=False)
-        model_id = _model_version_id(normalized)
-        complete = dict(normalized)
-        complete["id"] = model_id
-        return cls._from_normalized(complete)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "ModelVersion":
-        normalized = _normalize_model_version_payload(payload, require_id=True)
-        model_id = normalized["id"]
-        identity_payload = {key: value for key, value in normalized.items() if key != "id"}
-        expected_id = _model_version_id(identity_payload)
-        if model_id != expected_id:
-            raise ValueError(f"model version id does not match its immutable content: expected {expected_id}")
-        return cls._from_normalized(normalized)
-
-    @property
-    def id(self) -> str:
-        return self._id
-
-    @property
-    def composition(self) -> str:
-        return self._payload["composition"]
-
-    def identity_payload(self) -> dict[str, Any]:
-        """Return the canonical hash preimage without the computed id."""
-
-        return {key: _thaw_json(value) for key, value in self._payload.items() if key != "id"}
-
-    def canonical_bytes(self) -> bytes:
-        return canonical_json_bytes(self.identity_payload())
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a detached JSON-compatible copy of the immutable value."""
-
-        return _thaw_json(self._payload)
 
 
 @dataclass(frozen=True)
@@ -863,15 +412,11 @@ class ArtifactStager(Protocol):
 
 
 __all__ = [
-    "ARTIFACT_MANIFEST_VERSION",
-    "ARTIFACT_SCHEMA_VERSION",
     "ARTIFACT_URI_PREFIX",
     "JCS_SAFE_INTEGER_MAX",
     "PORTABLE_DIRECTORY_MANIFEST_VERSION",
     "ArtifactDirectoryEntry",
-    "ArtifactLineage",
     "ArtifactKind",
-    "ArtifactManifest",
     "ArtifactProvider",
     "ArtifactRef",
     "ArtifactStager",

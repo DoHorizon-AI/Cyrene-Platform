@@ -22,6 +22,7 @@ tonic = { version = "0.11", features = ["transport", "tls"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+chrono = "0.4"
 cy-kernel-daemon = { path = "../../../kernel/crates/cy-kernel-daemon" }
 cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
 cy-node-agent = { path = "../../../agents/node/cy-node-agent" }

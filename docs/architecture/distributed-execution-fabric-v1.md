@@ -280,7 +280,7 @@ Runtime 更新只能创建更高 generation，并在 readiness 后切换，再 d
 ## 9. Artifact model / Artifact 模型
 
 The Artifact Plane remains separate from control. Existing `ArtifactRef` and
-`ArtifactManifest` retain identity authority. `Node != ArtifactPeer`; a Node
+`ArtifactRef` retains identity authority. `Node != ArtifactPeer`; a Node
 may advertise a Peer capability, while an object-store gateway can be a Peer
 without being a Node. v1 adds these transport records:
 
@@ -646,7 +646,7 @@ Plane 基于同一 policy scope 生成，Framework 不接触 replica、ticket �
 ### Artifact transfer
 
 - **Concept:** Provider-neutral resumable movement of existing Artifact identity.
-- **Canonical authority:** existing `ArtifactRef`/`ArtifactManifest`.
+- **Canonical authority:** the existing `ArtifactRef` contract.
 - **Current existing implementation:** `cy-artifact-transfer` provides the
   canonical Rust projection, policy-scoped source/Peer planner, scoped ticket
   boundary, HTTPS Range transfer, bounded concurrency, part/full digest

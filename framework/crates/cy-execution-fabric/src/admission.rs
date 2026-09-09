@@ -310,6 +310,7 @@ pub(crate) fn validate_assignment_payload(
         if !artifact.manifest_digest.is_empty() {
             validate_sha256(&artifact.manifest_digest, "Artifact manifest digest")?;
         }
+        crate::assignment::artifact_kind_from_proto(&artifact.artifact_kind)?;
         if !artifact.sources.is_empty() {
             if artifact.destination_peer_id.is_empty()
                 || artifact.part_sources.len() != artifact.part_digests.len()
@@ -751,7 +752,7 @@ mod tests {
         };
         let mut bad_kind = assignment(1);
         let mut input = local_artifact('b', 1);
-        input.artifact_kind = "TrainingSpec".to_string();
+        input.artifact_kind = "bad\nkind".to_string();
         bad_kind.local_artifacts.push(input);
         assert_eq!(
             validate_assignment(&expected, &bad_kind, 10_000)
@@ -799,6 +800,7 @@ mod tests {
                 replica_id: "replica-1".to_string(),
             }],
             destination_peer_id: "peer-local".to_string(),
+            artifact_kind: "generic".to_string(),
             ..Default::default()
         });
         value.local_artifacts.push(local);
@@ -824,6 +826,7 @@ mod tests {
             sources: Vec::new(),
             part_sources: Vec::new(),
             destination_peer_id: String::new(),
+            artifact_kind: "generic".to_string(),
             ..Default::default()
         };
         let legacy_replica = b"https://legacy.example/artifact";

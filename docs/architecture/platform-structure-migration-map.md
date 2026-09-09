@@ -15,7 +15,7 @@ than treating a smaller directory as evidence of lost behavior.
   predates the embedded-runtime removal and later decomposition milestones.
 - Pre-major-refactor checkpoint: `142280f79fe497301b5f8fe7121f19d2bf922a2f`
   (`refactor(core): remove embedded Python and container tooling`).
-- Current develop under audit: `dae212db419ac1e5706b0a69f429cb05d534392a`.
+- Recorded develop snapshot: `1b49673366769ce6226f8819f8741c7eed01823f`.
 
 ## Why Kernel became smaller / Kernel 变小的原因
 
@@ -28,7 +28,7 @@ The history shows intentional boundary extraction, not accidental deletion:
 3. `a7c0e66` and `dc5f073` split large contract/API/daemon files into domain
    modules; the semantic contract and tests grew while individual files shrank.
 4. `30b3d40`, `e69f74f`, and `64d6a32` replaced and then removed the duplicate
-   plugin supervisor in favor of the Kernel InstanceActor/watchdog and CES.
+   plugin supervisor in favor of the Kernel InstanceActor/watchdog.
 5. `142280f` and the subsequent contract milestones removed obsolete embedded
    Python/container and untyped legacy RPC behavior from the open core.
 
@@ -41,10 +41,10 @@ Node Agent、重复 supervisor 被移到其权威层；大型文件被拆成显�
 | Status | Evidence-backed responsibility | Current owner |
 | --- | --- | --- |
 | STILL_HERE | Kernel authority, lease/fence decisions, worker lifecycle policy, generic protocol validation | `kernel/crates/cy-kernel-api`, `cy-kernel-daemon` |
-| MOVED | Node journal/session/upgrade; local transport; sandbox client; managed process metadata | `agents/node`, `framework/cy-local-transport`, Kernel daemon |
+| MOVED | Node journal/session/upgrade; sandbox client; managed process metadata | `agents/node`, adapters, Kernel daemon |
 | SPLIT | Manifest model, semantic contract, Kernel API, daemon implementation | `contracts/rust`, `kernel/crates/cy-kernel-api`, `cy-kernel-daemon` |
 | EXTRACTED | Vendor hardware discovery and privileged sandbox execution | `adapters/hardware`, `adapters/execution` |
-| REPLACED | Duplicate plugin supervisor and untyped Agent/AI RPC | InstanceActor/watchdog, CES, versioned contracts |
+| REPLACED | Duplicate plugin supervisor and untyped Agent/AI RPC | InstanceActor/watchdog, generic Kernel contracts, and Plugin-owned endpoints |
 | DELETED_OBSOLETE | Retired `cy-plugin-supervisor`, legacy `ai_service.proto`/`agent_service.proto` surfaces | Archived migration tooling; no canonical runtime caller |
 | LOST_SUSPECTED | None | — |
 
@@ -57,7 +57,7 @@ Node Agent、重复 supervisor 被移到其权威层；大型文件被拆成显�
 | Operation | Authority ports plus daemon operation conversion/RPC; lifecycle transitions are contract-tested. |
 | Resource | `cy-resource-manager/src/lib.rs`; inventory generation, allocation and lease ownership are fenced. |
 | Lease/Fence | `cy-kernel-api/src/lease.rs`, resource manager, daemon release/revoke paths; stale fence and incomplete cleanup tests are present. |
-| Capability | `framework/crates/cy-platform-api` and CES; resolution and activation remain generic. |
+| Capability | `framework/crates/cy-platform-api`; manifest normalization and selection remain generic. |
 | Endpoint | Endpoint/grant authority is lease-bound and purged on worker loss/release. |
 | Event | Durable event store/history and `SubscribeEvents` v1/v2 projections. |
 | Replay/live handoff | `snapshot` captures the cursor before reading state; ordered replay then notifier handoff is implemented and regression-tested. |
@@ -77,8 +77,7 @@ and `BUSINESS_SEMANTICS_REMAINING_IN_KERNEL=0` are evidence-backed outcomes.
   generic protocol validation, and recovery policy.
 - Resource Manager owns inventory, allocation, lease state, and release only
   after cleanup confirmation.
-- Platform API/CES owns generic capability resolution, activation and
-  request-scoped execution projection.
+- Platform API owns generic capability manifest normalization and selection.
 - Package Runtime owns package installation/dependency preparation; it is not a
   second manifest or registry authority.
 - Contracts own versioned protocol/schema/manifests.
@@ -86,5 +85,5 @@ and `BUSINESS_SEMANTICS_REMAINING_IN_KERNEL=0` are evidence-backed outcomes.
 - Product owns bindings, policy, auth/UI, connector semantics and domain data.
 
 Kernel 只拥有通用授权、租约围栏、生命周期决策、协议校验与恢复策略；资源管理器、
-CES、Package Runtime、契约、Plugins、Product 各自保留单一权威，未发现第二 registry、
-manifest 或 runtime lifecycle owner。
+Package Runtime、契约、Plugins、Product 各自保留单一权威，未发现第二 registry、
+manifest 或 runtime lifecycle owner。Product 业务载荷只进入 Plugin 自有 Endpoint。

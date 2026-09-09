@@ -4,11 +4,9 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
 };
 
 use cy_manifest::PluginManifest;
-use cy_platform_api::WorkerActivationOptions;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -17,8 +15,8 @@ use zip::ZipArchive;
 use crate::{
     ActivationRequest, ArtifactDigest, BindingId, CleanupReport, DependencyPreparationEvidence,
     InstallationId, InstallationRecord, InstallationState, PackageId, PackageInspection,
-    PackageRuntimeError, PackageSource, PackageVersion, RuntimeGeneration, RuntimeState,
-    RuntimeStatus, VerifiedPackage, WorkerSupervisor,
+    PackageRuntimeError, PackageSource, PackageVersion, PluginServiceSupervisor, RuntimeGeneration,
+    RuntimeState, RuntimeStatus, ServiceActivationOptions, VerifiedPackage,
     dependency::DependencyPreparer,
     descriptor::{
         digest_entries, digest_file, inspect_source, unix_ms, validate_archive_paths, verify_source,
@@ -40,13 +38,13 @@ struct ActivationRecord {
     last_failure_message: Option<String>,
 }
 
-/// Durable filesystem package runtime with content-addressed cache and worker
-/// activation delegated to the canonical Platform worker supervisor.
+/// Durable filesystem package runtime with content-addressed cache and generic
+/// Plugin service supervision.
 pub struct FilesystemPackageRuntime {
     root: PathBuf,
     dependency_preparer: Arc<dyn DependencyPreparer>,
-    worker_supervisor: Mutex<Box<dyn WorkerSupervisor>>,
-    base_worker_options: WorkerActivationOptions,
+    service_supervisor: Mutex<Box<dyn PluginServiceSupervisor>>,
+    base_service_options: ServiceActivationOptions,
     lifecycle_lock: Mutex<()>,
 }
 
@@ -54,8 +52,8 @@ impl FilesystemPackageRuntime {
     pub fn open(
         root: impl Into<PathBuf>,
         dependency_preparer: Arc<dyn DependencyPreparer>,
-        worker_supervisor: Box<dyn WorkerSupervisor>,
-        base_worker_options: WorkerActivationOptions,
+        service_supervisor: Box<dyn PluginServiceSupervisor>,
+        base_service_options: ServiceActivationOptions,
     ) -> Result<Self, PackageRuntimeError> {
         let root = root.into();
         for directory in [
@@ -76,8 +74,8 @@ impl FilesystemPackageRuntime {
         let runtime = Self {
             root,
             dependency_preparer,
-            worker_supervisor: Mutex::new(worker_supervisor),
-            base_worker_options,
+            service_supervisor: Mutex::new(service_supervisor),
+            base_service_options,
             lifecycle_lock: Mutex::new(()),
         };
         runtime.recover_incomplete_transactions()?;
@@ -203,7 +201,7 @@ impl FilesystemPackageRuntime {
                 .as_ref()
                 .map_or(1, |record| record.generation.value() + 1),
         )?;
-        self.activate_worker(&request, generation)?;
+        let connection_ref = self.activate_service(&request, generation)?;
         let record = ActivationRecord {
             record_version: ACTIVATION_RECORD_VERSION,
             binding_id: request.binding_id.clone(),
@@ -215,7 +213,7 @@ impl FilesystemPackageRuntime {
             last_failure_message: None,
         };
         if let Err(error) = self.write_activation(&record) {
-            let _ = self.supervisor()?.deactivate(&request.binding_id);
+            let _ = self.service_supervisor()?.deactivate(&request.binding_id);
             return Err(error);
         }
         Ok(RuntimeStatus {
@@ -225,6 +223,7 @@ impl FilesystemPackageRuntime {
             state: RuntimeState::Running,
             failure_code: None,
             failure_message: None,
+            connection_ref: Some(connection_ref),
         })
     }
 
@@ -252,7 +251,7 @@ impl FilesystemPackageRuntime {
     pub fn deactivate(&self, binding_id: &BindingId) -> Result<RuntimeStatus, PackageRuntimeError> {
         let _guard = self.lock_lifecycle()?;
         let mut record = self.read_activation(binding_id)?;
-        self.supervisor()?.deactivate(binding_id)?;
+        self.service_supervisor()?.deactivate(binding_id)?;
         record.desired_active = false;
         record.last_failure_code = None;
         record.last_failure_message = None;
@@ -264,6 +263,7 @@ impl FilesystemPackageRuntime {
             state: RuntimeState::Stopped,
             failure_code: None,
             failure_message: None,
+            connection_ref: None,
         })
     }
 
@@ -272,7 +272,8 @@ impl FilesystemPackageRuntime {
         binding_id: &BindingId,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
         let record = self.read_activation(binding_id)?;
-        let state = self.supervisor()?.status(binding_id)?;
+        let mut supervisor = self.service_supervisor()?;
+        let state = supervisor.status(binding_id)?;
         let state = if record.desired_active && state == RuntimeState::Stopped {
             RuntimeState::Failed
         } else {
@@ -285,65 +286,8 @@ impl FilesystemPackageRuntime {
             state,
             failure_code: record.last_failure_code,
             failure_message: record.last_failure_message,
+            connection_ref: supervisor.connection_ref(binding_id)?,
         })
-    }
-
-    /// Invoke an already-supervised worker through the existing canonical
-    /// worker protocol. Product adapters should normally expose this through
-    /// CES rather than leaking this internal seam into Product DTOs.
-    pub fn invoke(
-        &self,
-        binding_id: &BindingId,
-        capability: &str,
-        method: &str,
-        payload: &[u8],
-        timeout: Duration,
-    ) -> Result<Vec<u8>, PackageRuntimeError> {
-        self.supervisor()?
-            .invoke(binding_id, capability, method, payload, timeout)
-    }
-
-    pub fn invoke_typed(
-        &self,
-        binding_id: &BindingId,
-        capability: &str,
-        method: &str,
-        payload: &[u8],
-        timeout: Duration,
-    ) -> Result<crate::RuntimeInvocationResult, PackageRuntimeError> {
-        self.supervisor()?
-            .invoke_typed(binding_id, capability, method, payload, timeout)
-    }
-
-    pub fn subscribe(
-        &self,
-        binding_id: &BindingId,
-        capability: &str,
-        filter_payload: &[u8],
-        timeout: Duration,
-    ) -> Result<String, PackageRuntimeError> {
-        self.supervisor()?
-            .subscribe(binding_id, capability, filter_payload, timeout)
-    }
-
-    pub fn next_event(
-        &self,
-        binding_id: &BindingId,
-        subscription_id: &str,
-        timeout: Duration,
-    ) -> Result<Option<crate::RuntimeApplicationEvent>, PackageRuntimeError> {
-        self.supervisor()?
-            .next_event(binding_id, subscription_id, timeout)
-    }
-
-    pub fn unsubscribe(
-        &self,
-        binding_id: &BindingId,
-        subscription_id: &str,
-        timeout: Duration,
-    ) -> Result<(), PackageRuntimeError> {
-        self.supervisor()?
-            .unsubscribe(binding_id, subscription_id, timeout)
     }
 
     pub fn upgrade(
@@ -375,7 +319,7 @@ impl FilesystemPackageRuntime {
         binding_id: &BindingId,
     ) -> Result<(), PackageRuntimeError> {
         let _guard = self.lock_lifecycle()?;
-        if self.supervisor()?.status(binding_id)? == RuntimeState::Running {
+        if self.service_supervisor()?.status(binding_id)? == RuntimeState::Running {
             return Err(PackageRuntimeError::new(
                 "BINDING_RUNNING",
                 format!("deactivate {binding_id} before removing its runtime reference"),
@@ -435,12 +379,12 @@ impl FilesystemPackageRuntime {
             .filter(|record| record.desired_active)
             .map(|record| record.binding_id.clone())
             .collect::<BTreeSet<_>>();
-        let active = self.supervisor()?.active_bindings()?;
+        let active = self.service_supervisor()?.active_bindings()?;
         for orphan in active.difference(&desired) {
-            self.supervisor()?.deactivate(orphan)?;
+            self.service_supervisor()?.deactivate(orphan)?;
         }
         report.orphan_runtimes = self
-            .supervisor()?
+            .service_supervisor()?
             .active_bindings()?
             .difference(&desired)
             .count();
@@ -506,7 +450,7 @@ impl FilesystemPackageRuntime {
             .map(|record| record.binding_id)
             .collect::<BTreeSet<_>>();
         Ok(self
-            .supervisor()?
+            .service_supervisor()?
             .active_bindings()?
             .difference(&desired)
             .count())
@@ -712,11 +656,11 @@ impl FilesystemPackageRuntime {
         result
     }
 
-    fn activate_worker(
+    fn activate_service(
         &self,
         request: &ActivationRequest,
         generation: RuntimeGeneration,
-    ) -> Result<(), PackageRuntimeError> {
+    ) -> Result<String, PackageRuntimeError> {
         let record = self.get_installation(&request.installation_id)?;
         let payload = self
             .installation_path(&request.installation_id)
@@ -725,14 +669,10 @@ impl FilesystemPackageRuntime {
         let manifest = read_platform_manifest(&payload)?;
         validate_installed_manifest_record(&record, &manifest)?;
         let dependency_root = self.dependency_path(&record.dependencies.lock_digest);
-        let mut options = self.base_worker_options.clone();
+        let mut options = self.base_service_options.clone();
         options.working_dir = Some(payload.clone());
-        options.python_path.push(payload.join("src"));
-        for path in &record.dependencies.python_paths {
-            options.python_path.push(dependency_root.join(path));
-        }
-        if let Some(executable) = &record.dependencies.python_executable {
-            options.python_executable = Some(
+        if let Some(executable) = &record.dependencies.runtime_executable {
+            options.runtime_executable = Some(
                 dependency_root
                     .join(executable)
                     .to_string_lossy()
@@ -744,10 +684,15 @@ impl FilesystemPackageRuntime {
             "CYRENE_CAPABILITY_BINDING_ID".to_string(),
             request.binding_id.to_string(),
         );
-        options
-            .environment
-            .insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
-        self.supervisor()?.activate(
+        options.environment.insert(
+            "CYRENE_PACKAGE_ROOT".to_string(),
+            payload.to_string_lossy().to_string(),
+        );
+        options.environment.insert(
+            "CYRENE_DEPENDENCY_ROOT".to_string(),
+            dependency_root.to_string_lossy().to_string(),
+        );
+        self.service_supervisor()?.activate(
             &request.binding_id,
             &request.installation_id,
             &manifest,
@@ -767,21 +712,24 @@ impl FilesystemPackageRuntime {
         self.get_installation(installation_id)?;
         let current = self.read_activation(binding_id)?;
         let generation = RuntimeGeneration::new(current.generation.value() + 1)?;
-        self.supervisor()?.deactivate(binding_id)?;
+        self.service_supervisor()?.deactivate(binding_id)?;
         let request = ActivationRequest {
             binding_id: binding_id.clone(),
             installation_id: installation_id.clone(),
             environment: environment.clone(),
         };
-        if let Err(error) = self.activate_worker(&request, generation) {
-            let restore = ActivationRequest {
-                binding_id: binding_id.clone(),
-                installation_id: current.installation_id.clone(),
-                environment,
-            };
-            let _ = self.activate_worker(&restore, current.generation);
-            return Err(error);
-        }
+        let connection_ref = match self.activate_service(&request, generation) {
+            Ok(connection_ref) => connection_ref,
+            Err(error) => {
+                let restore = ActivationRequest {
+                    binding_id: binding_id.clone(),
+                    installation_id: current.installation_id.clone(),
+                    environment,
+                };
+                let _ = self.activate_service(&restore, current.generation);
+                return Err(error);
+            }
+        };
         let record = ActivationRecord {
             record_version: ACTIVATION_RECORD_VERSION,
             binding_id: binding_id.clone(),
@@ -793,7 +741,7 @@ impl FilesystemPackageRuntime {
             last_failure_message: None,
         };
         if let Err(error) = self.write_activation(&record) {
-            let _ = self.supervisor()?.deactivate(binding_id);
+            let _ = self.service_supervisor()?.deactivate(binding_id);
             return Err(error);
         }
         let _ = rollback;
@@ -804,6 +752,7 @@ impl FilesystemPackageRuntime {
             state: RuntimeState::Running,
             failure_code: None,
             failure_message: None,
+            connection_ref: Some(connection_ref),
         })
     }
 
@@ -844,22 +793,12 @@ impl FilesystemPackageRuntime {
                 "prepared dependency evidence differs from the installation record",
             ));
         }
-        if let Some(executable) = &evidence.python_executable
+        if let Some(executable) = &evidence.runtime_executable
             && !dependency_root.join(executable).is_file()
         {
             return Err(PackageRuntimeError::new(
                 "DEPENDENCY_RUNTIME_CORRUPT",
-                "prepared Python executable is missing",
-            ));
-        }
-        if evidence
-            .python_paths
-            .iter()
-            .any(|path| !dependency_root.join(path).exists())
-        {
-            return Err(PackageRuntimeError::new(
-                "DEPENDENCY_RUNTIME_CORRUPT",
-                "prepared Python path is missing",
+                "prepared runtime executable is missing",
             ));
         }
         Ok(())
@@ -897,11 +836,13 @@ impl FilesystemPackageRuntime {
         write_json_atomic(&self.activation_path(&record.binding_id), record)
     }
 
-    fn supervisor(&self) -> Result<MutexGuard<'_, Box<dyn WorkerSupervisor>>, PackageRuntimeError> {
-        self.worker_supervisor.lock().map_err(|_| {
+    fn service_supervisor(
+        &self,
+    ) -> Result<MutexGuard<'_, Box<dyn PluginServiceSupervisor>>, PackageRuntimeError> {
+        self.service_supervisor.lock().map_err(|_| {
             PackageRuntimeError::new(
-                "WORKER_SUPERVISOR_UNAVAILABLE",
-                "worker supervisor lock is poisoned",
+                "PLUGIN_SUPERVISOR_UNAVAILABLE",
+                "Plugin service supervisor lock is poisoned",
             )
         })
     }
@@ -1000,15 +941,18 @@ fn validate_installed_manifest_record(
 fn validate_relative_evidence_paths(
     evidence: &DependencyPreparationEvidence,
 ) -> Result<(), PackageRuntimeError> {
-    let paths = evidence
-        .python_executable
-        .iter()
-        .chain(evidence.python_paths.iter());
-    if paths.clone().any(|path| {
-        path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
+    if evidence.runtime_executable.iter().any(|path| {
+        path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::CurDir
+                )
+            })
     }) {
         return Err(PackageRuntimeError::new(
             "DEPENDENCY_EVIDENCE_INVALID",

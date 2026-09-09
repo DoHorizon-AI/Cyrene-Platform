@@ -1,71 +1,41 @@
-# CYRENE Core
+# CYRENE Platform
 
-CYRENE Core is the Rust host runtime and framework-contract repository for the
-CYRENE AI software matrix. It is being developed privately first and is intended
-to become the open-source trust base later.
+Cyrene-Platform is the reusable Rust Kernel, node/runtime agents, generic
+control-plane framework, and language-neutral contract repository for the
+CYRENE software family.
 
-This repository deliberately contains no Catalyst, Yield, Reactor, Exchange,
-Navigator, or Echo product logic. Those products and other closed plugins live
-in the private advanced-services repository and depend on versioned contracts
-from this repository.
-
-All platform development converges through the standard branch model:
-
-- `develop` is the active integration branch for all platform features, SDKs, and contracts. Pull requests merge to `develop` after passing CI and boundary governance checks.
-- `main` is the protected release branch. Releases and immutable tags are cut strictly from `main` after verified staging.
+It contains no Catalyst, Yield, Reactor, Exchange, Navigator, Echo, or Plugin
+business logic. Each Product and reusable capability lives in its own owning
+repository and consumes versioned Platform contracts.
 
 ## Repository layout
 
-| Directory    | Responsibility                                                                                             |
-| ------------ | ---------------------------------------------------------------------------------------------------------- |
-| `kernel/`         | Rust supervisor, local transport, node agent, resource observation, sandbox and process lifecycle boundary |
-| `framework/`      | Generic execution services and quarantined v0 compatibility crates                                        |
-| `contracts/`      | Protobuf, JSON Schema, canonical manifests, and generated protocol crates                                  |
-| `sdk/`            | Language client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`)                        |
-| `infrastructure/` | Generic systemd units for Platform-owned daemons and adapter hosts                                       |
-| `tooling/`        | Platform-local governance, CI boundary guards, code generation, and runtime bootstrap                    |
-| `examples/`       | Non-production plugin integration examples                                                                 |
-| `docs/`           | Architecture, protocol, and repository-boundary decisions                                                  |
+| Directory | Responsibility |
+| --- | --- |
+| `kernel/` | Node-local semantic authority, Lease/Fence, lifecycle, and authenticated adapter clients |
+| `agents/` | Generic Node and Runtime agents |
+| `adapters/` | Platform-owned sandbox and hardware adapter hosts |
+| `framework/` | Generic execution, workspace, Artifact, and Plugin control-plane services |
+| `contracts/` | Kernel/control Protobuf, generic JSON Schemas, and Rust projections |
+| `sdk/` | Provider-neutral Artifact and Platform client SDKs |
+| `infrastructure/` | systemd units for Platform-owned daemons |
+| `tooling/` | Repository-local CI, generation, and boundary checks |
+| `docs/` | Normative architecture and operating guidance |
 
+Product deployment templates, Product manifests, capability payload schemas,
+Plugin repository manifests, ecosystem catalogs, and compatibility snapshots
+are external. Adding a Product or Plugin method must not require a Platform
+source change.
 
-The former Rust control plane contained service-level training, runtime,
-artifact, and serving implementations, so it is preserved in the private
-advanced-services migration archive rather than published as core. The target
-framework may evolve toward Kotlin/JVM, but it must continue to consume the
-language-neutral contracts in `contracts/`; business behavior must not move
-back into the kernel.
+## Branches
 
-service.json describes a first-party service bundle. plugin.toml describes an
-installable component inside the signed package; these are metadata levels, not
-two package or installation protocols.
+`develop` is the reviewed integration branch and `main` is the protected release
+branch. Current repository policy and CI configuration are authoritative.
 
-Product deployment templates, edge configuration, product component catalogs,
-and compatibility snapshots are owned by their Product or integration
-repository. Adding or changing a Product must not require a Platform source
-change.
+## Key contracts
 
-## Hardware boundary
-
-The Rust Kernel keeps only node-local leases, fencing, lifecycle decisions and
-generic local-adapter clients. Privileged cgroup/device/process execution runs
-in the separately supervised `adapters/execution/sandboxd`; vendor discovery,
-telemetry, device-node enumeration, and C ABI loading run in separate hardware
-adapter processes under `adapters/hardware/`. CUDA, ROCm, Ascend, model
-execution, training, and quantization stay outside the Kernel. Kernel and all
-local adapters exchange versioned Protobuf frames over UDS; a C ABI may exist
-only inside an adapter process, never as a public Kernel API.
-
-## Current checkpoint
-
-This repository excludes Product lifecycle state, concrete capability
-implementations, Product deployment assets, generated build output, and local
-tooling state. Implemented v0 compatibility crates remain clearly quarantined
-and build-tested until their published migration gates complete.
-
-## Documentation & Authoritative Contracts
-
-- **Authoritative Substrate API Specification**: [`docs/API.md`](docs/API.md)
-- **Platform Contract Index**: [`docs/api/CAPABILITY_INDEX.md`](docs/api/CAPABILITY_INDEX.md)
-- **Architecture Blueprint**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- **Repository Boundaries**: [`docs/REPOSITORY_BOUNDARIES.md`](docs/REPOSITORY_BOUNDARIES.md)
-- **Contributing & Governance**: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- [Platform clean boundary](docs/governance/platform-clean-boundary.md)
+- [Kernel semantic contract](docs/contracts/kernel-semantic-contract-v1.md)
+- [Platform contract index](docs/api/CAPABILITY_INDEX.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Repository boundaries](docs/REPOSITORY_BOUNDARIES.md)

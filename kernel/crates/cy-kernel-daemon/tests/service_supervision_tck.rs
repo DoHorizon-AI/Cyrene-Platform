@@ -409,6 +409,8 @@ async fn test_generic_service_endpoint_lifecycle() {
             port: Some(15031),
             path: Some("/api/v1".to_string()),
             attributes: attrs,
+            connection_ref: "http://127.0.0.1/direct".to_string(),
+            credential_ref: None,
         });
 
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
@@ -719,6 +721,8 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
             port: Some(8080),
             path: None,
             attributes: attrs,
+            connection_ref: "http://127.0.0.1/direct".to_string(),
+            credential_ref: None,
         })
         .with_restart_policy(RestartPolicy::OnFailure {
             max_retries: Some(3),
@@ -825,6 +829,8 @@ async fn test_generic_service_stale_endpoint_protection_across_generations() {
             port: Some(9090),
             path: None,
             attributes: BTreeMap::new(),
+            connection_ref: "grpc://127.0.0.1/direct".to_string(),
+            credential_ref: Some("secret.test.endpoint".to_string()),
         })
         .with_restart_policy(RestartPolicy::OnFailure {
             max_retries: Some(2),

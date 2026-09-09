@@ -2,7 +2,8 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    net::TcpStream,
+    path::Path,
     sync::{
         Arc, Barrier,
         atomic::{AtomicUsize, Ordering},
@@ -14,58 +15,55 @@ use std::{
 use cy_package_runtime::{
     ActivationRequest, ArtifactDigest, BindingId, DependencyPreparationEvidence,
     DependencyPreparer, FilesystemPackageRuntime, InstallationState, PackageId,
-    PackageRuntimeError, PackageSource, PackageVersion, PlatformWorkerSupervisor, RuntimeState,
+    PackageRuntimeError, PackageSource, PackageVersion, ProcessPluginServiceSupervisor,
+    RuntimeState, ServiceActivationOptions,
 };
-use cy_platform_api::WorkerActivationOptions;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
-const PACKAGE_ID: &str = "com.cyrene.tck.package-worker";
+const PACKAGE_ID: &str = "com.cyrene.tck.package-service";
 const CAPABILITY_ID: &str = "test.capability.v1";
 const LOCK: &[u8] = b"typing-extensions==4.12.2\n";
 
-const WORKER_TEMPLATE: &str = r#"from __future__ import annotations
+const DIRECT_RUNTIME: &str = r#"from __future__ import annotations
 
+import argparse
 import json
-import os
+import signal
+import socket
+import threading
 
-from cyrene_worker_shim.cyrene_worker import CyreneWorker, run_worker_stdio
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--entrypoint", required=True)
+    parser.add_argument("--capability", required=True)
+    parser.add_argument("--interface-version", required=True)
+    parser.add_argument("--listen", required=True)
+    options = parser.parse_args()
 
-class PackageWorker(CyreneWorker):
-    def plugin_id(self):
-        return "com.cyrene.tck.package-worker"
-
-    def plugin_version(self):
-        return "__VERSION__"
-
-    def api_version(self):
-        return "1.0"
-
-    def declared_capabilities(self):
-        return ["test.capability.v1"]
-
-    def on_invoke(self, capability, action, payload):
-        request = json.loads(payload.decode("utf-8")) if payload else {}
-        return True, json.dumps({
-            "binding_id": os.environ.get("CYRENE_CAPABILITY_BINDING_ID"),
-            "version": "__VERSION__",
-            "value": request.get("value"),
-        }).encode("utf-8")
-
-    def on_subscribe(self, subscription_id, capability, filter_payload):
-        emitter = self.application_event_emitter(subscription_id)
-        emitter.emit("synthetic", json.dumps({
-            "binding_id": os.environ.get("CYRENE_CAPABILITY_BINDING_ID"),
-            "filter": filter_payload.decode("utf-8"),
-        }).encode("utf-8"))
-        return None
+    host, _separator, port = options.listen.rpartition(":")
+    listener = socket.socket()
+    listener.bind((host, int(port)))
+    listener.listen()
+    actual_port = listener.getsockname()[1]
+    print(json.dumps({
+        "event": "direct_plugin_ready",
+        "connection_ref": f"grpc://{host}:{actual_port}",
+        "capability": options.capability,
+        "interface_version": options.interface_version,
+    }), flush=True)
+    stopped = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_args: stopped.set())
+    signal.signal(signal.SIGINT, lambda *_args: stopped.set())
+    stopped.wait()
+    listener.close()
 
 
 if __name__ == "__main__":
-    run_worker_stdio(PackageWorker())
+    main()
 "#;
 
 #[derive(Clone)]
@@ -110,38 +108,21 @@ impl DependencyPreparer for FixtureDependencyPreparer {
             prepared_at_unix_ms: 1,
             lock_digest: lock_digest.clone(),
             runtime_digest: digest_bytes(b"generic-tck-runtime"),
-            python_executable: None,
-            python_paths: Vec::new(),
+            runtime_executable: None,
         })
     }
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
-fn worker_options() -> WorkerActivationOptions {
-    let root = workspace_root();
-    WorkerActivationOptions {
-        python_executable: Some(if cfg!(windows) {
+fn service_options() -> ServiceActivationOptions {
+    ServiceActivationOptions {
+        runtime_executable: Some(if cfg!(windows) {
             "python".to_string()
         } else {
             "python3".to_string()
         }),
-        python_path: vec![
-            root.join("sdk/python"),
-            root.join("sdk/python/cyrene_worker_shim"),
-        ],
-        handshake_timeout: Duration::from_secs(5),
-        default_invoke_timeout: Duration::from_secs(5),
-        ..WorkerActivationOptions::default()
+        startup_timeout: Duration::from_secs(5),
+        shutdown_grace_period: Duration::from_secs(1),
+        ..ServiceActivationOptions::default()
     }
 }
 
@@ -149,8 +130,8 @@ fn open_runtime(root: &Path, preparer: FixtureDependencyPreparer) -> FilesystemP
     FilesystemPackageRuntime::open(
         root,
         Arc::new(preparer),
-        Box::new(PlatformWorkerSupervisor::default()),
-        worker_options(),
+        Box::new(ProcessPluginServiceSupervisor::default()),
+        service_options(),
     )
     .unwrap()
 }
@@ -168,18 +149,27 @@ fn build_package_with_entry(
     let manifest = serde_json::to_vec_pretty(&json!({
         "schemaVersion": 1,
         "id": PACKAGE_ID,
-        "name": "Generic Package TCK Worker",
+        "name": "Generic Package TCK Service",
         "version": version,
         "kind": "capability-plugin",
         "capabilities": [CAPABILITY_ID],
         "methods": [{
             "name": "echo",
             "interfaceVersion": "1",
-            "executionMode": "worker"
+            "executionMode": "service"
         }],
         "runtime": {
             "language": "python",
-            "entrypoint": "package_worker:PackageWorker"
+            "entrypoint": "package_service:PackageService",
+            "protocol": "cyrene.plugin.runtime.v1.DirectPluginRuntime",
+            "launch": {
+                "executable": "prepared-runtime",
+                "args": [
+                    "src/cyrene_plugin_runtime/server.py",
+                    "--entrypoint",
+                    "package_service:PackageService"
+                ]
+            }
         }
     }))
     .unwrap();
@@ -191,13 +181,21 @@ fn build_package_with_entry(
         ("plugin.manifest.json".to_string(), manifest),
         (
             "pyproject.toml".to_string(),
-            format!("[project]\nname = \"generic-tck-worker\"\nversion = \"{version}\"\n")
+            format!("[project]\nname = \"generic-tck-service\"\nversion = \"{version}\"\n")
                 .into_bytes(),
         ),
         ("requirements.lock".to_string(), LOCK.to_vec()),
         (
-            "src/package_worker.py".to_string(),
-            WORKER_TEMPLATE.replace("__VERSION__", version).into_bytes(),
+            "src/package_service.py".to_string(),
+            b"class PackageService:\n    pass\n".to_vec(),
+        ),
+        (
+            "src/cyrene_plugin_runtime/__init__.py".to_string(),
+            Vec::new(),
+        ),
+        (
+            "src/cyrene_plugin_runtime/server.py".to_string(),
+            DIRECT_RUNTIME.as_bytes().to_vec(),
         ),
     ]);
     if let Some((name, content, _)) = special_entry {
@@ -242,7 +240,7 @@ fn build_package_with_entry(
                 "digest": artifact_digest.as_str(),
                 "format": "zip"
             },
-            "entrypoint": "package_worker:PackageWorker"
+            "entrypoint": "package_service:PackageService"
         },
         "dependencies": {"lock": {
             "status": "LOCKED",
@@ -341,98 +339,50 @@ fn generic_package_runtime_tck() {
     );
     let main = BindingId::new("generic-main").unwrap();
     let secondary = BindingId::new("generic-secondary").unwrap();
-    runtime
+    let main_status = runtime
         .activate(ActivationRequest {
             binding_id: main.clone(),
             installation_id: installation_v1.installation_id.clone(),
             environment: BTreeMap::new(),
         })
         .unwrap();
-    runtime
+    let secondary_status = runtime
         .activate(ActivationRequest {
             binding_id: secondary.clone(),
             installation_id: installation_v1.installation_id.clone(),
             environment: BTreeMap::new(),
         })
         .unwrap();
+    assert_eq!(main_status.state, RuntimeState::Running);
+    assert_eq!(secondary_status.state, RuntimeState::Running);
+    let main_connection = main_status.connection_ref.as_deref().unwrap();
+    let secondary_connection = secondary_status.connection_ref.as_deref().unwrap();
+    assert_ne!(main_connection, secondary_connection);
+    assert_connection_is_reachable(main_connection);
+    assert_connection_is_reachable(secondary_connection);
     assert_eq!(
-        runtime.runtime_status(&main).unwrap().state,
-        RuntimeState::Running
+        runtime
+            .runtime_status(&main)
+            .unwrap()
+            .connection_ref
+            .as_deref(),
+        Some(main_connection)
     );
-    assert_eq!(
-        runtime.runtime_status(&secondary).unwrap().state,
-        RuntimeState::Running
-    );
-    let main_result: serde_json::Value = serde_json::from_slice(
-        &runtime
-            .invoke(
-                &main,
-                CAPABILITY_ID,
-                "echo",
-                br#"{"value":"main"}"#,
-                Duration::from_secs(2),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    let secondary_result: serde_json::Value = serde_json::from_slice(
-        &runtime
-            .invoke(
-                &secondary,
-                CAPABILITY_ID,
-                "echo",
-                br#"{"value":"secondary"}"#,
-                Duration::from_secs(2),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(main_result["binding_id"], "generic-main");
-    assert_eq!(main_result["value"], "main");
-    assert_eq!(secondary_result["binding_id"], "generic-secondary");
-    assert_eq!(secondary_result["value"], "secondary");
-    let subscription_id = runtime
-        .subscribe(&main, CAPABILITY_ID, b"main-filter", Duration::from_secs(2))
-        .unwrap();
-    let event = runtime
-        .next_event(&main, &subscription_id, Duration::from_secs(2))
-        .unwrap()
-        .unwrap();
-    let event_payload: serde_json::Value = serde_json::from_slice(&event.payload).unwrap();
-    assert_eq!(event.event_type, "synthetic");
-    assert_eq!(event_payload["binding_id"], "generic-main");
-    assert_eq!(event_payload["filter"], "main-filter");
-    runtime
-        .unsubscribe(&main, &subscription_id, Duration::from_secs(2))
-        .unwrap();
 
     let upgraded = runtime
         .upgrade(&main, &installation_v2.installation_id, BTreeMap::new())
         .unwrap();
     assert_eq!(upgraded.generation.value(), 2);
-    let upgraded_result: serde_json::Value = serde_json::from_slice(
-        &runtime
-            .invoke(&main, CAPABILITY_ID, "echo", b"{}", Duration::from_secs(2))
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(upgraded_result["version"], "1.1.0");
-    let secondary_still_v1: serde_json::Value = serde_json::from_slice(
-        &runtime
-            .invoke(
-                &secondary,
-                CAPABILITY_ID,
-                "echo",
-                b"{}",
-                Duration::from_secs(2),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(secondary_still_v1["version"], "1.0.0");
+    assert_eq!(upgraded.installation_id, installation_v2.installation_id);
+    assert_connection_is_reachable(upgraded.connection_ref.as_deref().unwrap());
+    assert_eq!(
+        runtime.runtime_status(&secondary).unwrap().installation_id,
+        installation_v1.installation_id
+    );
     let rolled_back = runtime.rollback(&main, BTreeMap::new()).unwrap();
     assert_eq!(rolled_back.installation_id, installation_v1.installation_id);
     assert_eq!(rolled_back.generation.value(), 3);
+    assert_connection_is_reachable(rolled_back.connection_ref.as_deref().unwrap());
 
     drop(runtime);
     let restarted = open_runtime(&runtime_root, FixtureDependencyPreparer::successful());
@@ -552,6 +502,13 @@ fn rejects_corruption_traversal_absolute_paths_and_symlinks() {
         })
         .unwrap_err();
     assert_eq!(error.code, "INSTALLATION_CORRUPT");
+}
+
+fn assert_connection_is_reachable(connection_ref: &str) {
+    let address = connection_ref
+        .strip_prefix("grpc://")
+        .expect("TCK runtime must publish a gRPC connection descriptor");
+    TcpStream::connect(address).expect("supervised Plugin endpoint must accept connections");
 }
 
 fn digest_entries(entries: &BTreeMap<String, Vec<u8>>) -> ArtifactDigest {

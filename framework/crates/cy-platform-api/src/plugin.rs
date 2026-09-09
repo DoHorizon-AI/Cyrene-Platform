@@ -649,10 +649,7 @@ fn allowed_modes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cy_manifest::{
-        CapabilityDescriptor, CapabilityInterfaceVersion, Edition, PluginCapabilitiesManifest,
-        PluginDependencies, PluginMetadata, PluginPackage, RestartPolicy,
-    };
+    use cy_manifest::{CapabilityDescriptor, CapabilityInterfaceVersion, PluginMetadata};
 
     fn manifest(
         id: &str,
@@ -666,33 +663,9 @@ mod tests {
                 id: id.to_string(),
                 name: id.to_string(),
                 version: version.to_string(),
-                api_version: "1.0".to_string(),
-                kind: "service".to_string(),
-                edition: Edition::Community,
                 runtime: None,
-                license_gate: false,
-                entrypoint: None,
-                description: None,
-                author: None,
-                license: None,
-                source_target: None,
-                status: None,
-                protocol_version: None,
-                scope: None,
-                restart_policy: RestartPolicy::Never,
+                launch: None,
             },
-            capabilities: PluginCapabilitiesManifest::default(),
-            dependencies: PluginDependencies::default(),
-            components: Vec::new(),
-            launch: None,
-            permissions: None,
-            resources: None,
-            package: Some(PluginPackage {
-                sha256: Some("legacy-package-digest".to_string()),
-                signature: None,
-                target_os: Vec::new(),
-                target_arch: Vec::new(),
-            }),
             capability_descriptors: vec![
                 CapabilityDescriptor::new(
                     CapabilityId::new(capability).unwrap(),

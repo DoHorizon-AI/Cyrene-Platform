@@ -116,7 +116,7 @@ impl HttpAcquisitionProvider {
                     uri: format!("artifact://sha256/{digest_hex}"),
                     digest: format!("sha256:{digest_hex}"),
                     size_bytes,
-                    kind: ArtifactKind::Generic,
+                    kind: ArtifactKind::generic(),
                     manifest_digest: None,
                 },
             })

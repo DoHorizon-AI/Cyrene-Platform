@@ -71,6 +71,8 @@ fn endpoint(provider: &Identity) -> Endpoint {
         schema_id: "cyrene.endpoint.echo.v1".to_string(),
         capabilities: Vec::new(),
         public_attributes: BTreeMap::new(),
+        connection_ref: "uds://runtime/worker-1".to_string(),
+        credential_ref: Some("secret.endpoint.worker.one".to_string()),
     }
 }
 
@@ -199,6 +201,46 @@ fn endpoint_grant_requires_both_grant_and_lease_authority() {
         1_000
     ));
     assert!(!grant.authorizes(&grant.endpoint, &grant.grantee, &lease, 1_500));
+}
+
+#[test]
+fn endpoint_descriptor_is_capability_neutral_and_direct() {
+    let provider = identity("provider-1", 1);
+    let mut model_endpoint = endpoint(&provider);
+    model_endpoint.capabilities = vec![Capability {
+        id: "model.provider".to_string(),
+        revision: 1,
+        properties: BTreeMap::new(),
+    }];
+    let mut message_endpoint = endpoint(&provider);
+    message_endpoint.identity = identity("endpoint-2", 1);
+    message_endpoint.capabilities = vec![Capability {
+        id: "message.connector".to_string(),
+        revision: 1,
+        properties: BTreeMap::new(),
+    }];
+
+    model_endpoint.validate().unwrap();
+    message_endpoint.validate().unwrap();
+    assert_eq!(model_endpoint.transport, message_endpoint.transport);
+    assert_eq!(
+        model_endpoint.connection_ref,
+        message_endpoint.connection_ref
+    );
+
+    let mut missing_connection = model_endpoint.clone();
+    missing_connection.connection_ref.clear();
+    assert_eq!(
+        missing_connection.validate().unwrap_err().reason_code,
+        "TEXT_INVALID"
+    );
+
+    let mut inline_credential = message_endpoint;
+    inline_credential.credential_ref = Some("raw bearer token".to_string());
+    assert_eq!(
+        inline_credential.validate().unwrap_err().reason_code,
+        "NAMESPACED_ID_INVALID"
+    );
 }
 
 #[test]

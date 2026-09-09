@@ -68,10 +68,7 @@ def test_repository_policy_matches_every_direct_python_sdk() -> None:
 
     assert {package.name for package in packages} == {
         "cyrene-artifacts",
-        "cyrene-capability-client",
-        "cyrene-environment",
         "cyrene-preflight",
-        "cyrene-worker-shim",
     }
 
 
@@ -108,6 +105,9 @@ def test_build_packages_verifies_wheel_and_sdist_metadata(tmp_path: Path) -> Non
 def test_release_workflow_preserves_candidates_without_publishing_registry() -> None:
     workflow = (PLATFORM_ROOT / ".github/workflows/prepare-release.yml").read_text(encoding="utf-8")
 
+    assert "sdk/python/cyrene_artifacts" in workflow
+    assert "sdk/python/cyrene_preflight" in workflow
+    assert "cyrene_capability_client" not in workflow
     assert "tooling/release/build_python_sdks.py" in workflow
     assert "python -m twine check --strict release-dist/*" in workflow
     assert "actions/upload-artifact@v4" in workflow

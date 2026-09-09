@@ -42,7 +42,6 @@ struct DescriptorCapability {
 #[derive(Debug, Deserialize)]
 struct DescriptorImplementation {
     artifact: DescriptorArtifact,
-    entrypoint: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,7 +104,6 @@ pub(crate) fn inspect_source(
             archive_digest: ArtifactDigest::new(descriptor.integrity.archive_digest)?,
             dependency_lock_digest: ArtifactDigest::new(descriptor.dependencies.lock.digest)?,
             capabilities: vec![CapabilityId::new(descriptor.capability.id)?],
-            entrypoint: descriptor.implementation.entrypoint,
         },
         descriptor_bytes,
         lock_reference: descriptor.dependencies.lock.reference,
@@ -290,12 +288,6 @@ fn validate_descriptor(descriptor: &PackageDescriptor) -> Result<(), PackageRunt
     ArtifactDigest::new(descriptor.integrity.archive_digest.clone())?;
     ArtifactDigest::new(descriptor.dependencies.lock.digest.clone())?;
     validate_entry_name(&descriptor.dependencies.lock.reference)?;
-    if descriptor.implementation.entrypoint.trim().is_empty() {
-        return Err(PackageRuntimeError::new(
-            "DESCRIPTOR_INVALID",
-            "implementation entrypoint is required",
-        ));
-    }
     Ok(())
 }
 

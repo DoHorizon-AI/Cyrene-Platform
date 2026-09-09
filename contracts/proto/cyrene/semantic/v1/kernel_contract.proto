@@ -175,6 +175,11 @@ message Endpoint {
   string schema_id = 5;
   repeated Capability capabilities = 6;
   map<string, string> public_attributes = 7;
+  // Opaque connection material interpreted only by the Product-side direct
+  // transport client (for example a UDS name or service-discovery reference).
+  string connection_ref = 8;
+  // Reference to a secret or delegated credential; never a secret value.
+  string credential_ref = 9;
 }
 
 message EndpointGrant {

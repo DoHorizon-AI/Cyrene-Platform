@@ -32,7 +32,10 @@
         "digest": { "$ref": "#/$defs/digest" },
         "size_bytes": { "type": "integer", "minimum": 1 },
         "kind": {
-          "enum": ["generic", "model", "dataset", "checkpoint", "training_spec", "metrics", "merged", "quantized", "report"]
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "manifest_digest": { "$ref": "#/$defs/digest" }
       }

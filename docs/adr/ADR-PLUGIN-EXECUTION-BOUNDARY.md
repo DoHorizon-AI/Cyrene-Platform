@@ -2,48 +2,28 @@
 
 - Status: Approved / Normative
 - Date: 2026-08-10
-- Supersedes: ADR-PLUGIN-RUNTIME section 2.1A for installable business plugins
+- Updated: 2026-09-09
 
 ## Decision
 
-All installable business plugins run outside the Rust Kernel process. The
-supported manifest runtimes are:
+Installable business Plugins run outside Platform and Kernel processes. The
+Plugin package owns its language runtime adapter, direct data-plane protocol,
+payload contracts, and entrypoint. Platform owns verified installation,
+compatibility selection, process lifecycle, health, permissions, and an opaque
+`connection_ref`.
 
-- subprocess-python;
-- subprocess-jvm;
-- service.
-
-Local subprocess plugins use the existing zero-port stdio protocol as the
-mandatory baseline. UDS or platform-specific local transports may be added
-later without changing the lifecycle contract.
-
-In-process Rust code is permitted only for pure-safe Kernel mechanisms such as
-state machines, contract validation, and local transport framing. Privileged
-cgroup enforcement and pidfd lifecycle control belong to sandboxd. It is not
-an installable plugin runtime and cannot be selected through plugin.toml.
-Vendor hardware adapters are governed by
-[ADR-HARDWARE-ADAPTER-BOUNDARY](ADR-HARDWARE-ADAPTER-BOUNDARY.md) and always
-run outside the Kernel process.
-
-The Core repository must not link PyO3, PyTorch, vLLM, CUDA/ROCm compute
-runtimes, or model execution libraries. Python and JVM business code remains in
-out-of-process workers owned by the advanced-services or third-party plugin
-repository.
+A managed service package supplies a language-neutral launch command. Platform
+passes only generic readiness arguments and never imports a Python module,
+loads a JVM/.NET assembly, or dispatches a capability method. Product clients
+call the Plugin endpoint directly.
 
 ## Required invariants
 
-- stdout is reserved for framed protocol messages; logs use stderr or structured
-  events;
-- plugin launch receives typed, policy-approved inputs and never a shell string;
-- plugin identity, protocol version, API version, permissions, and package
-  digest are checked before launch;
-- worker crash, timeout, cancellation, and protocol corruption become typed
-  lifecycle events and cannot crash the Core process;
-- restart policy and quarantine are controlled by the Rust supervisor.
-
-## Migration
-
-The historical ADR remains in the repository for context and is marked
-Superseded. Existing legacy source is not deleted by this ADR. The P0
-manifest change removes the in-process runtime from the installable schema and
-Rust manifest model. Core v1 and the supervisor migration are later phases.
+- launch uses a verified package-relative executable or prepared runtime and an
+  argv array, never a shell command string;
+- identity, interface version, package digest, permissions, and readiness match
+  before the endpoint is published;
+- crash, timeout, cancellation, and protocol corruption are observable failures
+  and cannot crash Kernel;
+- stdout readiness is bounded, logs use stderr, and `connection_ref` is opaque;
+- capability request/response/stream bytes never enter Platform control APIs.

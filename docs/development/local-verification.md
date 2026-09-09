@@ -14,7 +14,7 @@ python tooling/ci/verify.py
 This runs all lightweight Tier 0 and Tier 1 checks:
 1. Documentation link and structure validation (`tooling/docs/validate_docs.py`).
 2. Architecture and service boundary governance (`tooling/ci/check_service_boundaries.py`).
-3. Python SDK unit test suites (`cyrene_preflight`, `cyrene_artifacts`, `cyrene_environment`, and the capability client).
+3. Python SDK unit test suites (`cyrene_preflight` and `cyrene_artifacts`).
 4. Platform-local manifest and repository-policy validation.
 
 ---

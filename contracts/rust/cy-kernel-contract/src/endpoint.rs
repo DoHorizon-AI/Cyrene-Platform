@@ -15,8 +15,8 @@ use crate::{
     lease::{Lease, LeaseState},
     resource::Capability,
     validation::{
-        validate_capabilities, validate_namespaced_id, validate_properties, validate_timestamp,
-        ContractError,
+        validate_capabilities, validate_namespaced_id, validate_properties, validate_text,
+        validate_timestamp, ContractError, MAX_CONNECTION_REF_BYTES,
     },
 };
 
@@ -29,6 +29,10 @@ pub struct Endpoint {
     pub schema_id: String,
     pub capabilities: Vec<Capability>,
     pub public_attributes: BTreeMap<String, String>,
+    /// Opaque location consumed by the Product-side direct transport client.
+    pub connection_ref: String,
+    /// Secret-provider reference. The actual credential is never stored here.
+    pub credential_ref: Option<String>,
 }
 
 impl Endpoint {
@@ -39,7 +43,16 @@ impl Endpoint {
         validate_namespaced_id("endpoint transport", &self.transport)?;
         validate_namespaced_id("endpoint schema id", &self.schema_id)?;
         validate_capabilities(&self.capabilities)?;
-        validate_properties(&self.public_attributes)
+        validate_properties(&self.public_attributes)?;
+        validate_text(
+            "endpoint connection reference",
+            &self.connection_ref,
+            MAX_CONNECTION_REF_BYTES,
+        )?;
+        if let Some(credential_ref) = &self.credential_ref {
+            validate_namespaced_id("endpoint credential reference", credential_ref)?;
+        }
+        Ok(())
     }
 }
 

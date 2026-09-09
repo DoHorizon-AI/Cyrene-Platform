@@ -208,6 +208,9 @@ message ArtifactTransferSpec {
   repeated ArtifactTransferSource sources = 8;
   repeated ArtifactPartSource part_sources = 9;
   string destination_peer_id = 10;
+  // Opaque producer-owned category; Platform does not define its vocabulary.
+  // 由生产者拥有的不透明分类；Platform 不定义其词汇表。
+  string artifact_kind = 11;
 }
 
 // Immutable identity projection for an Artifact already verified on the selected Node.
@@ -218,8 +221,8 @@ message ArtifactLocalInput {
   string artifact_uri = 1;
   string digest = 2;
   uint64 size_bytes = 3;
-  // Canonical snake_case spelling of cy_manifest::ArtifactKind.
-  // cy_manifest::ArtifactKind 的规范 snake_case 拼写。
+  // Opaque producer-owned category.
+  // 由生产者拥有的不透明分类。
   string artifact_kind = 4;
   string manifest_digest = 5;
 }

@@ -420,7 +420,7 @@ fn copy_and_digest(
     loop {
         // Read at most the remaining expected bytes plus one byte.  This
         // detects an oversized source promptly without buffering or writing a
-        // complete unexpected model blob.
+        // complete unexpected payload blob.
         let remaining = expected_size.saturating_sub(size_bytes);
         let read_limit = remaining
             .saturating_add(1)

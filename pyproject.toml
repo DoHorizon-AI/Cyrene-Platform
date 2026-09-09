@@ -23,9 +23,6 @@ testpaths = [
 pythonpath = [
     ".",
     "tooling/ci",
-    "sdk/python/cyrene_environment/src",
-    "sdk/python/cyrene_capability_client/src",
-    "sdk/python/cyrene_worker_shim/src",
     "sdk/python/cyrene_artifacts/src",
     "sdk/python/cyrene_preflight/src",
 ]

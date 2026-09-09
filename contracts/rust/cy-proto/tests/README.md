@@ -19,7 +19,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
-| `message_connector_contract_tck.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
