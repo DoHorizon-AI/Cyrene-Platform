@@ -1,43 +1,41 @@
-# Repository boundaries and migration checkpoint
+# Repository boundaries / 仓库边界
 
-## Core repository - GitHub organization
+Cyrene-Platform owns Product-neutral mechanisms: Kernel process and resource
+lifecycle, generic execution control, ArtifactRef and transfer, Plugin package
+installation and supervision, compatibility resolution, and opaque endpoint
+grants. It must build and test independently from every Product and Plugin
+repository.
 
-The future GitHub repository contains `kernel/`, `framework/`, `contracts/`,
-examples, and Rust-only core CI. It is private during the redesign and may be
-opened later after security, API stability, licensing, and documentation gates.
+Cyrene-Platform 只持有与产品无关的机制：Kernel 进程与资源生命周期、通用执行控制、
+ArtifactRef 与传输、Plugin 包安装与监督、兼容性解析，以及不透明端点授权。它必须能够
+脱离所有 Product 与 Plugin 仓库独立构建和测试。
 
-## Advanced-services repository - Azure DevOps
+Products own user intent, domain state, lifecycle policy, retry policy,
+persistence, billing, routing decisions, and user-facing workflows. Plugins own
+their callable payload contracts, methods, SDKs, implementation entrypoints,
+runtime adapters, configuration, and direct endpoint protocols.
 
-The private repository contains the six first-party services, vendor/runtime
-plugins, enterprise bundles, service deployments, and preserved legacy product
-sources. Its pipeline checks out this core repository and verifies the referenced
-Rust workspace before auditing all six service manifests and preserved roots.
+Product 持有用户意图、领域状态、生命周期策略、重试策略、持久化、计费、路由决策和
+面向用户的工作流。Plugin 持有自身的调用载荷契约、方法、SDK、实现入口、运行时适配、
+配置和直接端点协议。
 
-## Migration rule
+## Change rule / 修改规则
 
-The new repositories are clean-history snapshots assembled from audited source.
-Core contains only its explicit public whitelist. Legacy service source remains
-byte-preserved in the private repository; follow-up work may refactor imports
-only after a service has a stable public contract and an acceptance test.
+Adding or changing a Product capability must not require a Platform source
+change. Platform may validate generic identity, version, execution mode,
+permissions, health, and package-owned launch metadata. It must not parse,
+proxy, transform, route, or persist a capability's business payload.
 
-Development uses two language-specific lanes and one integration branch:
-`develop-kernel` is for Rust Kernel/Node Runtime work, `develop-framework` is
-for Kotlin Framework/Control Plane work, and `develop` is the reviewed
-cross-language integration branch. `main` is protected and accepts only a
-reviewed release pull request from `develop` after Core CI,
-architecture-governance, and release-evidence checks pass. GitHub branch
-protection is part of this governance checkpoint; it does not publish either
-repository or deploy any service.
+新增或修改 Product capability 不得要求修改 Platform 源码。Platform 可以校验通用的
+身份、版本、执行模式、权限、健康状态和包自有启动元数据；不得解析、代理、转换、路由
+或持久化 capability 的业务载荷。
 
-Language-specific plugin SDKs, generators, and compatibility tests are private
-migration tooling until the replacement API is designed. A Python process may
-implement an out-of-process plugin, but Python is not part of the core runtime or
-its repository toolchain.
+Cross-repository workflow ownership, accepted revisions, and remediation status
+are recorded in
+[Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace). Historical
+reports are evidence snapshots and do not override current contracts or live Git
+state.
 
-## Non-goals for this checkpoint
-
-- publishing or making either repository public;
-- configuring Azure DevOps service/deployment remotes;
-- claiming GPU support from source presence;
-- making every private legacy application build from its new path;
-- deleting legacy bundles or generated compatibility code.
+跨仓库工作流归属、已接受版本和整改状态记录在
+[Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace)。历史报告仅是
+证据快照，不能覆盖当前契约或实时 Git 状态。

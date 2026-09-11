@@ -37,26 +37,12 @@ jobs:
           python-version: "3.12"
       - name: Run architecture boundary guard
         run: |
-          python -m pip install pytest hypothesis
+          python -m pip install pytest hypothesis "pyyaml>=6.0"
           python tooling/ci/check_service_boundaries.py
           python -m pytest tooling/ci/test_check_service_boundaries.py
-
-  jvm-boundary:
-    name: ci / jvm-boundary
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "25"
-      - uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "9.5.0"
-          cache-provider: basic
-      - name: Test JVM authority boundary
-        run: gradle --no-daemon -p framework/jvm test
+          python tooling/governance/validate_repository_policy.py
+          python -m pytest tooling/governance/tests/test_repository_policy.py
+          bash tooling/ci/check-no-legacy-surface.sh
 
   python-sdk:
     name: ci / python-sdk
@@ -71,20 +57,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0"
           python -m pip install -e sdk/python/cyrene_artifacts
-          python -m pip install -e sdk/python/cyrene_environment
           python -m pip install -e sdk/python/cyrene_preflight
-          python -m pip install -e sdk/python/cyrene_control_plane
-          python -m pip install -e "sdk/python/cyrene_capability_client[dev]"
       - name: Run SDK unit tests
         run: |
-          python sdk/python/cyrene_capability_client/scripts/generate_proto.py --check
-          python -m pytest sdk/python/cyrene_capability_client/tests
-          python -m pytest sdk/python/cyrene_worker_shim/test_stream_item_wire.py
           python -m pytest sdk/python/cyrene_artifacts/tests
-          python -m pytest sdk/python/cyrene_environment/tests
           python -m pytest sdk/python/cyrene_preflight/tests
-          python -m pytest sdk/python/cyrene_control_plane/tests
-          python -m pytest tooling/workspace/tests
           python -m pytest tooling/docs/tests
           python -m pytest tooling/ci/tests
 

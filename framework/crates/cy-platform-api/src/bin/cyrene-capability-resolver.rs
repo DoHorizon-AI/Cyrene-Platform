@@ -10,15 +10,15 @@ use std::io::{self, Read};
 
 use cy_platform_api::{
     CapabilityId, CapabilityInterfaceVersion, CapabilityRegistry, CapabilityResolver,
-    ExecutionMode, PluginManifest, PluginRequirement, normalize_official_manifest,
+    ExecutionMode, PluginManifest, PluginRequirement, normalize_repository_manifest,
 };
 use serde::Deserialize;
 use serde_json::json;
 
 #[derive(Debug, Deserialize)]
 struct ResolverRequest {
-    /// Accepts the existing Platform manifest shape and the single
-    /// repository-facing Official Plugins manifest shape.  Both normalize to
+    /// Accepts the existing Platform manifest shape and the
+    /// repository-facing plugin manifest shape. Both normalize to
     /// the same Platform `PluginManifest` before registry registration.
     manifests: Vec<serde_json::Value>,
     requirements: Vec<RequirementWire>,
@@ -64,7 +64,7 @@ fn normalize_manifest(value: serde_json::Value) -> Result<PluginManifest, String
     if value.get("plugin").is_some() {
         serde_json::from_value(value).map_err(|error| format!("invalid Platform manifest: {error}"))
     } else {
-        normalize_official_manifest(value)
+        normalize_repository_manifest(value)
     }
 }
 
@@ -92,32 +92,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolver_accepts_the_official_manifest_shape() {
+    fn resolver_accepts_the_repository_manifest_shape() {
         let request = ResolverRequest {
             manifests: vec![json!({
                 "schemaVersion": 1,
-                "id": "cyrene.tools.media",
-                "name": "CYRENE Generic Media Processor",
+                "id": "example.worker",
+                "name": "Example Worker",
                 "version": "0.1.0",
                 "kind": "capability-plugin",
-                "capabilities": ["media.processor.v1"],
+                "capabilities": ["example.transform.v1"],
                 "methods": [
-                    {"name": "inspect_image", "interfaceVersion": "1", "executionMode": "worker"},
-                    {"name": "transform_image", "interfaceVersion": "1", "executionMode": "worker"}
+                    {"name": "inspect", "interfaceVersion": "1", "executionMode": "worker"},
+                    {"name": "transform", "interfaceVersion": "1", "executionMode": "worker"}
                 ],
-                "runtime": {"language": "python", "entrypoint": "media_processor:MediaProcessor"}
+                "runtime": {"language": "python", "entrypoint": "example_worker:Worker"}
             })],
             requirements: vec![RequirementWire {
-                capability: "media.processor.v1".to_string(),
+                capability: "example.transform.v1".to_string(),
                 interface_version: "1".to_string(),
                 execution_modes: vec![ExecutionMode::Worker],
             }],
         };
         let result = resolve(request).unwrap();
-        assert_eq!(
-            result["resolutions"][0]["plugin"]["id"],
-            "cyrene.tools.media"
-        );
+        assert_eq!(result["resolutions"][0]["plugin"]["id"], "example.worker");
         assert_eq!(result["resolutions"][0]["execution_mode"], "WORKER");
     }
 }

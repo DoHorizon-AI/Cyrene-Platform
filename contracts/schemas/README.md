@@ -1,35 +1,16 @@
-# schemas Directory Guide | contracts/schemas 目录指南
+# Platform JSON Schemas | Platform JSON Schema
 
-## Purpose | 目录职责
+These schemas describe only stable Platform control-plane and Artifact Plane
+contracts. Capability payload schemas, Product manifests, component catalogs,
+and Plugin repository manifests are owned by their implementation repository.
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+这些 Schema 仅描述稳定的 Platform 控制面与 Artifact Plane 契约。能力载荷、
+Product 清单、组件目录和 Plugin 仓库清单由其实现仓库拥有。
 
-## Contents | 内容
-
-| Entry | Responsibility | 一句话职责 |
-| --- | --- | --- |
-
-## Suggested reading / execution order | 推荐阅读 / 执行顺序
-
-Read this guide first, then the direct files above in dependency order, and finally the nested directory guides.
-先读本指南，再按依赖顺序阅读上方直接文件，最后进入嵌套目录指南。
-
-## Contents snapshot | 内容快照
-
-| Entry | Responsibility | 一句话职责 |
-| --- | --- | --- |
-| `CANONICALIZATION.md` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `advanced-service.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `component-catalog.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `execution-plan-v1.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `media-processor-v1.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `plugin-set.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `plugin.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `service.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `verified-installation-record.schema.json` | Supporting metadata or fixture. | 辅助元数据或 fixture。 |
-| `examples/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `manifests/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-
-This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
-本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+| Schema | Authority |
+| --- | --- |
+| `artifact_transfer.schema.json` | Provider-neutral transfer records around `ArtifactRef`. |
+| `manifests/artifact_ref.schema.json` | Immutable content reference with an opaque producer-owned category. |
+| `manifests/portable_directory_manifest.schema.json` | Cross-language portable directory index. |
+| `plugin-set.schema.json` | Generic capability requirements and deterministic resolution locks. |
+| `verified-installation-record.schema.json` | Digest-bound installer evidence consumed by Platform. |

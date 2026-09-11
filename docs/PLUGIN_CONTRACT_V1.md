@@ -1,88 +1,26 @@
-# Canonical Platform Plugin Contract v1
+# Platform Plugin Control Contract v1
 
-The Platform is the sole owner of the generic plugin and capability contract.
-The Rust types in `contracts/rust/cy-manifest` are the canonical manifest model;
-`framework/crates/cy-platform-api` owns the local registry and resolver policy.
-Existing manifest fields remain compatible with the pre-v1 plugin schema.
+Platform owns only the generic control-plane projection used to select and
+supervise a Plugin. `Cyrene-Plugins-Official` owns `plugin.manifest.json` and all
+capability payload contracts.
 
-## Contract inventory
+The Platform projection contains:
 
-- `PluginIdentity` and `PluginVersion` identify a plugin release.
-- `CapabilityId` and `CapabilityInterfaceVersion` identify a callable contract
-  separately from the plugin release.
-- `CapabilityDescriptor` declares an interface and one or more `ExecutionMode`
-  values: `INLINE`, `WORKER`, or `SERVICE`.
-- `PluginArtifactRef` carries an already-known URI and optional digest. The MVP
-  never downloads or materializes this reference.
-- `PluginManifest` is the existing Platform manifest with additive
-  `capability_descriptors` and `artifact` fields. Its legacy coarse capability
-  table is retained for compatibility and is not used for interface matching.
-- `PluginRequirement` (also exposed as `CapabilityRequirement`) requests an
-  exact capability interface and optional execution-mode constraints.
-- `PluginSetSpec` is a logical set of requirements. It does not imply one
-  Python environment or one process.
-- `ResolvedCapability` records the exact plugin/version, interface, mode,
-  artifact, and compatibility evidence selected by the resolver.
-- `PluginSetLock` sorts those records deterministically and carries a
-  content-derived SHA-256 lock digest.
-- `media.processor.v1` is the first narrow typed capability port in
-  `framework/crates/cy-platform-api/src/media.rs`; its normative JSON schema is
-  `contracts/schemas/media-processor-v1.schema.json`.
+- Plugin identity and release version;
+- opaque capability id and interface version;
+- `INLINE`, `WORKER`, or `SERVICE` placement compatibility;
+- optional immutable artifact reference;
+- optional package launch command for a managed service;
+- deterministic PluginSet resolution and lock evidence.
 
-## Registry and resolver MVP
+For package activation, the manifest's `runtime.launch` contains an executable
+and arguments. `prepared-runtime` selects the executable produced by the
+configured dependency preparer; any other value is a safe package-relative
+path. Platform appends only `--capability`, `--interface-version`, and `--listen`
+for the generic readiness handshake. The process publishes a bounded readiness
+record containing the same capability/interface plus an opaque
+`connection_ref`.
 
-`CapabilityRegistry` is an in-memory/reference registry. Registration rejects
-invalid descriptors and duplicate `plugin id + version` keys. Provider queries
-are returned in deterministic order.
-
-`CapabilityResolver` performs exact interface matching and intersects the
-requirement's execution modes with the optional PluginSet global constraint.
-Candidates are ordered by plugin identity, plugin version, and mode. The mode
-ordering is `INLINE`, `WORKER`, `SERVICE`. Missing providers, interface
-mismatches, and execution-mode mismatches are explicit errors; there is no
-silent fallback.
-
-## `media.processor.v1` first slice
-
-The Platform-owned media port contains only `inspect_image` and
-`transform_image`. Inputs distinguish caller-provided bytes from a caller-owned
-file path; the contract has no URL, data-URI, stream, or opaque-handle string.
-The transform surface is limited to resize, format conversion, codec quality,
-and orientation normalization. Products retain attachment records, storage,
-deduplication, authorization, persona/emotion semantics, and workflow policy.
-
-The resolver accepts the existing Official Plugins `plugin.manifest.json`
-through a normalization adapter in `cy-platform-api`. That adapter feeds the
-same `CapabilityRegistry` and `CapabilityResolver`; it is not a second manifest
-authority or a direct-instantiation test shortcut.
-
-The registry and resolver are local APIs only. Plugin Manager, Marketplace,
-remote catalogs, installation, update, uninstall, and artifact download are
-outside this contract.
-
-## Service seams
-
-Yield declares `training.engine.v1` through a small resolver protocol and wraps
-the current `TrainingRuntime` as the reference provider. Reactor declares
-`serving.engine.v1` and wraps the current lazy `EngineFactory` while retaining
-the existing `InferenceServer` lifecycle. These adapters are replaceable seams,
-not full engine extraction.
-
-Exchange is truthfully deferred: the current live repository contains a
-coordinator, not a gateway Product runtime. The preserved gateway sources can
-adopt `gateway.runtime.v1` when a live owner and lifecycle seam exist.
-
-## Contributor-ready follow-up
-
-1. Extract the production TrainingEngine port from the Yield compatibility
-   adapter and add a real Platform provider manifest.
-2. Extract the production ServingEngine port from Reactor without moving
-   Deployment readiness, traffic, or scaling policy out of the Service.
-3. Add a second ModelProvider implementation and its interface compatibility
-   tests.
-4. Implement one or more GatewayRuntime variants after Exchange has a live
-   gateway Product owner.
-5. Extend PluginSet compatibility policy beyond exact interface versions and
-   add policy-specific lock evidence.
-
-None of these tasks require a Kernel semantic change.
+No capability method name, payload schema, Product state, language taxonomy,
+provider type, or business policy is copied into the Platform model. A Product
+uses the Plugin-owned SDK or wire contract to call `connection_ref` directly.

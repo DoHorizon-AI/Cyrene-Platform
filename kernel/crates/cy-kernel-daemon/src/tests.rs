@@ -375,6 +375,8 @@ fn semantic_endpoint_for(worker: &semantic::Worker) -> semantic::Endpoint {
         schema_id: "schema.v1".to_string(),
         capabilities: Vec::new(),
         public_attributes: BTreeMap::new(),
+        connection_ref: "uds://runtime/direct-worker".to_string(),
+        credential_ref: None,
     }
 }
 
@@ -1130,6 +1132,8 @@ fn namespace_scopes_identical_worker_lease_operation_endpoint_grant_and_events()
         schema_id: "schema.v1".to_string(),
         capabilities: Vec::new(),
         public_attributes: BTreeMap::from([("owner".to_string(), principal.identity.id.clone())]),
+        connection_ref: "uds://runtime/direct-worker".to_string(),
+        credential_ref: None,
     };
     let endpoint_a = authority
         .publish_endpoint(&namespace_a, &principal_a, endpoint(&principal_a))
@@ -1359,6 +1363,8 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
                     schema_id: "schema.v1".to_string(),
                     capabilities: Vec::new(),
                     public_attributes: Default::default(),
+                    connection_ref: "uds://runtime/direct-worker".to_string(),
+                    credential_ref: String::new(),
                 }),
             })),
         )
@@ -4055,6 +4061,8 @@ fn endpoint_authority_scenario(
                 schema_id: "schema.v1".to_string(),
                 capabilities: Vec::new(),
                 public_attributes: BTreeMap::new(),
+                connection_ref: "uds://runtime/direct-worker".to_string(),
+                credential_ref: None,
             },
         )
         .unwrap();
@@ -4169,6 +4177,8 @@ fn endpoint_cross_principal_publish_denied() {
                 schema_id: "schema.v1".to_string(),
                 capabilities: Vec::new(),
                 public_attributes: BTreeMap::new(),
+                connection_ref: "uds://runtime/direct-worker".to_string(),
+                credential_ref: None,
             },
         )
         .unwrap_err();
@@ -4428,6 +4438,8 @@ fn endpoint_stale_generation_invalidated() {
                 schema_id: "schema.v1".to_string(),
                 capabilities: Vec::new(),
                 public_attributes: BTreeMap::new(),
+                connection_ref: "uds://runtime/direct-worker".to_string(),
+                credential_ref: None,
             },
         )
         .unwrap_err();
@@ -7290,6 +7302,8 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         schema_id: "schema.v1".to_string(),
         capabilities: Vec::new(),
         public_attributes: BTreeMap::new(),
+        connection_ref: "uds://runtime/direct-worker".to_string(),
+        credential_ref: None,
     };
     let ep_b = semantic::Endpoint {
         identity: shared_ep_id.clone(),
@@ -7299,6 +7313,8 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         schema_id: "schema.v1".to_string(),
         capabilities: Vec::new(),
         public_attributes: BTreeMap::new(),
+        connection_ref: "uds://runtime/direct-worker".to_string(),
+        credential_ref: None,
     };
     authority
         .publish_endpoint(&context_a, &principal_a, ep_a.clone())

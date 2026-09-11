@@ -167,6 +167,10 @@ pub struct ServiceEndpointSpec {
     pub path: Option<String>,
     /// Generic public metadata attributes.
     pub attributes: BTreeMap<String, String>,
+    /// Opaque location consumed by the direct Product-side transport client.
+    pub connection_ref: String,
+    /// Optional secret-provider reference; never a credential value.
+    pub credential_ref: Option<String>,
 }
 
 /// Complete declarative specification for a generic long-running service workload.

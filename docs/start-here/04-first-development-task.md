@@ -1,47 +1,30 @@
-# Your First Development Task
+# Your First Platform Development Task
 
-Welcome to Cyrene! This guide walks you through setting up your local development workspace, understanding the repository layout, making a verified change, and following the governance workflow.
+Use this workflow for a change owned by Cyrene-Platform.
 
----
+## 1. Confirm ownership
 
-## 1. Prerequisites & Toolchain Verification
+Read [Where Does My Code Go?](03-where-does-my-code-go.md) and
+[`repository-policy.yaml`](../../repository-policy.yaml). Platform changes must
+be generic contracts, Kernel/runtime mechanisms, generic adapters, SDK
+primitives, or repository-local tooling. Product behavior and concrete plugin
+implementations have separate owners.
 
-Cyrene leverages multi-language runtimes for optimal performance. Ensure the following tools are installed:
+## 2. Create a topic branch
 
-- **Git** (>= 2.40)
-- **Python** (>= 3.11, recommend Python 3.12) & `uv` (recommended fast package manager)
-- **Rust** (>= 1.80) & `cargo`
-- **.NET SDK** (>= 8.0 / 10.0, optional for gateway/internal services)
-- **JDK** (>= 17, optional for JVM gateway)
-
-Run the workspace doctor in `Cyrene-Platform`:
 ```bash
-python tooling/workspace/workspace.py doctor
+git switch -c feat/your-feature-name
 ```
 
----
+## 3. Verify the change
 
-## 2. Inspecting the Workspace
-
-Check the status of all local repositories in the Cyrene matrix:
 ```bash
-python tooling/workspace/workspace.py status
+python tooling/ci/verify.py --scope all-light
+cargo fmt --check
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 ```
 
----
-
-## 3. Standard Contribution Cycle
-
-1. **Pick an Issue / Define Task**: Ensure your change aligns with the [Where Does My Code Go?](03-where-does-my-code-go.md) guide.
-2. **Create a Topic Branch**:
-   ```bash
-   git checkout -b feat/your-feature-name
-   ```
-3. **Implement Cleanly**:
-   - Adhere to the [Cardinal Dependency Rule](../governance/repository-model.md) (`PRIVATE -> PUBLIC` allowed, `PUBLIC -> PRIVATE` forbidden).
-   - Do not add product semantics to Kernel.
-4. **Run Unit & Governance Tests**:
-   - For Platform: `python -m pytest tooling/ci/test_check_service_boundaries.py`
-   - For Plugins: `python -m pytest conformance/tests/`
-   - For Yield / Reactor: run their respective pytest / cargo test suites.
-5. **Open a Pull Request**: Fill out the PR template, noting any architecture impacts.
+The hosted Azure pipeline is the remote source gate. Record local and hosted
+results separately, then merge through the protected integration branch.

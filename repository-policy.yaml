@@ -1,36 +1,37 @@
 schema_version: cyrene.repository-policy.v1
 repository:
   logical_name: Cyrene-Platform
-  lifecycle_class: PUBLIC_FOUNDATION
-  visibility: public
+  lifecycle_class: PRIVATE_FOUNDATION
+  visibility: private
   source_owner: Platform Core Team
-  remote_default_branch: develop
+  remote_default_branch: main
   integration_branch: develop
   release_branch: main
   default_branch: develop
 ownership:
   owns:
-  - Foundational contracts & Protobuf schemas
+  - Product-neutral control, lifecycle, resource, ArtifactRef, and transport contracts
   - Rust Kernel, process isolation & cgroup sandboxing
-  - Product Control Plane primitives
-  - Shared infrastructure and CI/CD tooling
+  - Product-neutral Kernel execution and resource-fact contracts
+  - Generic plugin installation, resolution, admission, health, and endpoint grants
+  - Generic daemon units and repository CI tooling
   does_not_own:
+  - Capability payload contracts, generated capability SDKs, or capability TCKs
+  - Concrete plugin implementations, provider adapters, or business request routing
   - Product-specific AI state
+  - Product lifecycle, run, attempt, retry, and persistence state
   - Training epoch loops or Serving engine internals
+  - Product deployment, edge configuration, adapters, or compatibility snapshots
+  - Cross-repository Product and plugin catalogs
 build:
   independent: true
   build_systems:
   - cargo
   - pyproject
-  - gradle
 artifacts:
   package_units:
-  - cyrene-control-plane
   - cyrene-preflight
   - cyrene-artifacts
-  - cyrene-environment
-  - cyrene-worker-shim
-  - cyrene-capability-client
   native_binaries:
   - cy-kernel-daemon
   - cy-node-agent
@@ -38,17 +39,13 @@ distribution:
   role: COMPONENT_RELEASE
   profiles:
   - core
-  - training
-  - serving
-  - gateway
-  - full
   standalone_user_product: false
 integration:
   multi_repo_required: false
 authorities:
-  ci: github
+  ci: azure_devops
   release: github_releases
-  deployment: community
+  deployment: consuming_repository
 trust:
   public_requires_private: false
 versioning:

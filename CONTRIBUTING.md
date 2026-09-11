@@ -12,13 +12,14 @@ Please review our official governance and development workflow documentation:
 
 ## Running Tests Locally
 ```bash
-# Workspace status & doctor
-python tooling/workspace/workspace.py doctor
-python tooling/workspace/workspace.py status
+# Run Platform-local lightweight verification
+python tooling/ci/verify.py --scope all-light
 
-# Run boundary governance tests
-python -m pytest tooling/ci/test_check_service_boundaries.py
-
-# Run Python SDK tests
-python -m pytest sdk/python/cyrene_preflight/tests
+# Run the Rust workspace
+cargo fmt --check
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace
 ```
+
+Multi-repository checkout and status tooling belongs to
+[Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace).

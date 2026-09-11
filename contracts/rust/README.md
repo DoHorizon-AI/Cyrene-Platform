@@ -21,7 +21,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 | --- | --- | --- |
 | `cy-kernel-contract/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-manifest/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `cy-plugin-protocol/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-proto/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.

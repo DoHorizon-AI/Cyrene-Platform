@@ -27,7 +27,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Sequence, Tuple
 
 from .contracts import (
-    ARTIFACT_MANIFEST_VERSION,
     ArtifactDirectoryEntry,
     ArtifactKind,
     ArtifactRef,
@@ -44,6 +43,9 @@ from .contracts import (
 )
 
 
+LOCAL_DIRECTORY_MANIFEST_VERSION = 1
+
+
 class ArtifactError(RuntimeError):
     """Base class for fail-closed artifact errors."""
 
@@ -58,7 +60,7 @@ class ArtifactIntegrityError(ArtifactError):
 
 @dataclass(frozen=True)
 class LocalDirectoryFile:
-    """Provider-private file entry; never part of the public ArtifactManifest."""
+    """Provider-private file entry; never part of public Artifact identity."""
 
     path: str
     digest: str
@@ -233,7 +235,7 @@ class LocalArtifactProvider:
 
         The complete tree is checked before any blob is committed.  The
         resulting manifest contains only logical paths, raw blob digests and
-        sizes; producer metadata belongs in the separate ArtifactManifest.
+        sizes; producer metadata remains provider-private.
         """
 
         source_path = Path(source)
@@ -430,7 +432,7 @@ class LocalArtifactProvider:
             )
 
         manifest = LocalDirectoryManifest(
-            version=ARTIFACT_MANIFEST_VERSION,
+            version=LOCAL_DIRECTORY_MANIFEST_VERSION,
             uri="",
             files=tuple(entries),
             digest="",

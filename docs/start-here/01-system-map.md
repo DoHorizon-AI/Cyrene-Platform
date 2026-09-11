@@ -20,7 +20,7 @@ This document details the layered architectural topology of Cyrene and defines t
 │   ┌─────────────────────────────────────────────────────────────────┐   │
 │   │                         CONTROL PLANE                           │   │
 │   │   • ExecutionPlan, PlanStep, Attempt, Generation, Reconciler    │   │
-│   │   • Artifact Contract & Provider   • Environment Lock & Resolver│   │
+│   │   • Artifact Contract & Provider   • Capability Package Control │   │
 │   └────────────────────────────────┬────────────────────────────────┘   │
 │                                    │ (Generic Operations & Leases)      │
 │   ┌────────────────────────────────▼────────────────────────────────┐   │
@@ -33,7 +33,7 @@ This document details the layered architectural topology of Cyrene and defines t
                                      │ (Worker IPC / Inline Invocation)
 ┌────────────────────────────────────▼────────────────────────────────────┐
 │                              PLUGIN LAYER                               │
-│  Cyrene-Plugins (Official Community & First-Party Capabilities)         │
+│  Cyrene-Plugins-Official (Official Community & First-Party Capabilities)         │
 │  • Model Analyzers    • Storage & Memory     • Tool & IM Connectors     │
 │  • Compatibility Rules• Gateway Runtimes     • Environment Builders     │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -45,7 +45,7 @@ This document details the layered architectural topology of Cyrene and defines t
 
 ### 1. Platform != Kernel
 - **Kernel Core** (`kernel/`): A lightweight, high-performance generic execution substrate written in Rust. It only understands processes, CPU/GPU resource allocations, time-bounded leases, execution sandboxes, and signal dispatch. It does **not** understand PyTorch, CUDA kernels, model tokens, or training epochs.
-- **Platform** (`Cyrene-Platform`): The broader foundational repository containing the Kernel, the Control Plane orchestration mechanisms, client SDKs (`cyrene_artifacts`, `cyrene_environment`, `cyrene_preflight`), shared infrastructure, and engineering tooling.
+- **Platform** (`Cyrene-Platform`): The broader foundational repository containing the Kernel, generic Control Plane mechanisms, client SDKs (`cyrene_artifacts`, `cyrene_preflight`), shared infrastructure, and engineering tooling.
 
 ### 2. Services Own Product Semantics
 - **Cyrene-Yield** owns the concept of a `TrainingRun`, dataset paths, hyperparameters, epoch progress, checkpoint schedules, and evaluation metrics.

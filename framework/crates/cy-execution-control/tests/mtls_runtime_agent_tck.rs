@@ -21,9 +21,9 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_execution_control::{
-    AuthenticatedAgent, CertificateFingerprintAuthenticator, ExecutionControlService,
-    ExecutionController, ExecutionDispatchRequest, ExecutionReleaseRequest,
-    FileExecutionIntentStore, IntentDisposition,
+    AuthenticatedAgent, CertificateFingerprintAuthenticator, DispatchReceipt,
+    ExecutionControlService, ExecutionController, ExecutionDispatchRequest,
+    ExecutionReleaseRequest, FileExecutionIntentStore, IntentDisposition,
 };
 use cy_execution_fabric::{
     execution_capability, plan_execution_placement, ArtifactAvailability, ArtifactPlacementQuote,
@@ -143,15 +143,12 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
 
     assert_unbound_certificate_is_rejected(&control_endpoint, &certificates).await?;
 
-    let host_task = tokio::spawn(run_host(
+    let mut host_task = tokio::spawn(run_host(
         control_endpoint.clone(),
         kernel_socket.clone(),
         certificates.clone(),
     ));
-    wait_until("authenticated Host session", || {
-        service.has_host_session(&node_ref())
-    })
-    .await?;
+    wait_for_host_session(&service, &mut host_task).await?;
 
     let observations = service.subscribe();
     let intent_path = temporary.path().join("execution-intents.json");
@@ -170,20 +167,25 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         controller_store.clone(),
     )?;
 
-    let runtime_task = spawn_runtime_agent(runtime_config(
+    let mut runtime_task = spawn_runtime_agent(runtime_config(
         &certificates,
         &control_endpoint,
         runtime_state.clone(),
         artifact_root.clone(),
         "CYRENE_REAL_WORKLOAD_ONE",
     ));
-    wait_until("authenticated Runtime session", || {
-        service.has_runtime_session(&runtime)
-    })
+    wait_for_runtime_session(
+        "authenticated Runtime session",
+        &service,
+        &runtime,
+        &mut runtime_task,
+    )
     .await?;
 
-    let first_receipt = controller
-        .dispatch(dispatch_request(
+    let first_receipt = dispatch_with_context(
+        &controller,
+        "first workload",
+        dispatch_request(
             &service,
             &runtime,
             &cpu,
@@ -195,8 +197,9 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
                 release: "release-mtls-one",
             },
             Some(&local_artifact),
-        )?)
-        .await?;
+        )?,
+    )
+    .await?;
     assert_eq!(
         first_receipt.ack_disposition,
         AssignmentAckDisposition::Accepted
@@ -318,13 +321,18 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     assert!(second_runtime_config.resume_token.is_empty());
     // The one-shot enrollment provider has no second proof. A successful
     // reconnect therefore proves the Agent resolved the persisted token.
-    let second_runtime_task = spawn_runtime_agent(second_runtime_config);
-    wait_until("reconnected Runtime session", || {
-        service.has_runtime_session(&runtime)
-    })
+    let mut second_runtime_task = spawn_runtime_agent(second_runtime_config);
+    wait_for_runtime_session(
+        "reconnected Runtime session",
+        &service,
+        &runtime,
+        &mut second_runtime_task,
+    )
     .await?;
-    let second_receipt = restarted_controller
-        .dispatch(dispatch_request(
+    let second_receipt = dispatch_with_context(
+        &restarted_controller,
+        "resumed workload",
+        dispatch_request(
             &service,
             &runtime,
             &cpu,
@@ -336,8 +344,9 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
                 release: "release-mtls-two",
             },
             None,
-        )?)
-        .await?;
+        )?,
+    )
+    .await?;
     assert_eq!(second_receipt.lease.resources[0].id, cpu.identity.id);
     assert!(resources.is_allocated(&cpu.identity.id));
     wait_for_runtime_state(&mut observations, &runtime, RuntimeObservedState::Running).await?;
@@ -374,16 +383,19 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     ));
     let completed_log = fs::read(&workload_log)?;
     let missing_artifact = artifact_ref(b"missing local Artifact input");
-    let rejected_runtime_task = spawn_runtime_agent(runtime_config(
+    let mut rejected_runtime_task = spawn_runtime_agent(runtime_config(
         &certificates,
         &control_endpoint,
         runtime_state,
         artifact_root,
-        "CYRENE_WORKLOAD_MUST_NOT_START",
+        "CYRENE_REJECTION_RECOVERY_WORKLOAD",
     ));
-    wait_until("Runtime session for rejected local Artifact", || {
-        service.has_runtime_session(&runtime)
-    })
+    wait_for_runtime_session(
+        "Runtime session for rejected local Artifact",
+        &service,
+        &runtime,
+        &mut rejected_runtime_task,
+    )
     .await?;
     let missing_artifact_request = dispatch_request(
         &service,
@@ -428,7 +440,56 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     .await?;
     assert_eq!(failure.reason_code, "ARTIFACT_STAGING_FAILED");
     assert_eq!(fs::read(&workload_log)?, completed_log);
-    rejected_runtime_task.abort();
+
+    // A rejected assignment leaves the Agent connected so it can accept later
+    // work. Dispatch one valid recovery assignment and await normal Agent exit;
+    // aborting a spawn_blocking JoinHandle cannot cancel the running Agent.
+    let recovery_receipt = dispatch_with_context(
+        &restarted_controller,
+        "recovery workload",
+        dispatch_request(
+            &service,
+            &runtime,
+            &cpu,
+            DispatchIds {
+                assignment: "assignment-mtls-rejection-recovery",
+                operation: "operation-mtls-rejection-recovery",
+                attempt: "attempt-mtls-rejection-recovery",
+                acquire: "acquire-mtls-rejection-recovery",
+                release: "release-mtls-rejection-recovery",
+            },
+            None,
+        )?,
+    )
+    .await?;
+    assert!(resources.is_allocated(&cpu.identity.id));
+    wait_for_runtime_state(&mut observations, &runtime, RuntimeObservedState::Running).await?;
+    wait_for_workload_log(
+        &mut observations,
+        &runtime,
+        "CYRENE_REJECTION_RECOVERY_WORKLOAD",
+    )
+    .await?;
+    let terminal = wait_for_terminal_observation(&mut observations, &runtime).await?;
+    assert_eq!(
+        terminal.observed_state,
+        RuntimeObservedState::Stopped as i32
+    );
+    rejected_runtime_task.await??;
+    wait_until("recovery Runtime session removal", || {
+        !service.has_runtime_session(&runtime)
+    })
+    .await?;
+    restarted_controller
+        .release(ExecutionReleaseRequest {
+            assignment_id: "assignment-mtls-rejection-recovery".to_string(),
+            node: recovery_receipt.node,
+            lease: recovery_receipt.lease,
+            command_id: "release-mtls-rejection-recovery".to_string(),
+            context: context("release-mtls-rejection-recovery"),
+        })
+        .await?;
+    assert!(!resources.is_allocated(&cpu.identity.id));
 
     host_task.abort();
     control_task.abort();
@@ -470,75 +531,125 @@ impl Certificates {
             .into());
         }
 
+        let ca_database = directory.join("ca-index.txt");
+        let ca_serial = directory.join("ca-serial");
+        let ca_certificates = directory.join("ca-certificates");
+        fs::write(&ca_database, "")?;
+        fs::write(&ca_serial, "03E8\n")?;
+        fs::create_dir(&ca_certificates)?;
+        let ca_config = directory.join("openssl-ca.cnf");
+        fs::write(
+            &ca_config,
+            format!(
+                "[ca]\ndefault_ca=local_ca\n\
+                 [local_ca]\ndatabase={}\nnew_certs_dir={}\nserial={}\ndefault_md=sha256\npolicy=common_name\nunique_subject=no\n\
+                 [common_name]\ncommonName=supplied\n\
+                 [root_certificate]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n",
+                ca_database.display(),
+                ca_certificates.display(),
+                ca_serial.display(),
+            ),
+        )?;
+        let now = chrono::Utc::now();
+        let not_before = (now - chrono::Duration::hours(24))
+            .format("%Y%m%d%H%M%SZ")
+            .to_string();
+        let not_after = (now + chrono::Duration::days(2))
+            .format("%Y%m%d%H%M%SZ")
+            .to_string();
+
         let ca_pem = directory.join("ca.pem");
         let ca_key = directory.join("ca.key");
+        let ca_csr = directory.join("ca.csr");
         run_openssl(vec![
             arg("req"),
-            arg("-x509"),
+            arg("-new"),
             arg("-newkey"),
             arg("rsa:2048"),
             arg("-nodes"),
             arg("-keyout"),
             arg(&ca_key),
             arg("-out"),
-            arg(&ca_pem),
-            arg("-days"),
-            arg("1"),
+            arg(&ca_csr),
             arg("-subj"),
             arg("/CN=cyrene-mtls-runtime-tck-ca"),
-            arg("-addext"),
-            arg("basicConstraints=critical,CA:TRUE"),
-            arg("-addext"),
-            arg("keyUsage=critical,keyCertSign,cRLSign"),
+        ])?;
+        run_openssl(vec![
+            arg("ca"),
+            arg("-batch"),
+            arg("-selfsign"),
+            arg("-notext"),
+            arg("-config"),
+            arg(&ca_config),
+            arg("-keyfile"),
+            arg(&ca_key),
+            arg("-in"),
+            arg(&ca_csr),
+            arg("-out"),
+            arg(&ca_pem),
+            arg("-startdate"),
+            arg(&not_before),
+            arg("-enddate"),
+            arg(&not_after),
+            arg("-extensions"),
+            arg("root_certificate"),
         ])?;
         set_private_key_permissions(&ca_key)?;
 
         let (server_pem, server_key, _) = issue_leaf(
             directory,
+            &ca_config,
             &ca_pem,
             &ca_key,
+            &not_before,
+            &not_after,
             LeafCertificateSpec {
                 name: "server",
                 subject: "/CN=cyrene-mtls-runtime-tck-server",
                 subject_alt_name: "DNS:control.test,IP:127.0.0.1",
                 extended_key_usage: "serverAuth",
-                serial: 1001,
             },
         )?;
         let (host_pem, host_key, host_der) = issue_leaf(
             directory,
+            &ca_config,
             &ca_pem,
             &ca_key,
+            &not_before,
+            &not_after,
             LeafCertificateSpec {
                 name: "host",
                 subject: "/CN=cyrene-mtls-runtime-tck-host",
                 subject_alt_name: "DNS:host.test",
                 extended_key_usage: "clientAuth",
-                serial: 1002,
             },
         )?;
         let (runtime_pem, runtime_key, runtime_der) = issue_leaf(
             directory,
+            &ca_config,
             &ca_pem,
             &ca_key,
+            &not_before,
+            &not_after,
             LeafCertificateSpec {
                 name: "runtime",
                 subject: "/CN=cyrene-mtls-runtime-tck-runtime",
                 subject_alt_name: "DNS:runtime.test",
                 extended_key_usage: "clientAuth",
-                serial: 1003,
             },
         )?;
         let (rogue_pem, rogue_key, _) = issue_leaf(
             directory,
+            &ca_config,
             &ca_pem,
             &ca_key,
+            &not_before,
+            &not_after,
             LeafCertificateSpec {
                 name: "rogue",
                 subject: "/CN=cyrene-mtls-runtime-tck-rogue",
                 subject_alt_name: "DNS:rogue.test",
                 extended_key_usage: "clientAuth",
-                serial: 1004,
             },
         )?;
 
@@ -563,13 +674,15 @@ struct LeafCertificateSpec<'a> {
     subject: &'a str,
     subject_alt_name: &'a str,
     extended_key_usage: &'a str,
-    serial: u64,
 }
 
 fn issue_leaf(
     directory: &Path,
+    ca_config: &Path,
     ca_pem: &Path,
     ca_key: &Path,
+    not_before: &str,
+    not_after: &str,
     spec: LeafCertificateSpec<'_>,
 ) -> TestResult<(PathBuf, PathBuf, Vec<u8>)> {
     let LeafCertificateSpec {
@@ -577,7 +690,6 @@ fn issue_leaf(
         subject,
         subject_alt_name,
         extended_key_usage,
-        serial,
     } = spec;
     let key = directory.join(format!("{name}.key"));
     let csr = directory.join(format!("{name}.csr"));
@@ -587,7 +699,7 @@ fn issue_leaf(
     fs::write(
         &extensions,
         format!(
-            "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage={extended_key_usage}\nsubjectAltName={subject_alt_name}\n"
+            "[leaf_certificate]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage={extended_key_usage}\nsubjectAltName={subject_alt_name}\n"
         ),
     )?;
     run_openssl(vec![
@@ -604,23 +716,27 @@ fn issue_leaf(
         arg(subject),
     ])?;
     run_openssl(vec![
-        arg("x509"),
-        arg("-req"),
+        arg("ca"),
+        arg("-batch"),
+        arg("-notext"),
+        arg("-config"),
+        arg(ca_config),
+        arg("-cert"),
+        arg(ca_pem),
+        arg("-keyfile"),
+        arg(ca_key),
         arg("-in"),
         arg(&csr),
-        arg("-CA"),
-        arg(ca_pem),
-        arg("-CAkey"),
-        arg(ca_key),
-        arg("-set_serial"),
-        arg(serial.to_string()),
         arg("-out"),
         arg(&pem),
-        arg("-days"),
-        arg("1"),
-        arg("-sha256"),
+        arg("-startdate"),
+        arg(not_before),
+        arg("-enddate"),
+        arg(not_after),
         arg("-extfile"),
         arg(&extensions),
+        arg("-extensions"),
+        arg("leaf_certificate"),
     ])?;
     run_openssl(vec![
         arg("x509"),
@@ -728,15 +844,17 @@ async fn assert_unbound_certificate_is_rejected(
     )
     .await?;
     let mut client = NodeControlServiceClient::new(channel);
-    let (outbound, inbound) = tokio::sync::mpsc::channel(4);
     let mut session =
         NodeControlSession::new(NODE_ID, NODE_EPOCH, "mtls-runtime-tck-rogue", 1, 1, "");
-    outbound.send(session.hello()).await?;
     let error = client
-        .connect(Request::new(ReceiverStream::new(inbound)))
+        .connect(Request::new(tokio_stream::iter([session.hello()])))
         .await
         .expect_err("an unbound but CA-signed client certificate must be rejected");
-    assert_eq!(error.code(), Code::Unauthenticated);
+    assert_eq!(
+        error.code(),
+        Code::Unauthenticated,
+        "unexpected unbound-certificate status: {error:?}"
+    );
     assert!(error.message().contains("PEER_CERTIFICATE_UNAUTHORIZED"));
     Ok(())
 }
@@ -911,6 +1029,11 @@ fn dispatch_request(
     local_artifact: Option<&ArtifactRef>,
 ) -> TestResult<ExecutionDispatchRequest> {
     let now = now_unix_ms();
+    // Placement consumes wall-clock evidence while the test's timeouts use a
+    // monotonic clock. Leave a bounded skew margin so a host clock correction
+    // cannot make freshly constructed evidence appear sampled in the future.
+    let observed_at = now.saturating_sub(30_000);
+    let valid_until = now.saturating_add(300_000);
     let workload_identity = service.workload_identity(
         runtime,
         "mtls-runtime-user",
@@ -939,8 +1062,8 @@ fn dispatch_request(
                 artifact: artifact.clone(),
                 destination_peer_id: "peer-node-mtls-runtime-tck".to_string(),
                 policy_scope: "workspace-local-cas-v1".to_string(),
-                observed_at_unix_ms: now,
-                valid_until_unix_ms: now.saturating_add(60_000),
+                observed_at_unix_ms: observed_at,
+                valid_until_unix_ms: valid_until,
                 availability: ArtifactAvailability::VerifiedLocal {
                     inventory_generation: 1,
                 },
@@ -965,8 +1088,8 @@ fn dispatch_request(
             resources: vec![resource.clone()],
             workers: Vec::new(),
             endpoints: Vec::new(),
-            sampled_at_unix_ms: now,
-            expires_at_unix_ms: now.saturating_add(60_000),
+            sampled_at_unix_ms: observed_at,
+            expires_at_unix_ms: valid_until,
         },
         residency: "local".to_string(),
         trust_domain: "workspace".to_string(),
@@ -975,7 +1098,7 @@ fn dispatch_request(
         artifact_destination_peer_id: "peer-node-mtls-runtime-tck".to_string(),
         artifact_quotes,
         execution_cost_microunits: 1,
-        available_at_unix_ms: now,
+        available_at_unix_ms: observed_at,
         reliability_score: 100,
     };
     Ok(ExecutionDispatchRequest {
@@ -1002,7 +1125,7 @@ fn dispatch_request(
                 String::new()
             },
             policy: PlacementPolicy::default(),
-            latest_start_unix_ms: Some(now.saturating_add(30_000)),
+            latest_start_unix_ms: Some(now.saturating_add(120_000)),
             now_unix_ms: now,
         },
         candidates: vec![candidate],
@@ -1028,6 +1151,23 @@ fn dispatch_request(
         release_command_id: format!("command-{}", ids.release),
         release_context: context(ids.release),
         lease_ttl: Duration::from_secs(30),
+    })
+}
+
+async fn dispatch_with_context(
+    controller: &ExecutionController,
+    description: &str,
+    request: ExecutionDispatchRequest,
+) -> TestResult<DispatchReceipt> {
+    let diagnostic_request = request.clone();
+    controller.dispatch(request).await.map_err(|error| {
+        let mut placement = diagnostic_request.placement.clone();
+        placement.now_unix_ms = now_unix_ms();
+        let decision = plan_execution_placement(&placement, &diagnostic_request.candidates);
+        format!(
+            "{description} dispatch failed: {error:?}; current placement decision: {decision:?}"
+        )
+        .into()
     })
 }
 
@@ -1123,6 +1263,36 @@ async fn wait_for_observation(
     }
 }
 
+async fn wait_for_host_session(
+    service: &ExecutionControlService,
+    host_task: &mut tokio::task::JoinHandle<TestResult>,
+) -> TestResult {
+    tokio::select! {
+        result = host_task => match result {
+            Ok(Ok(())) => Err("Host Agent ended before publishing an authenticated session".into()),
+            Ok(Err(error)) => Err(format!("Host Agent failed before session admission: {error}").into()),
+            Err(error) => Err(format!("Host Agent task failed before session admission: {error}").into()),
+        },
+        result = wait_until("authenticated Host session", || service.has_host_session(&node_ref())) => result,
+    }
+}
+
+async fn wait_for_runtime_session(
+    description: &str,
+    service: &ExecutionControlService,
+    runtime: &semantic::Identity,
+    runtime_task: &mut tokio::task::JoinHandle<Result<(), cy_runtime_agent::RuntimeAgentError>>,
+) -> TestResult {
+    tokio::select! {
+        result = runtime_task => match result {
+            Ok(Ok(())) => Err(format!("Runtime Agent ended before {description}").into()),
+            Ok(Err(error)) => Err(format!("Runtime Agent failed before {description}: {error}").into()),
+            Err(error) => Err(format!("Runtime Agent task failed before {description}: {error}").into()),
+        },
+        result = wait_until(description, || service.has_runtime_session(runtime)) => result,
+    }
+}
+
 async fn wait_until(description: &str, mut ready: impl FnMut() -> bool) -> TestResult {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -1162,7 +1332,7 @@ fn artifact_ref(value: &[u8]) -> ArtifactRef {
         uri: format!("artifact://sha256/{}", &digest[7..]),
         digest,
         size_bytes: value.len() as u64,
-        kind: ArtifactKind::Generic,
+        kind: ArtifactKind::generic(),
         manifest_digest: None,
     }
 }

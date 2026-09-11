@@ -21,8 +21,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | --- | --- | --- |
 | `builtin.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `lib.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
-| `media.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
-| `official_manifest.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
+| `repository_manifest.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `plugin.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `worker.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `bin/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |

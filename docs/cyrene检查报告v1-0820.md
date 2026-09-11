@@ -1,5 +1,7 @@
 # Implementation Status Audit
 
+Status: **Historical snapshot**. It does not describe the current Platform boundary.
+
 审计基准：`docs/contracts/kernel-semantic-contract-v1.md`，Frozen v1.0。  
 审计对象：当前工作树，分支 `develop-kernel`，`HEAD=e725e57`，包含 12 个未提交改动路径。未修改代码。
 

@@ -7,7 +7,7 @@
 To support both open-source community distribution and future enterprise/commercial offerings, a strict dependency direction is required.
 
 ## Decision
-Dependency direction is strictly: $\text{PRIVATE} \longrightarrow \text{PUBLIC}$. Public code (`Cyrene-Platform`, `Cyrene-Plugins`) must never import, link, or conditionally reference private commercial or enterprise packages.
+Dependency direction is strictly: $\text{PRIVATE} \longrightarrow \text{PUBLIC}$. Public code (`Cyrene-Platform`, `Cyrene-Plugins-Official`) must never import, link, or conditionally reference private commercial or enterprise packages.
 
 ## Why
 Public foundation code must remain 100% buildable, testable, and functional in Community mode without requiring private repositories or licensing keys.

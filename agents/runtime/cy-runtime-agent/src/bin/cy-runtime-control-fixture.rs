@@ -546,6 +546,7 @@ fn make_assignment(
                 })
                 .collect(),
             destination_peer_id: format!("node-cache-{}", runtime.generation),
+            artifact_kind: "generic".to_string(),
             ..Default::default()
         }],
         local_artifacts: Vec::new(),
@@ -561,7 +562,7 @@ fn transfer_ticket_json(state: &FixtureState, runtime: &semantic_v1::Identity) -
                 uri: state.artifact.uri.clone(),
                 digest: state.artifact.digest.clone(),
                 size_bytes: state.artifact.size_bytes,
-                kind: ArtifactKind::Generic,
+                kind: ArtifactKind::generic(),
                 manifest_digest: None,
             },
             source_peer_id: "seed-peer-1".to_string(),

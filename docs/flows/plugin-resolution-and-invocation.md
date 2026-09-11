@@ -1,24 +1,21 @@
-# End-to-End Flow: Plugin Resolution & Invocation
-
-This document explains how Capability requests from Services are dynamically resolved and bound to concrete Plugin implementations.
-
----
-
-## Dynamic Resolution Flow
+# Plugin resolution and direct invocation
 
 ```text
-1. Service Request (e.g. "I need model.analyzer.v1")
-          │
-          ▼
-2. Platform Capability Resolver
-          │
-          ├── Reads: catalog/official/catalog.json
-          ├── Matches: Active plugin providing "model.analyzer.v1"
-          └── Validates: Manifest schema & Conformance level
-          │
-          ▼
-3. Execution Binding Strategy
-   ├── If Mode == "inline"  ──► Load Python module / C# DLL directly in process
-   ├── If Mode == "worker"  ──► Invoke via WorkerControl (stdio / HTTP IPC)
-   └── If Mode == "job"     ──► Schedule as standalone Kernel Operation
+Product
+  │ requests capability id + interface version + allowed placement
+  ▼
+Platform resolver
+  │ returns exact Plugin release, compatibility evidence, and binding
+  ▼
+Platform package lifecycle
+  │ installs/starts/observes a verified package
+  │ returns opaque connection_ref
+  ▼
+Product-owned client ───── direct versioned call ─────► Plugin-owned endpoint
 ```
+
+Platform does not receive the last arrow's payload. The Plugin repository owns
+its request, response, stream, cancellation, error, and schema contracts; the
+Product owns business routing and state. Adding a method or payload version is a
+Plugin/Product change as long as the existing generic lifecycle contract is
+sufficient.

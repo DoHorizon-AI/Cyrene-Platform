@@ -89,7 +89,9 @@ impl Read for FailingReader {
 
 fn fixture_manifest_and_artifact() -> (PortableDirectoryManifest, ArtifactRef) {
     let manifest: PortableDirectoryManifest = serde_json::from_slice(PYTHON_MANIFEST).unwrap();
-    let artifact = manifest.artifact_ref(ArtifactKind::Model).unwrap();
+    let artifact = manifest
+        .artifact_ref(ArtifactKind::new("producer.bundle").unwrap())
+        .unwrap();
     assert_eq!(artifact.digest, EXPECTED_DIGEST);
     (manifest, artifact)
 }

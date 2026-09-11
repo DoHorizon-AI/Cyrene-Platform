@@ -1,72 +1,31 @@
 # Repository Lifecycle: Cyrene-Platform
 
-This document provides self-contained lifecycle, boundary, and authority specifications for **Cyrene-Platform**.
+Cyrene-Platform is classified as `PRIVATE_FOUNDATION` with private visibility.
+It is an independently buildable trust-base component rather than a standalone
+user Product.
 
----
+## Ownership
 
-## 1. Repository Purpose & Ownership
-**Cyrene-Platform** is classified as **`PUBLIC_FOUNDATION`** with visibility **`public`**.
+The repository owns foundational Protobuf and schema contracts, the Rust
+Kernel, process isolation and resource mechanisms, product-neutral execution
+control, Platform daemon units, and repository-local CI.
 
-### What This Repository OWNS:
-- Foundational contracts & Protobuf schemas
-- Rust Kernel, process isolation & cgroup sandboxing
-- Product Control Plane primitives
-- Shared infrastructure and CI/CD tooling
+It does not own Product lifecycle state, concrete AI engines, Product
+infrastructure, edge configuration, adapter implementations, compatibility
+snapshots, or cross-repository Product and plugin catalogs.
 
-### What This Repository DOES NOT OWN:
-- Product-specific AI state
-- Training epoch loops or Serving engine internals
+## Build and release
 
----
+- Independent build: `true`
+- Integration branch: `develop`
+- Release branch: `main`
+- Release role: `COMPONENT_RELEASE`
+- Versioning: repository-scoped SemVer with immutable `v{version}` tags
+- Hosted CI authority: `azure_devops`
+- Deployment authority: `consuming_repository`
+- Multi-repository build required: `false`
 
-## 2. Classification & Release Units
-- **Lifecycle Class**: `PUBLIC_FOUNDATION`
-- **Source Owner**: Platform Core Team
-- **Independent Build Unit**: `Yes` (Build tools: cargo, pyproject, gradle)
-- **Package / Artifact Units**: cyrene-control-plane, cyrene-preflight, cyrene-artifacts, cyrene-environment
-- **Deployable Unit**: `Yes`
-- **Product Unit**: `No (Substrate / Capability Collection)`
-- **User Distribution Unit**: `No (Consumed as component in Distribution)`
-- **Multi-Repository Dependency**: `No (Root trust base)`
-
----
-
-## 3. Authorities & Delivery Boundaries
-- **CI Authority**: `github` (Pull request validation occurs in GitHub Actions)
-- **Release Role**: `COMPONENT_RELEASE`
-- **Release Authority**: `github_releases`
-- **Deployment Authority**: `community`
-- **Distribution Profiles**: `core`, `training`, `serving`, `gateway`, `full`
-
----
-
-## 4. Public / Private Trust Boundary & Access Matrix
-- **Public / Private Invariant**: Strictly `PRIVATE -> PUBLIC`. Public code must never import or require private code.
-- **Community Contributor**: Full access to public source, local verification, and public PR CI. Requires **zero** private tokens or Azure credentials.
-- **Public Maintainer**: Review and merge PRs; releases public component artifacts without needing Azure DevOps.
-- **Internal / Delivery Maintainer**: Azure DevOps pipelines are reserved for internal DoHorizon delivery and private release orchestration.
-
----
-
-## 5. Participation in a Complete Cyrene Distribution
-This repository does **not** distribute standalone release zip files directly to general end users. Instead, its verified component artifacts are referenced by exact commit and digest in the official **Cyrene Distribution ReleaseLock** (BOM) under the `core`, `training`, `serving`, `gateway`, `full` profile(s).
-
----
-
-## 6. Verification & Governance Links
-- **Local Verification**: Run `python -m pytest` or `python tooling/ci/verify.py` (Platform).
-- **Canonical Architecture Docs**: See [`Cyrene-Platform/docs/start-here/00-what-is-cyrene.md`](start-here/00-what-is-cyrene.md)
-- **Release Topology**: See [`Cyrene-Platform/docs/release/release-topology.md`](release/release-topology.md)
-- **CI Trust Model**: See [`Cyrene-Platform/docs/governance/ci-trust-model.md`](governance/ci-trust-model.md)
-
-## 7. Versioning & Tag Strategy
-- **Versioning Scheme**: `semver` (SemVer)
-- **Version Scope**: `repository`
-- **Tag Strategy**: `repository`
-- **Canonical Tag Pattern**: `v{version}`
-- **Tag Immutability**: Published tags are permanent and immutable. Defective releases require patch increments.
-
-## 8. Branch Model & Promotion
-- **Integration Branch (`develop`)**: Primary branch for daily development and PRs. Must remain green.
-- **Release Branch (`main`)**: Protected release-only branch. Code promoted via Release PRs.
-- **Release Source**: Official component releases and tags are created strictly from `main`.
+The machine-readable authority is [`repository-policy.yaml`](../repository-policy.yaml).
+Platform builds and source gates must not discover sibling repositories.
+Multi-repository topology and compatibility pins belong to
+[Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace).

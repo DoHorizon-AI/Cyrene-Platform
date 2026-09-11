@@ -17,8 +17,10 @@ lifecycle, local control-plane access, and the facts emitted about those
 changes. It does not become a global scheduler, a vendor SDK, a device driver,
 or a product/business layer.
 
-The architectural repository boundary remains the
-[CYRENE Engine Architecture Blueprint](../CYRENE_ENGINE_ARCHITECTURE_BLUEPRINT.md).
+The architectural repository boundary is the
+[Platform clean boundary](../governance/platform-clean-boundary.md). The older
+[Engine Architecture Blueprint](../CYRENE_ENGINE_ARCHITECTURE_BLUEPRINT.md) is
+retained only as historical context.
 Platform and resource-specific isolation stay in external adapters or services;
 the Kernel keeps the common semantic authority.
 

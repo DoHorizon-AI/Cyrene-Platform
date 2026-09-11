@@ -5,7 +5,12 @@
   "description": "Provider-neutral immutable reference to an artifact. Provider locations are resolved separately.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["uri", "digest", "size_bytes", "kind"],
+  "required": [
+    "uri",
+    "digest",
+    "size_bytes",
+    "kind"
+  ],
   "properties": {
     "uri": {
       "type": "string",
@@ -21,7 +26,9 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["generic", "model", "dataset", "checkpoint", "training_spec", "metrics", "merged", "quantized", "report"]
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Opaque producer-owned category. Platform does not define its vocabulary."
     },
     "manifest_digest": {
       "type": "string",

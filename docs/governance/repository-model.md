@@ -24,8 +24,8 @@ This document defines the canonical repository topology for Cyrene, establishing
                                     │ (Implements Public Capability APIs)
 ┌───────────────────────────────────▼────────────────────────────────────┐
 │                  PUBLIC FOUNDATION & COMMUNITY                         │
-│   Repositories: Cyrene-Platform, Cyrene-Plugins, Public Services       │
-│   • Canonical Contracts, Rust Kernel, Control Plane, SDKs              │
+│   Repositories: Cyrene-Platform, Cyrene-Plugins-Official, Public Services │
+│   • Canonical Contracts, Rust Kernel, Execution, SDKs                 │
 │   • Official Community Plugins (HF, FAISS, FastMCP, SQLite)            │
 │   • Public Product Services (Cyrene-Yield, Cyrene-Reactor, etc.)       │
 └────────────────────────────────────────────────────────────────────────┘
@@ -33,8 +33,8 @@ This document defines the canonical repository topology for Cyrene, establishing
 
 ### 1.1 Public Foundation
 Public repositories define the open core trust base:
-- **`Cyrene-Platform`**: Foundational contracts, Rust Kernel, Control Plane state machines, Python SDKs, shared infrastructure, and governance tooling.
-- **`Cyrene-Plugins`**: Official community plugin catalog and first-party capability implementations.
+- **`Cyrene-Platform`**: Foundational contracts, Rust Kernel, execution state machines, Python SDKs, shared infrastructure, and governance tooling.
+- **`Cyrene-Plugins-Official`**: Official community plugin catalog and first-party capability implementations.
 
 ### 1.2 Private Commercial Implementations (Proposed)
 - **`Cyrene-Commercial-Plugins`** *(Proposed boundary)*: Houses commercial/proprietary engine implementations (e.g. specialized hardware accelerators like Google TPU or Huawei Ascend, commercial vendor connectors, and proprietary tensor kernels).
@@ -71,4 +71,4 @@ eq$ Enterprise**
 - **Spring $
 eq$ Enterprise**
 
-For example, `GatewayRuntime` publicly offers Python, ASP.NET Core, and Spring implementations in `Cyrene-Plugins`. Enterprise features are discovered dynamically via capability contracts (e.g. `IdentityProvider`, `AuditSink`, `EntitlementProvider`), not by hiding entire programming languages in private repositories.
+For example, `GatewayRuntime` publicly offers Python, ASP.NET Core, and Spring implementations in `Cyrene-Plugins-Official`. Enterprise features are discovered dynamically via capability contracts (e.g. `IdentityProvider`, `AuditSink`, `EntitlementProvider`), not by hiding entire programming languages in private repositories.

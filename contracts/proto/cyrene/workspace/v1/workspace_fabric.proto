@@ -46,7 +46,7 @@ message WorkspaceConnectionCandidate {
   bytes routing_hint = 6;
 }
 
-// Directory response used by Navigator, Web, CLI, and future frontends.
+// Directory response used by interactive, CLI, and automation clients.
 message WorkspaceConnectionDescriptor {
   string descriptor_version = 1;
   string workspace_id = 2;

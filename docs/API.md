@@ -1,123 +1,64 @@
 # Cyrene-Platform Canonical API & Substrate Contract Specification
 
-This document provides the authoritative specification for **Cyrene-Platform**, classified as **`ACTIVE_PLATFORM`**, the shared substrate foundation for all Cyrene Products and Plugins.
+Cyrene-Platform is the shared execution substrate for Products and capability
+plugins. Its public surface is product-neutral: Kernel execution, isolation,
+resource observations, capability resolution, Artifact references, and versioned
+wire contracts.
 
----
+## Repository ownership
 
-## 1. Repository Role & Audience
+Platform owns:
 
-- **Role**: `ACTIVE_PLATFORM` / Foundational Kernel, Control Plane & Substrate Runtime.
-- **Audience**: Product engine developers, plugin authors, and infrastructure operators.
-- **Implementation Status**: `IMPLEMENTED_STABLE` (Kernel, Control Plane, Artifact Plane, Preflight).
+- Kernel process execution, sandboxing, resource accounting, Lease/Fence
+  enforcement, and worker lifecycle transport;
+- canonical Node resource observations and immutable HardwareFacts projections;
+- generic capability package resolution and language-neutral worker/service
+  runtime selection;
+- Artifact identity, CAS mechanisms, and generic contract TCKs.
 
----
+Products own their run, attempt, retry, workflow, draft, result, and persistence
+state. Plugins own capability implementations and conversion between generic
+wire objects and capability-specific request types. Adding a Product or plugin
+must not require a Platform source change.
 
-## 2. What the Platform Substrate Owns
+The former Python/Kotlin ProductRun control plane moved to Cyrene-Yield. The
+former in-Platform model analyzer and compatibility evaluator moved behind
+Yield-owned replaceable ports; the official Hugging Face analyzer remains in
+Cyrene-Plugins-Official. These are no longer Platform APIs.
 
-Cyrene-Platform is **NOT a Product**. It owns generic execution mechanisms, process supervision, isolation, and capability resolution primitives:
+## Public Platform objects
 
-- **Kernel Runtime & Isolation**: Process supervision, cgroup sandbox boundaries, resource accounting (CPU/GPU/VRAM), hardware facts authority via Node Agent.
-- **Product Control Plane Primitives**: Generic execution primitives (`ProductRun`, `Attempt`, `PlanStep`, `ExecutionPlan`), reconciliation state machines, idempotency management.
-- **WorkerControl**: Execution lifecycle channel (`INIT`, `READY`, `HEARTBEAT`, `CANCEL`, `DRAIN`, `LOST`, `EXIT`).
-- **Capability Registry & Installation Resolver**: Discovery, resolution, and binding of replaceable plugins implementing versioned capability interfaces.
-- **Artifact Plane**: Content-Addressable Storage (CAS), artifact digests (SHA-256), immutable reference transport.
-- **Environment & Preflight**: Deterministic environment locks, dependency resolution, hardware compatibility evaluation, and static model inspection.
-
-### What Cyrene-Platform Must NOT Contain
-- **Product-Specific Semantics**: No dataset ingestion/cleaning (Catalyst), training loops or epochs (Yield), deployment admission logic (Reactor), gateway routing rules (Exchange), desktop workspace UI (Navigator), or evaluation/benchmark logic (Echo).
-
----
-
-## 3. Public Platform Objects & Schemas
-
-| Object / Type | Schema / Contract | Implementation Status | Definition & Responsibility |
+| Object / Type | Contract | Status | Responsibility |
 |---|---|---|---|
-| `ProductRun` | `execution-plan-v1.schema.json` | `IMPLEMENTED_STABLE` | Top-level durable execution instance initiated by a Product. |
-| `Attempt` | `execution-plan-v1.schema.json` | `IMPLEMENTED_STABLE` | Concrete execution attempt of a step. Mapped 1:1 with worker/process execution. |
-| `PlanStep` | `execution-plan-v1.schema.json` | `IMPLEMENTED_STABLE` | Discrete executable task within an `ExecutionPlan`. |
-| `WorkerControl` | `kernel_authority.proto` | `IMPLEMENTED_STABLE` | Lifecycle protocol between Platform Kernel and capability worker processes. |
-| `HardwareFacts` | `kernel_runtime.proto` | `IMPLEMENTED_STABLE` | Authoritative hardware observation from Node Agent (GPU compute, VRAM, NUMA, driver). |
-| `ArtifactRef` | `cy_artifacts.contracts` | `IMPLEMENTED_STABLE` | Immutable reference with digest (`sha256`), uri, kind, and size. |
-| `EnvironmentLock` | `cy_environment.contracts` | `IMPLEMENTED_STABLE` | Fully pinned and reproducible execution environment specification. |
-| `CapabilityRequirement` | `plugin.manifest.schema.json` | `IMPLEMENTED_STABLE` | Typed capability interface identifier with version constraint and required execution mode. |
+| WorkerControl | kernel_authority.proto | IMPLEMENTED | Generic supervised worker lifecycle. |
+| HardwareFacts | cyrene_preflight and Node resource inventory | IMPLEMENTED | Immutable Platform resource projection. |
+| ArtifactRef | cyrene_artifacts and manifest schemas | IMPLEMENTED | Immutable digest-addressed artifact reference. |
+| CapabilityRequirement | plugin manifest schema | IMPLEMENTED | Capability/interface and execution-mode requirement. |
 
----
+cyrene_preflight exposes contracts and resource facts. It does not choose model
+architecture, estimate model memory, or decide Product admission.
 
-## 4. Core Platform Subsystems & APIs
+## Execution relationship
 
-```mermaid
-flowchart TD
-    Product["Cyrene Product Service<br/>(Yield, Reactor, Exchange, etc.)"]
-    Resolver["Capability Resolver<br/>(cy-installation-resolver)"]
-    Registry["Component Catalog<br/>(catalog.json / manifests)"]
-    ControlPlane["Product Control Plane<br/>(cyrene_control_plane)"]
-    Kernel["Platform Kernel Daemon<br/>(cy-kernel-daemon)"]
-    Worker["Capability Plugin Worker<br/>(Process / Container / Service)"]
+A Product resolves a capability requirement, persists its own lifecycle state,
+and passes bounded execution intent to the Platform Kernel. The Kernel
+supervises the selected plugin worker or service. The plugin returns a typed
+result or ArtifactRef to the Product.
 
-    Product -->|1. Resolve Capability| Resolver
-    Resolver -->|2. Query Catalog| Registry
-    Product -->|3. Submit ExecutionPlan| ControlPlane
-    ControlPlane -->|4. Request Worker Lease| Kernel
-    Kernel -->|5. Launch & Supervise| Worker
-    Worker -->|6. WorkerControl Heartbeat| Kernel
-```
+Platform never infers a Product run from a process, worker, route, or container
+identity.
 
-### A. Capability Registry & Resolver API (`IMPLEMENTED_STABLE`)
-Products query the resolver using structured requirements:
-```python
-from cy_installation_resolver import CapabilityRequirement, CapabilityResolver
+## Implementation status
 
-requirement = CapabilityRequirement(
-    capability="model.analyzer.v1",
-    interface_version="1",
-    execution_modes=("IN_PROCESS", "WORKER")
-)
-plugin_target = resolver.resolve(requirement)
-```
-
-The `cyrene-capability-resolver` executable used by the current cross-language
-Product integration is a **REFERENCE / EXPERIMENTAL BRIDGE**. It proves the
-registry and resolver boundary for a Python Product, but it is not a
-prescription that production deployments must start a subprocess per
-resolution. The production transport and lifecycle remain open to the
-Platform runtime design.
-
-### B. WorkerControl Lifecycle Channel (`IMPLEMENTED_STABLE`)
-Kernel supervises worker execution using standard transitions:
-- `INIT` $\rightarrow$ Worker process spawned, assigned cgroup/sandbox.
-- `READY` $\rightarrow$ Worker signals socket availability (`WORKER_READY` or ready file).
-- `HEALTH_PROBE` $\rightarrow$ Periodic ping/metrics collection.
-- `CANCEL` $\rightarrow$ Kernel sends SIGTERM $\rightarrow$ graceful drain $\rightarrow$ SIGKILL on deadline.
-- `LOST` $\rightarrow$ Process exited unexpectedly; maps directly to `AttemptStatus.FAILED` (Lost) to allow Product controller reconciliation.
-
-### C. Artifact Plane API (`IMPLEMENTED_STABLE`)
-```python
-from cy_artifacts import LocalArtifactProvider, ArtifactKind
-
-provider = LocalArtifactProvider(storage_root="/var/cyrene/cas")
-artifact_ref = provider.put(
-    source_path="/path/to/checkpoint",
-    kind=ArtifactKind.MODEL_CHECKPOINT,
-    metadata={"format": "safetensors", "model_id": "org/model-v1"}
-)
-```
-
----
-
-## 5. Implementation Status Matrix
-
-| Subsystem / Component | Implementation Status | Notes |
+| Subsystem | Status | Notes |
 |---|---|---|
-| Rust Kernel Supervisor & UDS | `IMPLEMENTED_STABLE` | `kernel/crates/` core isolation daemon. |
-| Node Agent Hardware Observation | `IMPLEMENTED_STABLE` | Authoritative GPU/VRAM hardware discovery. |
-| Control Plane Primitives | `IMPLEMENTED_STABLE` | `cyrene_control_plane` (Python / Kotlin). |
-| Artifact Plane CAS | `IMPLEMENTED_STABLE` | `cyrene_artifacts` Content-Addressable Storage. |
-| Preflight & Compat Analyzers | `IMPLEMENTED_STABLE` | `cyrene_preflight` verification library. |
-| Central Capability Registry | `IMPLEMENTED_STABLE` | `docs/api/CAPABILITY_INDEX.md`. |
-| Shared Model Registry Capability | `CONTRACT_CANDIDATE` | `model.registry.v1` formal interface candidate. |
-| Generic Service Supervision & Hosting | `IMPLEMENTED_STABLE` | `cy-kernel-api::service`, `ServiceSupervisor`, deterministic backoff & probes. |
-
----
+| Rust Kernel supervision and isolation | IMPLEMENTED | Workspace Cargo gates build all targets. |
+| Node resource observation | IMPLEMENTED | Node Agent is the resource-fact authority. |
+| Artifact Plane | IMPLEMENTED | Generic CAS and ArtifactRef contracts. |
+| Preflight contracts | IMPLEMENTED | Facts and replaceable capability interfaces only. |
+| Capability package runtime | IMPLEMENTED | Language-neutral worker/service dispatch. |
+| Product lifecycle | EXTERNAL | Owned by each Product repository. |
+| Capability implementations | EXTERNAL | Owned by plugin or consuming repositories. |
 
 ## 6. Generic Service & Workload Supervision Foundation (`IMPLEMENTED_STABLE`)
 

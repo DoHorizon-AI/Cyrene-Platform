@@ -591,7 +591,7 @@ async fn stage_artifacts(
             uri: spec.artifact_uri.clone(),
             digest: spec.digest.clone(),
             size_bytes: spec.size_bytes,
-            kind: ArtifactKind::Generic,
+            kind: ArtifactKind::generic(),
             manifest_digest: (!spec.manifest_digest.is_empty())
                 .then(|| spec.manifest_digest.clone()),
         };
@@ -664,7 +664,7 @@ fn verify_local_artifact(
         uri: input.artifact_uri.clone(),
         digest: input.digest.clone(),
         size_bytes: input.size_bytes,
-        kind: ArtifactKind::Generic,
+        kind: ArtifactKind::generic(),
         manifest_digest: (!input.manifest_digest.is_empty()).then(|| input.manifest_digest.clone()),
     };
     artifact.validate().map_err(RuntimeAgentError::Artifact)?;
@@ -1489,7 +1489,7 @@ mod tests {
             uri: format!("artifact://sha256/{}", "a".repeat(64)),
             digest: format!("sha256:{}", "a".repeat(64)),
             size_bytes: 1,
-            kind: ArtifactKind::Generic,
+            kind: ArtifactKind::generic(),
             manifest_digest: None,
         };
         let mut ticket = TransferTicket {
@@ -1633,6 +1633,7 @@ mod tests {
                 replica_id: "replica-1".to_string(),
             }],
             destination_peer_id: "runtime-cache-1".to_string(),
+            artifact_kind: "generic".to_string(),
             ..Default::default()
         }
     }

@@ -20,7 +20,6 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `capability_worker_tck.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
-| `real_media_worker_test.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `fixtures/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.

@@ -15,7 +15,7 @@ This document establishes the official separation of responsibilities between **
 ├──────────────────────────────┬──────────────────────────────┤
 │     PUBLIC REPOSITORIES      │     PRIVATE REPOSITORIES     │
 │   • Cyrene-Platform          │   • Cyrene-Commercial-Plugins│
-│   • Cyrene-Plugins           │   • Cyrene-Enterprise        │
+│   • Cyrene-Plugins-Official           │   • Cyrene-Enterprise        │
 │   • Public Services          │   • Internal Operations      │
 └──────────────────────────────┴──────────────────────────────┘
 ```

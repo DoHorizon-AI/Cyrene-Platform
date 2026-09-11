@@ -1,15 +1,15 @@
-"""Unit test for Service Boundary & Repository Governance Guard."""
+"""Unit test for the Platform-local source boundary guard."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ci_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(ci_dir))
 
-from check_service_boundaries import check_service_boundaries, find_workspace_root
+from check_service_boundaries import check_service_boundaries, find_platform_root
 
 
-def test_service_boundaries_on_workspace() -> None:
-    workspace_root = find_workspace_root()
-    violations = check_service_boundaries(workspace_root)
-    assert not violations, f"Expected 0 service boundary violations, got: {violations}"
+def test_platform_source_boundaries() -> None:
+    platform_root = find_platform_root()
+    violations = check_service_boundaries(platform_root)
+    assert not violations, f"Expected 0 Platform boundary violations, got: {violations}"
