@@ -8,17 +8,18 @@
 
 | Item | Evidence |
 | --- | --- |
-| Branch | `develop` in the canonical checkout; the isolated task worktree is detached for safe writes. |
-| HEAD before cleanup | `f56a7f30c31a729a7d4c030813356018a7be3dc1` |
-| HEAD after cleanup | Same SHA; changes are intentionally uncommitted in the isolated task worktree. |
-| Task worktree | `/tmp/cyrene-licensing-audit.UsmX2s/source` |
-| Canonical checkout | `/home/baijin/Dev/Cyrene/Cyrene-Platform`; task changes were kept out of it, and final live read-back shows only its pre-existing `M README.md`. |
+| Branch | `develop` in the canonical checkout; current live HEAD is the promoted local adapter boundary commit. |
+| HEAD before current adapter promotion | `7b279d237161d8a6181c80d78b780c61af0fd548` |
+| HEAD after current adapter promotion | `8a6a6c0bde136f474ffb15b39dba2619db9157bf`; committed locally and read back on canonical `develop`. |
+| Task worktree | `/tmp/cyrene-finalize-platform-adapters`; clean and points at the same commit. |
+| Canonical checkout | `/home/baijin/Dev/Cyrene/Cyrene-Platform`; clean on `develop`, with the promoted commit intentionally not pushed. |
 | PR #41 | Merge commit `dc37791a806bd6c405932f0f0457518db6e6aaa0` remains an ancestor of the current HEAD. |
-| Worktree after cleanup | Intended architecture, tooling, documentation, lockfile, and package mirror changes are modified/untracked; no unrelated canonical changes were taken over. |
+| Worktree after cleanup | Intended architecture, adapter, documentation, and systemd changes are committed on `develop`; no unrelated canonical changes were taken over. |
 
-The current HEAD is still the previous audit baseline, so the old SHA did not
-drift. PR #41 is historical lineage evidence only; its hosted check rollup was
-not treated as a current green acceptance result.
+The previous licensing-audit baseline `f56a7f30c31a729a7d4c030813356018a7be3dc1`
+is historical evidence only. The current live state is `develop@8a6a6c0`; PR #41
+is also historical lineage evidence, and its hosted check rollup is not treated
+as a current green acceptance result.
 
 ## 2. Ground-truth inventory and classification
 
