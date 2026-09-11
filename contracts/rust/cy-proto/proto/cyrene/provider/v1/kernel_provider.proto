@@ -1,0 +1,82 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/provider/v1/kernel_provider.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.provider.v1;
+
+import "cyrene/semantic/v1/kernel_contract.proto";
+
+// Dedicated local Provider projection. It is intentionally separate from the
+// client authority and Worker-control sockets, and carries no runtime handles.
+service KernelProviderService {
+  rpc RegisterProvider(RegisterProviderRequest)
+      returns (cyrene.semantic.v1.Provider);
+  rpc PublishInventory(PublishInventoryRequest)
+      returns (cyrene.semantic.v1.ProviderSnapshot);
+  rpc ReconcileProvider(ReconcileProviderRequest)
+      returns (ReconcileProviderResponse);
+}
+
+message ProviderCallContext {
+  cyrene.semantic.v1.ContractRevision contract = 1;
+  string namespace = 2;
+  string request_id = 3;
+  string idempotency_key = 4;
+}
+
+message RegisterProviderRequest {
+  ProviderCallContext context = 1;
+  cyrene.semantic.v1.Provider provider = 2;
+}
+
+message PublishInventoryRequest {
+  ProviderCallContext context = 1;
+  cyrene.semantic.v1.ProviderSnapshot snapshot = 2;
+}
+
+enum ProviderReconcileActionKind {
+  PROVIDER_RECONCILE_ACTION_KIND_UNSPECIFIED = 0;
+  PROVIDER_RECONCILE_ACTION_KIND_NOOP = 1;
+  PROVIDER_RECONCILE_ACTION_KIND_REFRESH_RESOURCE = 2;
+  PROVIDER_RECONCILE_ACTION_KIND_MARK_WORKER_LOST = 3;
+  PROVIDER_RECONCILE_ACTION_KIND_REVOKE_LEASE = 4;
+  PROVIDER_RECONCILE_ACTION_KIND_TERMINATE_STALE_WORKER = 5;
+  PROVIDER_RECONCILE_ACTION_KIND_RESTART_WORKER = 6;
+  PROVIDER_RECONCILE_ACTION_KIND_MARK_OPERATION_LOST = 7;
+  PROVIDER_RECONCILE_ACTION_KIND_REVOKE_ENDPOINT = 8;
+}
+
+message ProviderReconcileAction {
+  ProviderReconcileActionKind kind = 1;
+  cyrene.semantic.v1.Identity subject = 2;
+}
+
+// The Provider executes termination with its private runtime handle, then
+// confirms only the semantic Worker identity and observed outcome to Kernel.
+message TerminateStaleWorkerResult {
+  uint64 snapshot_generation = 1;
+  cyrene.semantic.v1.Identity worker = 2;
+  oneof outcome {
+    bool terminated = 3;
+    cyrene.semantic.v1.Rejection failure = 4;
+  }
+}
+
+message ReconcileProviderRequest {
+  ProviderCallContext context = 1;
+  cyrene.semantic.v1.Identity provider = 2;
+  repeated TerminateStaleWorkerResult stale_worker_results = 3;
+}
+
+message ReconcileProviderResponse {
+  cyrene.semantic.v1.Identity provider = 1;
+  uint64 snapshot_generation = 2;
+  repeated ProviderReconcileAction actions = 3;
+}

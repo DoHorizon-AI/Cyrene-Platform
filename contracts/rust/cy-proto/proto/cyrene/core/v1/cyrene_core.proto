@@ -1,0 +1,78 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/core/v1/cyrene_core.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/core/v1/common.proto";
+import "cyrene/core/v1/kernel_runtime.proto";
+import "cyrene/core/v1/node_control.proto";
+import "cyrene/core/v1/plugin_lifecycle.proto";
+import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.core.v1";
+option java_outer_classname = "CyreneCoreProto";
+
+service NodeControlService {
+  rpc Connect(stream NodeToControlPlane)
+      returns (stream ControlPlaneToNode);
+}
+
+service KernelService {
+  rpc GetKernelCapabilities(GetKernelCapabilitiesRequest)
+      returns (KernelCapabilities);
+  rpc ReserveResources(ReserveResourcesRequest)
+      returns (ResourceLease) {
+    option deprecated = true;
+  }
+  rpc AcquireLease(AcquireLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+  rpc ReleaseResources(ReleaseResourcesRequest)
+      returns (ResourceLease) {
+    option deprecated = true;
+  }
+  rpc ReleaseLease(ReleaseLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
+  rpc LaunchPlugin(LaunchPluginRequest)
+      returns (Operation);
+  rpc TerminatePlugin(TerminatePluginRequest)
+      returns (Operation);
+  rpc GetOperation(GetOperationRequest)
+      returns (Operation);
+  rpc CancelOperation(CancelOperationRequest)
+      returns (Operation);
+  rpc WatchOperations(WatchOperationsRequest)
+      returns (stream OperationEvent);
+}
+
+service PluginLifecycleService {
+  rpc InstallPlugin(InstallPluginRequest)
+      returns (Operation);
+  rpc UninstallPlugin(UninstallPluginRequest)
+      returns (Operation);
+  rpc SetPluginEnabled(SetPluginEnabledRequest)
+      returns (PluginInstallation);
+  rpc StartPlugin(StartPluginRequest)
+      returns (Operation);
+  rpc StopPlugin(StopPluginRequest)
+      returns (Operation);
+  rpc GetPluginInstance(GetPluginInstanceRequest)
+      returns (PluginInstance);
+  rpc ListPluginInstances(ListPluginInstancesRequest)
+      returns (ListPluginInstancesResponse);
+  rpc ReportHeartbeat(ReportHeartbeatRequest)
+      returns (ReportHeartbeatResponse);
+  rpc ConnectWorker(stream WorkerToKernel)
+      returns (stream KernelToWorker);
+  rpc WatchPluginEvents(WatchPluginEventsRequest)
+      returns (stream PluginLifecycleEvent);
+}

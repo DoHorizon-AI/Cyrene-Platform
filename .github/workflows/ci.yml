@@ -44,6 +44,27 @@ jobs:
           python -m pytest tooling/governance/tests/test_repository_policy.py
           bash tooling/ci/check-no-legacy-surface.sh
 
+  licensing-boundary:
+    name: ci / licensing-boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify public/core dependency firewall
+        run: python tooling/ci/check-license-boundary.py
+      - name: Verify license metadata
+        run: python tooling/ci/check-license-metadata.py
+      - name: Verify package-local protocol sources
+        run: bash tooling/ci/check-public-proto-sync.sh
+      - name: Package public Rust interfaces
+        run: bash tooling/ci/check-public-packages.sh
+      - name: Compile independent external consumers
+        run: bash tooling/acceptance/licensing-boundary/run.sh
+
   python-sdk:
     name: ci / python-sdk
     runs-on: ubuntu-latest

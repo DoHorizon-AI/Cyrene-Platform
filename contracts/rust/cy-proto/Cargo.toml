@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Generated CYRENE Core v1 protocol types and tonic bindings."
 license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
 [lib]
 name = "cy_proto"

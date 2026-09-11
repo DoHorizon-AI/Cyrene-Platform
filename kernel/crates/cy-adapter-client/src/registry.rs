@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::Resource, DeviceBinding, HealthReport, HostInventoryProvider, InventorySnapshot,
     NodeCapabilities, ProviderError, ResourceProvider,
 };

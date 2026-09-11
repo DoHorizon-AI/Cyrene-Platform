@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Core CYRENE manifest types with deterministic RFC 8785 canonical hashing."
 license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
 [lib]
 name = "cy_manifest"

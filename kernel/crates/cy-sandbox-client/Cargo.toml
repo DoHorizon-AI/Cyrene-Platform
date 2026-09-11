@@ -3,7 +3,7 @@ name = "cy-sandbox-client"
 version = "0.1.0"
 edition = "2021"
 description = "Pure-safe Kernel client for the external CYRENE Sandbox Adapter Host"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "cy_sandbox_client"

@@ -64,10 +64,12 @@ Adapter 执行 Linux `SO_PEERCRED` 校验；单例 sandbox Adapter 因无路由 
 各传 `--allowed-client-uid 991 --allowed-client-gid 992`。具体数值以部署主机的
 `id -u cyrene-kernel` / `getent group cyrene` 为准，由打包脚本写入单元文件。
 
-**fail-closed 启动**：自本变更起，三个特权进程在启动参数解析阶段即要求至少配置一个可信
-peer UID/GID；任一 Adapter 端点未配置身份策略将直接启动失败，而不再静默退回“仅文件系统
-权限”。因此部署要么同时配置双方，要么依赖受保护的 systemd socket 目录——未配置身份策略
-不再是“对不受信任本地用户”的可用安全边界。
+**fail-closed 启动**：sandboxd 与 NVIDIA Adapter 在启动参数解析阶段要求至少配置一个可信
+peer UID/GID。Linux system Adapter 当前允许省略这两个可选参数，并在该配置下依赖受保护的
+systemd/socket 文件权限；一旦提供参数，它会在读协议帧前执行 Linux `SO_PEERCRED` 校验。
+因此生产部署应为三个进程都显式配置 peer UID/GID，不能把 Linux system Adapter 的默认 socket
+权限模型误解为强制的进程身份认证。将 Linux system Adapter 也改为无条件 fail-closed 是后续
+hardening 项，不是本次协议或许可边界清理的一部分。
 
 ## 生命周期、心跳和回收
 

@@ -1,0 +1,171 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 workspace_fabric.proto                                          │
+// │  Package: cyrene.workspace.v1                                       │
+// │  Role: Workspace discovery, connection, and relayed API projection. │
+// │                                                                     │
+// │  协议职责：Workspace 发现、连接描述符与中继 API 投影。                   │
+// │  · Relay 只转发请求，不拥有 Workspace/Product 状态。                   │
+// └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.workspace.v1;
+
+import "cyrene/core/v1/node_control.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+// Relay roles authenticate independently from execution placement.
+enum RelayParticipantRole {
+  RELAY_PARTICIPANT_ROLE_UNSPECIFIED = 0;
+  RELAY_PARTICIPANT_ROLE_FRONTEND = 1;
+  RELAY_PARTICIPANT_ROLE_WORKSPACE_CONNECTOR = 2;
+}
+
+// A human identity reference issued by an external identity provider.
+message UserIdentityRef {
+  string issuer = 1;
+  string subject = 2;
+}
+
+// Directory-owned enrollment metadata; this is not a Fabric Node identity.
+message DeviceEnrollmentRef {
+  string device_id = 1;
+  string workspace_id = 2;
+  string enrollment_state = 3;
+}
+
+// One transport-neutral candidate for reaching a Workspace API.
+message WorkspaceConnectionCandidate {
+  cyrene.core.v1.ConnectivityMode mode = 1;
+  string provider_id = 2;
+  string connection_uri = 3;
+  string server_name = 4;
+  uint32 priority = 5;
+  // Opaque provider routing input. It is never a Workspace or Node identity.
+  bytes routing_hint = 6;
+}
+
+// Directory response used by interactive, CLI, and automation clients.
+message WorkspaceConnectionDescriptor {
+  string descriptor_version = 1;
+  string workspace_id = 2;
+  string organization_id = 3;
+  string display_name = 4;
+  repeated WorkspaceConnectionCandidate candidates = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+// First authenticated frame on every relay connection.
+message RelayHello {
+  RelayParticipantRole role = 1;
+  string session_credential = 2;
+  UserIdentityRef user = 3;
+  string organization_id = 4;
+  // Empty for a frontend that has not discovered its Workspace yet.
+  string workspace_id = 5;
+  DeviceEnrollmentRef device = 6;
+}
+
+message RelayReady {
+  string relay_session_id = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message DiscoverWorkspacesRequest {
+  UserIdentityRef user = 1;
+  string organization_id = 2;
+}
+
+message DiscoverWorkspacesResponse {
+  repeated WorkspaceConnectionDescriptor workspaces = 1;
+}
+
+// Frontends request an existing canonical Artifact by URI, never by path.
+message StartWorkspaceOperationRequest {
+  cyrene.semantic.v1.Identity operation = 1;
+  repeated string input_artifact_uris = 2;
+}
+
+message GetWorkspaceOperationRequest {
+  cyrene.semantic.v1.Identity operation = 1;
+}
+
+message WorkspaceApiRequest {
+  string request_id = 1;
+  string workspace_id = 2;
+  oneof request {
+    StartWorkspaceOperationRequest start_operation = 10;
+    GetWorkspaceOperationRequest get_operation = 11;
+  }
+}
+
+// This is an API view of canonical Workspace/Operation state, not a state store.
+enum WorkspaceOperationState {
+  WORKSPACE_OPERATION_STATE_UNSPECIFIED = 0;
+  WORKSPACE_OPERATION_STATE_PENDING = 1;
+  WORKSPACE_OPERATION_STATE_SCHEDULED = 2;
+  WORKSPACE_OPERATION_STATE_RUNNING = 3;
+  WORKSPACE_OPERATION_STATE_SUCCEEDED = 4;
+  WORKSPACE_OPERATION_STATE_FAILED = 5;
+  WORKSPACE_OPERATION_STATE_LOST = 6;
+}
+
+message WorkspaceOperationView {
+  cyrene.semantic.v1.Identity operation = 1;
+  WorkspaceOperationState state = 2;
+  uint64 completed_units = 3;
+  uint64 total_units = 4;
+  string unit = 5;
+  repeated string artifact_uris = 6;
+  repeated string resource_references = 7;
+  string status_reason = 8;
+  // Stable only for the authoritative Workspace process lifetime.
+  string authority_instance_id = 9;
+}
+
+message WorkspaceApiResponse {
+  string request_id = 1;
+  oneof outcome {
+    WorkspaceOperationView operation = 10;
+    google.rpc.Status error = 11;
+  }
+}
+
+// Relay-only routing wrapper. The inner request remains Workspace API data.
+message RelayForwardedRequest {
+  string frontend_session_id = 1;
+  WorkspaceApiRequest request = 2;
+}
+
+message RelayForwardedResponse {
+  string frontend_session_id = 1;
+  WorkspaceApiResponse response = 2;
+}
+
+message RelayFrame {
+  string frame_id = 1;
+  oneof body {
+    RelayHello hello = 10;
+    RelayReady ready = 11;
+    DiscoverWorkspacesRequest discover_request = 12;
+    DiscoverWorkspacesResponse discover_response = 13;
+    WorkspaceApiRequest workspace_request = 14;
+    WorkspaceApiResponse workspace_response = 15;
+    RelayForwardedRequest forwarded_request = 16;
+    RelayForwardedResponse forwarded_response = 17;
+    google.rpc.Status error = 18;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// SERVICE: WorkspaceRelayService
+//
+//   Routes authenticated frontend requests to an outbound Workspace
+//   connection. It does not persist or reconcile Workspace state.
+//   将认证后的前端请求路由到 Workspace 主动出站连接；不持久化 Workspace 状态。
+// ════════════════════════════════════════════════════════════════════════
+service WorkspaceRelayService {
+  rpc Connect(stream RelayFrame) returns (stream RelayFrame);
+}

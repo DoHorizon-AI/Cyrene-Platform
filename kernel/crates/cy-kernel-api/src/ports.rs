@@ -8,8 +8,6 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 //! 内核六边形架构核心端口 Trait 契约定义.
 
-use cy_kernel_contract as semantic;
-
 use crate::{
     binding::DeviceBinding,
     capability::{EnforcementMode, EnforcementReport, NodeCapabilities},
@@ -20,37 +18,7 @@ use crate::{
     runtime::{CgroupTelemetry, CleanupReport, ProcessHandle, RuntimeProcessEvidence, StopRequest},
 };
 
-/// 端口 Trait 1：宿主机全量硬件清单探测器
-pub trait HostInventoryProvider: Send + Sync {
-    /// 采集并返回节点硬件清单快照
-    fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError>;
-}
-
-/// 端口 Trait 2：特定厂商硬件加速卡适配器
-pub trait ResourceProvider: Send + Sync {
-    /// 适配器唯一 ID（例如："hardware-adapter-uds"）
-    fn adapter_id(&self) -> &str;
-    /// 探测该 Provider 的通用资源事实。
-    fn probe_resources(&self) -> Result<Vec<semantic::Resource>, ProviderError>;
-    /// 为指定资源创建安全隔离绑定规则。
-    fn create_binding(&self, resource: &semantic::Resource)
-        -> Result<DeviceBinding, ProviderError>;
-    /// 为指定库存代次创建绑定。
-    ///
-    /// 旧的或纯静态实现可以安全地沿用无代次的默认实现；进程外 Adapter Host
-    /// 必须覆盖此方法并将代次传给其协议端点。
-    fn create_binding_for_generation(
-        &self,
-        resource: &semantic::Resource,
-        _expected_inventory_generation: u64,
-    ) -> Result<DeviceBinding, ProviderError> {
-        self.create_binding(resource)
-    }
-    /// 读取指定资源的健康状态。
-    fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError>;
-}
-
-/// 端口 Trait 3：硬件资源租约与锁管理器
+/// 端口 Trait 1：硬件资源租约与锁管理器
 pub trait ResourceLeaseManager: Send + Sync {
     /// 获取当前最新硬件清单快照
     fn inventory(&self) -> InventorySnapshot;

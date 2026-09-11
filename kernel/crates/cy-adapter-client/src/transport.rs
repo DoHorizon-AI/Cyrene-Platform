@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use cy_kernel_api::ProviderError;
+use cy_kernel_contract::ProviderError;
 
 #[cfg(unix)]
 use crate::credential::verify_connected_peer;

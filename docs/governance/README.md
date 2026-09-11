@@ -12,6 +12,8 @@ rules for the public Core boundary.
 | `repository-lifecycle-matrix.md` | Platform repository lifecycle authority. | Platform 仓库生命周期权威 |
 | `ci-trust-model.md` | CI evidence and trust boundaries. | CI 证据与信任边界 |
 | `source-control-and-delivery.md` | Local and remote delivery rules. | 本地与远端交付规则 |
+| [`OPEN_SOURCE_ARCHITECTURE_READINESS.md`](OPEN_SOURCE_ARCHITECTURE_READINESS.md) | Current open-source licensing-boundary readiness evidence. | 当前开源许可边界就绪证据 |
+| [`PUBLIC_RELEASE_PREFLIGHT.md`](PUBLIC_RELEASE_PREFLIGHT.md) | Current-publication preflight and evidence status. | 当前公开发布前检查与证据状态 |
 
 ## Suggested reading | 推荐顺序
 

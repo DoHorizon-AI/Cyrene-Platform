@@ -1,0 +1,117 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/core/v1/kernel_runtime.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/core/v1/common.proto";
+import "cyrene/core/v1/resource.proto";
+import "cyrene/semantic/v1/kernel_contract.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+message KernelCapabilities {
+  NodeRef node = 1;
+  string kernel_version = 2;
+  uint64 inventory_generation = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  NodeCapacity capacity = 5;
+  repeated AcceleratorDevice accelerators = 6 [deprecated = true];
+  repeated string sandbox_backends = 7;
+  repeated EnforcementReport enforcement = 8;
+  repeated string feature_flags = 9;
+  repeated cyrene.semantic.v1.Resource resources = 10;
+}
+
+message GetKernelCapabilitiesRequest {
+  RequestContext context = 1;
+  NodeRef node = 2;
+}
+
+message LaunchPluginRequest {
+  MutationContext mutation = 1;
+  NodeRef node = 2;
+  InstalledPluginRef plugin = 3;
+
+  oneof allocation {
+    ResourceRequirements resource_claim = 4;
+    ResourceLeaseRef existing_lease = 5;
+  }
+
+  SnapshotRef configuration = 6;
+  SnapshotRef runtime_profile = 7;
+  SnapshotRef sandbox_profile = 8;
+}
+
+enum StopMode {
+  STOP_MODE_UNSPECIFIED = 0;
+  STOP_MODE_GRACEFUL = 1;
+  STOP_MODE_IMMEDIATE = 2;
+}
+
+message TerminatePluginRequest {
+  MutationContext mutation = 1;
+  string process_name = 2;
+  StopMode mode = 3;
+  google.protobuf.Duration grace_period = 4;
+}
+
+enum PluginRuntimeState {
+  PLUGIN_RUNTIME_STATE_UNSPECIFIED = 0;
+  PLUGIN_RUNTIME_STATE_DISCOVERED = 1;
+  PLUGIN_RUNTIME_STATE_RESOLVED = 2;
+  PLUGIN_RUNTIME_STATE_STARTING = 3;
+  PLUGIN_RUNTIME_STATE_HANDSHAKING = 4;
+  PLUGIN_RUNTIME_STATE_HEALTHY = 5;
+  PLUGIN_RUNTIME_STATE_DEGRADED = 6;
+  PLUGIN_RUNTIME_STATE_STOPPING = 7;
+  PLUGIN_RUNTIME_STATE_STOPPED = 8;
+  PLUGIN_RUNTIME_STATE_UNAVAILABLE = 9;
+  PLUGIN_RUNTIME_STATE_INCOMPATIBLE = 10;
+  PLUGIN_RUNTIME_STATE_CRASHED = 11;
+  PLUGIN_RUNTIME_STATE_QUARANTINED = 12;
+  PLUGIN_RUNTIME_STATE_DISABLED = 13;
+}
+
+message ExitStatus {
+  optional int32 exit_code = 1;
+  bool oom_killed = 2;
+  string reason_code = 3;
+  google.protobuf.Timestamp exited_at = 4;
+}
+
+enum ProcessCleanupState {
+  PROCESS_CLEANUP_STATE_UNSPECIFIED = 0;
+  PROCESS_CLEANUP_STATE_NOT_STARTED = 1;
+  PROCESS_CLEANUP_STATE_IN_PROGRESS = 2;
+  PROCESS_CLEANUP_STATE_COMPLETE = 3;
+  PROCESS_CLEANUP_STATE_STUCK = 4;
+}
+
+message RuntimeCondition {
+  string reason_code = 1;
+  string summary = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+message PluginProcess {
+  string name = 1;
+  InstalledPluginRef plugin = 2;
+  NodeRef node = 3;
+  ResourceLeaseRef lease = 4;
+  PluginRuntimeState state = 5;
+  uint64 generation = 6;
+  uint32 restart_count = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  ExitStatus last_exit = 10;
+  ProcessCleanupState cleanup_state = 11;
+  repeated RuntimeCondition conditions = 12;
+}

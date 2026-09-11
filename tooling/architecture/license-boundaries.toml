@@ -1,0 +1,32 @@
+# Machine-readable architecture ownership. This is not a legal licence grant;
+# it records the dependency firewall used by CI and the readiness report.
+version = 1
+
+public_permissive = [
+    "cy-artifact-transfer",
+    "cy-execution-fabric",
+    "cy-kernel-contract",
+    "cy-manifest",
+    "cy-proto",
+    "cy-workspace-fabric",
+]
+core_copyleft = [
+    "cy-adapter-client",
+    "cy-execution-control",
+    "cy-installation-resolver",
+    "cy-kernel-api",
+    "cy-kernel-daemon",
+    "cy-node-agent",
+    "cy-package-runtime",
+    "cy-platform-api",
+    "cy-resource-manager",
+    "cy-runtime-agent",
+    "cy-sandbox-client",
+    "cyrene-kernel",
+    "cyrene-sandboxd",
+]
+
+separate_decision = [
+    "cyrene-linux-sys-adapter",
+    "cyrene-nvidia-adapter",
+]

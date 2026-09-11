@@ -3,7 +3,7 @@ name = "cy-execution-control"
 version = "0.1.0"
 edition = "2021"
 description = "Product-neutral placement-to-assignment control for CYRENE execution agents."
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [dependencies]
 cy-execution-fabric = { path = "../cy-execution-fabric" }

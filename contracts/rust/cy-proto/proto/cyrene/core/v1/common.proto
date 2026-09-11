@@ -1,0 +1,136 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/core/v1/common.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.core.v1";
+
+message RequestContext {
+  string request_id = 1;
+  string tenant_id = 2;
+  string project_id = 3;
+  string traceparent = 4;
+  google.protobuf.Timestamp expire_at = 5;
+}
+
+message MutationContext {
+  RequestContext request = 1;
+  string idempotency_key = 2;
+  optional uint64 expected_generation = 3;
+}
+
+message NodeRef {
+  string node_id = 1;
+  uint64 node_epoch = 2;
+}
+
+message OciArtifactRef {
+  string registry = 1;
+  string repository = 2;
+  string digest = 3;
+}
+
+message CatalogPluginRef {
+  string catalog_name = 1;
+  string plugin_id = 2;
+  string version = 3;
+  string component_id = 4;
+  OciArtifactRef artifact = 5;
+  string signature_policy_name = 6;
+}
+
+message InstalledPluginRef {
+  string installation_name = 1;
+  string plugin_id = 2;
+  string version = 3;
+  string component_id = 4;
+  string manifest_digest = 5;
+  string artifact_digest = 6;
+  string verified_signature_identity = 7;
+}
+
+message SnapshotRef {
+  string name = 1;
+  uint64 generation = 2;
+  string digest = 3;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCEEDED = 3;
+  OPERATION_STATE_FAILED = 4;
+  OPERATION_STATE_CANCELLING = 5;
+  OPERATION_STATE_CANCELLED = 6;
+}
+
+message Operation {
+  string name = 1;
+  OperationState state = 2;
+  string target_resource_name = 3;
+  bool cancellable = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+
+  oneof outcome {
+    google.protobuf.Any result = 10;
+    google.rpc.Status error = 11;
+  }
+}
+
+message OperationEvent {
+  string event_id = 1;
+  string resume_token = 2;
+  uint64 sequence_number = 3;
+  Operation operation = 4;
+  RuntimeEvent runtime_event = 5;
+}
+
+enum RuntimeEventType {
+  RUNTIME_EVENT_TYPE_UNSPECIFIED = 0;
+  RUNTIME_EVENT_TYPE_INSTANCE_STATE_CHANGED = 1;
+  RUNTIME_EVENT_TYPE_WATCHDOG_TRIGGERED = 2;
+  RUNTIME_EVENT_TYPE_OOM_KILLED = 3;
+  RUNTIME_EVENT_TYPE_ADAPTER_DEGRADED = 4;
+  RUNTIME_EVENT_TYPE_CLEANUP_COMPLETED = 5;
+  RUNTIME_EVENT_TYPE_KERNEL_RECONCILED = 6;
+}
+
+// Bounded event-stream record for runtime evidence that is not itself an LRO.
+message RuntimeEvent {
+  RuntimeEventType type = 1;
+  string target_resource_name = 2;
+  string reason_code = 3;
+  string summary = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+message GetOperationRequest {
+  RequestContext context = 1;
+  string name = 2;
+}
+
+message CancelOperationRequest {
+  MutationContext mutation = 1;
+  string name = 2;
+}
+
+message WatchOperationsRequest {
+  RequestContext context = 1;
+  repeated string operation_names = 2;
+  string resume_token = 3;
+}

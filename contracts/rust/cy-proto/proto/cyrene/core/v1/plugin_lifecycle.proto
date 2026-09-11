@@ -1,0 +1,241 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ 📄 File: contracts/proto/cyrene/core/v1/plugin_lifecycle.proto
+// ║ Module: CYRENE Platform
+// ║ Role: Versioned Protobuf wire contract for this repository boundary.
+// ║
+// ║ 模块：CYRENE Platform
+// ║ 职责：版本化 Protobuf 线协议契约。
+// ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.core.v1;
+
+import "cyrene/core/v1/common.proto";
+import "cyrene/core/v1/kernel_runtime.proto";
+import "cyrene/core/v1/resource.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+enum PluginInstallationState {
+  PLUGIN_INSTALLATION_STATE_UNSPECIFIED = 0;
+  PLUGIN_INSTALLATION_STATE_INSTALLING = 1;
+  PLUGIN_INSTALLATION_STATE_INSTALLED = 2;
+  PLUGIN_INSTALLATION_STATE_FAILED = 3;
+  PLUGIN_INSTALLATION_STATE_UNINSTALLING = 4;
+  PLUGIN_INSTALLATION_STATE_UNINSTALLED = 5;
+}
+
+message PluginInstallation {
+  InstalledPluginRef plugin = 1;
+  PluginInstallationState state = 2;
+  bool enabled = 3;
+  uint64 generation = 4;
+  repeated string declared_capabilities = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+  google.rpc.Status error = 8;
+}
+
+message InstallPluginRequest {
+  MutationContext mutation = 1;
+  CatalogPluginRef catalog_plugin = 2;
+}
+
+message UninstallPluginRequest {
+  MutationContext mutation = 1;
+  string installation_name = 2;
+}
+
+message SetPluginEnabledRequest {
+  MutationContext mutation = 1;
+  string installation_name = 2;
+  bool enabled = 3;
+}
+
+enum DesiredPluginState {
+  DESIRED_PLUGIN_STATE_UNSPECIFIED = 0;
+  DESIRED_PLUGIN_STATE_RUNNING = 1;
+  DESIRED_PLUGIN_STATE_STOPPED = 2;
+  DESIRED_PLUGIN_STATE_DISABLED = 3;
+}
+
+message PluginInstance {
+  string name = 1;
+  InstalledPluginRef plugin = 2;
+  NodeRef node = 3;
+  uint64 generation = 4;
+  uint64 observed_generation = 5;
+  DesiredPluginState desired_state = 6;
+  PluginRuntimeState runtime_state = 7;
+  HealthReport health = 8;
+  ResourceLeaseRef lease = 9;
+  uint32 restart_count = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+  google.protobuf.Timestamp last_heartbeat_at = 13;
+}
+
+message StartPluginRequest {
+  MutationContext mutation = 1;
+  InstalledPluginRef plugin = 2;
+  NodeRef preferred_node = 3;
+  ResourceRequirements resources = 4;
+  SnapshotRef configuration = 5;
+  SnapshotRef deployment_policy = 6;
+}
+
+message StopPluginRequest {
+  MutationContext mutation = 1;
+  string plugin_instance_name = 2;
+  StopMode mode = 3;
+  google.protobuf.Duration grace_period = 4;
+}
+
+message GetPluginInstanceRequest {
+  RequestContext context = 1;
+  string name = 2;
+}
+
+message ListPluginInstancesRequest {
+  RequestContext context = 1;
+  repeated PluginRuntimeState state_filter = 2;
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListPluginInstancesResponse {
+  repeated PluginInstance plugins = 1;
+  string next_page_token = 2;
+}
+
+message ReportHeartbeatRequest {
+  RequestContext context = 1;
+  string plugin_instance_name = 2;
+  uint64 generation = 3;
+  uint64 sequence_number = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  PluginRuntimeState runtime_state = 6;
+  HealthReport health = 7;
+  uint32 restart_count = 8;
+}
+
+enum HeartbeatDisposition {
+  HEARTBEAT_DISPOSITION_UNSPECIFIED = 0;
+  HEARTBEAT_DISPOSITION_ACCEPTED = 1;
+  HEARTBEAT_DISPOSITION_DUPLICATE = 2;
+  HEARTBEAT_DISPOSITION_STALE_GENERATION = 3;
+  HEARTBEAT_DISPOSITION_UNKNOWN_INSTANCE = 4;
+}
+
+message ReportHeartbeatResponse {
+  HeartbeatDisposition disposition = 1;
+  uint64 accepted_sequence_number = 2;
+  google.protobuf.Timestamp server_time = 3;
+  google.protobuf.Duration next_heartbeat_after = 4;
+  DesiredPluginState desired_state = 5;
+  uint64 desired_generation = 6;
+}
+
+// Preferred local Worker control transport. It is a bidirectional UDS/gRPC
+// session so Kernel shutdown intent and the Worker drain acknowledgement share
+// one authenticated instance/generation boundary. The unary heartbeat RPC is
+// retained only for migration compatibility.
+message WorkerToKernel {
+  oneof body {
+    WorkerHello hello = 1;
+    WorkerHeartbeat heartbeat = 2;
+    WorkerShutdownAck shutdown_ack = 3;
+  }
+}
+
+message WorkerHello {
+  string plugin_instance_name = 1;
+  uint64 generation = 2;
+  uint32 protocol_version = 3;
+}
+
+message WorkerHeartbeat {
+  string plugin_instance_name = 1;
+  uint64 generation = 2;
+  uint64 sequence_number = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  PluginRuntimeState runtime_state = 5;
+  HealthReport health = 6;
+  uint32 restart_count = 7;
+}
+
+message WorkerShutdownAck {
+  string plugin_instance_name = 1;
+  uint64 generation = 2;
+  string shutdown_id = 3;
+  bool drained = 4;
+  string detail = 5;
+}
+
+message KernelToWorker {
+  oneof body {
+    WorkerWelcome welcome = 1;
+    WorkerHeartbeatAck heartbeat_ack = 2;
+    WorkerShutdown shutdown = 3;
+  }
+}
+
+message WorkerWelcome {
+  DesiredPluginState desired_state = 1;
+  uint64 desired_generation = 2;
+  google.protobuf.Duration next_heartbeat_after = 3;
+}
+
+message WorkerHeartbeatAck {
+  HeartbeatDisposition disposition = 1;
+  uint64 accepted_sequence_number = 2;
+  DesiredPluginState desired_state = 3;
+  uint64 desired_generation = 4;
+}
+
+message WorkerShutdown {
+  string shutdown_id = 1;
+  StopMode mode = 2;
+  google.protobuf.Duration ack_deadline = 3;
+  string reason_code = 4;
+}
+
+enum PluginLifecycleEventType {
+  PLUGIN_LIFECYCLE_EVENT_TYPE_UNSPECIFIED = 0;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_SNAPSHOT = 1;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_INSTALLED = 2;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_UNINSTALLED = 3;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_ENABLED = 4;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_DISABLED = 5;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_STATE_CHANGED = 6;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_HEALTH_CHANGED = 7;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_RESTARTED = 8;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_LEASE_CHANGED = 9;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_WATCHDOG_TRIGGERED = 10;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_OOM_KILLED = 11;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_ADAPTER_DEGRADED = 12;
+  PLUGIN_LIFECYCLE_EVENT_TYPE_CLEANUP_COMPLETED = 13;
+}
+
+message WatchPluginEventsRequest {
+  RequestContext context = 1;
+  repeated string plugin_instance_names = 2;
+  string resume_token = 3;
+  bool include_initial_snapshot = 4;
+}
+
+message PluginLifecycleEvent {
+  string event_id = 1;
+  string resume_token = 2;
+  uint64 sequence_number = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  PluginLifecycleEventType type = 5;
+  PluginRuntimeState previous_state = 6;
+
+  oneof snapshot {
+    PluginInstance plugin_instance = 7;
+    PluginInstallation plugin_installation = 8;
+  }
+}

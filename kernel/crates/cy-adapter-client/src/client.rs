@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{Resource, ResourceState},
     CapabilityFact, DeviceBinding, DeviceNode, HealthReport, HostInventoryProvider,
     InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,

@@ -3,14 +3,14 @@ name = "cy-adapter-client"
 version = "0.1.0"
 edition = "2021"
 description = "Generic local IPC client for CYRENE hardware adapter processes"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "cy_adapter_client"
 path = "src/lib.rs"
 
 [dependencies]
-cy-kernel-api = { path = "../cy-kernel-api" }
+cy-kernel-contract = { version = "0.1.0", path = "../../../contracts/rust/cy-kernel-contract" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 prost = "0.12"
 prost-types = "0.12"
