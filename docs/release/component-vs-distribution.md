@@ -1,7 +1,7 @@
 # Platform Component Release Boundary
 
 Cyrene-Platform publishes independently versioned component artifacts: Rust
-binaries and libraries, Python SDK distributions, and JVM libraries. Its
+binaries and libraries, and Python SDK distributions. Its
 repository version and tags describe only these Platform-owned artifacts.
 
 A multi-repository distribution combines independently released Platform,

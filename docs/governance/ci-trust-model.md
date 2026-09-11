@@ -13,7 +13,7 @@ $$\mathbf{PRIVATE\ CI\ MAY\ CONSUME\ PUBLIC\ CONTRACTS\ \&\ PACKAGES}$$
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    PUBLIC REPOSITORIES                      │
-│   (Cyrene-Platform, Cyrene-Plugins, Public Services)        │
+│   (Cyrene-Platform, Cyrene-Plugins-Official, Public Services)        │
 ├─────────────────────────────────────────────────────────────┤
 │ • PR CI runs on standard GitHub-hosted public runners       │
 │ • GITHUB_TOKEN has default read-only permissions            │

@@ -21,7 +21,6 @@ or build configuration.
 ## Branch and release policy
 
 - `develop-kernel` is the Rust Kernel/Node Runtime development branch.
-- `develop-framework` is the Kotlin Framework/Control Plane development branch.
 - `develop` is the reviewed cross-language integration branch.
 - `main` is the release branch and accepts only pull requests whose head branch
   is `develop`.

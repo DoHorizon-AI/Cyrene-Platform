@@ -4,7 +4,7 @@
 - **Date**: 2026-08-27
 
 ## Context
-Hosting long-running workloads (e.g. AstrBot, model workers, HTTP/gRPC services) requires generic process management mechanisms: working directory configuration, multi-strategy readiness probing (`ProcessAlive`, `TcpSocket`, `HttpGet`, `WorkerControl`), deterministic exponential restart backoff, and endpoint publication synchronization.
+Hosting long-running workloads (e.g. model workers, HTTP/gRPC services) requires generic process management mechanisms: working directory configuration, multi-strategy readiness probing (`ProcessAlive`, `TcpSocket`, `HttpGet`, `WorkerControl`), deterministic exponential restart backoff, and endpoint publication synchronization.
 
 In introducing `ServiceSpec`, `ServiceState`, `ServiceStatus`, `ServiceEvent`, and `ServiceSupervisor`, there is a risk of future architectural erosion where developers might observe these names and attempt to promote `Service` into a 10th authoritative Kernel semantic entity by introducing `ServiceId`, `ServiceRepository`, `ServiceLedger`, `ServiceLease`, or persistent service tables.
 

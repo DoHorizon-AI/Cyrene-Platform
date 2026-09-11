@@ -33,7 +33,7 @@ This document details the layered architectural topology of Cyrene and defines t
                                      │ (Worker IPC / Inline Invocation)
 ┌────────────────────────────────────▼────────────────────────────────────┐
 │                              PLUGIN LAYER                               │
-│  Cyrene-Plugins (Official Community & First-Party Capabilities)         │
+│  Cyrene-Plugins-Official (Official Community & First-Party Capabilities)         │
 │  • Model Analyzers    • Storage & Memory     • Tool & IM Connectors     │
 │  • Compatibility Rules• Gateway Runtimes     • Environment Builders     │
 └─────────────────────────────────────────────────────────────────────────┘
