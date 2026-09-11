@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! CLI entry point for capability manifest normalization and resolution.
+//!
+//! Capability manifest 标准化与解析 CLI 入口。
 use std::io::{self, Read};
 
 use cy_platform_api::{

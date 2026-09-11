@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Lease and resource-limit projections between Kernel models and Core Proto.
+//!
+//! Kernel 模型与 Core Proto 的 Lease、资源限制 projection。
 use cy_kernel_api::{semantic, CgroupLimits, LeaseState, ResourceLease};
 use cy_proto::{core_v1, semantic_v1};
 use tonic::Status;

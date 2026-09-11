@@ -1,3 +1,14 @@
+<!-- Status: non-normative design note. Normative semantic, wire, and ownership
+     sources are linked below and in docs/README.md. -->
+# C ABI and JDK SPI Design Note
+
+> This document is a non-normative design note, not a current public API
+> commitment. The semantic contract and repository boundary documents are
+> authoritative.
+>
+> 本文是非规范设计说明，不是当前公开 API 承诺。语义契约与仓库边界文档才是
+> 权威来源。
+
 可以。现在最值得做的不是马上写 `libcy.so` 和一堆 Kotlin class，而是先把它们当成**两个受约束的投影层**来规定。
 
 我会建议你把规则定成：

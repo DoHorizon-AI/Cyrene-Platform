@@ -15,7 +15,7 @@ than treating a smaller directory as evidence of lost behavior.
   predates the embedded-runtime removal and later decomposition milestones.
 - Pre-major-refactor checkpoint: `142280f79fe497301b5f8fe7121f19d2bf922a2f`
   (`refactor(core): remove embedded Python and container tooling`).
-- Recorded develop snapshot: `1b49673366769ce6226f8819f8741c7eed01823f`.
+- Last verified develop snapshot: `bc3327bdbe1edba6449a0f34d6954b022e4c3dd0`.
 
 ## Why Kernel became smaller / Kernel 变小的原因
 

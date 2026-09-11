@@ -1,7 +1,8 @@
 # API Naming Constitution Migration Plan
 
-**Status: P0-01 through P0-04, P0-06, and P0-07 complete; P0-05 remains a
-separate model-identity decision.**
+**Status: Canonical operation naming is complete; P0-01 through P0-04, P0-06,
+and P0-07 are complete. P0-05 remains a separate internal model-identity
+decision and is not an API action naming blocker.**
 
 This plan records the current evidence behind the naming migration. It is
 deliberately separate from the constitution: the constitution defines the
@@ -66,7 +67,9 @@ repository-level verification after the semantic operation.
 ## Current gate status
 
 The migration gate is wired into Platform's architecture-governance workflow.
-It is now enforced in `all_source` mode. The public API freeze still depends
-on the separate P0-05 lease-model decision and repository-level adoption
-checks, but the retired API vocabulary itself is no longer reachable from the
-configured Platform source roots.
+It is now enforced in `all_source` mode. The retired API vocabulary is no
+longer reachable from the configured Platform source roots. The public API
+freeze still requires the separate P0-05 decision if the two Lease
+representations are ever exposed as one public model, plus normal
+repository-level adoption checks; that open model decision does not make the
+canonical action vocabulary incomplete.

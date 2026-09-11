@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Conversions between semantic resource models and Core Proto.
+//!
+//! 语义 Resource 模型与 Core Proto 之间的转换。
 use std::collections::BTreeMap;
 
 use cy_kernel_api::{

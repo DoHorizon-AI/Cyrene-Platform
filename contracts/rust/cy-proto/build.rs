@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Build-time generation of mirrored Protocol bindings and descriptors.
+//!
+//! 生成镜像 Protocol binding 与 descriptor 的构建步骤。
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

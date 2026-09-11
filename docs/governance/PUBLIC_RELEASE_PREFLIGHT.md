@@ -4,20 +4,21 @@ Status: `READY_TO_MAKE_PUBLIC_WITH_POST_PUBLIC_CI`
 
 This is a technical repository preflight, not legal advice. It records the
 state of the canonical `develop` checkout after promoting the licensing-boundary
-cleanup and finalizing the repository license layout. No repository visibility
-change, tag, release, registry upload, or remote push was performed.
+cleanup, finalizing the repository license layout, and pushing the bilingual
+documentation follow-up. No repository visibility change, tag, release, or
+registry upload was performed.
 
 ## Baseline and delivery
 
 | Item | Evidence |
 | --- | --- |
 | Canonical branch | `develop` |
-| Canonical HEAD before cleanup | `f56a7f30c31a729a7d4c030813356018a7be3dc1` |
+| Canonical HEAD before cleanup | `f56a7f30c31a729a7d4c030813356018a7be3dc1` (historical baseline) |
 | Architecture cleanup commit | `ddb342f` — `architecture: finalize public core licensing boundary` |
 | License finalization commit | `06e6ac5` — `legal: finalize repository license layout` |
-| Preflight report commit | The commit containing this file; record with `git log -1` after commit |
-| Remote state | Local `develop` is ahead of `origin/develop`; push intentionally not performed |
-| Candidate source | `/tmp/cyrene-licensing-audit.UsmX2s/source`, compared and selectively promoted |
+| Current canonical HEAD | `bc3327bdbe1edba6449a0f34d6954b022e4c3dd0` (`docs: add bilingual system and sandbox adapter guides`) |
+| Remote state | `origin/develop` reads back the same `bc3327b` commit; no force push was used |
+| Candidate source | Historical licensing candidate only; current canonical docs were edited and verified in the repository checkout |
 
 The canonical user README change was preserved and semantically merged. The
 final README retains the user's Platform-as-generic-substrate positioning,
@@ -244,7 +245,7 @@ source finding was identified by the available checks.
 | --- | --- | --- |
 | README build/test instructions | `READY_WITH_DOCUMENTATION` | CPU-only build/test path, Linux/cgroup/NVIDIA prerequisites, and pre-release runtime status are explicit |
 | Fresh Ubuntu clone/build/test/lifecycle | `DEFERRED_UNTIL_PUBLIC` | No fresh GitHub-hosted Ubuntu runner was executed in this private repository context |
-| Hosted GitHub CI | `DEFERRED_UNTIL_PUBLIC` | Deliberately not triggered; push was withheld |
+| Hosted GitHub CI | `DEFERRED_UNTIL_PUBLIC` | Not manually triggered or monitored in the local delivery; repository push workflows may auto-enqueue after a normal push |
 | Azure pipeline | `NOT_TRIGGERED` | Repository configuration has `trigger: none` and `pr: none` |
 
 The remaining hosted gate should use an uncached `ubuntu-24.04` environment,

@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! UDS peer credential policy for adapter clients.
+//!
+//! 适配器客户端的 UDS peer credential 策略。
 #[cfg(any(test, unix, target_os = "linux"))]
 use cy_kernel_contract::ProviderError;
 

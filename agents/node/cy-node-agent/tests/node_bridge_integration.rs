@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! End-to-end Node Agent UDS bridge integration tests.
+//!
+//! Node Agent UDS bridge 端到端集成测试。
 #![cfg(unix)]
 
 use std::{collections::HashMap, time::Duration};

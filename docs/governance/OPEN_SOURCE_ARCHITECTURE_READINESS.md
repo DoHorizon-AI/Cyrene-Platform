@@ -8,16 +8,18 @@
 
 | Item | Evidence |
 | --- | --- |
-| Branch | `develop` in the canonical checkout; current live HEAD is the promoted local adapter boundary commit. |
+| Branch | `develop` in the canonical checkout; current live HEAD is the pushed documentation follow-up commit. |
 | HEAD before current adapter promotion | `7b279d237161d8a6181c80d78b780c61af0fd548` |
-| HEAD after current adapter promotion | `8a6a6c0bde136f474ffb15b39dba2619db9157bf`; committed locally and read back on canonical `develop`. |
-| Task worktree | `/tmp/cyrene-finalize-platform-adapters`; clean and points at the same commit. |
-| Canonical checkout | `/home/baijin/Dev/Cyrene/Cyrene-Platform`; clean on `develop`, with the promoted commit intentionally not pushed. |
+| HEAD after current adapter promotion | `8a6a6c0bde136f474ffb15b39dba2619db9157bf`; historical adapter-boundary checkpoint. |
+| Current HEAD | `bc3327bdbe1edba6449a0f34d6954b022e4c3dd0`; bilingual System/Sandbox documentation commit, read back from `origin/develop`. |
+| Task worktree | The prior isolated adapter worktree is historical; the current documentation follow-up was committed on canonical `develop`. |
+| Canonical checkout | `/home/baijin/Dev/Cyrene/Cyrene-Platform`; clean on `develop` and aligned with `origin/develop`. |
 | PR #41 | Merge commit `dc37791a806bd6c405932f0f0457518db6e6aaa0` remains an ancestor of the current HEAD. |
 | Worktree after cleanup | Intended architecture, adapter, documentation, and systemd changes are committed on `develop`; no unrelated canonical changes were taken over. |
 
 The previous licensing-audit baseline `f56a7f30c31a729a7d4c030813356018a7be3dc1`
-is historical evidence only. The current live state is `develop@8a6a6c0`; PR #41
+and adapter-boundary checkpoint `8a6a6c0` are historical evidence only. The current
+live state is `develop@bc3327b`; PR #41
 is also historical lineage evidence, and its hosted check rollup is not treated
 as a current green acceptance result.
 

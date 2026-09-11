@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Bounded framed transport for adapter UDS exchanges.
+//!
+//! 适配器 UDS 交换的有界 framed transport。
 use std::{
     io::{Read, Write},
     path::Path,

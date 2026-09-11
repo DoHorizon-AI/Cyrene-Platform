@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Kernel integration tests for hardware adapter discovery and binding.
+//!
+//! Kernel 硬件适配器发现与 binding 集成测试。
 #![cfg(unix)]
 
 use std::{

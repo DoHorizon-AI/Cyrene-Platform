@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Event and continuity projections between semantic and Core Proto models.
+//!
+//! 语义 Event/continuity 模型与 Core Proto 的 projection。
 use cy_kernel_api::semantic;
 use cy_proto::{core_v1, semantic_v1};
 use tonic::Status;

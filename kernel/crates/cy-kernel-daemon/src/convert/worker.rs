@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Worker and launch/process-control projections between Kernel and Core Proto.
+//!
+//! Kernel 与 Core Proto 的 Worker、launch/process-control projection。
 use std::collections::BTreeMap;
 
 use cy_kernel_api::{semantic, CgroupLimits, ProviderError};

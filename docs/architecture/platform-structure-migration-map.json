@@ -15,7 +15,7 @@
     "label": "pre-split core after embedded Python/container removal"
   },
   "recorded_develop_snapshot": {
-    "sha": "1b49673366769ce6226f8819f8741c7eed01823f",
+    "sha": "bc3327bdbe1edba6449a0f34d6954b022e4c3dd0",
     "branch": "origin/develop"
   },
   "migration_map": [

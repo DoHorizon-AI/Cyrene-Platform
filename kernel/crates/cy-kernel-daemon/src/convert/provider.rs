@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Provider snapshot, resource, worker, and endpoint projections.
+//!
+//! Provider snapshot、Resource、Worker 与 Endpoint projection。
 use cy_kernel_api::{semantic, AuthorityCallContext, NamespaceId};
 use cy_proto::{provider_v1, semantic_v1};
 use tonic::Status;
