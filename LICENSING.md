@@ -51,7 +51,7 @@ outside the monorepo:
 - `cy-workspace-fabric`
 
 The public adapter SPI is limited to implementation-free facts and the
-`HostInventoryProvider` and `ResourceProvider` traits in
+`HostInventoryProvider`, `ResourceProvider`, and `SystemAdapter` traits in
 `cy-kernel-contract`. Kernel lease, journal, sandbox, runtime, and
 orchestration ports remain in Core.
 

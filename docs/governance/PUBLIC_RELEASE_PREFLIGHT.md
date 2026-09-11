@@ -39,8 +39,9 @@ README was not copied over the user's file as a whole.
 | Tooling and tests | boundary gates, package verifier, mirror gate, external consumers, governance checks | Repository tooling; no implementation dependency is exposed as public API |
 
 `cy-kernel-contract` was manually checked after the cleanup. Its public traits
-are `HostInventoryProvider`, `ResourceProvider`, and their implementation-free
-semantic facts. It does not contain `ResourceLeaseManager`, `JournalPort`, or
+are `HostInventoryProvider`, `ResourceProvider`, and `SystemAdapter`, plus
+their implementation-free semantic facts. It does not contain
+`ResourceLeaseManager`, `JournalPort`, or
 the sandbox/runtime orchestration ports. Those remain in Core. `cy-kernel-api`
 retains a Core compatibility surface, including `doc(hidden)` exports;
 `doc(hidden)` is not access control, but no Apache public crate reverse-
