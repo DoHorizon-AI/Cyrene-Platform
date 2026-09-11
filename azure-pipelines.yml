@@ -10,20 +10,10 @@ parameters:
   type: string
   default: 'Default'
 
-trigger:
-  branches:
-    include:
-      - main
-      - develop
-      - feat/*
-      - fix/*
-      - chore/*
-
-pr:
-  branches:
-    include:
-      - main
-      - develop
+# Platform is public: GitHub Actions owns automatic source, contract, and unit checks.
+# Keep Azure manual for self-hosted GPU/runtime acceptance and delivery work.
+trigger: none
+pr: none
 
 pool:
   vmImage: 'ubuntu-latest'
