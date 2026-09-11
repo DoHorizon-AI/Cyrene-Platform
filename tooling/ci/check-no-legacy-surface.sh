@@ -19,6 +19,7 @@ PATTERNS=(
   "*/plugin.legacy.toml|legacy plugin manifest"
   "*/LEGACY_PLUGIN.md|legacy plugin marker"
   "*.legacy.toml|legacy toml"
+  "astrbot/*|astrbot package namespace (legacy AstrBot source)"
 )
 
 status=0
