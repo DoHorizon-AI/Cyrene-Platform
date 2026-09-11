@@ -209,8 +209,8 @@
     "lease_fence": "cy-kernel-api/src/lease.rs, cy-resource-manager fencing, daemon authority lease transitions, and release/revocation tests",
     "capability": "framework/crates/cy-platform-api resolves generic capability interfaces; Products call Plugin-owned endpoints directly",
     "endpoint": "cy-kernel-api authority endpoint/grant ports and daemon purge_endpoint_authority enforce lease-bound endpoint grants",
-    "event": "cy-kernel-daemon authority event store/history plus RPC SubscribeEvents projections",
-    "replay_live_handoff": "authority snapshot captures cursor before state read; events_after and both v1/v2 SubscribeEvents use ordered replay then notifier handoff",
+    "event": "cy-kernel-daemon authority event store/history plus RPC WatchEvents projections",
+    "replay_live_handoff": "authority snapshot captures cursor before state read; read_events and both v1/v2 WatchEvents use ordered replay then notifier handoff",
     "cleanup_recovery": "service_manager, watchdog, sandboxed_process and runtime journal require confirmed physical cleanup; startup recovery tests cover stale processes and epoch-scoped cursors"
   },
   "lost_suspected": [],

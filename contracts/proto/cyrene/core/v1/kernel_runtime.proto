@@ -35,7 +35,7 @@ message GetKernelCapabilitiesRequest {
   NodeRef node = 2;
 }
 
-message LaunchPluginRequest {
+message LaunchProcessRequest {
   MutationContext mutation = 1;
   NodeRef node = 2;
   InstalledPluginRef plugin = 3;
@@ -56,7 +56,7 @@ enum StopMode {
   STOP_MODE_IMMEDIATE = 2;
 }
 
-message TerminatePluginRequest {
+message TerminateProcessRequest {
   MutationContext mutation = 1;
   string process_name = 2;
   StopMode mode = 3;

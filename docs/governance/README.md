@@ -16,6 +16,8 @@ rules for the public Core boundary.
 | [`PUBLIC_RELEASE_PREFLIGHT.md`](PUBLIC_RELEASE_PREFLIGHT.md) | Current-publication preflight and evidence status. | 当前公开发布前检查与证据状态 |
 | [`CONTRIBUTOR_LICENSING_POLICY.md`](CONTRIBUTOR_LICENSING_POLICY.md) | Contributor copyright ownership and inbound component licensing. | 贡献者版权归属与组件入站许可 |
 | [`CLA_STRATEGY.md`](CLA_STRATEGY.md) | Current no-assignment decision and future CLA decision boundary. | 当前不转让版权决定与未来 CLA 决策边界 |
+| [`API_NAMING_CONSTITUTION.md`](API_NAMING_CONSTITUTION.md) | Canonical cross-project API vocabulary, abstraction rules, and migration gate. | 跨项目统一 API 词汇、抽象层规则与迁移门禁 |
+| [`API_NAMING_MIGRATION_PLAN.md`](API_NAMING_MIGRATION_PLAN.md) | P0 inventory, dispositions, work packages, and current gate status. | P0 盘点、处置、工作包与当前门禁状态 |
 
 ## Suggested reading | 推荐顺序
 

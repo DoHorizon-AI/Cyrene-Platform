@@ -401,13 +401,14 @@ message KernelCommand {
 
   oneof request {
     GetKernelCapabilitiesRequest get_capabilities = 10;
-    ReserveResourcesRequest reserve_resources = 11;
-    ReleaseResourcesRequest release_resources = 12;
-    LaunchPluginRequest launch_plugin = 13;
-    TerminatePluginRequest terminate_plugin = 14;
-    CancelOperationRequest cancel_operation = 15;
+    LaunchProcessRequest launch_process = 13;
+    TerminateProcessRequest terminate_process = 14;
+    LegacyCancelOperationRequest cancel_operation = 15;
     KernelAuthorityCommand authority = 16;
   }
+
+  reserved 11, 12;
+  reserved "reserve_resources", "release_resources";
 }
 
 message KernelCommandResult {
@@ -427,19 +428,21 @@ message KernelCommandResult {
 message KernelAuthorityCommand {
   oneof request {
     NegotiateRequest negotiate = 1;
-    AcquireSemanticLeaseRequest acquire_lease = 2;
+    AcquireLeaseRequest acquire_lease = 2;
     RenewLeaseRequest renew_lease = 3;
-    ReleaseSemanticLeaseRequest release_lease = 4;
+    ReleaseLeaseRequest release_lease = 4;
     StartWorkerRequest start_worker = 5;
-    HeartbeatWorkerRequest heartbeat_worker = 6;
+    ReportHeartbeatRequest report_heartbeat = 6;
     StopWorkerRequest stop_worker = 7;
     CreateOperationRequest create_operation = 8;
     ReportOperationRequest report_operation = 9;
-    CancelSemanticOperationRequest cancel_operation = 10;
+    CancelOperationRequest cancel_operation = 10;
     PublishEndpointRequest publish_endpoint = 11;
     AuthorizeEndpointRequest authorize_endpoint = 12;
     RevokeEndpointRequest revoke_endpoint = 13;
-    SubscribeEventsRequest subscribe_events = 14;
+    // The request/response Node control envelope exposes finite history only.
+    // Continuous WatchEvents remains on KernelAuthorityService's stream.
+    ReadEventsRequest read_events = 14;
   }
 }
 

@@ -124,7 +124,9 @@ message GetOperationRequest {
   string name = 2;
 }
 
-message CancelOperationRequest {
+// Legacy KernelService compatibility request. The canonical authority request
+// is defined in kernel_authority.proto as CancelOperationRequest.
+message LegacyCancelOperationRequest {
   MutationContext mutation = 1;
   string name = 2;
 }

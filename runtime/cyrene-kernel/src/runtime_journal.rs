@@ -537,7 +537,7 @@ impl DurableEventStore for FileRuntimeJournal {
 fn event_name(event: RuntimeJournalEvent) -> &'static str {
     match event {
         RuntimeJournalEvent::KernelStarted => "KERNEL_STARTED",
-        RuntimeJournalEvent::LeaseReserved => "LEASE_RESERVED",
+        RuntimeJournalEvent::LeaseAcquired => "LEASE_ACQUIRED",
         RuntimeJournalEvent::LeaseReleaseStarted => "LEASE_RELEASE_STARTED",
         RuntimeJournalEvent::LeaseReleased => "LEASE_RELEASED",
         RuntimeJournalEvent::LeaseRevoked => "LEASE_REVOKED",
@@ -866,17 +866,17 @@ mod tests {
 
         // Pre-restart: acquire a lease with fence token N and durably record it.
         let manager_before = InMemoryResourceManager::new("node-1", vec![resource.clone()]);
-        let lease_before = manager_before.reserve(request.clone()).unwrap();
+        let lease_before = manager_before.acquire(request.clone()).unwrap();
         let fence_before = lease_before.fence_token;
         journal
             .append(RuntimeJournalRecord {
-                event: RuntimeJournalEvent::LeaseReserved,
+                event: RuntimeJournalEvent::LeaseAcquired,
                 node_id: "node-1".to_string(),
                 node_epoch: 0,
                 instance_name: None,
                 lease_name: Some(lease_before.name.clone()),
                 fence_token: Some(fence_before),
-                reason_code: "LEASE_RESERVED".to_string(),
+                reason_code: "LEASE_ACQUIRED".to_string(),
                 runtime_evidence: None,
             })
             .unwrap();
@@ -890,7 +890,7 @@ mod tests {
             vec![resource],
             recovery.next_fence_token,
         );
-        let lease_after = manager_after.reserve(request).unwrap();
+        let lease_after = manager_after.acquire(request).unwrap();
         assert!(
             lease_after.fence_token > fence_before,
             "fence token must not be reused across a restart"
@@ -1354,7 +1354,7 @@ mod tests {
             )
             .unwrap();
         let source_changed = authority_n_plus_one
-            .events_after(&context("replay-after-restart"), &principal, &cursor_n, 256)
+            .read_events(&context("replay-after-restart"), &principal, &cursor_n, 256)
             .unwrap();
         assert_eq!(source_changed.status, semantic::ReplayStatus::SourceChanged);
         assert!(source_changed.events.is_empty());
@@ -1384,7 +1384,7 @@ mod tests {
         assert!(snapshot_n_plus_one.workers.is_empty());
         assert!(snapshot_n_plus_one.endpoints.is_empty());
         assert!(authority_n_plus_one
-            .events_after(
+            .read_events(
                 &context("resume-after-resnapshot"),
                 &principal,
                 &snapshot_n_plus_one.cursor,
@@ -1938,7 +1938,7 @@ mod tests {
 
         // Verify old cursor gets SOURCE_CHANGED
         let source_changed = authority_n_plus_one
-            .events_after(&context("replay-old-cursor"), &principal, &cursor_n, 256)
+            .read_events(&context("replay-old-cursor"), &principal, &cursor_n, 256)
             .unwrap();
         assert_eq!(
             source_changed.status,

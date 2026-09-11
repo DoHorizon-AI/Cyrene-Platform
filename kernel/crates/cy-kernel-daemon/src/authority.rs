@@ -266,7 +266,7 @@ impl LocalKernelAuthority {
         // state. A transition publishes its durable event only after mutating
         // state, so reading state after the cursor guarantees the snapshot is a
         // superset of every event already counted in `cursor`. This makes
-        // `Snapshot @ C + events_after(C)` reconstruct current state without
+        // `Snapshot @ C + read_events(C)` reconstruct current state without
         // losing a transition that publishes between the state read and the
         // cursor read (the single-mutex hole that previously let a Worker or
         // Operation vanish from both the snapshot and the incremental replay).
@@ -960,7 +960,7 @@ impl KernelAuthority for LocalKernelAuthority {
         let lease = self
             .runtime
             .daemon
-            .reserve(ResourceRequest {
+            .acquire(ResourceRequest {
                 lease_name: Self::lease_internal_name(context, &object.identity),
                 expected_inventory_generation: self.runtime.daemon.resources.inventory().generation,
                 holder,
@@ -970,10 +970,10 @@ impl KernelAuthority for LocalKernelAuthority {
             })
             .map_err(Self::provider_rejection)?;
         if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReserved,
+            RuntimeJournalEvent::LeaseAcquired,
             None,
             Some(&lease),
-            "LEASE_RESERVED",
+            "LEASE_ACQUIRED",
         ) {
             let _ = self
                 .runtime
@@ -1391,7 +1391,7 @@ impl KernelAuthority for LocalKernelAuthority {
         ))
     }
 
-    fn heartbeat_worker(
+    fn report_heartbeat(
         &self,
         context: &AuthorityCallContext,
         principal: &semantic::Principal,
@@ -1858,7 +1858,7 @@ impl KernelAuthority for LocalKernelAuthority {
         Ok(())
     }
 
-    fn events_after(
+    fn read_events(
         &self,
         context: &AuthorityCallContext,
         principal: &semantic::Principal,
@@ -1873,7 +1873,7 @@ impl KernelAuthority for LocalKernelAuthority {
                 "event page_size must be in 1..=256",
             ));
         }
-        self.events_after_inner(&context.namespace, cursor, limit)
+        self.read_events_page(&context.namespace, cursor, limit)
     }
 }
 
@@ -2583,7 +2583,7 @@ impl LocalKernelAuthority {
         self.runtime.event_notifier.notify_waiters();
     }
 
-    fn events_after_inner(
+    fn read_events_page(
         &self,
         namespace: &NamespaceId,
         cursor: &semantic::EventCursor,

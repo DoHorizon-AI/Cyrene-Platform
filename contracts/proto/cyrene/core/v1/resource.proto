@@ -189,25 +189,9 @@ message ResourceLease {
   uint64 inventory_generation = 9;
 }
 
-message ReserveResourcesRequest {
-  option deprecated = true;
-
-  MutationContext mutation = 1;
-  NodeRef node = 2;
-  ResourceRequirements requirements = 3;
-  google.protobuf.Duration ttl = 4;
-}
-
-message ReleaseResourcesRequest {
-  option deprecated = true;
-
-  MutationContext mutation = 1;
-  ResourceLeaseRef lease = 2;
-}
-
-// Canonical semantic lease API. Legacy ReserveResources remains a
-// compatibility projection while clients migrate away from accelerator enums.
-message AcquireLeaseRequest {
+// Legacy KernelService compatibility request. The canonical authority request
+// is defined in kernel_authority.proto as AcquireLeaseRequest.
+message LegacyAcquireLeaseRequest {
   MutationContext mutation = 1;
   NodeRef node = 2;
   cyrene.semantic.v1.Identity holder = 3;
@@ -219,7 +203,9 @@ message AcquireLeaseRequest {
   MemoryRequirements memory = 7;
 }
 
-message ReleaseLeaseRequest {
+// Legacy KernelService compatibility request. The canonical authority request
+// is defined in kernel_authority.proto as ReleaseLeaseRequest.
+message LegacyReleaseLeaseRequest {
   MutationContext mutation = 1;
   cyrene.semantic.v1.Identity lease = 2;
   uint64 fence_token = 3;

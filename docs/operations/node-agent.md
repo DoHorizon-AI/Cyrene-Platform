@@ -12,10 +12,14 @@ The production path is:
 Rust `cy-execution-control::ExecutionControlService` -- mTLS bidi gRPC --> cy-node-agent -- UDS --> KernelService
 ```
 
-The Agent accepts only `KernelCommand`'s six typed requests: capability query,
-resource reserve/release, launch/terminate, and operation cancel. It maps each
-to the matching Kernel RPC and returns the typed result or a gRPC status. It
-does not turn any remote string into a process command.
+The Agent accepts typed `KernelCommand` requests for capability query,
+process launch/termination, operation cancellation, and the canonical
+authority branch. The authority branch exposes finite `ReadEvents` as an
+`EventPage`; continuous `WatchEvents` remains on the Kernel authority gRPC
+stream because this one-command/one-result envelope is not a durable stream
+subscription. It maps each supported request to the matching Kernel RPC and
+returns the typed result or a gRPC status. It does not turn any remote string
+into a process command.
 
 `NodeWelcome`, `NodeToControlPlane`, and `ControlPlaneToNode` carry a session
 id. The Agent accepts the initial welcome only when its envelope session id

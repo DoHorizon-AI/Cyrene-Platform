@@ -27,6 +27,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check architecture governance
         run: bash tooling/ci/check-architecture-governance.sh
+      - name: Check API naming constitution
+        run: python3 tooling/ci/check-api-naming.py
       - name: Check Core v1 contract
         run: bash tooling/ci/check-core-v1-contract.sh
       - name: Check Kernel semantic contract

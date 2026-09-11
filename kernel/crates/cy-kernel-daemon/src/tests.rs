@@ -67,6 +67,16 @@ fn authority_request_for<T>(peer: PeerCred, message: T) -> Request<T> {
     request
 }
 
+fn watch_event(response: core_v1::WatchEventsResponse) -> semantic_v1::Event {
+    match response.body {
+        Some(core_v1::watch_events_response::Body::Event(event)) => event,
+        Some(core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+            panic!("watch stream returned continuity page: {:?}", page.status)
+        }
+        None => panic!("watch stream returned an empty response"),
+    }
+}
+
 #[derive(Debug)]
 struct EmptyHardware;
 
@@ -844,7 +854,7 @@ fn semantic_lease_rpc_is_vendor_neutral_fenced_and_ttl_bounded() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(Request::new(core_v1::AcquireLeaseRequest {
+            adapter.acquire_lease(Request::new(core_v1::LegacyAcquireLeaseRequest {
                 mutation: Some(core_v1::MutationContext {
                     request: Some(core_v1::RequestContext {
                         request_id: "request-1".to_string(),
@@ -889,7 +899,7 @@ fn semantic_lease_rpc_is_vendor_neutral_fenced_and_ttl_bounded() {
 
     let released = runtime
         .block_on(
-            adapter.release_lease(Request::new(core_v1::ReleaseLeaseRequest {
+            adapter.release_lease(Request::new(core_v1::LegacyReleaseLeaseRequest {
                 mutation: None,
                 lease: lease_identity,
                 fence_token: lease.fence_token,
@@ -924,12 +934,10 @@ fn authority_rejects_requests_without_peer_credentials() {
 
 #[test]
 fn core_v1_defaults_scope_and_core_v2_requires_a_valid_explicit_namespace() {
-    use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
-    };
+    use core_v1::{kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest};
     use core_v2::{
         kernel_authority_service_server::KernelAuthorityService as KernelAuthorityV2Service,
-        AcquireSemanticLeaseRequest as AcquireV2LeaseRequest,
+        AcquireLeaseRequest as AcquireV2LeaseRequest,
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -940,7 +948,7 @@ fn core_v1_defaults_scope_and_core_v2_requires_a_valid_explicit_namespace() {
     let default_lease = runtime
         .block_on(KernelAuthorityService::acquire_lease(
             &adapter,
-            authority_request(AcquireSemanticLeaseRequest {
+            authority_request(AcquireLeaseRequest {
                 context: Some(authority_context("v1-default")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-v1".to_string(),
@@ -1213,7 +1221,7 @@ fn namespace_scopes_identical_worker_lease_operation_endpoint_grant_and_events()
         })));
 
     let events_a = authority
-        .events_after(
+        .read_events(
             &namespace_a,
             &principal_a,
             &semantic::EventCursor {
@@ -1224,7 +1232,7 @@ fn namespace_scopes_identical_worker_lease_operation_endpoint_grant_and_events()
         )
         .unwrap();
     let events_b = authority
-        .events_after(
+        .read_events(
             &namespace_b,
             &principal_b,
             &semantic::EventCursor {
@@ -1258,7 +1266,7 @@ fn namespace_scopes_identical_worker_lease_operation_endpoint_grant_and_events()
 #[test]
 fn endpoint_authority_requires_the_worker_owner_principal() {
     use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+        kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest,
         AuthorizeEndpointRequest, PublishEndpointRequest, RenewLeaseRequest, RevokeEndpointRequest,
     };
 
@@ -1269,7 +1277,7 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireLeaseRequest {
                 context: Some(authority_context("endpoint-lease")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-1".to_string(),
@@ -1446,9 +1454,9 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
 fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     use crate::watchdog::InstanceActorState;
     use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
-        CancelSemanticOperationRequest, CreateOperationRequest, HeartbeatWorkerRequest,
-        ReportOperationRequest, StartWorkerRequest, StopWorkerRequest, SubscribeEventsRequest,
+        kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest,
+        CancelOperationRequest, CreateOperationRequest, ReadEventsRequest, ReportHeartbeatRequest,
+        ReportOperationRequest, StartWorkerRequest, StopWorkerRequest, WatchEventsRequest,
     };
 
     let adapter = semantic_worker_adapter();
@@ -1458,7 +1466,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireLeaseRequest {
                 context: Some(authority_context("worker-lease")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-1".to_string(),
@@ -1539,7 +1547,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
 
     let running = runtime
         .block_on(
-            adapter.heartbeat_worker(authority_request(HeartbeatWorkerRequest {
+            adapter.report_heartbeat(authority_request(ReportHeartbeatRequest {
                 context: Some(authority_context("heartbeat-worker")),
                 worker: worker.identity.clone(),
                 lease: lease.identity.clone(),
@@ -1583,7 +1591,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .unwrap();
     let cancelled = runtime
         .block_on(
-            adapter.cancel_operation(authority_request(CancelSemanticOperationRequest {
+            adapter.cancel_operation(authority_request(CancelOperationRequest {
                 context: Some(authority_context("cancel-operation")),
                 operation: Some(semantic_v1::Identity {
                     id: "operation-1".to_string(),
@@ -1599,14 +1607,24 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
         sequence: 0,
     };
+    let read_page = runtime
+        .block_on(adapter.read_events(authority_request(ReadEventsRequest {
+            context: Some(authority_context("read-events")),
+            cursor: Some(cursor.clone()),
+            limit: 256,
+        })))
+        .unwrap()
+        .into_inner()
+        .page
+        .expect("ReadEvents returns its EventPage");
+    assert_eq!(read_page.status, semantic_v1::ReplayStatus::Current as i32);
+
     let mut stream = runtime
-        .block_on(
-            adapter.subscribe_events(authority_request(SubscribeEventsRequest {
-                context: Some(authority_context("subscribe-events")),
-                cursor: Some(cursor),
-                page_size: 256,
-            })),
-        )
+        .block_on(adapter.watch_events(authority_request(WatchEventsRequest {
+            context: Some(authority_context("watch-events")),
+            cursor: Some(cursor),
+            page_size: 256,
+        })))
         .unwrap()
         .into_inner();
     let mut events = Vec::new();
@@ -1618,11 +1636,12 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
             events.push(event);
         }
     });
+    let events = events.into_iter().map(watch_event).collect::<Vec<_>>();
     assert!(events.iter().any(|event| event.kind == "worker.starting"));
     assert!(events.iter().any(|event| event.kind == "operation.running"));
 
-    let source_changed_res = runtime.block_on(adapter.subscribe_events(authority_request(
-        SubscribeEventsRequest {
+    let mut source_changed_stream = runtime
+        .block_on(adapter.watch_events(authority_request(WatchEventsRequest {
             context: Some(authority_context("source-changed")),
             cursor: Some(semantic_v1::EventCursor {
                 source: Some(semantic_v1::Identity {
@@ -1632,15 +1651,22 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
                 sequence: 0,
             }),
             page_size: 1,
-        },
-    )));
-    assert!(source_changed_res.is_err());
-    let status = match source_changed_res {
-        Err(status) => status,
-        Ok(_) => panic!("expected Err(Status), got Ok"),
-    };
-    assert_eq!(status.code(), tonic::Code::OutOfRange);
-    assert!(status.message().contains("SOURCE_CHANGED"));
+        })))
+        .unwrap()
+        .into_inner();
+    let source_changed = runtime
+        .block_on(async {
+            use tokio_stream::StreamExt;
+            source_changed_stream.next().await
+        })
+        .expect("source change response")
+        .expect("source change is a typed stream response");
+    match source_changed.body {
+        Some(core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+            assert_eq!(page.status, semantic_v1::ReplayStatus::SourceChanged as i32);
+        }
+        other => panic!("expected typed source-change page, got {other:?}"),
+    }
 
     for sequence in 0..=OPERATION_EVENT_HISTORY_CAPACITY {
         adapter.publish_semantic_event(
@@ -1653,23 +1679,30 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
             sequence.to_string().into_bytes(),
         );
     }
-    let gap_res = runtime.block_on(adapter.subscribe_events(authority_request(
-        SubscribeEventsRequest {
+    let mut gap_stream = runtime
+        .block_on(adapter.watch_events(authority_request(WatchEventsRequest {
             context: Some(authority_context("replay-gap")),
             cursor: Some(semantic_v1::EventCursor {
                 source: Some(to_semantic_proto_identity(&adapter.semantic_event_source())),
                 sequence: 1,
             }),
             page_size: 1,
-        },
-    )));
-    assert!(gap_res.is_err());
-    let status = match gap_res {
-        Err(status) => status,
-        Ok(_) => panic!("expected Err(Status), got Ok"),
-    };
-    assert_eq!(status.code(), tonic::Code::OutOfRange);
-    assert!(status.message().contains("GAP"));
+        })))
+        .unwrap()
+        .into_inner();
+    let gap = runtime
+        .block_on(async {
+            use tokio_stream::StreamExt;
+            gap_stream.next().await
+        })
+        .expect("gap response")
+        .expect("gap is a typed stream response");
+    match gap.body {
+        Some(core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+            assert_eq!(page.status, semantic_v1::ReplayStatus::Gap as i32);
+        }
+        other => panic!("expected typed gap page, got {other:?}"),
+    }
 
     let stopped = runtime
         .block_on(adapter.stop_worker(authority_request(StopWorkerRequest {
@@ -1706,7 +1739,7 @@ fn durable_event_replay_is_not_limited_by_the_memory_window() {
     let context = scoped_authority_context("default", "durable-replay");
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
     let first = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -1724,7 +1757,7 @@ fn durable_event_replay_is_not_limited_by_the_memory_window() {
     assert_eq!(first.events.last().unwrap().sequence, 256);
 
     let second = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -1778,7 +1811,7 @@ fn durable_retention_gap_requires_snapshot_before_resume() {
     let context = scoped_authority_context("default", "durable-gap");
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
     let gap = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -1795,7 +1828,7 @@ fn durable_retention_gap_requires_snapshot_before_resume() {
     let snapshot = authority.snapshot(&context, &principal).unwrap();
     assert_eq!(snapshot.cursor.sequence, 10);
     let resumed = authority
-        .events_after(&context, &principal, &snapshot.cursor, 1)
+        .read_events(&context, &principal, &snapshot.cursor, 1)
         .unwrap();
     assert_eq!(resumed.status, semantic::ReplayStatus::Current);
     assert!(resumed.events.is_empty());
@@ -1814,7 +1847,7 @@ fn durable_event_read_failure_never_falls_back_to_memory_history() {
     };
     assert_eq!(
         authority
-            .events_after(&context, &principal, &cursor, 1)
+            .read_events(&context, &principal, &cursor, 1)
             .unwrap_err()
             .reason_code,
         "EVENT_READ_FAILED"
@@ -1860,7 +1893,7 @@ fn recreated_authority_continues_sequence_for_the_same_source() {
     let context = scoped_authority_context("default", "recreated-source");
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
     let replay = recreated
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -1905,7 +1938,7 @@ fn cursor_from_an_older_epoch_returns_source_changed() {
     let context = scoped_authority_context("default", "changed-source");
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
     let page = restarted
-        .events_after(&context, &principal, &old_cursor, 1)
+        .read_events(&context, &principal, &old_cursor, 1)
         .unwrap();
     assert_eq!(page.status, semantic::ReplayStatus::SourceChanged);
     assert!(page.events.is_empty());
@@ -1916,7 +1949,7 @@ fn cursor_from_an_older_epoch_returns_source_changed() {
 
 /// Item 3: the snapshot cursor and the durable event ordering are the SAME
 /// consistency boundary. A snapshot taken at cursor C, followed by
-/// `events_after(C)`, must reconstruct the live authority state: the set of
+/// `read_events(C)`, must reconstruct the live authority state: the set of
 /// operation identities in the snapshot equals the set of `operation.created`
 /// subjects in the durable history at or before C, the cursor equals the
 /// latest durable sequence, and replay from C is empty/Current when nothing
@@ -1996,7 +2029,7 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
 
     // (a) The snapshot cursor equals the latest durable sequence.
     let full = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -2018,9 +2051,9 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
 
     // (b) Replay from the snapshot cursor is empty and Current: nothing
     // changed after the snapshot, so Snapshot @ C is already complete and
-    // events_after(C) contributes no further (and no lost) transition.
+    // read_events(C) contributes no further (and no lost) transition.
     let after = authority
-        .events_after(&context, &principal, &snapshot.cursor, 256)
+        .read_events(&context, &principal, &snapshot.cursor, 256)
         .unwrap();
     assert_eq!(after.status, semantic::ReplayStatus::Current);
     assert!(after.events.is_empty());
@@ -2112,7 +2145,7 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
                 Err(_) => continue,
             };
             let page = reader_authority
-                .events_after(&reader_context, &reader_principal, &snapshot.cursor, 256)
+                .read_events(&reader_context, &reader_principal, &snapshot.cursor, 256)
                 .expect("replay from a fresh snapshot cursor must not fail");
             // Under concurrency a writer may commit between the snapshot and
             // this replay, or the in-memory window may roll past the snapshot
@@ -2146,7 +2179,7 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
     // the cursor read under concurrency.
     let snapshot = authority.snapshot(&context, &principal).unwrap();
     let full = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -2184,8 +2217,8 @@ fn heartbeat_requires_generation_and_monotonic_sequence() {
         .build()
         .unwrap();
     let accepted = runtime
-        .block_on(
-            adapter.report_heartbeat(Request::new(core_v1::ReportHeartbeatRequest {
+        .block_on(adapter.report_plugin_heartbeat(Request::new(
+            core_v1::ReportPluginHeartbeatRequest {
                 context: None,
                 plugin_instance_name: "worker_1".to_string(),
                 generation: 99,
@@ -2194,8 +2227,8 @@ fn heartbeat_requires_generation_and_monotonic_sequence() {
                 runtime_state: core_v1::PluginRuntimeState::Healthy as i32,
                 health: None,
                 restart_count: 0,
-            })),
-        )
+            },
+        )))
         .unwrap()
         .into_inner();
     assert_eq!(
@@ -2203,8 +2236,8 @@ fn heartbeat_requires_generation_and_monotonic_sequence() {
         core_v1::HeartbeatDisposition::Accepted as i32
     );
     let duplicate = runtime
-        .block_on(
-            adapter.report_heartbeat(Request::new(core_v1::ReportHeartbeatRequest {
+        .block_on(adapter.report_plugin_heartbeat(Request::new(
+            core_v1::ReportPluginHeartbeatRequest {
                 context: None,
                 plugin_instance_name: "worker_1".to_string(),
                 generation: 99,
@@ -2213,8 +2246,8 @@ fn heartbeat_requires_generation_and_monotonic_sequence() {
                 runtime_state: core_v1::PluginRuntimeState::Healthy as i32,
                 health: None,
                 restart_count: 0,
-            })),
-        )
+            },
+        )))
         .unwrap()
         .into_inner();
     assert_eq!(
@@ -2222,8 +2255,8 @@ fn heartbeat_requires_generation_and_monotonic_sequence() {
         core_v1::HeartbeatDisposition::Duplicate as i32
     );
     let stale = runtime
-        .block_on(
-            adapter.report_heartbeat(Request::new(core_v1::ReportHeartbeatRequest {
+        .block_on(adapter.report_plugin_heartbeat(Request::new(
+            core_v1::ReportPluginHeartbeatRequest {
                 context: None,
                 plugin_instance_name: "worker_1".to_string(),
                 generation: 98,
@@ -2232,8 +2265,8 @@ fn heartbeat_requires_generation_and_monotonic_sequence() {
                 runtime_state: core_v1::PluginRuntimeState::Healthy as i32,
                 health: None,
                 restart_count: 0,
-            })),
-        )
+            },
+        )))
         .unwrap()
         .into_inner();
     assert_eq!(
@@ -2296,7 +2329,7 @@ fn worker_control_shutdown_waits_for_matching_ack() {
 #[test]
 fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
     use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
+        kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest,
         StartWorkerRequest,
     };
 
@@ -2313,7 +2346,7 @@ fn semantic_worker_control_shutdown_is_fenced_and_acknowledged() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireLeaseRequest {
                 context: Some(authority_context("control-lease")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-control-1".to_string(),
@@ -2482,7 +2515,7 @@ fn cancel_operation_reaps_worker_and_emits_terminal_operation() {
         .unwrap();
     let cancelled = runtime
         .block_on(
-            adapter.cancel_operation(Request::new(core_v1::CancelOperationRequest {
+            adapter.cancel_operation(Request::new(core_v1::LegacyCancelOperationRequest {
                 mutation: None,
                 name: running.name.clone(),
             })),
@@ -2589,21 +2622,19 @@ fn multi_adapter_bindings_reject_mixed_enforcement() {
 
 /// A lease must never become externally visible when the durable fence record
 /// cannot be persisted. The journal write is authoritative: on failure the
-/// in-memory reservation is rolled back, leaving no active lease behind.
+/// in-memory acquisition is rolled back, leaving no active lease behind.
 #[test]
 fn acquire_lease_is_rolled_back_when_journal_write_fails() {
     use crate::convert::authority_lease_name;
-    use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
-    };
+    use core_v1::{kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest};
 
     let adapter = semantic_lease_adapter().with_runtime_journal(Arc::new(FailingRuntimeJournal));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let result = runtime.block_on(adapter.acquire_lease(authority_request(
-        AcquireSemanticLeaseRequest {
+    let result = runtime.block_on(
+        adapter.acquire_lease(authority_request(AcquireLeaseRequest {
             context: Some(authority_context("rollback-journal-fail")),
             holder: Some(semantic_v1::Identity {
                 id: "worker-1".to_string(),
@@ -2623,8 +2654,8 @@ fn acquire_lease_is_rolled_back_when_journal_write_fails() {
                 seconds: 30,
                 nanos: 0,
             }),
-        },
-    )));
+        })),
+    );
     assert!(
         result.is_err(),
         "acquire_lease must fail when the durable journal write fails"
@@ -2647,13 +2678,13 @@ fn acquire_lease_is_rolled_back_when_journal_write_fails() {
 
 /// A release must fail closed: if the durable release record cannot be
 /// persisted the in-memory lease is retained (we do not lose the evidence of
-/// the reservation). This journal double allows `LeaseReserved` but fails
+/// the acquisition). This journal double allows `LeaseAcquired` but fails
 /// `LeaseReleased`, so a held lease survives a failed release attempt.
 #[test]
 fn release_lease_fails_closed_when_journal_write_fails() {
     use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
-        ReleaseSemanticLeaseRequest,
+        kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest,
+        ReleaseLeaseRequest,
     };
 
     #[derive(Default)]
@@ -2682,7 +2713,7 @@ fn release_lease_fails_closed_when_journal_write_fails() {
         .unwrap();
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(authority_request(AcquireSemanticLeaseRequest {
+            adapter.acquire_lease(authority_request(AcquireLeaseRequest {
                 context: Some(authority_context("release-journal-fail")),
                 holder: Some(semantic_v1::Identity {
                     id: "worker-1".to_string(),
@@ -2708,7 +2739,7 @@ fn release_lease_fails_closed_when_journal_write_fails() {
         .into_inner();
 
     let release_result = runtime.block_on(adapter.release_lease(authority_request(
-        ReleaseSemanticLeaseRequest {
+        ReleaseLeaseRequest {
             context: Some(authority_context("release-journal-fail")),
             lease: lease.identity.clone(),
             fence_token: lease.fence_token,
@@ -3111,7 +3142,7 @@ fn missing_worker_reconcile_revokes_authority_and_fences_old_worker() {
         .start_worker(&context, &principal, worker.clone())
         .unwrap();
     authority
-        .heartbeat_worker(
+        .report_heartbeat(
             &context,
             &principal,
             &worker.identity,
@@ -3322,7 +3353,7 @@ fn missing_worker_reconcile_revokes_authority_and_fences_old_worker() {
 
     assert_eq!(
         authority
-            .heartbeat_worker(
+            .report_heartbeat(
                 &context,
                 &principal,
                 &worker.identity,
@@ -3388,7 +3419,7 @@ fn missing_worker_reconcile_revokes_authority_and_fences_old_worker() {
         vec![ProviderReconcileAction::Noop]
     );
     let events = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -3433,9 +3464,7 @@ fn missing_worker_reconcile_revokes_authority_and_fences_old_worker() {
 
 #[test]
 fn owned_startup_failure_keeps_resource_unavailable_when_release_cannot_complete() {
-    use core_v1::{
-        kernel_authority_service_server::KernelAuthorityService, AcquireSemanticLeaseRequest,
-    };
+    use core_v1::{kernel_authority_service_server::KernelAuthorityService, AcquireLeaseRequest};
 
     #[derive(Default)]
     struct TerminalReleaseJournal;
@@ -3458,7 +3487,7 @@ fn owned_startup_failure_keeps_resource_unavailable_when_release_cannot_complete
         .enable_all()
         .build()
         .unwrap();
-    let request = |request_id: &str| AcquireSemanticLeaseRequest {
+    let request = |request_id: &str| AcquireLeaseRequest {
         context: Some(authority_context(request_id)),
         holder: Some(semantic_v1::Identity {
             id: format!("worker-{request_id}"),
@@ -3578,7 +3607,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     // Acquire the sole resource through the legacy KernelService RPC.
     let lease = runtime
         .block_on(
-            adapter.acquire_lease(Request::new(core_v1::AcquireLeaseRequest {
+            adapter.acquire_lease(Request::new(core_v1::LegacyAcquireLeaseRequest {
                 mutation: Some(core_v1::MutationContext {
                     request: Some(core_v1::RequestContext {
                         request_id: "e2e-release".to_string(),
@@ -3672,7 +3701,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     // Release through the legacy RPC: because the instance cannot be reaped,
     // `release_lease_with_cleanup` must fail closed with CLEANUP_INCOMPLETE.
     let release = runtime.block_on(adapter.release_lease(Request::new(
-        core_v1::ReleaseLeaseRequest {
+        core_v1::LegacyReleaseLeaseRequest {
             mutation: None,
             lease: Some(lease_identity.clone()),
             fence_token,
@@ -3706,7 +3735,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     // proof and must keep the allocation held.
     adapter.instances.lock().unwrap().remove("stuck-instance");
     let missing_actor_retry = runtime.block_on(adapter.release_lease(Request::new(
-        core_v1::ReleaseLeaseRequest {
+        core_v1::LegacyReleaseLeaseRequest {
             mutation: None,
             lease: Some(lease_identity.clone()),
             fence_token,
@@ -3729,7 +3758,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
 
     // The half-cleaned resource must NOT be reacquired by another lease.
     let reacquire = runtime.block_on(adapter.acquire_lease(Request::new(
-        core_v1::AcquireLeaseRequest {
+        core_v1::LegacyAcquireLeaseRequest {
             mutation: Some(core_v1::MutationContext {
                 request: Some(core_v1::RequestContext {
                     request_id: "e2e-reacquire".to_string(),
@@ -4652,7 +4681,7 @@ fn watchdog_instance_scenario(
         resource_request("watchdog-lease", 1, holder, None, &requirements).expect("request");
     let lease = adapter
         .daemon
-        .reserve(request)
+        .acquire(request)
         .expect("unique resource is allocatable");
 
     let mut actor = InstanceActor::new(
@@ -4755,7 +4784,7 @@ fn watchdog_incomplete_cleanup_never_releases_and_blocks_reacquire() {
     };
     let request =
         resource_request("watchdog-lease-retry", 1, holder, None, &requirements).expect("request");
-    let reacquire = adapter.daemon.reserve(request);
+    let reacquire = adapter.daemon.acquire(request);
     assert!(
         reacquire.is_err(),
         "the still-held FAILED lease must block reallocation with INSUFFICIENT_RESOURCES"
@@ -4806,7 +4835,7 @@ fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
         .expect("request");
     let replacement = adapter
         .daemon
-        .reserve(request)
+        .acquire(request)
         .expect("replacement Lease must succeed after complete cleanup");
     assert!(
         replacement.fence_token > old_fence,
@@ -4864,7 +4893,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
         .expect("request");
     let lease = adapter
         .daemon
-        .reserve(request)
+        .acquire(request)
         .expect("unique resource is allocatable");
     let mut actor = InstanceActor::new(
         "watchdog-journal-w1",
@@ -4950,7 +4979,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
     )
     .expect("request");
     assert!(
-        adapter.daemon.reserve(retry).is_err(),
+        adapter.daemon.acquire(retry).is_err(),
         "the still-ACTIVE Lease must keep the resource non-allocatable"
     );
 }
@@ -5172,7 +5201,7 @@ fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
     // The degraded stream is externally observable: replay surfaces Gap
     // (resnapshot required), never a silent Current-with-no-new-events stall.
     let page = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -5452,8 +5481,8 @@ fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
     assert!(
         records
             .iter()
-            .any(|record| record.event == RuntimeJournalEvent::LeaseReserved),
-        "the lease reservation must be durably present"
+            .any(|record| record.event == RuntimeJournalEvent::LeaseAcquired),
+        "the lease acquisition must be durably present"
     );
     assert!(
         !records
@@ -5655,14 +5684,14 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     .expect("legacy request");
     let legacy_daemon_lease = adapter
         .daemon
-        .reserve(legacy_request)
+        .acquire(legacy_request)
         .expect("the second resource is allocatable");
     bind_stuck(&adapter, "worker-legacy", &legacy_daemon_lease);
     let legacy_error = runtime
         .block_on(
             <KernelServiceAdapter as core_v1::kernel_service_server::KernelService>::release_lease(
                 &adapter,
-                authority_request(core_v1::ReleaseLeaseRequest {
+                authority_request(core_v1::LegacyReleaseLeaseRequest {
                     mutation: None,
                     lease: Some(semantic_v1::Identity {
                         id: legacy_daemon_lease.name.clone(),
@@ -5717,11 +5746,11 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     );
 }
 
-// Legacy launch_plugin convergence: like canonical start_worker it now persists
+// Process launch convergence: like canonical start_worker it now persists
 // the Class B pre-launch intent before the physical spawn, so restart recovery
 // can classify intent-without-outcome identically.
 #[test]
-fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() {
+fn launch_process_records_pre_launch_intent_like_canonical_start_worker() {
     use core_v1::kernel_service_server::KernelService;
     #[derive(Default)]
     struct IntentRecordingJournal {
@@ -5785,7 +5814,7 @@ fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() 
 
     let operation = runtime
         .block_on(
-            adapter.launch_plugin(authority_request(core_v1::LaunchPluginRequest {
+            adapter.launch_process(authority_request(core_v1::LaunchProcessRequest {
                 node: Some(core_v1::NodeRef {
                     node_id: "node".to_string(),
                     node_epoch: 7,
@@ -5799,7 +5828,7 @@ fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() 
                     artifact_digest: "sha256:test".to_string(),
                     verified_signature_identity: "test".to_string(),
                 }),
-                allocation: Some(core_v1::launch_plugin_request::Allocation::ResourceClaim(
+                allocation: Some(core_v1::launch_process_request::Allocation::ResourceClaim(
                     core_v1::ResourceRequirements {
                         cpu: Some(core_v1::CpuRequirements {
                             request_millicores: 500,
@@ -5837,7 +5866,7 @@ fn legacy_launch_plugin_records_pre_launch_intent_like_canonical_start_worker() 
         .find(|record| record.event == RuntimeJournalEvent::InstanceLaunching);
     assert!(
         intent.is_some_and(|record| record.instance_name.as_deref() == Some("plugin-parity")),
-        "legacy launch_plugin must persist the pre-launch intent like canonical start_worker"
+        "launch_process must persist the pre-launch intent like canonical start_worker"
     );
     assert!(
         records
@@ -6023,7 +6052,7 @@ fn renew_just_before_expiry_succeeds_and_extends_authority() {
 
     // Heartbeat still succeeds on the renewed lease
     let hb = authority
-        .heartbeat_worker(
+        .report_heartbeat(
             &context,
             &principal,
             &worker.identity,
@@ -6135,7 +6164,7 @@ fn heartbeat_after_lease_expiry_is_rejected_and_fenced() {
 
     // Heartbeat after expiry is rejected
     let err = authority
-        .heartbeat_worker(
+        .report_heartbeat(
             &context,
             &principal,
             &worker.identity,
@@ -6520,7 +6549,7 @@ fn expiry_durability_failure_fails_closed_and_retries_until_cleanup() {
 
     // 4. Verify old authority remains rejected (fail-closed)
     let hb_err = authority
-        .heartbeat_worker(&context, &principal, &worker_identity, &lease.identity, 1)
+        .report_heartbeat(&context, &principal, &worker_identity, &lease.identity, 1)
         .unwrap_err();
     assert_eq!(hb_err.reason_code, "FENCE_MISMATCH");
 
@@ -6734,7 +6763,7 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
 
     // 6. Verify authority operations remain rejected
     let hb_err = authority
-        .heartbeat_worker(
+        .report_heartbeat(
             &context,
             &principal,
             &worker_identity,
@@ -7071,7 +7100,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     drop(journal_records);
 
     let replay = authority
-        .events_after(
+        .read_events(
             &context,
             &principal,
             &semantic::EventCursor {
@@ -7449,7 +7478,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     // Verification 4: Event Isolation (A <-> B)
     // ==========================================
     let replay_a = authority
-        .events_after(
+        .read_events(
             &context_a,
             &principal_a,
             &semantic::EventCursor {
@@ -7460,7 +7489,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         )
         .unwrap();
     let replay_b = authority
-        .events_after(
+        .read_events(
             &context_b,
             &principal_b,
             &semantic::EventCursor {
@@ -7897,7 +7926,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
         "Proof 2: Event source is epoch-scoped and changes on restart"
     );
     let old_cursor_replay = authority_2
-        .events_after(&context_epoch_2, &principal, &cursor_1, 256)
+        .read_events(&context_epoch_2, &principal, &cursor_1, 256)
         .unwrap();
     assert_eq!(
         old_cursor_replay.status,
@@ -7950,7 +7979,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
     use cy_proto::core_v1::{
         kernel_authority_service_client::KernelAuthorityServiceClient,
-        kernel_authority_service_server::KernelAuthorityServiceServer, SubscribeEventsRequest,
+        kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
     use std::path::PathBuf;
     use tokio::net::{UnixListener, UnixStream};
@@ -8028,8 +8057,8 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     }
 
     // 3. Resume from current cursor (sequence 260) -> receives streaming events 261..=300
-    let current_req = SubscribeEventsRequest {
-        context: Some(authority_context("subscribe-current")),
+    let current_req = WatchEventsRequest {
+        context: Some(authority_context("watch-current")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
             source: Some(to_semantic_proto_identity(&source_1)),
             sequence: 260,
@@ -8037,7 +8066,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         page_size: 256,
     };
     let mut current_stream = client
-        .subscribe_events(current_req)
+        .watch_events(current_req)
         .await
         .expect("subscribe from current cursor")
         .into_inner();
@@ -8047,7 +8076,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     while let Ok(Some(Ok(event))) =
         tokio::time::timeout(Duration::from_millis(50), current_stream.next()).await
     {
-        received_events.push(event);
+        received_events.push(watch_event(event));
     }
     assert_eq!(
         received_events.len(),
@@ -8057,24 +8086,31 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     assert_eq!(received_events[0].sequence, 261);
     assert_eq!(received_events.last().unwrap().sequence, 300);
 
-    // 4. Resume from expired cursor (sequence 1, which has been evicted) -> returns GAP (OutOfRange)
-    let expired_req = SubscribeEventsRequest {
-        context: Some(authority_context("subscribe-gap")),
+    // 4. Resume from expired cursor (sequence 1, which has been evicted) -> returns typed GAP
+    let expired_req = WatchEventsRequest {
+        context: Some(authority_context("watch-gap")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
             source: Some(to_semantic_proto_identity(&source_1)),
             sequence: 1,
         }),
         page_size: 256,
     };
-    let gap_res = client.subscribe_events(expired_req).await;
-    assert!(gap_res.is_err(), "Expired cursor must fail with GAP error");
-    let status = gap_res.unwrap_err();
-    assert_eq!(status.code(), tonic::Code::OutOfRange);
-    assert!(
-        status.message().contains("GAP"),
-        "Error message must explicitly indicate GAP: {}",
-        status.message()
-    );
+    let mut gap_stream = client
+        .watch_events(expired_req)
+        .await
+        .expect("expired cursor returns a typed continuity response")
+        .into_inner();
+    let gap_response = gap_stream
+        .next()
+        .await
+        .expect("gap stream response")
+        .expect("gap response is not a transport error");
+    match gap_response.body {
+        Some(cy_proto::core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+            assert_eq!(page.status, cy_proto::semantic_v1::ReplayStatus::Gap as i32);
+        }
+        other => panic!("expected typed GAP response, got {other:?}"),
+    }
 
     // 5. Restart daemon (simulate crash/restart with epoch advance)
     drop(current_stream);
@@ -8089,27 +8125,34 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
 
     let mut client_2 = connect_client(socket_path.clone()).await;
 
-    // 6. Old source cursor -> returns SOURCE_CHANGED (OutOfRange)
-    let old_source_req = SubscribeEventsRequest {
-        context: Some(authority_context("subscribe-old-source")),
+    // 6. Old source cursor -> returns typed SOURCE_CHANGED
+    let old_source_req = WatchEventsRequest {
+        context: Some(authority_context("watch-old-source")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
             source: Some(to_semantic_proto_identity(&source_1)),
             sequence: 300,
         }),
         page_size: 256,
     };
-    let source_changed_res = client_2.subscribe_events(old_source_req).await;
-    assert!(
-        source_changed_res.is_err(),
-        "Replay with old epoch source must fail with SOURCE_CHANGED"
-    );
-    let status = source_changed_res.unwrap_err();
-    assert_eq!(status.code(), tonic::Code::OutOfRange);
-    assert!(
-        status.message().contains("SOURCE_CHANGED"),
-        "Error message must explicitly indicate SOURCE_CHANGED: {}",
-        status.message()
-    );
+    let mut source_changed_stream = client_2
+        .watch_events(old_source_req)
+        .await
+        .expect("old source returns a typed continuity response")
+        .into_inner();
+    let source_changed_response = source_changed_stream
+        .next()
+        .await
+        .expect("source-change stream response")
+        .expect("source change is not a transport error");
+    match source_changed_response.body {
+        Some(cy_proto::core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+            assert_eq!(
+                page.status,
+                cy_proto::semantic_v1::ReplayStatus::SourceChanged as i32
+            );
+        }
+        other => panic!("expected typed SOURCE_CHANGED response, got {other:?}"),
+    }
 
     // 7. Snapshot + new cursor -> resume correctly
     let snap_ctx = AuthorityCallContext {
@@ -8133,13 +8176,13 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         "Snapshot provides new epoch source"
     );
 
-    let resume_req = SubscribeEventsRequest {
-        context: Some(authority_context("subscribe-new-epoch")),
+    let resume_req = WatchEventsRequest {
+        context: Some(authority_context("watch-new-epoch")),
         cursor: Some(new_cursor),
         page_size: 256,
     };
     let mut resumed_stream = client_2
-        .subscribe_events(resume_req)
+        .watch_events(resume_req)
         .await
         .expect("subscribe with new cursor")
         .into_inner();
@@ -8159,6 +8202,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         .await
         .expect("receive live event within timeout")
         .expect("stream yields event")
+        .map(watch_event)
         .expect("event is ok");
 
     assert_eq!(live_event.kind, "worker.state.changed");
@@ -8167,7 +8211,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     let _ = shutdown_tx_2.send(());
 }
 
-/// Canonical SubscribeEvents server-streaming backpressure test over real authority UDS
+/// Canonical WatchEvents server-streaming backpressure test over real authority UDS
 ///
 /// Verifies:
 /// 1. open canonical stream;
@@ -8178,11 +8222,11 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
 /// 6. reconnect using last acknowledged cursor and verify replay resumes correctly.
 #[cfg(unix)]
 #[tokio::test]
-async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real_uds() {
+async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds() {
     use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
     use cy_proto::core_v1::{
         kernel_authority_service_client::KernelAuthorityServiceClient,
-        kernel_authority_service_server::KernelAuthorityServiceServer, SubscribeEventsRequest,
+        kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
@@ -8251,8 +8295,8 @@ async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real
     }
 
     // 2. Client subscribes from sequence 0
-    let req = SubscribeEventsRequest {
-        context: Some(authority_context("subscribe-stream-backpressure")),
+    let req = WatchEventsRequest {
+        context: Some(authority_context("watch-stream-backpressure")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
             source: Some(to_semantic_proto_identity(&source)),
             sequence: 0,
@@ -8260,21 +8304,23 @@ async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real
         page_size: 256,
     };
     let mut stream = client
-        .subscribe_events(req)
+        .watch_events(req)
         .await
-        .expect("subscribe stream")
+        .expect("watch stream")
         .into_inner();
 
     // 3. Client reads 5 events and stops reading
     let mut acked_cursor = 0;
     for _ in 1..=5 {
         let event = stream.next().await.unwrap().unwrap();
-        acked_cursor = event.sequence;
+        acked_cursor = watch_event(event).sequence;
     }
     assert_eq!(acked_cursor, 5);
 
-    // 4. Kernel produces > bounded capacity (1500 events) without subscriber reading
-    for sequence in 11..=1500 {
+    // 4. Kernel produces more events than the bounded subscriber capacity but
+    // stays within durable history, so the transport backpressure path is
+    // exercised before the later cursor-gap reconnect assertion.
+    for sequence in 11..=110 {
         adapter.publish_semantic_event(
             semantic::Identity {
                 id: "worker-backpressure-test".to_string(),
@@ -8309,8 +8355,21 @@ async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real
         "Slow subscriber must be disconnected with OutOfRange without blocking kernel"
     );
 
-    // 6. Client reconnects with last acknowledged cursor (sequence 5 is now evicted, so GAP is returned)
-    let reconnect_req = SubscribeEventsRequest {
+    // 6. Evict the last acknowledged cursor, then reconnect. GAP is a typed
+    // event-history continuity condition, not a transport status.
+    for sequence in 111..=300 {
+        adapter.publish_semantic_event(
+            semantic::Identity {
+                id: "worker-backpressure-test".to_string(),
+                generation: 1,
+            },
+            "worker.state.changed",
+            "cyrene.worker.v1",
+            format!("event-{sequence}").into_bytes(),
+        );
+    }
+
+    let reconnect_req = WatchEventsRequest {
         context: Some(authority_context("reconnect-stream")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
             source: Some(to_semantic_proto_identity(&source)),
@@ -8318,34 +8377,42 @@ async fn canonical_subscribe_events_stream_slow_consumer_and_reconnect_over_real
         }),
         page_size: 256,
     };
-    let reconnect_res = client.subscribe_events(reconnect_req).await;
-    assert!(
-        reconnect_res.is_err(),
-        "Reconnection with evicted cursor must require resnapshot with GAP"
-    );
-    let gap_status = reconnect_res.unwrap_err();
-    assert_eq!(gap_status.code(), tonic::Code::OutOfRange);
-    assert!(gap_status.message().contains("GAP"));
+    let mut reconnect_stream = client
+        .watch_events(reconnect_req)
+        .await
+        .expect("reconnection returns typed GAP continuity")
+        .into_inner();
+    let reconnect_response = reconnect_stream
+        .next()
+        .await
+        .expect("reconnection continuity response")
+        .expect("GAP is not a transport error");
+    match reconnect_response.body {
+        Some(cy_proto::core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+            assert_eq!(page.status, cy_proto::semantic_v1::ReplayStatus::Gap as i32);
+        }
+        other => panic!("expected typed GAP continuity, got {other:?}"),
+    }
 
     let _ = shutdown_tx.send(());
     let _ = server_handle.await;
 }
 
-/// Canonical SubscribeEvents does not lose any event at the boundary between initial durable replay and live notification waiting.
+/// Canonical WatchEvents does not lose any event at the boundary between initial durable replay and live notification waiting.
 ///
 /// Verifies:
 /// 1. publish initial batch of events (1..=5);
-/// 2. client opens SubscribeEvents stream and consumes initial replay events;
+/// 2. client opens WatchEvents stream and consumes initial replay events;
 /// 3. exactly one event is committed (sequence 6) at the replay/live transition boundary;
 /// 4. no subsequent events are published;
 /// 5. subscriber waiting for live events still receives event 6 promptly without requiring future events to wake up.
 #[cfg(unix)]
 #[tokio::test]
-async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff() {
+async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
     use crate::peer_cred::{inject_authority_principal, PeerCredAccept};
     use cy_proto::core_v1::{
         kernel_authority_service_client::KernelAuthorityServiceClient,
-        kernel_authority_service_server::KernelAuthorityServiceServer, SubscribeEventsRequest,
+        kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
@@ -8414,8 +8481,8 @@ async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff()
     }
 
     // 2. Client subscribes from sequence 0
-    let req = SubscribeEventsRequest {
-        context: Some(authority_context("subscribe-stream-handoff")),
+    let req = WatchEventsRequest {
+        context: Some(authority_context("watch-stream-handoff")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
             source: Some(to_semantic_proto_identity(&source)),
             sequence: 0,
@@ -8423,9 +8490,9 @@ async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff()
         page_size: 256,
     };
     let mut stream = client
-        .subscribe_events(req)
+        .watch_events(req)
         .await
-        .expect("subscribe stream")
+        .expect("watch stream")
         .into_inner();
 
     // 3. Read initial 5 events
@@ -8435,7 +8502,7 @@ async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff()
             .expect("timeout waiting for initial replay event")
             .expect("stream ended prematurely")
             .expect("event ok");
-        assert_eq!(event.sequence, expected_seq);
+        assert_eq!(watch_event(event).sequence, expected_seq);
     }
 
     // 4. Publish exactly one event at the replay -> live transition boundary, and no subsequent events
@@ -8455,6 +8522,7 @@ async fn canonical_subscribe_events_does_not_lose_event_at_replay_live_handoff()
         .expect("timeout waiting for live handoff event")
         .expect("stream ended prematurely")
         .expect("event ok");
+    let live_event = watch_event(live_event);
 
     assert_eq!(live_event.sequence, 6);
     assert_eq!(live_event.body, b"handoff-event-6");

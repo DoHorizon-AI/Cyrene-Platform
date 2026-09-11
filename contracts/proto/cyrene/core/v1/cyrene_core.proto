@@ -30,25 +30,17 @@ service NodeControlService {
 service KernelService {
   rpc GetKernelCapabilities(GetKernelCapabilitiesRequest)
       returns (KernelCapabilities);
-  rpc ReserveResources(ReserveResourcesRequest)
-      returns (ResourceLease) {
-    option deprecated = true;
-  }
-  rpc AcquireLease(AcquireLeaseRequest)
+  rpc AcquireLease(LegacyAcquireLeaseRequest)
       returns (cyrene.semantic.v1.Lease);
-  rpc ReleaseResources(ReleaseResourcesRequest)
-      returns (ResourceLease) {
-    option deprecated = true;
-  }
-  rpc ReleaseLease(ReleaseLeaseRequest)
+  rpc ReleaseLease(LegacyReleaseLeaseRequest)
       returns (cyrene.semantic.v1.Lease);
-  rpc LaunchPlugin(LaunchPluginRequest)
+  rpc LaunchProcess(LaunchProcessRequest)
       returns (Operation);
-  rpc TerminatePlugin(TerminatePluginRequest)
+  rpc TerminateProcess(TerminateProcessRequest)
       returns (Operation);
   rpc GetOperation(GetOperationRequest)
       returns (Operation);
-  rpc CancelOperation(CancelOperationRequest)
+  rpc CancelOperation(LegacyCancelOperationRequest)
       returns (Operation);
   rpc WatchOperations(WatchOperationsRequest)
       returns (stream OperationEvent);
@@ -69,8 +61,8 @@ service PluginLifecycleService {
       returns (PluginInstance);
   rpc ListPluginInstances(ListPluginInstancesRequest)
       returns (ListPluginInstancesResponse);
-  rpc ReportHeartbeat(ReportHeartbeatRequest)
-      returns (ReportHeartbeatResponse);
+  rpc ReportPluginHeartbeat(ReportPluginHeartbeatRequest)
+      returns (ReportPluginHeartbeatResponse);
   rpc ConnectWorker(stream WorkerToKernel)
       returns (stream KernelToWorker);
   rpc WatchPluginEvents(WatchPluginEventsRequest)

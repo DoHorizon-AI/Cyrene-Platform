@@ -24,29 +24,30 @@ option java_package = "io.cyrene.proto.core.v1";
 service KernelAuthorityService {
   rpc Negotiate(NegotiateRequest) returns (cyrene.semantic.v1.ContractRevision);
 
-  rpc AcquireLease(AcquireSemanticLeaseRequest)
+  rpc AcquireLease(AcquireLeaseRequest)
       returns (cyrene.semantic.v1.Lease);
   rpc RenewLease(RenewLeaseRequest) returns (cyrene.semantic.v1.Lease);
-  rpc ReleaseLease(ReleaseSemanticLeaseRequest)
+  rpc ReleaseLease(ReleaseLeaseRequest)
       returns (cyrene.semantic.v1.Lease);
 
   rpc StartWorker(StartWorkerRequest) returns (cyrene.semantic.v1.Operation);
-  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (cyrene.semantic.v1.Worker);
+  rpc ReportHeartbeat(ReportHeartbeatRequest) returns (cyrene.semantic.v1.Worker);
   rpc StopWorker(StopWorkerRequest) returns (cyrene.semantic.v1.Operation);
 
   rpc CreateOperation(CreateOperationRequest)
       returns (cyrene.semantic.v1.Operation);
   rpc ReportOperation(ReportOperationRequest)
       returns (cyrene.semantic.v1.Operation);
-  rpc CancelOperation(CancelSemanticOperationRequest)
+  rpc CancelOperation(CancelOperationRequest)
       returns (cyrene.semantic.v1.Operation);
 
   rpc PublishEndpoint(PublishEndpointRequest) returns (cyrene.semantic.v1.Endpoint);
   rpc AuthorizeEndpoint(AuthorizeEndpointRequest)
       returns (cyrene.semantic.v1.EndpointGrant);
   rpc RevokeEndpoint(RevokeEndpointRequest) returns (google.protobuf.Empty);
-  rpc SubscribeEvents(SubscribeEventsRequest)
-      returns (stream cyrene.semantic.v1.Event);
+  rpc ReadEvents(ReadEventsRequest) returns (ReadEventsResponse);
+  rpc WatchEvents(WatchEventsRequest)
+      returns (stream WatchEventsResponse);
 }
 
 // Dedicated Worker liveness/drain channel. It is served only on the Worker
@@ -68,7 +69,7 @@ message NegotiateRequest {
   repeated cyrene.semantic.v1.ContractRevision offered = 1;
 }
 
-message AcquireSemanticLeaseRequest {
+message AcquireLeaseRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.Identity holder = 2;
   cyrene.semantic.v1.ResourceQuery query = 3;
@@ -82,7 +83,7 @@ message RenewLeaseRequest {
   google.protobuf.Duration ttl = 4;
 }
 
-message ReleaseSemanticLeaseRequest {
+message ReleaseLeaseRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.Identity lease = 2;
   uint64 fence_token = 3;
@@ -93,7 +94,7 @@ message StartWorkerRequest {
   cyrene.semantic.v1.Worker worker = 2;
 }
 
-message HeartbeatWorkerRequest {
+message ReportHeartbeatRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.Identity worker = 2;
   cyrene.semantic.v1.Identity lease = 3;
@@ -118,7 +119,7 @@ message ReportOperationRequest {
   cyrene.semantic.v1.Operation operation = 2;
 }
 
-message CancelSemanticOperationRequest {
+message CancelOperationRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.Identity operation = 2;
 }
@@ -138,10 +139,31 @@ message RevokeEndpointRequest {
   cyrene.semantic.v1.Identity grant = 2;
 }
 
-message SubscribeEventsRequest {
+message ReadEventsRequest {
+  AuthorityCallContext context = 1;
+  cyrene.semantic.v1.EventCursor cursor = 2;
+  uint32 limit = 3;
+}
+
+message ReadEventsResponse {
+  cyrene.semantic.v1.EventPage page = 1;
+}
+
+message WatchEventsRequest {
   AuthorityCallContext context = 1;
   cyrene.semantic.v1.EventCursor cursor = 2;
   uint32 page_size = 3;
+}
+
+// A Watch emits one Event at a time while continuity remains intact. If the
+// cursor cannot continue incrementally, it emits the same typed EventPage used
+// by ReadEvents as `continuity_change` and closes the stream. Transport/service
+// failures remain gRPC status failures and are not encoded as continuity.
+message WatchEventsResponse {
+  oneof body {
+    cyrene.semantic.v1.Event event = 1;
+    cyrene.semantic.v1.EventPage continuity_change = 2;
+  }
 }
 
 message WorkerControlToKernel {

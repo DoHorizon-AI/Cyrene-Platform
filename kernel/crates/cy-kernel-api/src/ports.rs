@@ -26,8 +26,8 @@ pub trait ResourceLeaseManager: Send + Sync {
     ///
     /// 实现必须保留已分配设备的可释放记录，并拒绝发生回退的事实代数。
     fn refresh_inventory(&self, snapshot: InventorySnapshot) -> Result<(), ProviderError>;
-    /// 申请预留硬件资源租约
-    fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError>;
+    /// 获取硬件资源租约
+    fn acquire(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError>;
     /// 读取租约当前状态，用于启动/停止流程的 fencing 与结果回报
     fn get_lease(&self, lease_name: &str) -> Result<ResourceLease, ProviderError>;
     /// 使用当前 fencing authority 延长一个活跃租约。续约绝不改变已分配

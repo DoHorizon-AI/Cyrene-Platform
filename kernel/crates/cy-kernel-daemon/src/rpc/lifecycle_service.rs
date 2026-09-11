@@ -51,7 +51,7 @@ impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for Kernel
         _request: Request<core_v1::StartPluginRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
         Err(Status::unimplemented(
-            "use KernelService.LaunchPlugin after policy and installation validation",
+            "use KernelService.LaunchProcess after policy and installation validation",
         ))
     }
 
@@ -60,7 +60,7 @@ impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for Kernel
         _request: Request<core_v1::StopPluginRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
         Err(Status::unimplemented(
-            "use KernelService.TerminatePlugin for node-local process termination",
+            "use KernelService.TerminateProcess for node-local process termination",
         ))
     }
 
@@ -108,10 +108,10 @@ impl core_v1::plugin_lifecycle_service_server::PluginLifecycleService for Kernel
         }))
     }
 
-    async fn report_heartbeat(
+    async fn report_plugin_heartbeat(
         &self,
-        request: Request<core_v1::ReportHeartbeatRequest>,
-    ) -> Result<Response<core_v1::ReportHeartbeatResponse>, Status> {
+        request: Request<core_v1::ReportPluginHeartbeatRequest>,
+    ) -> Result<Response<core_v1::ReportPluginHeartbeatResponse>, Status> {
         let request = request.into_inner();
         Ok(Response::new(self.accept_heartbeat(
             &request.plugin_instance_name,

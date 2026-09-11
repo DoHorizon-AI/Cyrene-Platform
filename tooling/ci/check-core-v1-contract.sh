@@ -58,7 +58,7 @@ fi
 if ! rg -q 'InstalledPluginRef plugin' "$core_root/kernel_runtime.proto" \
     || ! rg -q 'ResourceRequirements resource_claim|ResourceLeaseRef existing_lease' \
       "$core_root/kernel_runtime.proto"; then
-  echo "LaunchPluginRequest must use an installed plugin and opaque resource refs" >&2
+  echo "LaunchProcessRequest must use an installed plugin and opaque resource refs" >&2
   exit 1
 fi
 

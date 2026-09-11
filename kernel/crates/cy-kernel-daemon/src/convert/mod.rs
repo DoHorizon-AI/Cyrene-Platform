@@ -33,8 +33,7 @@ pub(crate) use event::{
     semantic_operation_event_kind, to_semantic_proto_event, to_semantic_proto_event_page,
 };
 pub(crate) use lease::{
-    cgroup_limits, legacy_holder, to_proto_lease, to_semantic_proto_contract_lease,
-    to_semantic_proto_lease,
+    cgroup_limits, legacy_holder, to_semantic_proto_contract_lease, to_semantic_proto_lease,
 };
 pub(crate) use operation::{
     semantic_endpoint_from_proto, semantic_endpoint_grant_from_proto,

@@ -16,7 +16,7 @@
 //! - 通用资源与能力事实 ([`semantic_v1::Resource`], [`semantic_v1::Capability`])
 //! - 资源租约管理与围栏令牌 ([`core_v1::AcquireLeaseRequest`], [`semantic_v1::Lease`])
 //! - 插件进程生命周期与清理状态 ([`core_v1::PluginProcess`])
-//! - 控制面下发指令与心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportHeartbeatResponse`])
+//! - 控制面下发指令与插件心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportPluginHeartbeatResponse`])
 
 // Prost owns the generated enum representation; wire compatibility takes
 // precedence over hand-boxing generated variants in this projection crate.
@@ -121,32 +121,15 @@ mod tests {
         assert_eq!(welcome.encode_to_vec(), welcome_bytes);
         assert_eq!(welcome.selected_protocol_version, 1);
 
-        let reserve_bytes = fixture_bytes("reserve_resources");
-        let reserve = core_v1::ReserveResourcesRequest::decode(reserve_bytes.as_slice()).unwrap();
-        assert_eq!(reserve.encode_to_vec(), reserve_bytes);
-        assert_eq!(reserve.node.unwrap().node_epoch, 7);
-        assert_eq!(
-            reserve
-                .requirements
-                .unwrap()
-                .cpu
-                .unwrap()
-                .request_millicores,
-            1000
-        );
-
-        let release_bytes = fixture_bytes("release_resources");
-        let release = core_v1::ReleaseResourcesRequest::decode(release_bytes.as_slice()).unwrap();
-        assert_eq!(release.encode_to_vec(), release_bytes);
-        assert_eq!(release.lease.unwrap().fence_token, 9);
-
         let launch_bytes = fixture_bytes("inline_resource_claim_launch");
-        let launch = core_v1::LaunchPluginRequest::decode(launch_bytes.as_slice()).unwrap();
+        let launch = core_v1::LaunchProcessRequest::decode(launch_bytes.as_slice()).unwrap();
         assert_eq!(launch.encode_to_vec(), launch_bytes);
         assert_eq!(launch.plugin.unwrap().plugin_id, "plugin-a");
         assert!(matches!(
             launch.allocation,
-            Some(core_v1::launch_plugin_request::Allocation::ResourceClaim(_))
+            Some(core_v1::launch_process_request::Allocation::ResourceClaim(
+                _
+            ))
         ));
 
         let success_bytes = fixture_bytes("operation_success");
@@ -168,7 +151,7 @@ mod tests {
         ));
 
         let stale_bytes = fixture_bytes("heartbeat_stale_generation");
-        let stale = core_v1::ReportHeartbeatResponse::decode(stale_bytes.as_slice()).unwrap();
+        let stale = core_v1::ReportPluginHeartbeatResponse::decode(stale_bytes.as_slice()).unwrap();
         assert_eq!(stale.encode_to_vec(), stale_bytes);
         assert_eq!(
             stale.disposition,

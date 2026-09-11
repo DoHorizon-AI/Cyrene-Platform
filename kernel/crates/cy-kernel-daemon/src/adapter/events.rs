@@ -18,13 +18,13 @@
 //! ## Class A — Durable-before-visible
 //!
 //! Authority must not become externally visible before durable evidence
-//! succeeds. Applied to fence reservation / authority generation: a Lease may
-//! be returned to a caller only after its `LEASE_RESERVED` fence record is
-//! durably persisted. On write failure the reservation is rolled back
+//! succeeds. Applied to fence acquisition / authority generation: a Lease may
+//! be returned to a caller only after its `LEASE_ACQUIRED` fence record is
+//! durably persisted. On write failure the acquisition is rolled back
 //! (`begin_release` + `complete_release` of the never-bound Lease), so a
 //! Lease that lost its durable fence is never visible and its fence is never
-//! reused. See `AcquireSemanticLease`/`acquire_lease` reserve rollback and the
-//! legacy reserve paths in `kernel_service.rs`.
+//! reused. See `AcquireLease`/`acquire_lease` rollback and the compatibility
+//! paths in `kernel_service.rs`.
 //!
 //! ## Class B — Durable intent / physical action / durable outcome
 //!
@@ -37,7 +37,7 @@
 //!
 //! Recovery classifies an incomplete transition by comparing the durable
 //! intent/outcome records with the current physical state. The intent write
-//! (`LEASE_RELEASE_STARTED`, `WorkerLost`, `LEASE_RESERVED`) is the release
+//! (`LEASE_RELEASE_STARTED`, `WorkerLost`, `LEASE_ACQUIRED`) is the release
 //! gate: if it fails, the physical action MUST NOT begin. The watchdog release
 //! (`enforce_heartbeat_deadlines`), `release_with_cleanup`, `stop_worker` and
 //! the legacy terminate/cancel paths all gate their physical stop on this
@@ -190,7 +190,7 @@ impl KernelServiceAdapter {
 
     /// Persists a runtime lifecycle record to the durable journal.
     ///
-    /// For lease reservation/release this is the authoritative step: callers
+    /// For lease acquisition/release this is the authoritative step: callers
     /// must treat a returned `Err` as a hard failure (the fence record was not
     /// durably reserved) and roll back or fail-closed accordingly, never
     /// letting a lease become externally visible without its persisted fence.

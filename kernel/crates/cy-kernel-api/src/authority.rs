@@ -168,7 +168,7 @@ pub trait KernelAuthority: Send + Sync {
     ) -> Result<semantic::Operation, semantic::Rejection>;
 
     /// Record liveness for the exact Worker/Lease generation and fence.
-    fn heartbeat_worker(
+    fn report_heartbeat(
         &self,
         context: &AuthorityCallContext,
         principal: &semantic::Principal,
@@ -225,9 +225,9 @@ pub trait KernelAuthority: Send + Sync {
         grant: &semantic::Identity,
     ) -> Result<(), semantic::Rejection>;
 
-    /// Replay immutable facts after a cursor scoped to one authority
+    /// Read immutable facts after a cursor scoped to one authority
     /// incarnation. A source mismatch requires a fresh snapshot/reconcile.
-    fn events_after(
+    fn read_events(
         &self,
         context: &AuthorityCallContext,
         principal: &semantic::Principal,

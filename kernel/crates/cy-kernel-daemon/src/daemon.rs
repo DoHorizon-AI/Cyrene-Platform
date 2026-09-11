@@ -141,23 +141,23 @@ impl KernelDaemon {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // 🔧 FUNCTION: KernelDaemon::reserve
+    // 🔧 FUNCTION: KernelDaemon::acquire
     //
-    //   Reserves from the last durable inventory ledger only after readiness
+    //   Acquires from the last durable inventory ledger only after readiness
     //   has been established; it does not probe hardware inline.
     //
     //   仅在确认资源就绪后从最近一次持久化清单账本中申请租约，不在申请路径内
     //   临时探测硬件，避免事实刷新与分配发生竞态。
     // ════════════════════════════════════════════════════════════════════════
-    /// 申请预留硬件资源租约
+    /// 获取硬件资源租约
     ///
     /// Transport authentication is enforced at the `KernelAuthority` boundary.
     /// The lease holder remains the planned Worker identity, not a
     /// caller-supplied Principal.
-    pub fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
+    pub fn acquire(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
         // Allocation consumes the last durably observed inventory ledger. It
         // must not probe and mutate facts inline, because that would race the
-        // caller's snapshot generation between validation and reservation.
+        // caller's snapshot generation between validation and acquisition.
         // The startup/monitor observation paths refresh this ledger separately.
         let snapshot = self.resources.inventory();
         if !snapshot.capabilities.ready {
@@ -167,7 +167,7 @@ impl KernelDaemon {
                 "required hardware adapter capability is not ready",
             ));
         }
-        self.resources.reserve(request)
+        self.resources.acquire(request)
     }
 
     /// Begins release authority while keeping the physical allocation held.
@@ -263,7 +263,7 @@ impl KernelDaemon {
                     )
                 })?;
             bindings.push(
-                // Already-reserved lease bindings do not enforce volatile hardware inventory generation checks
+                // Already-acquired lease bindings do not enforce volatile hardware inventory generation checks
                 self.resource_provider
                     .create_binding_for_generation(resource, 0)?,
             );

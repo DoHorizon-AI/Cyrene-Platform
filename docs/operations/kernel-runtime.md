@@ -97,7 +97,7 @@ JSONL 审计证据，不是 Worker 恢复数据库：只包含 node id/epoch、l
 实例名称和生命周期 reason code，绝不保存命令行、环境变量、驱动事实或 Worker 负载。
 
 每一次 Kernel 启动都会产生单调递增的 node epoch；运行时从该节点历史 fence token 的最大值
-开始分配新的 fence。于是旧 epoch 的 `ReleaseResources` 或 Worker 心跳不可能碰巧匹配一次
+开始分配新的 fence。于是旧 epoch 的 `ReleaseLease` 或 Worker 心跳不可能碰巧匹配一次
 重启后重新使用的 lease 名称。journal 无法持久化或出现非末尾损坏记录时，Kernel 必须拒绝启动；
 仅允许忽略断电留下的最后一条不完整记录。
 

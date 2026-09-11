@@ -14,6 +14,27 @@ It contains no Catalyst, Yield, Reactor, Exchange, Navigator, Echo, or Plugin
 business logic. Products and reusable capabilities live in their owning
 repositories and consume versioned Platform contracts.
 
+## API Naming Constitution
+
+Cyrene uses one shared semantic vocabulary across Platform, Products, and
+Plugins. The normative source is
+[`docs/governance/API_NAMING_CONSTITUTION.md`](docs/governance/API_NAMING_CONSTITUTION.md).
+It fixes the distinctions between `Acquire`/`Reserve`, `Start`/`Launch`,
+`Stop`/`Terminate`, `Watch`/`Subscribe`, and the `State`/`Status`/`Phase`
+abstraction layers.
+
+This repository is the language source for the whole Cyrene system. Every
+breaking rename must update contract inputs, generated bindings, consumers,
+fixtures, and state-machine evidence together. The migration gate is defined
+by [`tooling/architecture/api-naming.toml`](tooling/architecture/api-naming.toml)
+and runs through
+[`tooling/ci/check-api-naming.py`](tooling/ci/check-api-naming.py). The public
+API naming freeze begins with the first public release.
+
+Cyrene 使用统一的 API 语义词汇；Platform 是整个系统的语言源头。首次公开
+发布前可以进行 breaking rename，但必须同步更新合约、生成绑定、消费者、
+fixture 与状态机证据。首次 public release 开始后，公共 API 命名冻结。
+
 ## Core design philosophy
 
 Platform is a generic mechanism layer, not an AI product framework.
@@ -161,6 +182,8 @@ the [independent consumer gate](tooling/acceptance/licensing-boundary/), and the
 - [Contribution guide](CONTRIBUTING.md)
 - [Open-source architecture readiness](docs/governance/OPEN_SOURCE_ARCHITECTURE_READINESS.md)
 - [Public release preflight](docs/governance/PUBLIC_RELEASE_PREFLIGHT.md)
+- [API Naming Constitution](docs/governance/API_NAMING_CONSTITUTION.md)
+- [API Naming Migration Plan](docs/governance/API_NAMING_MIGRATION_PLAN.md)
 
 ## Licensing
 

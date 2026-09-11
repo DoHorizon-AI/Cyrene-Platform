@@ -25,7 +25,7 @@ recommended path from protocol definitions to executable adapters.
 | [`contracts/`](contracts/README.md) | Normative semantic and wire contracts. | 规范语义契约与线协议 |
 | [`development/`](development/README.md) | Branching, dependencies, and local development guidance. | 分支、依赖与本地开发指南 |
 | [`flows/`](flows/README.md) | Sequence-oriented runtime walkthroughs. | 按时序说明运行时流程 |
-| [`governance/`](governance/README.md) | Ownership, CI trust, and repository policy. | 责任归属、CI 信任与仓库治理 |
+| [`governance/`](governance/README.md) | Ownership, CI trust, repository policy, and API naming constitution. | 责任归属、CI 信任、仓库治理与 API 命名宪法 |
 | [`operations/`](operations/README.md) | Runtime, node-agent, and recovery operations. | 运行时、节点代理与恢复运维 |
 | [`release/`](release/README.md) | Artifact, versioning, and release topology. | 产物、版本与发布拓扑 |
 | [`security/`](security/README.md) | Trust, privilege, and sandbox non-guarantees. | 信任、特权与沙箱非保证 |

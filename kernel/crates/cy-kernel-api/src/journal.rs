@@ -31,7 +31,7 @@ pub struct RuntimeJournalRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeJournalEvent {
     KernelStarted,
-    LeaseReserved,
+    LeaseAcquired,
     LeaseReleaseStarted,
     LeaseReleased,
     LeaseRevoked,

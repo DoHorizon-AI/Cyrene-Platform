@@ -21,8 +21,7 @@ use crate::{
     convert::{
         cgroup_limits, expires_after, inject_heartbeat_environment, legacy_holder,
         operation_event_matches, proto_duration, provider_status, resource_request,
-        semantic_identity_from_proto, semantic_query_from_proto, to_proto_lease,
-        to_semantic_proto_lease,
+        semantic_identity_from_proto, semantic_query_from_proto, to_semantic_proto_lease,
     },
     session::ManagedProcess,
     watchdog::InstanceActor,
@@ -44,7 +43,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn acquire_lease(
         &self,
-        request: Request<core_v1::AcquireLeaseRequest>,
+        request: Request<core_v1::LegacyAcquireLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
         let request = request.into_inner();
         self.validate_node(request.node.as_ref())?;
@@ -71,7 +70,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let limits = cgroup_limits(request.cpu.as_ref(), request.memory.as_ref())?;
         let lease = self
             .daemon
-            .reserve(ResourceRequest {
+            .acquire(ResourceRequest {
                 lease_name,
                 expected_inventory_generation: generation,
                 holder,
@@ -85,10 +84,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             fence_token: lease.fence_token,
         };
         if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReserved,
+            RuntimeJournalEvent::LeaseAcquired,
             None,
             Some(&journal_lease),
-            "LEASE_RESERVED",
+            "LEASE_ACQUIRED",
         ) {
             // Durable fence record could not be persisted: roll back the
             // in-memory lease so it is never externally visible without the
@@ -102,7 +101,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn release_lease(
         &self,
-        request: Request<core_v1::ReleaseLeaseRequest>,
+        request: Request<core_v1::LegacyReleaseLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
         let request = request.into_inner();
         let lease_identity = semantic_identity_from_proto(request.lease, "lease")?;
@@ -129,78 +128,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         Ok(Response::new(to_semantic_proto_lease(&lease)))
     }
 
-    async fn reserve_resources(
+    async fn launch_process(
         &self,
-        request: Request<core_v1::ReserveResourcesRequest>,
-    ) -> Result<Response<core_v1::ResourceLease>, Status> {
-        let request = request.into_inner();
-        self.validate_node(request.node.as_ref())?;
-        let requirements = request
-            .requirements
-            .ok_or_else(|| Status::invalid_argument("resource requirements are required"))?;
-        let lease_name = self.lease_name(request.mutation.as_ref())?;
-        let generation = request
-            .mutation
-            .as_ref()
-            .and_then(|mutation| mutation.expected_generation)
-            .unwrap_or_else(|| self.daemon.resources.inventory().generation);
-        let holder = legacy_holder(request.mutation.as_ref(), &lease_name);
-        let expires_at_unix_ms = request
-            .ttl
-            .map(proto_duration)
-            .transpose()?
-            .map(expires_after);
-        let internal = resource_request(
-            &lease_name,
-            generation,
-            holder,
-            expires_at_unix_ms,
-            &requirements,
-        )?;
-        let lease = self.daemon.reserve(internal).map_err(provider_status)?;
-        let journal_lease = core_v1::ResourceLeaseRef {
-            lease_name: lease.name.clone(),
-            fence_token: lease.fence_token,
-        };
-        if let Err(error) = self.record_runtime(
-            RuntimeJournalEvent::LeaseReserved,
-            None,
-            Some(&journal_lease),
-            "LEASE_RESERVED",
-        ) {
-            let _ = self.daemon.begin_release(&lease.name, lease.fence_token);
-            let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
-            return Err(provider_status(error));
-        }
-        Ok(Response::new(to_proto_lease(
-            &self.daemon,
-            lease,
-            Some(requirements),
-        )?))
-    }
-
-    async fn release_resources(
-        &self,
-        request: Request<core_v1::ReleaseResourcesRequest>,
-    ) -> Result<Response<core_v1::ResourceLease>, Status> {
-        let request = request.into_inner();
-        let lease = request
-            .lease
-            .ok_or_else(|| Status::invalid_argument("lease reference is required"))?;
-        // Same invariant as ReleaseLease: cleanup of any instance still fenced
-        // by this lease must be confirmed before the allocation is reusable.
-        self.release_lease_with_cleanup(&lease)
-            .map_err(provider_status)?;
-        let lease = self
-            .daemon
-            .lease(&lease.lease_name)
-            .map_err(provider_status)?;
-        Ok(Response::new(to_proto_lease(&self.daemon, lease, None)?))
-    }
-
-    async fn launch_plugin(
-        &self,
-        request: Request<core_v1::LaunchPluginRequest>,
+        request: Request<core_v1::LaunchProcessRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
         let request = request.into_inner();
         self.validate_node(request.node.as_ref())?;
@@ -213,7 +143,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             || plugin.verified_signature_identity.is_empty()
         {
             return Err(Status::failed_precondition(
-                "LaunchPlugin accepts only a verified InstalledPluginRef",
+                "LaunchProcess accepts only a verified InstalledPluginRef",
             ));
         }
         let instance_name = plugin.installation_name.clone();
@@ -229,13 +159,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             ));
         }
         let (lease, owned_lease) = match request.allocation {
-            Some(core_v1::launch_plugin_request::Allocation::ExistingLease(lease_ref)) => (
+            Some(core_v1::launch_process_request::Allocation::ExistingLease(lease_ref)) => (
                 self.daemon
                     .lease(&lease_ref.lease_name)
                     .map_err(provider_status)?,
                 false,
             ),
-            Some(core_v1::launch_plugin_request::Allocation::ResourceClaim(requirements)) => {
+            Some(core_v1::launch_process_request::Allocation::ResourceClaim(requirements)) => {
                 let lease_name = self.lease_name(request.mutation.as_ref())?;
                 let generation = request
                     .mutation
@@ -250,7 +180,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     &requirements,
                 )?;
                 (
-                    self.daemon.reserve(internal).map_err(provider_status)?,
+                    self.daemon.acquire(internal).map_err(provider_status)?,
                     true,
                 )
             }
@@ -423,9 +353,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         ))
     }
 
-    async fn terminate_plugin(
+    async fn terminate_process(
         &self,
-        request: Request<core_v1::TerminatePluginRequest>,
+        request: Request<core_v1::TerminateProcessRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
         let request = request.into_inner();
         if request.process_name.is_empty() {
@@ -577,7 +507,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
 
     async fn cancel_operation(
         &self,
-        request: Request<core_v1::CancelOperationRequest>,
+        request: Request<core_v1::LegacyCancelOperationRequest>,
     ) -> Result<Response<core_v1::Operation>, Status> {
         let name = request.into_inner().name;
         if name.is_empty() {

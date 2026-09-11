@@ -38,7 +38,7 @@ allowed when ignoring them preserves every v1 decision.
 The suite now exercises every v1 action and every v1 `reason_code` from
 `docs/contracts/kernel-semantic-contract-v1.md` §11.
 
-### Actions (17/17)
+### Actions (18/18)
 
 | Action | Fixture file |
 |---|---|
@@ -58,7 +58,8 @@ The suite now exercises every v1 action and every v1 `reason_code` from
 | `PUBLISH_ENDPOINT` | `endpoint.tsv` (new) |
 | `AUTHORIZE_ENDPOINT` | `authority.tsv` (grant rows) |
 | `REVOKE_ENDPOINT` | `endpoint.tsv` (new) |
-| `SUBSCRIBE_EVENTS` | `replay.tsv` |
+| `READ_EVENTS` | `replay.tsv` |
+| `WATCH_EVENTS` | `replay.tsv` initial replay and continuity vectors |
 
 ### Reason codes (all covered)
 

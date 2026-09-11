@@ -59,7 +59,7 @@ Node Agent、重复 supervisor 被移到其权威层；大型文件被拆成显�
 | Lease/Fence | `cy-kernel-api/src/lease.rs`, resource manager, daemon release/revoke paths; stale fence and incomplete cleanup tests are present. |
 | Capability | `framework/crates/cy-platform-api`; manifest normalization and selection remain generic. |
 | Endpoint | Endpoint/grant authority is lease-bound and purged on worker loss/release. |
-| Event | Durable event store/history and `SubscribeEvents` v1/v2 projections. |
+| Event | Durable event store/history and `WatchEvents` v1/v2 projections. |
 | Replay/live handoff | `snapshot` captures the cursor before reading state; ordered replay then notifier handoff is implemented and regression-tested. |
 | Cleanup/recovery | Watchdog, service manager and sandbox client require physical cleanup confirmation; restart recovery is epoch/fence scoped. |
 

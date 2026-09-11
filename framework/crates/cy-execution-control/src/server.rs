@@ -612,7 +612,7 @@ impl ExecutionControlService {
             command_id: acquisition.command_id.to_string(),
             request: Some(kernel_command::Request::Authority(KernelAuthorityCommand {
                 request: Some(kernel_authority_command::Request::AcquireLease(
-                    core_v1::AcquireSemanticLeaseRequest {
+                    core_v1::AcquireLeaseRequest {
                         context: Some(context_to_proto(acquisition.context)),
                         holder: Some(identity_to_proto(acquisition.holder)),
                         query: Some(resource_query_to_proto(acquisition.query)),
@@ -672,7 +672,7 @@ impl ExecutionControlService {
             command_id: command_id.to_string(),
             request: Some(kernel_command::Request::Authority(KernelAuthorityCommand {
                 request: Some(kernel_authority_command::Request::ReleaseLease(
-                    core_v1::ReleaseSemanticLeaseRequest {
+                    core_v1::ReleaseLeaseRequest {
                         context: Some(context_to_proto(context)),
                         lease: Some(identity_to_proto(&lease.identity)),
                         fence_token: lease.fence_token,

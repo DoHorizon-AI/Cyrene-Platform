@@ -244,7 +244,7 @@ pair `(source, sequence)`. Event body is optional descriptive payload under a
 registered schema ID. It never carries authority, credentials, native handles
 or state required to interpret the Event header.
 
-`events_after` returns an `EventPage` of at most 256 events:
+`ReadEvents` returns an `EventPage` of at most 256 events:
 
 - `CURRENT`: same source and retained history covers `sequence + 1`; events
   are strictly ordered and `next_sequence` equals the last returned sequence;
@@ -263,6 +263,13 @@ rather than falling back to cached events. After `GAP` or `SOURCE_CHANGED`, a
 client rebuilds from the existing authority snapshot and resumes with its
 returned cursor. Events from an earlier source generation are audit history and
 cannot rebuild active authority state for a new Kernel epoch.
+
+`WatchEvents` begins with the same cursor continuity decision, replays retained
+events as a server stream, and then observes the live authority. Each intact
+event is emitted as an `Event`. A `GAP` or `SOURCE_CHANGED` is emitted as a
+typed `EventPage` continuity change and closes the stream; it is not converted
+into a generic transport status. `ReadEvents` and `WatchEvents` share the same
+cursor, source identity and durable history rules.
 
 ## 10. Provider snapshot and reconciliation
 
@@ -291,8 +298,9 @@ The v1 actions are `NEGOTIATE`, `REGISTER_PROVIDER`, `PUBLISH_INVENTORY`,
 `RECONCILE_PROVIDER`, `ACQUIRE_LEASE`, `RENEW_LEASE`, `RELEASE_LEASE`,
 `START_WORKER`, `HEARTBEAT_WORKER`, `STOP_WORKER`, `CREATE_OPERATION`,
 `REPORT_OPERATION`, `CANCEL_OPERATION`, `PUBLISH_ENDPOINT`,
-`AUTHORIZE_ENDPOINT`, `REVOKE_ENDPOINT` and `SUBSCRIBE_EVENTS`. A transport may
-combine entry points but cannot omit their validation or authority semantics.
+`AUTHORIZE_ENDPOINT`, `REVOKE_ENDPOINT`, `READ_EVENTS` and `WATCH_EVENTS`. A
+transport may combine entry points but cannot omit their validation or authority
+semantics.
 
 Stable action-level reason codes are:
 
@@ -321,11 +329,24 @@ public APIs use the semantic nouns and `KernelAuthority`; compatibility
 translation stays at the outer transport edge.
 
 At this freeze, the specification, semantic Proto, pure Rust model and
-Kernel-semantic TCK define v1. The production Core gRPC service, Node Agent and
-Hardware Adapter protocols are **partial migration projections**, not yet a
-claim of full v1 conformance. In particular they must still adopt authenticated
-Principal injection, Provider-scoped TTL/reconciliation and complete Linux
-integration evidence for durable fencing and local peer authorization.
+Kernel-semantic TCK define v1. The current API/semantic projection status is
+explicitly recorded below; deployment hardening is tracked separately and does
+not downgrade a completed naming or contract projection.
+
+| Component | Current status | Evidence and exact scope |
+| --- | --- | --- |
+| Core gRPC | **COMPLETE** | v1/v2 expose finite `ReadEvents` and continuous `WatchEvents`; typed `EventPage` continuity responses cover `GAP` and `SOURCE_CHANGED`; daemon RPC tests cover replay, handoff, backpressure and reconnect. |
+| Node Agent | **COMPLETE** | The one-command/one-result Node control projection carries finite `ReadEvents` and typed `EventPage` results; continuous `WatchEvents` is **NOT_APPLICABLE** to that envelope and remains on the canonical Core gRPC stream. Node bridge and integration tests pass. |
+| Hardware Adapter | **NOT_APPLICABLE** for Event read/watch | The local adapter contract reports inventory facts and creates resource bindings; it does not own durable Event history or observation. Hardware adapter protocol round-trip and daemon integration tests pass. |
+| Sandbox Adapter | **NOT_APPLICABLE** for Event read/watch | The local adapter contract launches, stops, observes and recovers concrete processes; it does not own durable Event history or cursor continuity. Sandbox protocol and UDS integration tests pass. |
+| Rust semantic authority | **COMPLETE** | `Event`, `EventCursor`, `EventPage` and `ReplayStatus` remain the single semantic model; `KernelAuthority::read_events` is the finite history operation used by both projections. Rust semantic TCK and workspace tests pass. |
+| Python consumer / TCK | **COMPLETE** | The checked-in Python Kernel Semantic TCK passes; Platform owns no second Python Event authority or alternate operation name. |
+| Kotlin TCK / consumer | **COMPLETE** | The checked-in Kotlin Kernel Semantic TCK passes against the same frozen vectors and semantic names. |
+
+The remaining `PRODUCTION_HARDENING / DEPLOYMENT_VALIDATION` items are
+cross-host mTLS, systemd crash recovery, privileged deployment identity and
+multi-account Linux acceptance. They are not missing API operations,
+projections, or naming rules.
 
 `KernelAuthorityService` is the canonical Core gRPC projection. Every
 state-changing authority action requires a selected `ContractRevision` in an
@@ -343,21 +364,25 @@ provisional local admission boundary.
 The canonical projection now also carries semantic `Worker`, `Operation` and
 `EventPage` actions. `StartWorker` accepts only an opaque execution reference;
 the out-of-Kernel resolver proves the digest-bound installation before returning
-a launch plan. `SubscribeEvents` is a bounded pull projection of
-`EventCursor → EventPage`: it returns typed `CURRENT`, `GAP` or
-`SOURCE_CHANGED` and never reuses the legacy `resume_token` or LRO event
+a launch plan. `ReadEvents` is the finite `EventCursor → EventPage` projection.
+`WatchEvents` is the continuous server stream: it replays `Event` values, then
+emits a typed `EventPage` continuity change for `GAP` or `SOURCE_CHANGED` and
+closes. Neither operation reuses the legacy `resume_token` or LRO event
 envelope. The runtime serves authority actions on one UDS path and canonical
 plus compatibility Worker control actions on a separate Worker UDS path, so a
 Worker control client is never registered on the authority endpoint.
 
-The Node Agent projects these actions through a typed
+The Node Agent projects finite `ReadEvents` through a typed
 `KernelAuthorityCommand`/`KernelAuthorityCommandResult` control-stream branch.
-It offers and validates the selected semantic revision during its fenced Node
-session, then forwards only the canonical action request to the local Authority
-UDS client. Semantic results remain typed; a gRPC rejection trailer is carried
-back as a serialized `cyrene.semantic.v1.Rejection` detail so remote Kotlin,
-Python and native clients can branch on `reason_code` rather than an error
-string. Legacy node commands remain a separately named compatibility branch.
+Its one-command/one-result envelope does not create a durable subscription or
+pretend to be a continuous `WatchEvents` stream; continuous observation uses
+the canonical authority gRPC stream. It offers and validates the selected
+semantic revision during its fenced Node session, then forwards only the
+canonical action request to the local Authority UDS client. Semantic results
+remain typed; a gRPC rejection trailer is carried back as a serialized
+`cyrene.semantic.v1.Rejection` detail so remote Kotlin, Python and native
+clients can branch on `reason_code` rather than an error string. Legacy node
+commands remain a separately named compatibility branch.
 
 Installation remains outside the authority. The built-in filesystem resolver
 accepts a Worker `execution_ref` only in its adapter-owned

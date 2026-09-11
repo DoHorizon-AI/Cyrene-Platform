@@ -15,7 +15,7 @@ record, and reconciles from the normal authority path.
 | Endpoint authority metadata                       | reconstruct only from a current Worker and active Lease; stale data is revoked       | reconciliation                         |
 | Event source and cursor                           | source epoch and event sequence persist with each durable event                      | durable event store                    |
 
-Durable-before-visible boundaries are lease reservation, lease revoke/fence advance, Worker LOST, operation terminal
+Durable-before-visible boundaries are lease acquisition, lease revoke/fence advance, Worker LOST, operation terminal
 transition, and semantic event publication. The JSONL composition adapter calls `sync_data` after each append; the
 Kernel depends only on `RuntimeJournalSink` and `DurableEventStore` ports.
 
@@ -59,13 +59,13 @@ records. A read error or corruption fails closed: the Kernel must not fall back 
 events to rebuild active authority state. Events from an older epoch remain audit history only; a new epoch starts with
 newly reconciled authority.
 
-`Snapshot @ C + events_after(C) = current state` is the single consistency boundary. `LocalKernelAuthority::snapshot`
-captures the event cursor **before** reading authority state, and `events_after` replays from that cursor using the
+`Snapshot @ C + read_events(C) = current state` is the single consistency boundary. `LocalKernelAuthority::snapshot`
+captures the event cursor **before** reading authority state, and `read_events` replays from that cursor using the
 same `DurableEventStore` ordering. Because a transition publishes its durable event only after mutating state, the
 snapshot is always a superset of every event already counted in the cursor, so a concurrent transition can never vanish
 from both the snapshot and the incremental replay.
 
-`EventCursor::status_against` defines three outcomes for `events_after`:
+`EventCursor::status_against` defines three outcomes for `read_events`:
 
 | Status         | Condition                                                            | Client action                                                                 |
 |----------------|----------------------------------------------------------------------|-------------------------------------------------------------------------------|
@@ -76,7 +76,7 @@ from both the snapshot and the incremental replay.
 ## Client recovery: GAP / SOURCE_CHANGED
 
 A client that receives `GAP` or `SOURCE_CHANGED` discards its incremental model, obtains the existing
-`LocalKernelAuthority::snapshot`, reconciles that snapshot, persists its fresh cursor, and resumes `events_after` from
+`LocalKernelAuthority::snapshot`, reconciles that snapshot, persists its fresh cursor, and resumes `read_events` from
 it. `GAP` means the cursor predates retained durable history; `SOURCE_CHANGED` means the cursor belongs to another
 Kernel epoch (e.g. after a two-epoch restart). A durable replay read failure is not resumable from memory and requires
 the durable store to be repaired or made available before rebuilding client state.
@@ -85,9 +85,9 @@ the durable store to be repaired or made available before rebuilding client stat
 
 | Signal                                  | Incremental model | New cursor | Next client step                                  |
 |-----------------------------------------|------------------|------------|---------------------------------------------------|
-| `events_after` returns `Current`        | keep             | `next_sequence` | persist cursor; continue                         |
-| `events_after` returns `Gap`            | discard          | `snapshot.cursor` | `GetSnapshot`; persist; resume `events_after`    |
-| `events_after` returns `SourceChanged`  | discard          | `snapshot.cursor` | `GetSnapshot`; persist; resume `events_after`     |
+| `read_events` returns `Current`        | keep             | `next_sequence` | persist cursor; continue                         |
+| `read_events` returns `Gap`            | discard          | `snapshot.cursor` | `GetSnapshot`; persist; resume `read_events`    |
+| `read_events` returns `SourceChanged`  | discard          | `snapshot.cursor` | `GetSnapshot`; persist; resume `read_events`     |
 | durable replay read error               | discard          | —          | repair/restore durable store; then `GetSnapshot`  |
 
 The two-epoch restart golden test proves this end to end: an epoch N snapshot carrying a lease, Worker, Operation, and

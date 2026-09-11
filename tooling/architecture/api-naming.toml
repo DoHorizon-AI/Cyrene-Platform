@@ -1,0 +1,67 @@
+# Cyrene API Naming Constitution machine-readable policy.
+# The normative definitions live in docs/governance/API_NAMING_CONSTITUTION.md.
+
+version = 1
+status = "enforced"
+enforcement = "all_source"
+canonical_document = "docs/governance/API_NAMING_CONSTITUTION.md"
+
+[scope]
+roots = [
+  "contracts",
+  "kernel",
+  "framework",
+  "runtime",
+  "sdk",
+  "adapters",
+  "agents",
+]
+excluded_globs = [
+  "**/*.md",
+  "**/fixtures/**",
+  "**/compatibility/**",
+  "**/changelog/**",
+  "**/target/**",
+  "**/build/**",
+]
+
+[canonical_actions]
+lease_acquisition = ["Acquire", "AcquireLease", "acquire_lease"]
+lease_renewal = ["Renew", "RenewLease", "renew_lease"]
+lease_release = ["Release", "ReleaseLease", "release_lease"]
+lease_revoke = ["Revoke", "RevokeLease", "revoke_lease"]
+logical_start = ["Start", "StartWorker", "StartService", "StartPlugin"]
+execution_launch = ["Launch", "LaunchProcess", "launch_process"]
+logical_stop = ["Stop", "StopWorker", "StopService", "StopPlugin"]
+execution_terminate = ["Terminate", "TerminateProcess", "terminate_process"]
+execution_cleanup = ["Cleanup", "cleanup_execution"]
+single_get = ["Get", "GetWorker", "GetLease"]
+collection_list = ["List", "ListWorkers"]
+long_watch = ["Watch", "WatchEvents", "WatchOperations"]
+durable_subscribe = ["Subscribe", "SubscribeEventStream"]
+fact_report = ["Report", "ReportHeartbeat", "ReportOperation"]
+identity_register = ["Register", "RegisterWorker", "RegisterProvider"]
+operation_cancel = ["Cancel", "CancelOperation"]
+execution_abort = ["Abort", "abort_execution"]
+execution_prepare = ["Prepare", "PrepareExecution"]
+health_check = ["Check", "GetHealth", "health_check"]
+fact_refresh = ["Refresh", "RefreshInventory", "refresh_inventory"]
+
+[forbidden]
+# Retain the retired vocabulary as a regression guard. The all_source policy
+# now requires every configured source root to remain free of these symbols.
+symbols = [
+  "AcquireSemanticLeaseRequest",
+  "ReleaseSemanticLeaseRequest",
+  "CancelSemanticOperationRequest",
+  "ReserveResources",
+  "ReserveResourcesRequest",
+  "SubscribeEvents",
+  "SubscribeEventsRequest",
+  "HeartbeatWorker",
+  "HeartbeatWorkerRequest",
+  "LaunchPlugin",
+  "LaunchPluginRequest",
+  "TerminatePlugin",
+  "TerminatePluginRequest",
+]

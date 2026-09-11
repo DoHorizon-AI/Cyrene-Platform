@@ -110,7 +110,7 @@ message ListPluginInstancesResponse {
   string next_page_token = 2;
 }
 
-message ReportHeartbeatRequest {
+message ReportPluginHeartbeatRequest {
   RequestContext context = 1;
   string plugin_instance_name = 2;
   uint64 generation = 3;
@@ -129,7 +129,7 @@ enum HeartbeatDisposition {
   HEARTBEAT_DISPOSITION_UNKNOWN_INSTANCE = 4;
 }
 
-message ReportHeartbeatResponse {
+message ReportPluginHeartbeatResponse {
   HeartbeatDisposition disposition = 1;
   uint64 accepted_sequence_number = 2;
   google.protobuf.Timestamp server_time = 3;

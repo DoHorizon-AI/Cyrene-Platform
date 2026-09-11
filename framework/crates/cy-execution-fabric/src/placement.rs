@@ -128,7 +128,7 @@ impl PlacementReason {
 
 /// Read-only ProviderSnapshot evidence for one ResourceQuery.
 ///
-/// This is not a reservation or allocation. Only the canonical Kernel Lease
+/// This is not a lease acquisition or allocation. Only the canonical Kernel Lease
 /// authority can bind resources after placement selects a Node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceMatchEvidence {

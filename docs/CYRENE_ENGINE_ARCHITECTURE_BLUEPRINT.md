@@ -211,7 +211,7 @@ sequenceDiagram
 ```
 
 上图是默认的主动拨号模式。可选直连模式下，唯一控制编排方通过 canonical
-generated binding 和 mTLS 调用 Rust 暴露的 `KernelService`；`LaunchPluginRequest`、
+generated binding 和 mTLS 调用 Rust 暴露的 `KernelService`；`LaunchProcessRequest`、
 `Operation`、幂等规则、generation 和错误语义完全相同。直连模式只是传输拓扑
 变化，不能形成第二套节点 API，也不能与 outbound session 同时成为命令权威。
 
@@ -635,19 +635,19 @@ service KernelService {
   rpc GetKernelCapabilities(GetKernelCapabilitiesRequest)
       returns (KernelCapabilities);
 
-  rpc ReserveResources(ReserveResourcesRequest)
-      returns (ResourceLease);
+  rpc AcquireLease(LegacyAcquireLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
 
-  rpc ReleaseResources(ReleaseResourcesRequest)
-      returns (ResourceLease);
+  rpc ReleaseLease(LegacyReleaseLeaseRequest)
+      returns (cyrene.semantic.v1.Lease);
 
   // With resource_claim this is an atomic allocate-and-launch transaction.
   // The executable, argv and environment are resolved from a verified local
   // installation and are never accepted from this remote request.
-  rpc LaunchPlugin(LaunchPluginRequest)
+  rpc LaunchProcess(LaunchProcessRequest)
       returns (Operation);
 
-  rpc TerminatePlugin(TerminatePluginRequest)
+  rpc TerminateProcess(TerminateProcessRequest)
       returns (Operation);
 
   rpc GetOperation(GetOperationRequest)
@@ -770,10 +770,8 @@ message KernelCommand {
 
   oneof request {
     GetKernelCapabilitiesRequest get_capabilities = 10;
-    ReserveResourcesRequest reserve_resources = 11;
-    ReleaseResourcesRequest release_resources = 12;
-    LaunchPluginRequest launch_plugin = 13;
-    TerminatePluginRequest terminate_plugin = 14;
+    LaunchProcessRequest launch_process = 13;
+    TerminateProcessRequest terminate_process = 14;
     CancelOperationRequest cancel_operation = 15;
   }
 }
@@ -1003,19 +1001,7 @@ message ResourceLease {
   uint64 fence_token = 8;
 }
 
-message ReserveResourcesRequest {
-  MutationContext mutation = 1;
-  NodeRef node = 2;
-  ResourceRequirements requirements = 3;
-  google.protobuf.Duration ttl = 4;
-}
-
-message ReleaseResourcesRequest {
-  MutationContext mutation = 1;
-  ResourceLeaseRef lease = 2;
-}
-
-message LaunchPluginRequest {
+message LaunchProcessRequest {
   MutationContext mutation = 1;
   NodeRef node = 2;
   InstalledPluginRef plugin = 3;
@@ -1024,7 +1010,7 @@ message LaunchPluginRequest {
     // Kernel performs atomic allocate + launch.
     ResourceRequirements resource_claim = 4;
 
-    // Used only after an explicit reservation.
+    // Used only after an explicit lease acquisition.
     ResourceLeaseRef existing_lease = 5;
   }
 
@@ -1040,7 +1026,7 @@ enum StopMode {
   STOP_MODE_IMMEDIATE = 2;
 }
 
-message TerminatePluginRequest {
+message TerminateProcessRequest {
   MutationContext mutation = 1;
   string process_name = 2;
   StopMode mode = 3;
@@ -1316,8 +1302,8 @@ message PluginLifecycleEvent {
   `(plugin_instance_name, generation, sequence_number)` 去重；旧 generation
   不得复活已停止实例。
 - gRPC deadline 约束当前网络调用，`expire_at` 约束进入队列后的持久操作。
-- 取消等待 `LaunchPlugin` 的 RPC 不等于终止已启动进程。取消异步工作用
-  `CancelOperation`；停止运行实例用 `StopPlugin/TerminatePlugin`。
+- 取消等待 `LaunchProcess` 的 RPC 不等于终止已启动进程。取消异步工作用
+  `CancelOperation`；停止运行实例用 `StopPlugin/TerminateProcess`。
 - 内联 `resource_claim` 启动失败时自动回滚租约；`existing_lease` 保留到
   显式释放或 TTL 到期。
 - 仅靠可见性环境变量时，GPU enforcement 必须返回
@@ -1454,7 +1440,7 @@ golden fixture 一致。
 - Supervisor 正确处理 cgroup 进程树、wait/reap 超时、OOM、优雅停止和资源回收；
   IPC 心跳看门狗必须在生产验收前完成，不能以 PID 存活替代；
 - 生产部署采用 systemd control-group fate sharing，不在 P2 认领孤儿实例；
-- `LaunchPlugin` 只能引用已验证安装；外层 resolver 返回的 LaunchPlan 必须带回
+- `LaunchProcess` 只能引用已验证安装；外层 resolver 返回的 LaunchPlan 必须带回
   manifest/artifact digest 与签名身份的同一绑定，SBOM/provenance evidence 不符即拒绝。
 
 验收：并发租约不重复分配；未知硬件不伪造能力；Adapter 失联阻止新租约且不
