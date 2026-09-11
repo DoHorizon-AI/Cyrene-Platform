@@ -14,6 +14,8 @@ rules for the public Core boundary.
 | `source-control-and-delivery.md` | Local and remote delivery rules. | 本地与远端交付规则 |
 | [`OPEN_SOURCE_ARCHITECTURE_READINESS.md`](OPEN_SOURCE_ARCHITECTURE_READINESS.md) | Current open-source licensing-boundary readiness evidence. | 当前开源许可边界就绪证据 |
 | [`PUBLIC_RELEASE_PREFLIGHT.md`](PUBLIC_RELEASE_PREFLIGHT.md) | Current-publication preflight and evidence status. | 当前公开发布前检查与证据状态 |
+| [`CONTRIBUTOR_LICENSING_POLICY.md`](CONTRIBUTOR_LICENSING_POLICY.md) | Contributor copyright ownership and inbound component licensing. | 贡献者版权归属与组件入站许可 |
+| [`CLA_STRATEGY.md`](CLA_STRATEGY.md) | Current no-assignment decision and future CLA decision boundary. | 当前不转让版权决定与未来 CLA 决策边界 |
 
 ## Suggested reading | 推荐顺序
 

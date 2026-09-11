@@ -113,11 +113,29 @@ matter for legal review.
 
 ## Contributions and future relicensing
 
-The repository currently has contribution guides but no CLA or DCO policy that
-grants broad relicensing rights. If DoHorizon later pursues a commercial
-dual-licensing or relicensing strategy, maintainers must obtain legal advice
-and adopt an explicit contributor policy before relying on that strategy.
-This document does not fabricate a CLA, assignment, or relicensing consent.
+Contributors retain copyright in their individual contributions. Cyrene-Platform
+does not require copyright assignment to DoHorizon. When a contribution is
+accepted into a component, it is distributed under that component's existing
+outbound license: `AGPL-3.0-only` for `AGPL_CORE` components and `Apache-2.0`
+for `APACHE_PUBLIC_INTERFACE` components.
+
+The project does not require contributors to append personal copyright notices
+to every source file. Concise SPDX headers are preferred where appropriate, and
+Git history remains the primary authorship and contribution-provenance record.
+This policy concerns code accepted into this repository; it does not impose a
+license on independently developed third-party plugins, workers, providers,
+adapters, or integrations.
+
+The repository currently has no mandatory CLA and no DCO policy. Future
+commercial, OEM, or enterprise dual-licensing may require an additional
+non-exclusive relicensing agreement for affected contributions, while the
+contributor retains copyright. Such rights are not obtained automatically by
+this policy. Any agreement and the review of historical contributions require
+separate legal review; this document does not create a CLA, assignment, or
+relicensing consent.
+
+See [`CONTRIBUTOR_LICENSING_POLICY.md`](docs/governance/CONTRIBUTOR_LICENSING_POLICY.md)
+and [`CLA_STRATEGY.md`](docs/governance/CLA_STRATEGY.md).
 
 ## Verification
 
