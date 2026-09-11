@@ -50,7 +50,7 @@ pub use authority::{
 pub use binding::{DeviceBinding, EnvironmentMerge};
 pub use capability::{CapabilityFact, EnforcementMode, EnforcementReport, NodeCapabilities};
 #[doc(hidden)]
-pub use cy_kernel_contract::{HostInventoryProvider, ResourceProvider};
+pub use cy_kernel_contract::{HostInventoryProvider, ResourceProvider, SystemAdapter};
 pub use error::ProviderError;
 pub use inventory::{DeviceNode, HealthReport, InventorySnapshot};
 pub use journal::{

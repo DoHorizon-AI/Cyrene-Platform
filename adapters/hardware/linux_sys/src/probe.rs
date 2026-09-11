@@ -19,6 +19,7 @@ use cy_kernel_contract::{
     semantic::{Capability, Identity, Quantity, Resource, ResourceState},
     CapabilityFact, DeviceBinding, EnforcementMode, EnforcementReport, HealthReport,
     HostInventoryProvider, InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,
+    SystemAdapter,
 };
 
 /// Parsed host CPU facts.
@@ -467,6 +468,8 @@ impl ResourceProvider for LinuxSystemProvider {
         }
     }
 }
+
+impl SystemAdapter for LinuxSystemProvider {}
 
 /// Parse `/proc/cpuinfo` text into `ParsedCpuInfo`.
 pub fn parse_cpuinfo(content: &str) -> Result<ParsedCpuInfo, ProviderError> {

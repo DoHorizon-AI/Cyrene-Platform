@@ -8,12 +8,13 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 //! Linux composition root for the CYRENE Kernel daemon.
 //!
-//! The process owns no vendor driver code. It joins a versioned UDS hardware
-//! adapter and one separately supervised Sandbox Adapter Host, then serves Core
-//! v1 over a local UDS endpoint. Admission is enforced by Unix-socket peer
-//! credentials (SO_PEERCRED): every Adapter endpoint must be configured with a
-//! trusted peer UID/GID (fail-closed at startup), and the authority socket also
-//! authenticates the calling Principal from the peer credential.
+//! The process owns no vendor driver code. It joins versioned UDS system and
+//! hardware adapters plus one separately supervised Sandbox Adapter Host, then
+//! serves Core v1 over a local UDS endpoint. Admission is enforced by
+//! Unix-socket peer credentials (SO_PEERCRED): every Adapter endpoint must be
+//! configured with a trusted peer UID/GID (fail-closed at startup), and the
+//! authority socket also authenticates the calling Principal from the peer
+//! credential.
 
 mod runtime_journal;
 
@@ -67,8 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new(),
         recovery.next_fence_token,
     ));
-    let daemon = Arc::new(KernelDaemon::with_hardware_adapters(
-        args.hardware_adapters,
+    let daemon = Arc::new(KernelDaemon::with_adapters(
+        args.adapters,
         resources,
         sandbox,
         &args.node_id,
@@ -156,7 +157,7 @@ struct Args {
     socket: std::path::PathBuf,
     worker_control_socket: std::path::PathBuf,
     provider_socket: std::path::PathBuf,
-    hardware_adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
+    adapters: Vec<cy_adapter_client::HardwareAdapterEndpoint>,
     sandbox_adapter: cy_sandbox_client::SandboxAdapterEndpoint,
     installations_root: std::path::PathBuf,
     worker_transport_root: std::path::PathBuf,
@@ -177,6 +178,7 @@ impl Args {
         let mut socket = PathBuf::from("/run/cyrene/kernel.sock");
         let mut worker_control_socket = PathBuf::from("/run/cyrene/worker.sock");
         let mut provider_socket = PathBuf::from("/run/cyrene/provider.sock");
+        let mut system_adapters = Vec::new();
         let mut hardware_adapters = Vec::new();
         let mut sandbox_adapter = None;
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
@@ -205,12 +207,13 @@ impl Args {
                 "--socket" => socket = PathBuf::from(value()?),
                 "--worker-control-socket" => worker_control_socket = PathBuf::from(value()?),
                 "--provider-socket" => provider_socket = PathBuf::from(value()?),
+                "--system-adapter" => system_adapters.push(parse_hardware_adapter(&value()?)?),
                 "--hardware-adapter" => hardware_adapters.push(parse_hardware_adapter(&value()?)?),
-                "--hardware-adapter-peer-uid" => {
+                "--system-adapter-peer-uid" | "--hardware-adapter-peer-uid" => {
                     let (adapter_id, uid) = parse_adapter_identity_value(&value()?)?;
                     adapter_peer_credentials.entry(adapter_id).or_default().uid = Some(uid);
                 }
-                "--hardware-adapter-peer-gid" => {
+                "--system-adapter-peer-gid" | "--hardware-adapter-peer-gid" => {
                     let (adapter_id, gid) = parse_adapter_identity_value(&value()?)?;
                     adapter_peer_credentials.entry(adapter_id).or_default().gid = Some(gid);
                 }
@@ -239,7 +242,7 @@ impl Args {
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] --hardware-adapter ID=/absolute/socket.sock [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --system-adapter ID=/absolute/socket.sock [--system-adapter-peer-uid ID=UID] [--system-adapter-peer-gid ID=GID] [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -257,10 +260,10 @@ impl Args {
             )
             .into());
         }
-        if hardware_adapters.is_empty() {
+        if system_adapters.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "at least one --hardware-adapter ID=/absolute/socket.sock is required",
+                "at least one --system-adapter ID=/absolute/socket.sock is required",
             )
             .into());
         }
@@ -277,7 +280,9 @@ impl Args {
             )
                 .into());
         }
-        for endpoint in &mut hardware_adapters {
+        let mut adapters = system_adapters;
+        adapters.extend(hardware_adapters);
+        for endpoint in &mut adapters {
             if let Some(credentials) = adapter_peer_credentials.remove(&endpoint.adapter_id) {
                 endpoint.peer_credentials = credentials;
             }
@@ -285,7 +290,7 @@ impl Args {
         if let Some(adapter_id) = adapter_peer_credentials.keys().next() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("peer credential policy references unknown hardware adapter: {adapter_id}"),
+                format!("peer credential policy references unknown adapter: {adapter_id}"),
             )
             .into());
         }
@@ -305,13 +310,13 @@ impl Args {
         // with at least one trusted peer UID/GID. Without this, the library
         // default of `PeerCredentialExpectation::default()` (allow any peer)
         // would silently disable UDS admission for that endpoint in production.
-        require_configured_adapter_peers(&hardware_adapters, &sandbox_adapter)?;
+        require_configured_adapter_peers(&adapters, &sandbox_adapter)?;
         Ok(Self {
             node_id,
             socket,
             worker_control_socket,
             provider_socket,
-            hardware_adapters,
+            adapters,
             sandbox_adapter,
             installations_root,
             worker_transport_root,
@@ -327,15 +332,15 @@ impl Args {
 
 #[cfg(unix)]
 fn require_configured_adapter_peers(
-    hardware_adapters: &[cy_adapter_client::HardwareAdapterEndpoint],
+    adapters: &[cy_adapter_client::HardwareAdapterEndpoint],
     sandbox_adapter: &cy_sandbox_client::SandboxAdapterEndpoint,
 ) -> std::io::Result<()> {
-    for endpoint in hardware_adapters {
+    for endpoint in adapters {
         if !endpoint.peer_credentials.is_configured() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "hardware adapter '{}' requires at least one --hardware-adapter-peer-uid or --hardware-adapter-peer-gid",
+                    "adapter '{}' requires at least one system/hardware adapter peer UID or GID",
                     endpoint.adapter_id
                 ),
             ));

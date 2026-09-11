@@ -63,11 +63,11 @@ impl KernelDaemon {
         }
     }
 
-    /// 通过版本化 UDS 连接进程外硬件适配器注册表。
+    /// 通过版本化 UDS 连接进程外系统/硬件适配器注册表。
     ///
     /// 该组合根不加载厂商动态库，也不执行任何厂商探测命令。适配器失联时，端口
     /// 返回 `ADAPTER_UNAVAILABLE`，由上层将节点转为不可继续分配的降级状态。
-    pub fn with_hardware_adapters(
+    pub fn with_adapters(
         endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
         resources: Arc<dyn ResourceLeaseManager>,
         sandbox: Arc<dyn SandboxBackend>,
@@ -86,6 +86,19 @@ impl KernelDaemon {
         );
         daemon.hardware_adapters = Some(hardware_adapters);
         Ok(daemon)
+    }
+
+    /// Backward-compatible constructor for callers that only use hardware
+    /// resource adapters. The registry also accepts the required system
+    /// adapter endpoint used by the Linux composition root.
+    pub fn with_hardware_adapters(
+        endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
+        resources: Arc<dyn ResourceLeaseManager>,
+        sandbox: Arc<dyn SandboxBackend>,
+        node_id: impl Into<String>,
+        node_epoch: u64,
+    ) -> Result<Self, ProviderError> {
+        Self::with_adapters(endpoints, resources, sandbox, node_id, node_epoch)
     }
 
     /// 检查节点基础沙箱环境是否已就绪

@@ -266,6 +266,18 @@ pub trait ResourceProvider: Send + Sync {
     fn read_health(&self, resource_id: &str) -> Result<HealthReport, ProviderError>;
 }
 
+/// Host-system Adapter port.
+///
+/// A system Adapter owns operating-system facts and resource projections for
+/// one build target. It does not own Kernel leases, lifecycle policy, or
+/// hardware-vendor semantics; those remain separate ports.
+pub trait SystemAdapter: HostInventoryProvider + ResourceProvider {
+    /// Stable Adapter identity used by the local protocol and diagnostics.
+    fn system_id(&self) -> &str {
+        self.adapter_id()
+    }
+}
+
 fn split_csv(value: &str) -> Vec<String> {
     value
         .split(',')

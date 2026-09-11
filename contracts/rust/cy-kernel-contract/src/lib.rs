@@ -32,7 +32,7 @@ mod tests;
 pub use adapter::{
     CapabilityFact, DeviceBinding, DeviceNode, EnforcementMode, EnforcementReport,
     EnvironmentMerge, HealthReport, HostInventoryProvider, InventorySnapshot, NodeCapabilities,
-    ProviderError, ResourceProvider,
+    ProviderError, ResourceProvider, SystemAdapter,
 };
 pub use endpoint::{Endpoint, EndpointGrant};
 pub use event::{Event, EventContinuity, EventCursor, EventPage, ReplayStatus};

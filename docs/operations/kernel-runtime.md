@@ -28,6 +28,9 @@ cyrene-kernel \
   --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
   --sandbox-adapter-peer-uid sandboxd=0 \
   --sandbox-adapter-peer-gid sandboxd=992 \
+  --system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock \
+  --system-adapter-peer-uid linux-system=0 \
+  --system-adapter-peer-gid linux-system=992 \
   --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock \
   --hardware-adapter-peer-uid nvidia=0 \
   --hardware-adapter-peer-gid nvidia=992
@@ -40,27 +43,33 @@ cyrene-sandboxd --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock \
   --allowed-client-uid 991 --allowed-client-gid 992
 cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock \
   --allowed-client-uid 991 --allowed-client-gid 992
+cyrene-linux-sys-adapter --socket /run/cyrene/linux-sys-adapter.sock \
+  --adapter-id linux-system --allowed-client-uid 991 --allowed-client-gid 992
 ```
 
 - sandboxd UDS 连接、协议版本与 adapter identity 均匹配；
 - sandboxd 报告 cgroup v2、`cgroup.kill`、cpu/memory/pids 控制器等必需能力；
-- 各硬件 Adapter 能返回当前、身份匹配且可用的库存事实；
+- Linux System Adapter 必须返回当前、身份匹配且可用的主机库存事实；
+- 配置的 Hardware Adapter 能返回当前、身份匹配且可用的设备库存事实；
 - 请求 HARD 设备隔离时，sandboxd 能真实加载并附加 cgroup-device BPF；失败即拒绝
   启动，绝不降级为 `CUDA_VISIBLE_DEVICES` 后仍声明 HARD。
 
 UDS 文件权限与 peer credential 共同构成本地身份边界：服务 socket 设置为 `0660`，必须由
 受信任的 Kernel/Adapter 服务账户及专用组拥有，绝不能让不受信任 Worker 可写。Kernel 可用
-`--hardware-adapter-peer-uid ID=UID` / `--hardware-adapter-peer-gid ID=GID` 对已连接 Hardware
-Adapter 执行 Linux `SO_PEERCRED` 校验；单例 sandbox Adapter 因无路由 ID 歧义，使用裸
+`--system-adapter-peer-uid ID=UID` / `--system-adapter-peer-gid ID=GID` 与
+`--hardware-adapter-peer-uid ID=UID` / `--hardware-adapter-peer-gid ID=GID` 分别对已连接
+System/Hardware Adapter 执行 Linux `SO_PEERCRED` 校验；单例 sandbox Adapter 因无路由 ID 歧义，使用裸
 `--sandbox-adapter-peer-uid UID` / `--sandbox-adapter-peer-gid GID`。反向地，sandboxd 与
-各 Hardware Adapter 用 `--allowed-client-uid UID` / `--allowed-client-gid GID` 对 Kernel 做
+各 System/Hardware Adapter 用 `--allowed-client-uid UID` / `--allowed-client-gid GID` 对 Kernel 做
 `SO_PEERCRED` 校验。任一已配置校验失败都会在发送协议帧前拒绝。
 
 **服务账户与 UID/GID 部署示例**：推荐把三个进程做成独立 systemd 服务账户。假设
-`cyrene-kernel` 账户 uid = 991、专用组 `cyrene` gid = 992，`cyrene-sandboxd` 与
-`cyrene-nvidia-adapter` 在单元中以 `root` 运行（uid 0）、同属 `cyrene` 组，则：Kernel 传
+`cyrene-kernel` 账户 uid = 991、专用组 `cyrene` gid = 992，`cyrene-sandboxd`、
+`cyrene-linux-sys-adapter` 与 `cyrene-nvidia-adapter` 在单元中以 `root` 运行（uid 0）、同属
+`cyrene` 组，则：Kernel 传
 `--sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992` 与
-`--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`；两个 Adapter
+`--system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system=992` 与
+`--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`；三个 Adapter
 各传 `--allowed-client-uid 991 --allowed-client-gid 992`。具体数值以部署主机的
 `id -u cyrene-kernel` / `getent group cyrene` 为准，由打包脚本写入单元文件。
 
