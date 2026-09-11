@@ -13,6 +13,7 @@ distribution targets relate to one another.
 | `versioning-model.md` | Versioning rules. | 版本规则 |
 | `tagging.md` | Tagging rules. | 标签规则 |
 | `release-topology.md` | Release topology. | 发布拓扑 |
+| `PUBLIC_PACKAGE_RELEASE_ORDER.md` | Public Rust package publication DAG and dry-run procedure. | 公共 Rust 包发布依赖顺序与 dry-run 流程 |
 
 ## Suggested reading | 推荐顺序
 
@@ -21,4 +22,3 @@ Read `component-vs-distribution.md`, `versioning-model.md`, and
 
 准备发布前先读 `component-vs-distribution.md`、`versioning-model.md` 和
 `release-topology.md`。
-

@@ -1,4 +1,5 @@
 {
+  "$comment": "SPDX-License-Identifier: Apache-2.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cy-llm.dev/schemas/manifests/artifact_ref.schema.json",
   "title": "ArtifactRef",

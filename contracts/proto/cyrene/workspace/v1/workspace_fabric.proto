@@ -6,6 +6,7 @@
 // │  协议职责：Workspace 发现、连接描述符与中继 API 投影。                   │
 // │  · Relay 只转发请求，不拥有 Workspace/Product 状态。                   │
 // └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
 syntax = "proto3";
 
 package cyrene.workspace.v1;

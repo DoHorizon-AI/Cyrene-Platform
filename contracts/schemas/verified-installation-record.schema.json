@@ -1,4 +1,5 @@
 {
+  "$comment": "SPDX-License-Identifier: Apache-2.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cyrene.dev/schemas/verified-installation-record.schema.json",
   "title": "CYRENE Verified Installation Record",

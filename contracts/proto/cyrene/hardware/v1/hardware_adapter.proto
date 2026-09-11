@@ -6,6 +6,7 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：版本化 Protobuf 线协议契约。
 // ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
 syntax = "proto3";
 
 package cyrene.hardware.v1;

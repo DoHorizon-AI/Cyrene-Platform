@@ -6,6 +6,7 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：统一 Host Agent 与容器内 Runtime Agent 的出站控制通道。
 // ╚══════════════════════════════════════════════════════════════════════╝
+// SPDX-License-Identifier: Apache-2.0
 syntax = "proto3";
 
 package cyrene.core.v1;
