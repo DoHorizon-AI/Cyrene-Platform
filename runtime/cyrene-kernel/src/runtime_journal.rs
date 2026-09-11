@@ -866,7 +866,7 @@ mod tests {
 
         // Pre-restart: acquire a lease with fence token N and durably record it.
         let manager_before = InMemoryResourceManager::new("node-1", vec![resource.clone()]);
-        let lease_before = manager_before.acquire(request.clone()).unwrap();
+        let lease_before = manager_before.acquire_lease(request.clone()).unwrap();
         let fence_before = lease_before.fence_token;
         journal
             .append(RuntimeJournalRecord {
@@ -890,7 +890,7 @@ mod tests {
             vec![resource],
             recovery.next_fence_token,
         );
-        let lease_after = manager_after.acquire(request).unwrap();
+        let lease_after = manager_after.acquire_lease(request).unwrap();
         assert!(
             lease_after.fence_token > fence_before,
             "fence token must not be reused across a restart"

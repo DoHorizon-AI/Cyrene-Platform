@@ -70,8 +70,11 @@ fn authority_request_for<T>(peer: PeerCred, message: T) -> Request<T> {
 fn watch_event(response: core_v1::WatchEventsResponse) -> semantic_v1::Event {
     match response.body {
         Some(core_v1::watch_events_response::Body::Event(event)) => event,
-        Some(core_v1::watch_events_response::Body::ContinuityChange(page)) => {
-            panic!("watch stream returned continuity page: {:?}", page.status)
+        Some(core_v1::watch_events_response::Body::Continuity(continuity)) => {
+            panic!(
+                "watch stream returned continuity frame: {:?}",
+                continuity.status
+            )
         }
         None => panic!("watch stream returned an empty response"),
     }
@@ -1662,8 +1665,11 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .expect("source change response")
         .expect("source change is a typed stream response");
     match source_changed.body {
-        Some(core_v1::watch_events_response::Body::ContinuityChange(page)) => {
-            assert_eq!(page.status, semantic_v1::ReplayStatus::SourceChanged as i32);
+        Some(core_v1::watch_events_response::Body::Continuity(continuity)) => {
+            assert_eq!(
+                continuity.status,
+                semantic_v1::ReplayStatus::SourceChanged as i32
+            );
         }
         other => panic!("expected typed source-change page, got {other:?}"),
     }
@@ -1698,8 +1704,8 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
         .expect("gap response")
         .expect("gap is a typed stream response");
     match gap.body {
-        Some(core_v1::watch_events_response::Body::ContinuityChange(page)) => {
-            assert_eq!(page.status, semantic_v1::ReplayStatus::Gap as i32);
+        Some(core_v1::watch_events_response::Body::Continuity(continuity)) => {
+            assert_eq!(continuity.status, semantic_v1::ReplayStatus::Gap as i32);
         }
         other => panic!("expected typed gap page, got {other:?}"),
     }
@@ -4681,7 +4687,7 @@ fn watchdog_instance_scenario(
         resource_request("watchdog-lease", 1, holder, None, &requirements).expect("request");
     let lease = adapter
         .daemon
-        .acquire(request)
+        .acquire_lease(request)
         .expect("unique resource is allocatable");
 
     let mut actor = InstanceActor::new(
@@ -4784,7 +4790,7 @@ fn watchdog_incomplete_cleanup_never_releases_and_blocks_reacquire() {
     };
     let request =
         resource_request("watchdog-lease-retry", 1, holder, None, &requirements).expect("request");
-    let reacquire = adapter.daemon.acquire(request);
+    let reacquire = adapter.daemon.acquire_lease(request);
     assert!(
         reacquire.is_err(),
         "the still-held FAILED lease must block reallocation with INSUFFICIENT_RESOURCES"
@@ -4835,7 +4841,7 @@ fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
         .expect("request");
     let replacement = adapter
         .daemon
-        .acquire(request)
+        .acquire_lease(request)
         .expect("replacement Lease must succeed after complete cleanup");
     assert!(
         replacement.fence_token > old_fence,
@@ -4893,7 +4899,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
         .expect("request");
     let lease = adapter
         .daemon
-        .acquire(request)
+        .acquire_lease(request)
         .expect("unique resource is allocatable");
     let mut actor = InstanceActor::new(
         "watchdog-journal-w1",
@@ -4979,7 +4985,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
     )
     .expect("request");
     assert!(
-        adapter.daemon.acquire(retry).is_err(),
+        adapter.daemon.acquire_lease(retry).is_err(),
         "the still-ACTIVE Lease must keep the resource non-allocatable"
     );
 }
@@ -5684,7 +5690,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     .expect("legacy request");
     let legacy_daemon_lease = adapter
         .daemon
-        .acquire(legacy_request)
+        .acquire_lease(legacy_request)
         .expect("the second resource is allocatable");
     bind_stuck(&adapter, "worker-legacy", &legacy_daemon_lease);
     let legacy_error = runtime
@@ -6203,7 +6209,7 @@ fn expiry_with_incomplete_cleanup_blocks_resource_reallocation() {
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
 
     // Expire the lease in the resource manager
-    let _ = authority.runtime.daemon.renew(
+    let _ = authority.runtime.daemon.renew_lease(
         &lease.name,
         lease.fence_token,
         now_unix_ms().saturating_add(25),
@@ -8106,8 +8112,11 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         .expect("gap stream response")
         .expect("gap response is not a transport error");
     match gap_response.body {
-        Some(cy_proto::core_v1::watch_events_response::Body::ContinuityChange(page)) => {
-            assert_eq!(page.status, cy_proto::semantic_v1::ReplayStatus::Gap as i32);
+        Some(cy_proto::core_v1::watch_events_response::Body::Continuity(continuity)) => {
+            assert_eq!(
+                continuity.status,
+                cy_proto::semantic_v1::ReplayStatus::Gap as i32
+            );
         }
         other => panic!("expected typed GAP response, got {other:?}"),
     }
@@ -8145,9 +8154,9 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         .expect("source-change stream response")
         .expect("source change is not a transport error");
     match source_changed_response.body {
-        Some(cy_proto::core_v1::watch_events_response::Body::ContinuityChange(page)) => {
+        Some(cy_proto::core_v1::watch_events_response::Body::Continuity(continuity)) => {
             assert_eq!(
-                page.status,
+                continuity.status,
                 cy_proto::semantic_v1::ReplayStatus::SourceChanged as i32
             );
         }
@@ -8388,8 +8397,11 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
         .expect("reconnection continuity response")
         .expect("GAP is not a transport error");
     match reconnect_response.body {
-        Some(cy_proto::core_v1::watch_events_response::Body::ContinuityChange(page)) => {
-            assert_eq!(page.status, cy_proto::semantic_v1::ReplayStatus::Gap as i32);
+        Some(cy_proto::core_v1::watch_events_response::Body::Continuity(continuity)) => {
+            assert_eq!(
+                continuity.status,
+                cy_proto::semantic_v1::ReplayStatus::Gap as i32
+            );
         }
         other => panic!("expected typed GAP continuity, got {other:?}"),
     }

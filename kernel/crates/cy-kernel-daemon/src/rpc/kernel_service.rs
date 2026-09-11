@@ -70,7 +70,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         let limits = cgroup_limits(request.cpu.as_ref(), request.memory.as_ref())?;
         let lease = self
             .daemon
-            .acquire(ResourceRequest {
+            .acquire_lease(ResourceRequest {
                 lease_name,
                 expected_inventory_generation: generation,
                 holder,
@@ -180,7 +180,9 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     &requirements,
                 )?;
                 (
-                    self.daemon.acquire(internal).map_err(provider_status)?,
+                    self.daemon
+                        .acquire_lease(internal)
+                        .map_err(provider_status)?,
                     true,
                 )
             }

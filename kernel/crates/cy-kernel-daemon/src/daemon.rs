@@ -141,7 +141,7 @@ impl KernelDaemon {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // 🔧 FUNCTION: KernelDaemon::acquire
+    // 🔧 FUNCTION: KernelDaemon::acquire_lease
     //
     //   Acquires from the last durable inventory ledger only after readiness
     //   has been established; it does not probe hardware inline.
@@ -154,7 +154,7 @@ impl KernelDaemon {
     /// Transport authentication is enforced at the `KernelAuthority` boundary.
     /// The lease holder remains the planned Worker identity, not a
     /// caller-supplied Principal.
-    pub fn acquire(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
+    pub fn acquire_lease(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
         // Allocation consumes the last durably observed inventory ledger. It
         // must not probe and mutate facts inline, because that would race the
         // caller's snapshot generation between validation and acquisition.
@@ -167,7 +167,7 @@ impl KernelDaemon {
                 "required hardware adapter capability is not ready",
             ));
         }
-        self.resources.acquire(request)
+        self.resources.acquire_lease(request)
     }
 
     /// Begins release authority while keeping the physical allocation held.
@@ -233,14 +233,14 @@ impl KernelDaemon {
     /// Extend a live lease while retaining its exact resource allocation and
     /// fencing authority. The ledger performs the active-state, fence, and
     /// expiry monotonicity checks atomically.
-    pub fn renew(
+    pub fn renew_lease(
         &self,
         lease_name: &str,
         fence_token: u64,
         expires_at_unix_ms: u64,
     ) -> Result<ResourceLease, ProviderError> {
         self.resources
-            .renew(lease_name, fence_token, expires_at_unix_ms)
+            .renew_lease(lease_name, fence_token, expires_at_unix_ms)
     }
 
     /// 为租约内的所有资源合并一份沙箱绑定。

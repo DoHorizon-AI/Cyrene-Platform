@@ -960,7 +960,7 @@ impl KernelAuthority for LocalKernelAuthority {
         let lease = self
             .runtime
             .daemon
-            .acquire(ResourceRequest {
+            .acquire_lease(ResourceRequest {
                 lease_name: Self::lease_internal_name(context, &object.identity),
                 expected_inventory_generation: self.runtime.daemon.resources.inventory().generation,
                 holder,
@@ -1013,7 +1013,7 @@ impl KernelAuthority for LocalKernelAuthority {
         }
         self.runtime
             .daemon
-            .renew(&current.name, fence_token, expires_at_unix_ms)
+            .renew_lease(&current.name, fence_token, expires_at_unix_ms)
             .map(|lease| Self::semantic_lease(&object, &lease))
             .map_err(Self::provider_rejection)
     }

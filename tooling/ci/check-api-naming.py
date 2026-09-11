@@ -130,6 +130,23 @@ def all_source_lines(repo_root: Path, paths: list[str]) -> list[tuple[str, int, 
     return lines
 
 
+def semantic_shape_violations(
+    policy: dict, candidates: list[tuple[str, int, str]]
+) -> list[tuple[str, int, str, str]]:
+    """Enforce qualified Lease and Event projection rules without broad grep."""
+
+    violations: list[tuple[str, int, str, str]] = []
+    for rule in policy.get("semantic_contract", {}).get("exact_patterns", []):
+        pattern = re.compile(rule["regex"])
+        paths = rule["paths"]
+        for path, line_number, line in candidates:
+            if not any(fnmatch.fnmatch(path, path_pattern) for path_pattern in paths):
+                continue
+            if pattern.search(line):
+                violations.append((path, line_number, rule["name"], line.strip()))
+    return violations
+
+
 def main() -> int:
     """Validate configured source lines against the forbidden symbol inventory."""
 
@@ -185,6 +202,8 @@ def main() -> int:
         for symbol, pattern in patterns:
             if pattern.search(line):
                 violations.append((path, line_number, symbol, line.strip()))
+
+    violations.extend(semantic_shape_violations(policy, candidates))
 
     if violations:
         print(f"API naming gate failed in {mode} mode:")

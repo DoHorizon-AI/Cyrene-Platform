@@ -30,7 +30,8 @@ The nine durable nouns are:
 9. `Event` — immutable ordered observation, never a callback.
 
 `Identity`, `ContractRevision`, `ResourceQuery`, `Quantity`, `EndpointGrant`,
-`EventCursor`, `EventPage` and `Rejection` are bounded value objects. Product,
+`EventCursor`, `EventPage`, `EventContinuity` and `Rejection` are bounded value
+objects. Product,
 model, dataset, runtime-language, container and hardware-vendor vocabulary is
 outside Kernel semantics.
 
@@ -267,9 +268,10 @@ cannot rebuild active authority state for a new Kernel epoch.
 `WatchEvents` begins with the same cursor continuity decision, replays retained
 events as a server stream, and then observes the live authority. Each intact
 event is emitted as an `Event`. A `GAP` or `SOURCE_CHANGED` is emitted as a
-typed `EventPage` continuity change and closes the stream; it is not converted
-into a generic transport status. `ReadEvents` and `WatchEvents` share the same
-cursor, source identity and durable history rules.
+typed `EventContinuity` stream frame and closes the stream; it is not converted
+into a generic transport status. `EventPage` remains exclusive to the finite
+`ReadEvents` result. `ReadEvents` and `WatchEvents` share the same cursor,
+source identity and durable history rules.
 
 ## 10. Provider snapshot and reconciliation
 
@@ -335,11 +337,11 @@ not downgrade a completed naming or contract projection.
 
 | Component | Current status | Evidence and exact scope |
 | --- | --- | --- |
-| Core gRPC | **COMPLETE** | v1/v2 expose finite `ReadEvents` and continuous `WatchEvents`; typed `EventPage` continuity responses cover `GAP` and `SOURCE_CHANGED`; daemon RPC tests cover replay, handoff, backpressure and reconnect. |
-| Node Agent | **COMPLETE** | The one-command/one-result Node control projection carries finite `ReadEvents` and typed `EventPage` results; continuous `WatchEvents` is **NOT_APPLICABLE** to that envelope and remains on the canonical Core gRPC stream. Node bridge and integration tests pass. |
+| Core gRPC | **COMPLETE** | v1/v2 expose finite `ReadEvents` and continuous `WatchEvents`; `ReadEvents` returns `EventPage`, while `WatchEvents` emits typed `EventContinuity` frames for `GAP` and `SOURCE_CHANGED`; daemon RPC tests cover replay, handoff, backpressure and reconnect. |
+| Node Agent | **COMPLETE** | The one-command/one-result Node control projection carries finite `ReadEvents` and `EventPage` results; continuous `WatchEvents` is **NOT_APPLICABLE** to that envelope and remains on the canonical Core gRPC stream. Node bridge and integration tests pass. |
 | Hardware Adapter | **NOT_APPLICABLE** for Event read/watch | The local adapter contract reports inventory facts and creates resource bindings; it does not own durable Event history or observation. Hardware adapter protocol round-trip and daemon integration tests pass. |
 | Sandbox Adapter | **NOT_APPLICABLE** for Event read/watch | The local adapter contract launches, stops, observes and recovers concrete processes; it does not own durable Event history or cursor continuity. Sandbox protocol and UDS integration tests pass. |
-| Rust semantic authority | **COMPLETE** | `Event`, `EventCursor`, `EventPage` and `ReplayStatus` remain the single semantic model; `KernelAuthority::read_events` is the finite history operation used by both projections. Rust semantic TCK and workspace tests pass. |
+| Rust semantic authority | **COMPLETE** | `Event`, `EventCursor`, `EventPage`, `EventContinuity` and the shared `ReplayStatus` define one semantic model; `KernelAuthority::read_events` is the finite history operation used by both projections. Rust semantic TCK and workspace tests pass. |
 | Python consumer / TCK | **COMPLETE** | The checked-in Python Kernel Semantic TCK passes; Platform owns no second Python Event authority or alternate operation name. |
 | Kotlin TCK / consumer | **COMPLETE** | The checked-in Kotlin Kernel Semantic TCK passes against the same frozen vectors and semantic names. |
 
@@ -366,8 +368,8 @@ The canonical projection now also carries semantic `Worker`, `Operation` and
 the out-of-Kernel resolver proves the digest-bound installation before returning
 a launch plan. `ReadEvents` is the finite `EventCursor → EventPage` projection.
 `WatchEvents` is the continuous server stream: it replays `Event` values, then
-emits a typed `EventPage` continuity change for `GAP` or `SOURCE_CHANGED` and
-closes. Neither operation reuses the legacy `resume_token` or LRO event
+emits a typed `EventContinuity` frame for `GAP` or `SOURCE_CHANGED` and closes.
+Neither operation reuses the legacy `resume_token` or LRO event
 envelope. The runtime serves authority actions on one UDS path and canonical
 plus compatibility Worker control actions on a separate Worker UDS path, so a
 Worker control client is never registered on the authority endpoint.

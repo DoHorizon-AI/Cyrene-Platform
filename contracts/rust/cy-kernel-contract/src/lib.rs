@@ -35,7 +35,7 @@ pub use adapter::{
     ProviderError, ResourceProvider,
 };
 pub use endpoint::{Endpoint, EndpointGrant};
-pub use event::{Event, EventCursor, EventPage, ReplayStatus};
+pub use event::{Event, EventContinuity, EventCursor, EventPage, ReplayStatus};
 pub use identity::{Identity, Principal};
 pub use lease::{Lease, LeaseState};
 pub use operation::{Operation, OperationState};

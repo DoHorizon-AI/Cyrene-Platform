@@ -191,6 +191,39 @@ canonical lease operation. The semantic rename must distinguish it from
 unrelated methods such as `Vec::reserve`; use IDEA/RustRover symbol refactoring
 or compiler-guided edits, never a blind repository-wide replacement.
 
+Canonical semantic operations preserve the full semantic noun across language
+boundaries. The spelling changes only with the language convention:
+
+```text
+AcquireLease -> acquire_lease -> acquireLease
+RenewLease   -> renew_lease   -> renewLease
+ReleaseLease -> release_lease -> releaseLease
+```
+
+Contextual abbreviations such as `acquire()` are not used for canonical Lease
+operations. A receiver type may make a shortened method acceptable for a
+different, unambiguous domain operation, but it does not authorize shortening
+the canonical Lease vocabulary.
+
+### 6.1 Envelope and type responsibility
+
+A DTO or envelope has one primary semantic responsibility. Event contracts use
+the following separation:
+
+```text
+Event                immutable event record
+EventCursor          durable position and source identity
+EventPage            finite ReadEvents history result
+EventContinuity      typed history/stream continuity condition
+WatchEventsResponse  one item/control frame in continuous observation
+```
+
+`EventPage` is never used as a `WatchEvents` stream control payload.
+`WatchEventsResponse` carries either an `Event` or the dedicated
+`EventContinuity` frame. `EventContinuity` reuses the canonical
+`ReplayStatus` values (`CURRENT`, `GAP`, `SOURCE_CHANGED`) and does not create
+a second continuity status vocabulary.
+
 ## 7. State-machine rule
 
 **One canonical entity has one canonical lifecycle state machine.**
@@ -254,7 +287,9 @@ Current APIs, comments, examples, and governance prose must refer to the
 canonical vocabulary rather than reproducing retired spellings. Generic words
 such as `reserve` or `start` are not rejected by text matching because
 unrelated APIs (for example `Vec::reserve`) must remain valid; the Platform
-resource port uses the semantic `acquire` spelling.
+resource port uses the canonical `acquire_lease` spelling. Qualified Lease and
+Event-shape checks are maintained in the machine-readable policy so unrelated
+uses of generic verbs remain valid.
 
 ## 10. Adoption by Product and Plugin repositories
 

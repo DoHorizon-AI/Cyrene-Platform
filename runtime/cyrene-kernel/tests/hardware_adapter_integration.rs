@@ -269,7 +269,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
         limits: CgroupLimits::default(),
     };
 
-    let lease = daemon.acquire(request)?;
+    let lease = daemon.acquire_lease(request)?;
     assert_eq!(lease.name, "test-workload-lease-1");
     assert_eq!(lease.fence_token, 1);
     assert_eq!(lease.state, LeaseState::Active);
@@ -297,7 +297,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
         expires_at_unix_ms: Some(9999999999999),
         limits: CgroupLimits::default(),
     };
-    let stale_err = daemon.acquire(stale_request).unwrap_err();
+    let stale_err = daemon.acquire_lease(stale_request).unwrap_err();
     assert_eq!(stale_err.reason_code, "STALE_INVENTORY_GENERATION");
 
     Ok(())

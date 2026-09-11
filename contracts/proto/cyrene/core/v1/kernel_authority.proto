@@ -156,13 +156,16 @@ message WatchEventsRequest {
 }
 
 // A Watch emits one Event at a time while continuity remains intact. If the
-// cursor cannot continue incrementally, it emits the same typed EventPage used
-// by ReadEvents as `continuity_change` and closes the stream. Transport/service
-// failures remain gRPC status failures and are not encoded as continuity.
+// cursor cannot continue incrementally, it emits a typed EventContinuity frame
+// and closes the stream. EventPage remains exclusive to finite ReadEvents;
+// transport/service failures remain gRPC status failures.
 message WatchEventsResponse {
+  reserved 2;
+  reserved "continuity_change";
+
   oneof body {
     cyrene.semantic.v1.Event event = 1;
-    cyrene.semantic.v1.EventPage continuity_change = 2;
+    cyrene.semantic.v1.EventContinuity continuity = 3;
   }
 }
 

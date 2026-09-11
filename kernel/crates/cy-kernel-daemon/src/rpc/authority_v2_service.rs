@@ -21,17 +21,19 @@ use crate::{
         semantic_identity_from_proto, semantic_operation_from_proto, semantic_query_from_proto,
         semantic_worker_from_proto, to_semantic_proto_contract_lease,
         to_semantic_proto_contract_revision, to_semantic_proto_endpoint,
-        to_semantic_proto_endpoint_grant, to_semantic_proto_event_page,
-        to_semantic_proto_operation, to_semantic_proto_worker,
+        to_semantic_proto_endpoint_grant, to_semantic_proto_event_continuity,
+        to_semantic_proto_event_page, to_semantic_proto_operation, to_semantic_proto_worker,
     },
     peer_cred::principal_from_request,
     rpc::authority_service::authority_status,
 };
 
-fn watch_continuity_response(page: semantic::EventPage) -> core_v2::WatchEventsResponse {
+fn watch_continuity_response(
+    continuity: semantic::EventContinuity,
+) -> core_v2::WatchEventsResponse {
     core_v2::WatchEventsResponse {
-        body: Some(core_v2::watch_events_response::Body::ContinuityChange(
-            to_semantic_proto_event_page(&page),
+        body: Some(core_v2::watch_events_response::Body::Continuity(
+            to_semantic_proto_event_continuity(&continuity),
         )),
     }
 }
@@ -352,7 +354,7 @@ impl core_v2::kernel_authority_service_server::KernelAuthorityService for Kernel
         tokio::spawn(async move {
             if initial_page.status != semantic::ReplayStatus::Current {
                 let _ = sender
-                    .send(Ok(watch_continuity_response(initial_page)))
+                    .send(Ok(watch_continuity_response(initial_page.continuity())))
                     .await;
                 return;
             }
@@ -380,11 +382,15 @@ impl core_v2::kernel_authority_service_server::KernelAuthorityService for Kernel
                 match authority.read_events(&context, &principal, &cursor, limit) {
                     Ok(page) => match page.status {
                         semantic::ReplayStatus::SourceChanged => {
-                            let _ = sender.send(Ok(watch_continuity_response(page))).await;
+                            let _ = sender
+                                .send(Ok(watch_continuity_response(page.continuity())))
+                                .await;
                             return;
                         }
                         semantic::ReplayStatus::Gap => {
-                            let _ = sender.send(Ok(watch_continuity_response(page))).await;
+                            let _ = sender
+                                .send(Ok(watch_continuity_response(page.continuity())))
+                                .await;
                             return;
                         }
                         semantic::ReplayStatus::Current => {

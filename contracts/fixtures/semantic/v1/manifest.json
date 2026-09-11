@@ -1,5 +1,5 @@
 {
   "contract_revision": "cyrene.kernel.semantic/1.0",
-  "descriptor_sha256": "7AC88B18902C6C65C41E1F095A654FACBF6117B6BD11B53CE740ED05D8352324",
+  "descriptor_sha256": "2804B471269B875E7F50154352C3064F15BB9C2AD2D7BEB26C42E8073ED043E2",
   "tck": "contracts/tck/kernel-semantic/v1"
 }

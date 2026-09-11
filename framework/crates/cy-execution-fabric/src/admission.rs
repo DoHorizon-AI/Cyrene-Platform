@@ -388,7 +388,7 @@ pub fn validate_renewal(
         ));
     }
     let expected = previous
-        .renew(
+        .renew_lease(
             renewed.fence_token,
             renewed.expires_at_unix_ms.unwrap_or_default(),
             now_unix_ms,
