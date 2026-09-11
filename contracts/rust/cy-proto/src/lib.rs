@@ -9,7 +9,7 @@
 //! 自动生成的 CYRENE Core v1 平台核心网络协议与 gRPC 类型。
 //!
 //! 【协议契约源头】
-//! 本模块中的代码是在编译期由 `build.rs` 通过 `tonic-build` 编译 `contracts/proto/cyrene/core/v1/`
+//! 本模块中的代码是在编译期由 `build.rs` 通过 `tonic-build` 编译 crate-local `proto/cyrene/core/v1/`
 //! 下的 Protobuf 文件生成的。
 //! Proto 文件是整个平台的单一契约事实来源（Single Source of Truth），包含：
 //! - 节点问候与握手协议 ([`core_v1::NodeHello`], [`core_v1::NodeWelcome`])
@@ -93,7 +93,7 @@ mod tests {
     use prost::Message;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
-        let manifest = include_str!("../../../fixtures/core/v1/manifest.json");
+        let manifest = include_str!("../tests/fixtures/core/v1/manifest.json");
         let marker = format!("\"name\": \"{name}\"");
         let start = manifest
             .find(&marker)
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn core_v1_does_not_expose_process_or_large_artifact_inputs() {
         let core_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto/cyrene/core/v1");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proto/cyrene/core/v1");
         for entry in std::fs::read_dir(core_dir).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|value| value.to_str()) != Some("proto") {

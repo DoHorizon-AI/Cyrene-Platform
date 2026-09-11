@@ -26,7 +26,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{self, Resource},
     DeviceBinding, EnforcementMode, HostInventoryProvider, ProviderError, ResourceProvider,
 };
@@ -284,7 +284,9 @@ fn binding_to_proto(
     }
 }
 
-fn enforcement_to_proto(report: cy_kernel_api::EnforcementReport) -> core_v1::EnforcementReport {
+fn enforcement_to_proto(
+    report: cy_kernel_contract::EnforcementReport,
+) -> core_v1::EnforcementReport {
     core_v1::EnforcementReport {
         resource_kind: core_v1::ResourceKind::Unspecified as i32,
         mode: enforcement_mode_to_proto(report.mode),

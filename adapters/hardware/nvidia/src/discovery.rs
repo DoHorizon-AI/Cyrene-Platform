@@ -24,7 +24,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{Capability, Identity, Quantity, Resource, ResourceState},
     CapabilityFact, DeviceBinding, DeviceNode, HealthReport, HostInventoryProvider,
     InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,
@@ -367,9 +367,9 @@ impl ResourceProvider for NvidiaSmiProvider {
             joinable_environment_keys: nvidia_visibility_join_keys(),
             required_gids: Vec::new(),
             enforcement: if self.wsl_shared_device {
-                cy_kernel_api::EnforcementMode::Soft
+                cy_kernel_contract::EnforcementMode::Soft
             } else {
-                cy_kernel_api::EnforcementMode::Hard
+                cy_kernel_contract::EnforcementMode::Hard
             },
             adapter_id: self.adapter_id().to_string(),
             reason_code: if self.wsl_shared_device {
@@ -638,7 +638,10 @@ mod tests {
         );
         let provider = provider.with_wsl_shared_device(true);
         let binding = provider.create_binding(&resource).unwrap();
-        assert_eq!(binding.enforcement, cy_kernel_api::EnforcementMode::Soft);
+        assert_eq!(
+            binding.enforcement,
+            cy_kernel_contract::EnforcementMode::Soft
+        );
         assert_eq!(binding.reason_code, "WSL_SHARED_DEVICE_SOFT_BINDING");
         assert_eq!(binding.environment["CUDA_VISIBLE_DEVICES"], "GPU-uuid");
         assert_eq!(binding.nodes.len(), 1);
@@ -714,7 +717,7 @@ mod tests {
             environment: nvidia_visibility_environment(resource_id),
             joinable_environment_keys: nvidia_visibility_join_keys(),
             required_gids: Vec::new(),
-            enforcement: cy_kernel_api::EnforcementMode::Hard,
+            enforcement: cy_kernel_contract::EnforcementMode::Hard,
             adapter_id: "nvidia".to_string(),
             reason_code: "TEST".to_string(),
         }

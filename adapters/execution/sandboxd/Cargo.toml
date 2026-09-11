@@ -3,7 +3,7 @@ name = "cyrene-sandboxd"
 version = "0.1.0"
 edition = "2021"
 description = "Privileged Linux cgroup v2 Sandbox Adapter Host for CYRENE"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "cyrene_sandboxd"
@@ -19,4 +19,3 @@ prost = "0.12"
 [dev-dependencies]
 cy-sandbox-client = { path = "../../../kernel/crates/cy-sandbox-client" }
 tempfile = "3"
-

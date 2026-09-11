@@ -28,6 +28,7 @@ recommended path from protocol definitions to executable adapters.
 | [`governance/`](governance/README.md) | Ownership, CI trust, and repository policy. | 责任归属、CI 信任与仓库治理 |
 | [`operations/`](operations/README.md) | Runtime, node-agent, and recovery operations. | 运行时、节点代理与恢复运维 |
 | [`release/`](release/README.md) | Artifact, versioning, and release topology. | 产物、版本与发布拓扑 |
+| [`security/`](security/README.md) | Trust, privilege, and sandbox non-guarantees. | 信任、特权与沙箱非保证 |
 | [`start-here/`](start-here/README.md) | Guided onboarding and code-reading order. | 入门与代码阅读顺序 |
 
 ## Focused references | 重点参考
@@ -43,4 +44,3 @@ useful context, but the normative contract and current ADRs take precedence.
 
 仓库中还保留检查报告与迁移记录，可用于理解历史背景；规范契约与当前 ADR
 优先级更高。
-

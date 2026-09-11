@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adapter;
 pub(crate) mod endpoint;
 pub(crate) mod event;
 pub(crate) mod identity;
@@ -28,6 +29,11 @@ pub(crate) mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use adapter::{
+    CapabilityFact, DeviceBinding, DeviceNode, EnforcementMode, EnforcementReport,
+    EnvironmentMerge, HealthReport, HostInventoryProvider, InventorySnapshot, NodeCapabilities,
+    ProviderError, ResourceProvider,
+};
 pub use endpoint::{Endpoint, EndpointGrant};
 pub use event::{Event, EventCursor, EventPage, ReplayStatus};
 pub use identity::{Identity, Principal};
@@ -47,3 +53,7 @@ pub use validation::{
     MAX_WORKERS_PER_SNAPSHOT,
 };
 pub use worker::{Worker, WorkerState};
+
+/// Compatibility namespace for callers that distinguish semantic vocabulary
+/// from the adapter facts re-exported by this public contract crate.
+pub use crate as semantic;

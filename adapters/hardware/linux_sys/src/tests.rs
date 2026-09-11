@@ -10,7 +10,7 @@
 
 use std::fs;
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::ResourceState, EnforcementMode, HostInventoryProvider, ResourceProvider,
 };
 use cy_proto::hardware_v1;

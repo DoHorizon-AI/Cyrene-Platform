@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "cyrene-preflight"
 version = "0.1.0"
 description = "Cyrene resource-fact and preflight capability contracts"
+license = { text = "Apache-2.0" }
+classifiers = ["License :: OSI Approved :: Apache Software License"]
 readme = "README.md"
 requires-python = ">=3.11"
 

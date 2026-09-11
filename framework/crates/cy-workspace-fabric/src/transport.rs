@@ -9,7 +9,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cy_execution_fabric::ConnectivityRoute;
 use cy_proto::workspace_v1::relay_frame;
 use cy_proto::workspace_v1::workspace_relay_service_client::WorkspaceRelayServiceClient;
 use cy_proto::workspace_v1::{
@@ -26,10 +25,16 @@ use crate::WorkspaceApi;
 
 const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// TLS material and resolved route for one outbound relay connection.
+/// TLS material and public endpoint facts for one outbound relay connection.
+///
+/// This configuration deliberately contains primitives rather than a route
+/// type owned by the execution-fabric implementation crate. A consumer can
+/// construct it from environment, configuration, or another resolver without
+/// linking Platform implementation code.
 #[derive(Clone)]
 pub struct RelayClientConfig {
-    pub route: ConnectivityRoute,
+    pub control_endpoint: String,
+    pub server_name: String,
     pub ca_certificate_pem: Vec<u8>,
     pub client_certificate_pem: Vec<u8>,
     pub client_key_pem: Vec<u8>,
@@ -221,18 +226,15 @@ pub async fn run_workspace_connector_session(
 }
 
 async fn connect_channel(config: &RelayClientConfig) -> Result<Channel, RelayTransportError> {
-    if config.route.control_endpoint.is_empty()
-        || config.route.server_name.is_empty()
-        || !config.route.outbound_only
-    {
+    if config.control_endpoint.is_empty() || config.server_name.is_empty() {
         return Err(RelayTransportError::Endpoint(
-            "relay route must be outbound and include endpoint/server name".to_string(),
+            "relay endpoint must include endpoint/server name".to_string(),
         ));
     }
-    let endpoint = Endpoint::from_shared(config.route.control_endpoint.clone())
+    let endpoint = Endpoint::from_shared(config.control_endpoint.clone())
         .map_err(|error| RelayTransportError::Endpoint(error.to_string()))?;
     let tls = ClientTlsConfig::new()
-        .domain_name(config.route.server_name.clone())
+        .domain_name(config.server_name.clone())
         .ca_certificate(Certificate::from_pem(config.ca_certificate_pem.clone()))
         .identity(Identity::from_pem(
             config.client_certificate_pem.clone(),

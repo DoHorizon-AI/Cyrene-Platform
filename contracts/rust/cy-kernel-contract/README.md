@@ -20,6 +20,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `Cargo.toml` | Rust package manifest. | Rust 包清单。 |
+| `src/adapter.rs` | Public adapter facts and implementation-free adapter ports. | 公共 Adapter 事实与无实现端口。 |
 | `src/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.

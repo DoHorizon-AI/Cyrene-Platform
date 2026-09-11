@@ -268,6 +268,11 @@ impl InstanceActor {
     }
 
     /// Invoke an extension point RPC on the running sandboxed worker.
+    ///
+    /// This is a Kernel-internal transport hook, not the supported public
+    /// plugin API. External workers use the versioned wire contract carried by
+    /// this opaque payload.
+    #[doc(hidden)]
     pub async fn invoke_raw(
         &mut self,
         payload: Vec<u8>,

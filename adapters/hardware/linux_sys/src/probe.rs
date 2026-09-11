@@ -15,7 +15,7 @@ use std::{
     sync::Mutex,
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{Capability, Identity, Quantity, Resource, ResourceState},
     CapabilityFact, DeviceBinding, EnforcementMode, EnforcementReport, HealthReport,
     HostInventoryProvider, InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,

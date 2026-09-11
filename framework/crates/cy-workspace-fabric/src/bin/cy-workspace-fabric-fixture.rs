@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cy_execution_fabric::{ConnectivityProvider, RelayConnectivityProvider};
 use cy_proto::core_v1::ConnectivityMode;
 use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::semantic_v1::Identity as OperationIdentity;
@@ -295,9 +294,9 @@ fn fixture_user() -> UserIdentityRef {
 fn relay_client_config() -> Result<RelayClientConfig, Box<dyn std::error::Error>> {
     let endpoint = required("CYRENE_WORKSPACE_RELAY_ENDPOINT")?;
     let server_name = required("CYRENE_WORKSPACE_RELAY_SERVER_NAME")?;
-    let route = RelayConnectivityProvider::new(endpoint, server_name).resolve()?;
     Ok(RelayClientConfig {
-        route,
+        control_endpoint: endpoint,
+        server_name,
         ca_certificate_pem: fs::read(required("CYRENE_WORKSPACE_RELAY_CA")?)?,
         client_certificate_pem: fs::read(required("CYRENE_WORKSPACE_RELAY_CLIENT_CERT")?)?,
         client_key_pem: fs::read(required("CYRENE_WORKSPACE_RELAY_CLIENT_KEY")?)?,

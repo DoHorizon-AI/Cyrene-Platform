@@ -8,7 +8,7 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{self, Resource, ResourceState},
     EnforcementMode, EnforcementReport, ProviderError,
 };

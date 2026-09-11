@@ -3,11 +3,11 @@ name = "cy-kernel-api"
 version = "0.1.0"
 edition = "2021"
 description = "Stable Rust ports and facts for the CYRENE node kernel"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "cy_kernel_api"
 path = "src/lib.rs"
 
 [dependencies]
-cy-kernel-contract = { path = "../../../contracts/rust/cy-kernel-contract" }
+cy-kernel-contract = { version = "0.1.0", path = "../../../contracts/rust/cy-kernel-contract" }

@@ -7,7 +7,7 @@
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
 #[cfg(any(test, unix, target_os = "linux"))]
-use cy_kernel_api::ProviderError;
+use cy_kernel_contract::ProviderError;
 
 /// Optional UDS peer identity constraint from static node configuration. The
 /// Kernel verifies it after connect, before sending an adapter request.

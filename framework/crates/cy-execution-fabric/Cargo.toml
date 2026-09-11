@@ -4,14 +4,15 @@ version = "0.2.0"
 edition = "2021"
 description = "Product-neutral execution attachment admission and reconciliation."
 license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
 [dependencies]
-cy-kernel-contract = { path = "../../../contracts/rust/cy-kernel-contract" }
-cy-manifest = { path = "../../../contracts/rust/cy-manifest" }
-cy-proto = { path = "../../../contracts/rust/cy-proto" }
+cy-kernel-contract = { version = "0.1.0", path = "../../../contracts/rust/cy-kernel-contract" }
+cy-manifest = { version = "0.1.0", path = "../../../contracts/rust/cy-manifest" }
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
 prost-types = "0.12"
 thiserror = "1.0"
 
 [dev-dependencies]
-cy-artifact-transfer = { path = "../../../sdk/rust/cy-artifact-transfer" }
+cy-artifact-transfer = { version = "0.1.0", path = "../../../sdk/rust/cy-artifact-transfer" }
 prost = "0.12"
