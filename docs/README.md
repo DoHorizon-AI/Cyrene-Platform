@@ -12,8 +12,10 @@ recommended path from protocol definitions to executable adapters.
 1. [`start-here/00-what-is-cyrene.md`](start-here/00-what-is-cyrene.md) — platform purpose and vocabulary.
 2. [`start-here/02-repository-map.md`](start-here/02-repository-map.md) — repository ownership and boundaries.
 3. [`architecture/overview.md`](architecture/overview.md) — end-to-end component map and data flow.
-4. [`contracts/kernel-semantic-contract-v1.md`](contracts/kernel-semantic-contract-v1.md) — normative semantic authority.
-5. [`flows/plugin-resolution-and-invocation.md`](flows/plugin-resolution-and-invocation.md) — a concrete execution path.
+4. [`architecture/system-adapter.md`](architecture/system-adapter.md) — system facts and target-specific host adapter.
+5. [`architecture/sandbox-adapter.md`](architecture/sandbox-adapter.md) — sandbox port, native backend, and Docker boundary.
+6. [`contracts/kernel-semantic-contract-v1.md`](contracts/kernel-semantic-contract-v1.md) — normative semantic authority.
+7. [`flows/plugin-resolution-and-invocation.md`](flows/plugin-resolution-and-invocation.md) — a concrete execution path.
 
 ## Documentation map | 文档地图
 
@@ -44,3 +46,15 @@ useful context, but the normative contract and current ADRs take precedence.
 
 仓库中还保留检查报告与迁移记录，可用于理解历史背景；规范契约与当前 ADR
 优先级更高。
+
+## Language policy | 文档语言策略
+
+English is the canonical text for normative contracts, ADRs, and release gates.
+The maintained Chinese mirror for the core onboarding, architecture, operations,
+and security path is under [`zh-CN/`](zh-CN/README.md). A Chinese page links
+back to its English source and must preserve the same status labels and
+non-guarantees; it is not a second semantic authority.
+
+规范契约、ADR 与发布门禁以英文为 canonical source。核心入门、架构、运维和
+安全路径的中文镜像位于 [`zh-CN/`](zh-CN/README.md)。每个中文页面都会链接
+回英文源文档，并保持相同的状态标签与非保证声明；中文文档不是第二套语义权威。

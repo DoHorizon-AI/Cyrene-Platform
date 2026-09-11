@@ -174,6 +174,8 @@ the [independent consumer gate](tooling/acceptance/licensing-boundary/), and the
 ## Documentation and onboarding
 
 - [System map](docs/ARCHITECTURE.md)
+- [System Adapter contract and Linux implementation](docs/architecture/system-adapter.md)
+- [Sandbox Adapter boundary and backend status](docs/architecture/sandbox-adapter.md)
 - [Kernel semantic contract v1](docs/contracts/kernel-semantic-contract-v1.md)
 - [Platform clean boundary](docs/governance/platform-clean-boundary.md)
 - [Repository boundaries](docs/REPOSITORY_BOUNDARIES.md)
@@ -184,6 +186,7 @@ the [independent consumer gate](tooling/acceptance/licensing-boundary/), and the
 - [Public release preflight](docs/governance/PUBLIC_RELEASE_PREFLIGHT.md)
 - [API Naming Constitution](docs/governance/API_NAMING_CONSTITUTION.md)
 - [API Naming Migration Plan](docs/governance/API_NAMING_MIGRATION_PLAN.md)
+- [Chinese documentation set](docs/zh-CN/README.md)
 
 ## Licensing
 

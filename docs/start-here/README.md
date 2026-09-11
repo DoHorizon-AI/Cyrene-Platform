@@ -21,3 +21,5 @@ Read the numbered files from `00` through `05`; use `first-clone.md` when
 setting up a fresh checkout.
 
 按 `00` 至 `05` 的编号顺序阅读；新建工作区时再参考 `first-clone.md`。
+
+核心中文入门镜像：[../zh-CN/start-here/README.md](../zh-CN/start-here/README.md)。

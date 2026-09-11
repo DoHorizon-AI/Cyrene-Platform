@@ -55,6 +55,16 @@ flowchart LR
 
 ## Authority rules | 权威规则
 
+Focused boundary pages: [`system-adapter.md`](system-adapter.md) and
+[`sandbox-adapter.md`](sandbox-adapter.md). Their Chinese mirrors are
+[`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md)
+and [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md).
+
+重点边界页面：[`system-adapter.md`](system-adapter.md) 与
+[`sandbox-adapter.md`](sandbox-adapter.md)。对应中文镜像是
+[`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md)
+和 [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md)。
+
 - Semantic contracts are authoritative for nouns, transitions, and denials.
 - Protobuf and SDK types are projections; they must not introduce hidden
   semantics.

@@ -1,32 +1,90 @@
-# sandboxd Directory Guide | adapters/execution/sandboxd 目录指南
+# Sandbox Adapter Host | 沙箱适配器主机
 
-## Purpose | 目录职责
+`cyrene-sandboxd` is the privileged Platform Core service that implements the
+native Linux cgroup v2 `SandboxBackend`. It is out of process for safety and
+failure containment, but it is not an independently licensed third-party
+plugin: it owns enforcement, process lifecycle, and cleanup authority.
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+`cyrene-sandboxd` 是 Platform Core 的特权服务，实现 Linux native cgroup v2
+`SandboxBackend`。它为了安全与故障隔离而进程外运行，但不是独立授权的第三方
+插件：它拥有强制执行、进程生命周期和清理权威。
 
-## Contents | 内容
+## Current backend | 当前后端
 
-| Entry | Responsibility | 一句话职责 |
+The shipped backend is `native-cgroup-v2`. Its contract accepts preflight,
+launch, stop, telemetry, recovery discovery, and stale-process recovery
+requests over the versioned `cyrene.sandbox.v1` UDS protocol.
+
+当前随仓库交付的后端是 `native-cgroup-v2`。它通过版本化的
+`cyrene.sandbox.v1` UDS 协议接受 preflight、launch、stop、telemetry、恢复发现和
+陈旧进程恢复请求。
+
+The Linux implementation provides cgroup v2 limits, device-BPF enforcement for
+`HARD` bindings when available, pidfd tracking where available, parent-death
+cleanup, bounded process-tree cleanup, and OOM telemetry. The launch gate forks
+the child before attaching it and does not release the child to `exec` until
+attachment succeeds, closing the old spawn-then-attach user-code window.
+
+Linux 实现提供 cgroup v2 限制、可用时对 `HARD` binding 使用 device-BPF 强制、可用时
+使用 pidfd 跟踪、parent-death 清理、有界进程树清理和 OOM telemetry。启动 gate 会先
+fork 子进程，完成 attach 后才允许子进程 `exec`，从而关闭旧的 spawn-then-attach 用户
+代码执行窗口。
+
+## Boundary | 边界
+
+Kernel owns launch authorization, leases, fencing, lifecycle decisions, and
+the generic sandbox client. `sandboxd` owns the delegated cgroup subtree,
+process operations, device enforcement, and cleanup evidence. Exactly one
+backend owns a worker's cgroup and lifecycle tree.
+
+Kernel 拥有启动授权、租约、fencing、生命周期决策和通用 sandbox client。
+`sandboxd` 拥有被委托的 cgroup 子树、进程操作、设备强制和清理证据。每个 Worker
+只能由一个后端拥有其 cgroup 与生命周期树。
+
+The `SandboxBackend` port is a Core host port, not a public plugin ABI. Docker/
+OCI is a supported future adapter boundary: a future backend may let Docker or
+another OCI runtime own the container lifecycle, but it must project a stable
+runtime handle, stop/reap evidence, telemetry, and recovery semantics. The
+current repository does not ship a production Docker sandbox backend.
+
+`SandboxBackend` 是 Core host port，不是第三方公开插件 ABI。Docker/OCI 是已支持的
+未来适配器边界：未来后端可以让 Docker 或其他 OCI runtime 拥有容器生命周期，但必须
+提供稳定 runtime handle、stop/reap 证据、telemetry 与 recovery 语义。当前仓库尚未
+交付生产可用的 Docker sandbox backend。
+
+## Security boundary | 安全边界
+
+This is a bounded cgroup lifecycle sandbox, not hostile arbitrary-code
+containment. The current implementation does not claim user/mount/network/PID
+namespace isolation, seccomp, capability dropping, complete host-filesystem
+isolation, or syscall containment. `HARD` device enforcement fails closed when
+the required BPF capability is unavailable.
+
+这是一个有边界的 cgroup 生命周期沙箱，不是恶意任意代码隔离。当前实现不声称提供
+user/mount/network/PID namespace 隔离、seccomp、capability dropping、完整主机文件系统
+隔离或 syscall containment。需要 BPF 但能力不可用时，`HARD` 设备强制会 fail closed。
+
+## Status | 当前状态
+
+| Area | Status | Evidence / boundary |
 | --- | --- | --- |
+| Native cgroup lifecycle | `COMPLETE` | `CgroupV2Runtime` and sandbox protocol implementation. |
+| Launch-to-cgroup enforcement | `COMPLETE` | Gated fork/attach/exec path. |
+| Hostile-code containment | `NOT_COMPLETE` | Namespace, seccomp, capability, filesystem, and syscall controls are absent. |
+| Docker/OCI backend | `DEFERRED` | Boundary is documented; backend and real acceptance suite are absent. |
+| Production crash/restart acceptance | `DEFERRED` | Real systemd lifecycle validation is environment-required. |
 
-## Suggested reading / execution order | 推荐阅读 / 执行顺序
-
-Read this guide first, then the direct files above in dependency order, and finally the nested directory guides.
-先读本指南，再按依赖顺序阅读上方直接文件，最后进入嵌套目录指南。
-
-## Contents snapshot | 内容快照
-
-| Entry | Responsibility | 一句话职责 |
+| 范围 | 状态 | 证据 / 边界 |
 | --- | --- | --- |
-| `Cargo.toml` | Rust package manifest. | Rust 包清单。 |
-| `src/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `tests/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+| Native cgroup 生命周期 | `COMPLETE` | `CgroupV2Runtime` 与 sandbox 协议实现。 |
+| 启动到 cgroup 的强制窗口 | `COMPLETE` | gated fork/attach/exec 路径。 |
+| 恶意代码隔离 | `NOT_COMPLETE` | 缺少 namespace、seccomp、capability、文件系统与 syscall 控制。 |
+| Docker/OCI 后端 | `DEFERRED` | 已记录边界，但后端和真实验收套件尚不存在。 |
+| 生产崩溃/重启验收 | `DEFERRED` | 真实 systemd 生命周期验证需要环境。 |
 
-This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
-本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+See [`docs/architecture/sandbox-adapter.md`](../../../docs/architecture/sandbox-adapter.md)
+and [`docs/security/threat-model.md`](../../../docs/security/threat-model.md) for
+the normative boundary.
 
-Immediate cleanup reaps a tracked child even when its cgroup is already empty.
-This lets Kernel release the allocation after a model process exits during loading.
-
-立即清理也会回收空 cgroup 对应的子进程,使模型加载失败后的资源可以由 Kernel 释放。
+规范边界请阅读 [`docs/architecture/sandbox-adapter.md`](../../../docs/architecture/sandbox-adapter.md)
+和 [`docs/security/threat-model.md`](../../../docs/security/threat-model.md)。
