@@ -1,0 +1,208 @@
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+- name: runGpuRuntimeSmoke
+  displayName: 'Run Kernel Runtime Bootstrap Smoke (Trusted RTX 4080 Agent)'
+  type: boolean
+  default: false
+- name: gpuPoolName
+  displayName: 'Self-Hosted GPU Agent Pool Name'
+  type: string
+  default: 'Default'
+
+# Platform is public: GitHub Actions owns automatic source, contract, and unit checks.
+# Keep Azure manual for self-hosted GPU/runtime acceptance and delivery work.
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+- job: docs
+  displayName: 'Platform / Documentation Validation'
+  timeoutInMinutes: 10
+  variables:
+    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - task: Cache@2
+    inputs:
+      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/pip'
+    displayName: 'Restore pip cache'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+  - script: python tooling/docs/validate_docs.py
+    displayName: 'Validate documentation links and indexes'
+
+- job: governance
+  displayName: 'Platform / Architecture Governance'
+  timeoutInMinutes: 10
+  variables:
+    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - task: Cache@2
+    inputs:
+      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/pip'
+    displayName: 'Restore pip cache'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+  - script: |
+      sudo apt-get update
+      sudo apt-get install -y ripgrep
+      python -m pip install pytest hypothesis "pyyaml>=6.0"
+      python tooling/ci/check_service_boundaries.py
+      python -m pytest tooling/ci/test_check_service_boundaries.py
+      python tooling/governance/validate_repository_policy.py
+      python -m pytest tooling/governance/tests/test_repository_policy.py
+      bash tooling/ci/check-architecture-governance.sh
+      bash tooling/ci/check-kernel-boundary.sh
+    displayName: 'Run architecture boundary guard'
+  - script: bash tooling/ci/check-no-legacy-surface.sh
+    displayName: 'Reject reintroduction of legacy/archive/backup surface'
+
+- job: python_sdk
+  displayName: 'Platform / Python SDKs & Tooling'
+  timeoutInMinutes: 20
+  variables:
+    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - task: Cache@2
+    inputs:
+      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/pip'
+    displayName: 'Restore pip cache'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+  - script: |
+      python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0" ruff==0.16.5
+      python -m pip install -e sdk/python/cyrene_artifacts
+      python -m pip install -e sdk/python/cyrene_preflight
+    displayName: 'Install Python SDKs and dependencies'
+  - script: |
+      python -m pytest sdk/python/cyrene_artifacts/tests
+      python -m pytest sdk/python/cyrene_preflight/tests
+      python -m pytest tooling/docs/tests
+      python -m pytest tooling/ci/tests
+      python -m pytest tooling/runtime/tests
+      python -m ruff check tooling/runtime
+    displayName: 'Run SDK unit tests'
+
+- job: platform_core
+  displayName: 'Platform / Core Rust Workspace'
+  timeoutInMinutes: 30
+  variables:
+    CARGO_HOME: '$(Pipeline.Workspace)/.cargo'
+  steps:
+  - checkout: self
+    displayName: 'Checkout repository'
+  - bash: |
+      set -euo pipefail
+      mkdir -p "$(Pipeline.Workspace)/.cargo"
+      mkdir -p "$(Pipeline.Workspace)/s/Cyrene-Platform/target"
+    displayName: 'Prepare Cargo cache directories'
+  - task: Cache@2
+    inputs:
+      key: 'cargo | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cargo.lock'
+      restoreKeys: |
+        cargo | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cargo'
+    displayName: 'Restore Cargo registry cache'
+  - task: Cache@2
+    inputs:
+      key: 'cargo-target | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cargo.lock'
+      restoreKeys: |
+        cargo-target | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/s/Cyrene-Platform/target'
+    displayName: 'Restore Cargo target cache'
+  - script: |
+      rustup update stable
+      rustup component add rustfmt clippy
+    displayName: 'Setup Rust toolchain'
+  - script: cargo fmt --check
+    displayName: 'Check Rust formatting'
+  - script: cargo check --locked --workspace --all-targets
+    displayName: 'Check Cargo workspace (--locked)'
+  - script: cargo clippy --locked --workspace --all-targets -- -D warnings
+    displayName: 'Run Clippy'
+  - script: cargo test --locked --workspace
+    displayName: 'Run Rust unit tests (--locked)'
+
+- ${{ if eq(parameters.runGpuRuntimeSmoke, true) }}:
+  - job: platform_gpu_runtime
+    displayName: 'Platform / Self-Hosted RTX 4080 Runtime Bootstrap'
+    dependsOn:
+    - python_sdk
+    - platform_core
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    pool:
+      name: ${{ parameters.gpuPoolName }}
+      demands:
+      - cyrene.gpu -equals rtx4080
+    timeoutInMinutes: 60
+    steps:
+    - checkout: self
+      displayName: 'Checkout repository'
+    - bash: |
+        set -euo pipefail
+        case "$(Build.SourceBranch)" in
+          refs/heads/develop|refs/heads/main) ;;
+          *) echo 'GPU runtime is restricted to canonical branches.' >&2; exit 1 ;;
+        esac
+        runtime_home="$(Agent.TempDirectory)/cyrene-platform-runtime"
+        tooling/runtime/cyrene-runtime down --runtime-home "$runtime_home" >/dev/null || true
+        tooling/runtime/cyrene-runtime up --runtime-home "$runtime_home"
+        tooling/runtime/cyrene-runtime status --runtime-home "$runtime_home"
+      displayName: 'Bootstrap and probe adapters plus Kernel'
+    - bash: |
+        set -euo pipefail
+        tooling/runtime/cyrene-runtime down \
+          --runtime-home "$(Agent.TempDirectory)/cyrene-platform-runtime"
+      condition: always()
+      displayName: 'Teardown owned runtime processes'
+
+- job: platform_evidence
+  displayName: 'Platform / Assemble Evidence'
+  dependsOn:
+  - docs
+  - governance
+  - python_sdk
+  - platform_core
+  condition: succeeded()
+  steps:
+  - script: |
+      mkdir -p ci/evidence
+      cat <<EOF > ci/evidence/platform-summary.json
+      {
+        "suite": "Cyrene-Platform",
+        "commit": "$(Build.SourceVersion)",
+        "build_id": "$(Build.BuildId)",
+        "result": "HOSTED_SOURCE_GATES_COMPLETED",
+        "scope": "documentation, architecture governance, Python SDKs and tooling, Rust workspace",
+        "gpu_runtime": "NOT_RUN_BY_DEFAULT",
+        "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      }
+      EOF
+    displayName: 'Generate Sanitized Platform Evidence'
+  - publish: ci/evidence
+    artifact: platform-evidence
+    displayName: 'Publish Platform Evidence Artifact'
