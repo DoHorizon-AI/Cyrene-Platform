@@ -73,7 +73,25 @@ if rg -n 'legacy-local-ticket|legacy-local-compatibility|legacy-seed-peer' agent
     exit 1
 fi
 rg -q 'cy-manifest' sdk/rust/cy-artifact-transfer/Cargo.toml
-rg -q 'pub use cy_manifest::\{ArtifactKind, ArtifactRef\}' sdk/rust/cy-artifact-transfer/src/lib.rs
+# Keep this assertion independent from rustfmt's single-line or multi-line layout.
+# 保持断言不依赖 rustfmt 的单行或多行排版。
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path("sdk/rust/cy-artifact-transfer/src/lib.rs").read_text()
+exports = (
+    statement
+    for statement in source.split(";")
+    if "pub use cy_manifest::" in statement
+)
+if not any(
+    "ArtifactKind" in statement and "ArtifactRef" in statement
+    for statement in exports
+):
+    raise SystemExit(
+        "cy-artifact-transfer must publicly re-export ArtifactKind and ArtifactRef"
+    )
+PY
 
 python3 -c 'import json, pathlib; schema=json.loads(pathlib.Path("contracts/schemas/artifact_transfer.schema.json").read_text()); required={"artifactPeer", "artifactReplica", "transferTicket", "transferPlan", "transferCheckpoint", "externalSource", "sourceImportJob", "sourceSnapshot"}; missing=required-set(schema["$defs"]); assert not missing, missing'
 bash -n tooling/acceptance/distributed-execution-fabric/run-container-proof.sh
