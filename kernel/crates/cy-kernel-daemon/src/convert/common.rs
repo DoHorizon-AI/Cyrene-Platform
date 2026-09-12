@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Shared timestamp, identity, context, and status conversions.
+//!
+//! 共享的 timestamp、identity、context 与 status 转换。
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_kernel_api::{semantic, AuthorityCallContext, NamespaceId, ProviderError};

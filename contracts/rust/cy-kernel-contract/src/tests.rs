@@ -357,6 +357,11 @@ fn event_pages_are_source_scoped_ordered_and_gap_explicit() {
     };
     page.validate().unwrap();
 
+    let continuity = page.continuity();
+    continuity.validate().unwrap();
+    assert_eq!(continuity.status, ReplayStatus::Current);
+    assert_eq!(continuity.next_sequence, 5);
+
     let mut gap_with_data = page;
     gap_with_data.status = ReplayStatus::Gap;
     assert_eq!(
@@ -668,7 +673,7 @@ fn frozen_tck_matching_authority_and_replay_match_rust() {
             expires_at_unix_ms: Some(row[3].parse().unwrap()),
         };
         let actual = lease
-            .renew(
+            .renew_lease(
                 if row[2] == "true" { 9 } else { 8 },
                 row[4].parse().unwrap(),
                 row[5].parse().unwrap(),

@@ -63,11 +63,11 @@ impl KernelDaemon {
         }
     }
 
-    /// 通过版本化 UDS 连接进程外硬件适配器注册表。
+    /// 通过版本化 UDS 连接进程外系统/硬件适配器注册表。
     ///
     /// 该组合根不加载厂商动态库，也不执行任何厂商探测命令。适配器失联时，端口
     /// 返回 `ADAPTER_UNAVAILABLE`，由上层将节点转为不可继续分配的降级状态。
-    pub fn with_hardware_adapters(
+    pub fn with_adapters(
         endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
         resources: Arc<dyn ResourceLeaseManager>,
         sandbox: Arc<dyn SandboxBackend>,
@@ -86,6 +86,19 @@ impl KernelDaemon {
         );
         daemon.hardware_adapters = Some(hardware_adapters);
         Ok(daemon)
+    }
+
+    /// Backward-compatible constructor for callers that only use hardware
+    /// resource adapters. The registry also accepts the required system
+    /// adapter endpoint used by the Linux composition root.
+    pub fn with_hardware_adapters(
+        endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
+        resources: Arc<dyn ResourceLeaseManager>,
+        sandbox: Arc<dyn SandboxBackend>,
+        node_id: impl Into<String>,
+        node_epoch: u64,
+    ) -> Result<Self, ProviderError> {
+        Self::with_adapters(endpoints, resources, sandbox, node_id, node_epoch)
     }
 
     /// 检查节点基础沙箱环境是否已就绪
@@ -141,23 +154,23 @@ impl KernelDaemon {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // 🔧 FUNCTION: KernelDaemon::reserve
+    // 🔧 FUNCTION: KernelDaemon::acquire_lease
     //
-    //   Reserves from the last durable inventory ledger only after readiness
+    //   Acquires from the last durable inventory ledger only after readiness
     //   has been established; it does not probe hardware inline.
     //
     //   仅在确认资源就绪后从最近一次持久化清单账本中申请租约，不在申请路径内
     //   临时探测硬件，避免事实刷新与分配发生竞态。
     // ════════════════════════════════════════════════════════════════════════
-    /// 申请预留硬件资源租约
+    /// 获取硬件资源租约
     ///
     /// Transport authentication is enforced at the `KernelAuthority` boundary.
     /// The lease holder remains the planned Worker identity, not a
     /// caller-supplied Principal.
-    pub fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
+    pub fn acquire_lease(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
         // Allocation consumes the last durably observed inventory ledger. It
         // must not probe and mutate facts inline, because that would race the
-        // caller's snapshot generation between validation and reservation.
+        // caller's snapshot generation between validation and acquisition.
         // The startup/monitor observation paths refresh this ledger separately.
         let snapshot = self.resources.inventory();
         if !snapshot.capabilities.ready {
@@ -167,7 +180,7 @@ impl KernelDaemon {
                 "required hardware adapter capability is not ready",
             ));
         }
-        self.resources.reserve(request)
+        self.resources.acquire_lease(request)
     }
 
     /// Begins release authority while keeping the physical allocation held.
@@ -233,14 +246,14 @@ impl KernelDaemon {
     /// Extend a live lease while retaining its exact resource allocation and
     /// fencing authority. The ledger performs the active-state, fence, and
     /// expiry monotonicity checks atomically.
-    pub fn renew(
+    pub fn renew_lease(
         &self,
         lease_name: &str,
         fence_token: u64,
         expires_at_unix_ms: u64,
     ) -> Result<ResourceLease, ProviderError> {
         self.resources
-            .renew(lease_name, fence_token, expires_at_unix_ms)
+            .renew_lease(lease_name, fence_token, expires_at_unix_ms)
     }
 
     /// 为租约内的所有资源合并一份沙箱绑定。
@@ -263,7 +276,7 @@ impl KernelDaemon {
                     )
                 })?;
             bindings.push(
-                // Already-reserved lease bindings do not enforce volatile hardware inventory generation checks
+                // Already-acquired lease bindings do not enforce volatile hardware inventory generation checks
                 self.resource_provider
                     .create_binding_for_generation(resource, 0)?,
             );

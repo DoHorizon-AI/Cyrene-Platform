@@ -295,7 +295,7 @@ dependencies = [
 name = "cy-adapter-client"
 version = "0.1.0"
 dependencies = [
- "cy-kernel-api",
+ "cy-kernel-contract",
  "cy-proto",
  "nix",
  "prost",
@@ -512,7 +512,6 @@ dependencies = [
 name = "cy-workspace-fabric"
 version = "0.1.0"
 dependencies = [
- "cy-execution-fabric",
  "cy-proto",
  "prost-types",
  "tempfile",
@@ -548,7 +547,7 @@ dependencies = [
 name = "cyrene-linux-sys-adapter"
 version = "0.1.0"
 dependencies = [
- "cy-kernel-api",
+ "cy-kernel-contract",
  "cy-proto",
  "libc",
  "prost",
@@ -560,7 +559,7 @@ dependencies = [
 name = "cyrene-nvidia-adapter"
 version = "0.1.0"
 dependencies = [
- "cy-kernel-api",
+ "cy-kernel-contract",
  "cy-proto",
  "nix",
  "prost",

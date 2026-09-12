@@ -6,9 +6,12 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Conversions between adapter facts/bindings and public Proto contracts.
+//!
+//! 适配器事实/binding 与公共 Proto contract 之间的转换。
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{self, Resource, ResourceState},
     EnforcementMode, EnforcementReport, ProviderError,
 };

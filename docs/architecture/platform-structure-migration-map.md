@@ -15,7 +15,7 @@ than treating a smaller directory as evidence of lost behavior.
   predates the embedded-runtime removal and later decomposition milestones.
 - Pre-major-refactor checkpoint: `142280f79fe497301b5f8fe7121f19d2bf922a2f`
   (`refactor(core): remove embedded Python and container tooling`).
-- Recorded develop snapshot: `1b49673366769ce6226f8819f8741c7eed01823f`.
+- Last verified develop snapshot: `bc3327bdbe1edba6449a0f34d6954b022e4c3dd0`.
 
 ## Why Kernel became smaller / Kernel 变小的原因
 
@@ -59,7 +59,7 @@ Node Agent、重复 supervisor 被移到其权威层；大型文件被拆成显�
 | Lease/Fence | `cy-kernel-api/src/lease.rs`, resource manager, daemon release/revoke paths; stale fence and incomplete cleanup tests are present. |
 | Capability | `framework/crates/cy-platform-api`; manifest normalization and selection remain generic. |
 | Endpoint | Endpoint/grant authority is lease-bound and purged on worker loss/release. |
-| Event | Durable event store/history and `SubscribeEvents` v1/v2 projections. |
+| Event | Durable event store/history and `WatchEvents` v1/v2 projections. |
 | Replay/live handoff | `snapshot` captures the cursor before reading state; ordered replay then notifier handoff is implemented and regression-tested. |
 | Cleanup/recovery | Watchdog, service manager and sandbox client require physical cleanup confirmation; restart recovery is epoch/fence scoped. |
 

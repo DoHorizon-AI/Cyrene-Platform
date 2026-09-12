@@ -8,7 +8,7 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 //! CYRENE Linux System Adapter Host daemon binary.
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{
         env, fs,
@@ -161,8 +161,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("cyrene-linux-sys-adapter requires a Unix platform.");
+    eprintln!("cyrene-linux-sys-adapter requires a Linux platform.");
     std::process::exit(1);
 }

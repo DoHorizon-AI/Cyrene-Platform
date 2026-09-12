@@ -9,14 +9,14 @@
 //! 自动生成的 CYRENE Core v1 平台核心网络协议与 gRPC 类型。
 //!
 //! 【协议契约源头】
-//! 本模块中的代码是在编译期由 `build.rs` 通过 `tonic-build` 编译 `contracts/proto/cyrene/core/v1/`
+//! 本模块中的代码是在编译期由 `build.rs` 通过 `tonic-build` 编译 crate-local `proto/cyrene/core/v1/`
 //! 下的 Protobuf 文件生成的。
 //! Proto 文件是整个平台的单一契约事实来源（Single Source of Truth），包含：
 //! - 节点问候与握手协议 ([`core_v1::NodeHello`], [`core_v1::NodeWelcome`])
 //! - 通用资源与能力事实 ([`semantic_v1::Resource`], [`semantic_v1::Capability`])
 //! - 资源租约管理与围栏令牌 ([`core_v1::AcquireLeaseRequest`], [`semantic_v1::Lease`])
 //! - 插件进程生命周期与清理状态 ([`core_v1::PluginProcess`])
-//! - 控制面下发指令与心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportHeartbeatResponse`])
+//! - 控制面下发指令与插件心跳流 ([`core_v1::KernelCommand`], [`core_v1::ReportPluginHeartbeatResponse`])
 
 // Prost owns the generated enum representation; wire compatibility takes
 // precedence over hand-boxing generated variants in this projection crate.
@@ -93,7 +93,7 @@ mod tests {
     use prost::Message;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
-        let manifest = include_str!("../../../fixtures/core/v1/manifest.json");
+        let manifest = include_str!("../tests/fixtures/core/v1/manifest.json");
         let marker = format!("\"name\": \"{name}\"");
         let start = manifest
             .find(&marker)
@@ -121,32 +121,15 @@ mod tests {
         assert_eq!(welcome.encode_to_vec(), welcome_bytes);
         assert_eq!(welcome.selected_protocol_version, 1);
 
-        let reserve_bytes = fixture_bytes("reserve_resources");
-        let reserve = core_v1::ReserveResourcesRequest::decode(reserve_bytes.as_slice()).unwrap();
-        assert_eq!(reserve.encode_to_vec(), reserve_bytes);
-        assert_eq!(reserve.node.unwrap().node_epoch, 7);
-        assert_eq!(
-            reserve
-                .requirements
-                .unwrap()
-                .cpu
-                .unwrap()
-                .request_millicores,
-            1000
-        );
-
-        let release_bytes = fixture_bytes("release_resources");
-        let release = core_v1::ReleaseResourcesRequest::decode(release_bytes.as_slice()).unwrap();
-        assert_eq!(release.encode_to_vec(), release_bytes);
-        assert_eq!(release.lease.unwrap().fence_token, 9);
-
         let launch_bytes = fixture_bytes("inline_resource_claim_launch");
-        let launch = core_v1::LaunchPluginRequest::decode(launch_bytes.as_slice()).unwrap();
+        let launch = core_v1::LaunchProcessRequest::decode(launch_bytes.as_slice()).unwrap();
         assert_eq!(launch.encode_to_vec(), launch_bytes);
         assert_eq!(launch.plugin.unwrap().plugin_id, "plugin-a");
         assert!(matches!(
             launch.allocation,
-            Some(core_v1::launch_plugin_request::Allocation::ResourceClaim(_))
+            Some(core_v1::launch_process_request::Allocation::ResourceClaim(
+                _
+            ))
         ));
 
         let success_bytes = fixture_bytes("operation_success");
@@ -168,7 +151,7 @@ mod tests {
         ));
 
         let stale_bytes = fixture_bytes("heartbeat_stale_generation");
-        let stale = core_v1::ReportHeartbeatResponse::decode(stale_bytes.as_slice()).unwrap();
+        let stale = core_v1::ReportPluginHeartbeatResponse::decode(stale_bytes.as_slice()).unwrap();
         assert_eq!(stale.encode_to_vec(), stale_bytes);
         assert_eq!(
             stale.disposition,
@@ -295,7 +278,7 @@ mod tests {
     #[test]
     fn core_v1_does_not_expose_process_or_large_artifact_inputs() {
         let core_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto/cyrene/core/v1");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proto/cyrene/core/v1");
         for entry in std::fs::read_dir(core_dir).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|value| value.to_str()) != Some("proto") {

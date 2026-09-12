@@ -129,7 +129,7 @@ pub enum SemanticAction {
     RenewLease,
     ReleaseLease,
     StartWorker,
-    HeartbeatWorker,
+    ReportHeartbeat,
     StopWorker,
     CreateOperation,
     ReportOperation,
@@ -137,7 +137,8 @@ pub enum SemanticAction {
     PublishEndpoint,
     AuthorizeEndpoint,
     RevokeEndpoint,
-    SubscribeEvents,
+    ReadEvents,
+    WatchEvents,
 }
 
 pub const V1_ACTIONS: &[SemanticAction] = &[
@@ -149,7 +150,7 @@ pub const V1_ACTIONS: &[SemanticAction] = &[
     SemanticAction::RenewLease,
     SemanticAction::ReleaseLease,
     SemanticAction::StartWorker,
-    SemanticAction::HeartbeatWorker,
+    SemanticAction::ReportHeartbeat,
     SemanticAction::StopWorker,
     SemanticAction::CreateOperation,
     SemanticAction::ReportOperation,
@@ -157,5 +158,6 @@ pub const V1_ACTIONS: &[SemanticAction] = &[
     SemanticAction::PublishEndpoint,
     SemanticAction::AuthorizeEndpoint,
     SemanticAction::RevokeEndpoint,
-    SemanticAction::SubscribeEvents,
+    SemanticAction::ReadEvents,
+    SemanticAction::WatchEvents,
 ];

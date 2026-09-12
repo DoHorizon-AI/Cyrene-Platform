@@ -105,7 +105,7 @@ impl Lease {
                 .is_some_and(|expires_at| now_unix_ms < expires_at)
     }
 
-    pub fn renew(
+    pub fn renew_lease(
         &self,
         fence_token: u64,
         expires_at_unix_ms: u64,

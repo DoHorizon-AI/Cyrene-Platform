@@ -8,7 +8,7 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 //! Privileged local Sandbox Adapter Host process.
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cy_proto::sandbox_v1;
     use cyrene_sandboxd::{handle_request, verify_client_peer, CgroupV2Config, CgroupV2Runtime};
@@ -221,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("cyrene-sandboxd requires a Unix host with cgroup v2 and Unix domain sockets");
+    eprintln!("cyrene-sandboxd requires a Linux host with cgroup v2 and Unix domain sockets");
 }

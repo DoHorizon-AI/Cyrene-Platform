@@ -15,6 +15,7 @@ flowchart LR
     Kernel[Kernel Daemon / 内核守护进程]
     Node[Node Agent / 节点代理]
     Hardware[Hardware Adapter Host / 硬件适配器进程]
+    System[Linux System Adapter / Linux 系统适配器]
     Sandbox[Sandbox Adapter Host / 沙箱适配器进程]
     Store[(Local Journal and Resource Ledger / 本地日志与资源账本)]
 
@@ -25,6 +26,7 @@ flowchart LR
     Kernel --> Contracts
     Kernel --> Node
     Kernel --> Hardware
+    Kernel --> System
     Kernel --> Sandbox
     Kernel --> Store
     Node --> Kernel
@@ -53,6 +55,16 @@ flowchart LR
 
 ## Authority rules | 权威规则
 
+Focused boundary pages: [`system-adapter.md`](system-adapter.md) and
+[`sandbox-adapter.md`](sandbox-adapter.md). Their Chinese mirrors are
+[`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md)
+and [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md).
+
+重点边界页面：[`system-adapter.md`](system-adapter.md) 与
+[`sandbox-adapter.md`](sandbox-adapter.md)。对应中文镜像是
+[`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md)
+和 [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md)。
+
 - Semantic contracts are authoritative for nouns, transitions, and denials.
 - Protobuf and SDK types are projections; they must not introduce hidden
   semantics.
@@ -60,12 +72,14 @@ flowchart LR
 - The Kernel owns local admission, leases, fencing, lifecycle decisions, and
   generic transport—not product workflows or model execution.
 - Adapters own privileged host facts and enforcement in separately supervised
-  processes.
+  processes. The Linux build requires the Linux System Adapter for host facts;
+  the sandbox remains a replaceable `SandboxBackend` with one lifecycle owner.
 
 - 语义契约是名词、状态转换与拒绝条件的权威来源。
 - Protobuf 与 SDK 类型是投影，不得引入隐藏语义。
 - Framework 负责发现、策略路由和插件组合。
 - Kernel 负责本地准入、租约、围栏、生命周期决策与通用传输，不负责产品流程或
   模型执行。
-- 适配器在独立监管的进程中负责特权主机事实与强制执行。
-
+- 适配器在独立监管的进程中负责特权主机事实与强制执行。Linux 构建必须通过
+  Linux System Adapter 获取主机事实；沙箱仍是可替换的 `SandboxBackend`，每个
+  Worker 只允许一个生命周期 owner。

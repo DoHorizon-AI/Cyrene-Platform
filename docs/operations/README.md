@@ -8,6 +8,8 @@ goals, and verified installation evidence.
 | File | Responsibility | 文件职责 |
 | --- | --- | --- |
 | `kernel-runtime.md` | Kernel runtime operation. | Kernel 运行时操作 |
+| `../architecture/system-adapter.md` | System Adapter deployment boundary. | System Adapter 部署边界 |
+| `../architecture/sandbox-adapter.md` | Sandbox Adapter backend boundary. | Sandbox Adapter 后端边界 |
 | `node-agent.md` | Node Agent operation and ownership. | Node Agent 操作与归属 |
 | `kernel-execution-goals.md` | Execution safety goals. | 执行安全目标 |
 | `verified-installation-record.md` | Installation evidence record. | 安装证据记录 |
@@ -19,3 +21,5 @@ when investigating deployment provenance.
 
 先读 `kernel-runtime.md`，再读 `node-agent.md`；排查部署来源时参考安装记录。
 
+System 与 Sandbox Adapter 的中文镜像见 [`../zh-CN/operations/`](../zh-CN/operations/README.md)
+以及 [`../zh-CN/architecture/`](../zh-CN/architecture/README.md)。

@@ -36,8 +36,8 @@ impl KernelServiceAdapter {
         disposition: core_v1::HeartbeatDisposition,
         sequence: u64,
         generation: u64,
-    ) -> core_v1::ReportHeartbeatResponse {
-        core_v1::ReportHeartbeatResponse {
+    ) -> core_v1::ReportPluginHeartbeatResponse {
+        core_v1::ReportPluginHeartbeatResponse {
             disposition: disposition as i32,
             accepted_sequence_number: sequence,
             server_time: Some(now_timestamp()),
@@ -60,7 +60,7 @@ impl KernelServiceAdapter {
         runtime_state: i32,
         health: Option<core_v1::HealthReport>,
         restart_count: u32,
-    ) -> Result<core_v1::ReportHeartbeatResponse, Status> {
+    ) -> Result<core_v1::ReportPluginHeartbeatResponse, Status> {
         if plugin_instance_name.is_empty() || sequence_number == 0 {
             return Err(Status::invalid_argument(
                 "plugin_instance_name and a non-zero sequence_number are required",
@@ -82,7 +82,7 @@ impl KernelServiceAdapter {
             ));
         }
         if process.watchdog_triggered {
-            return Ok(core_v1::ReportHeartbeatResponse {
+            return Ok(core_v1::ReportPluginHeartbeatResponse {
                 disposition: core_v1::HeartbeatDisposition::Duplicate as i32,
                 accepted_sequence_number: process.accepted_sequence,
                 server_time: Some(now_timestamp()),

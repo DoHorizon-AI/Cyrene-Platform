@@ -6,70 +6,14 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Lease and resource-limit projections between Kernel models and Core Proto.
+//!
+//! Kernel 模型与 Core Proto 的 Lease、资源限制 projection。
 use cy_kernel_api::{semantic, CgroupLimits, LeaseState, ResourceLease};
 use cy_proto::{core_v1, semantic_v1};
 use tonic::Status;
 
-use super::{
-    common::{timestamp_from_unix_ms, to_semantic_proto_identity},
-    resource::to_proto_enforcement,
-};
-use crate::daemon::KernelDaemon;
-
-#[allow(deprecated)]
-pub(crate) fn to_proto_lease(
-    daemon: &KernelDaemon,
-    lease: ResourceLease,
-    granted: Option<core_v1::ResourceRequirements>,
-) -> Result<core_v1::ResourceLease, Status> {
-    let node = core_v1::NodeRef {
-        node_id: daemon.node_id.clone(),
-        node_epoch: daemon.node_epoch,
-    };
-    let enforcement = lease
-        .allocations
-        .iter()
-        .map(|allocation| core_v1::EnforcementReport {
-            resource_kind: core_v1::ResourceKind::Accelerator as i32,
-            mode: to_proto_enforcement(allocation.enforcement) as i32,
-            adapter_id: "resource-manager".to_string(),
-            reason_code: "LEASE_ALLOCATION".to_string(),
-        })
-        .collect();
-    Ok(core_v1::ResourceLease {
-        name: lease.name,
-        node: Some(node),
-        state: match lease.state {
-            LeaseState::Active => core_v1::LeaseState::Active,
-            LeaseState::Releasing => core_v1::LeaseState::Releasing,
-            LeaseState::Released => core_v1::LeaseState::Released,
-            LeaseState::Expired => core_v1::LeaseState::Expired,
-            LeaseState::Revoked => core_v1::LeaseState::Failed,
-            LeaseState::Failed => core_v1::LeaseState::Failed,
-            LeaseState::Quarantined => core_v1::LeaseState::Failed,
-        } as i32,
-        granted,
-        accelerators: lease
-            .allocations
-            .into_iter()
-            .map(|allocation| core_v1::AcceleratorAllocation {
-                allocation_id: allocation.allocation_id,
-                device_id: allocation.resource.id,
-                partition_id: String::new(),
-                granted_memory_bytes: allocation
-                    .granted_capacity
-                    .get("memory.allocatable")
-                    .filter(|quantity| quantity.unit == "byte")
-                    .map_or(0, |quantity| quantity.value),
-                enforcement: to_proto_enforcement(allocation.enforcement) as i32,
-            })
-            .collect(),
-        enforcement,
-        expires_at: lease.expires_at_unix_ms.map(timestamp_from_unix_ms),
-        fence_token: lease.fence_token,
-        inventory_generation: lease.inventory_generation,
-    })
-}
+use super::common::{timestamp_from_unix_ms, to_semantic_proto_identity};
 
 pub(crate) fn to_semantic_proto_lease(lease: &ResourceLease) -> semantic_v1::Lease {
     semantic_v1::Lease {

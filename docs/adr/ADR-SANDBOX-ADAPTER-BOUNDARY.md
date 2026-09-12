@@ -24,12 +24,17 @@ binding over `cyrene.hardware.v1`; `sandboxd` consumes the Kernel-approved
 binding but never selects a vendor or creates a resource lease. A binding that
 requests `HARD` must fail closed if device enforcement cannot be installed.
 
-## Docker and runtime backends
+## System and runtime backends
 
-Docker/OCI is a future `sandboxd` backend profile, not a Kernel feature and
-never a raw Docker CLI input exposed through Core RPC. The selected profile is
-host configuration, not a worker-controlled argument. For each worker exactly
-one backend owns the cgroup/lifecycle tree:
+The host-system facts are exposed through the `SystemAdapter` port. The current
+production build selects the Linux system Adapter and native cgroup v2 sandbox
+backend; target-specific builds must select one platform implementation at
+compile time. Kernel semantic authority is not moved into a system Adapter.
+
+Docker/OCI is a supported Adapter boundary, not a Kernel feature and never a
+raw Docker CLI input exposed through Core RPC. The selected profile is host
+configuration, not a worker-controlled argument. For each worker exactly one
+backend owns the cgroup/lifecycle tree:
 
 - native-cgroup: `sandboxd` creates and reaps the cgroup directly;
 - oci/docker: the selected runtime owns the container cgroup and lifecycle;
@@ -37,9 +42,13 @@ one backend owns the cgroup/lifecycle tree:
 
 Mixing direct cgroup writes with a Docker-owned worker is prohibited. This
 avoids both conflicting limits and ambiguous cleanup ownership. The current
-implementation ships only `native-cgroup`; OCI/systemd profiles remain an
-explicit extension point and must satisfy the same protocol and tests before
-being advertised.
+implementation ships and runs only `native-cgroup` on Linux. A Docker/OCI
+Adapter may be selected only when it owns the complete runtime reference,
+stop/reap path, telemetry projection, and restart evidence for its containers;
+it must not reuse the native `cgroup_path` handle as a container identifier.
+Until that handle projection and the real Docker acceptance suite are present,
+Docker remains an explicit build/runtime extension point rather than a
+production-ready sandbox claim.
 
 ## Failure and restart ownership
 

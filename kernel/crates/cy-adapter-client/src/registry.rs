@@ -6,12 +6,15 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Aggregates adapter facts and routes resource bindings by provenance.
+//!
+//! 聚合适配器事实并按来源路由 Resource binding。
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::Resource, DeviceBinding, HealthReport, HostInventoryProvider, InventorySnapshot,
     NodeCapabilities, ProviderError, ResourceProvider,
 };

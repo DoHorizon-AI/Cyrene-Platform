@@ -12,7 +12,6 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -20,6 +19,12 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(any(not(target_os = "linux"), test))]
+use std::process::Child;
+
+#[cfg(not(target_os = "linux"))]
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::{
@@ -37,7 +42,7 @@ use cy_kernel_api::{
 };
 
 #[cfg(target_os = "linux")]
-use crate::sys::open_pidfd;
+use crate::sys::{open_pidfd, spawn_gated_process, try_wait_pid, wait_pid};
 use crate::{
     bpf::attach_device_bpf_filter,
     config::{fact, is_owned_instance_name, CgroupV2Config, OwnedCgroupCleanupReport},
@@ -62,23 +67,61 @@ pub struct CgroupV2Runtime {
 /// process. Platforms without pidfd retain the bounded Child fallback.
 #[derive(Debug)]
 struct TrackedChild {
-    child: Child,
+    process: TrackedProcess,
     #[cfg(target_os = "linux")]
     pidfd: Option<OwnedFd>,
     #[cfg(unix)]
     transport: Option<WorkerTransportControl>,
 }
 
+#[derive(Debug)]
+enum TrackedProcess {
+    #[cfg(any(not(target_os = "linux"), test))]
+    Command(Child),
+    #[cfg(target_os = "linux")]
+    Forked,
+}
+
 impl TrackedChild {
+    #[cfg(any(not(target_os = "linux"), test))]
     fn new(child: Child, #[cfg(unix)] transport: Option<WorkerTransportControl>) -> Self {
         #[cfg(target_os = "linux")]
         let pidfd = open_pidfd(child.id());
         Self {
-            child,
+            process: TrackedProcess::Command(child),
             #[cfg(target_os = "linux")]
             pidfd,
             #[cfg(unix)]
             transport,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn new_forked(pid: u32, transport: Option<WorkerTransportControl>) -> Self {
+        Self {
+            process: TrackedProcess::Forked,
+            pidfd: open_pidfd(pid),
+            transport,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn try_wait(&mut self, pid: u32) -> Option<Option<i32>> {
+        match &mut self.process {
+            #[cfg(test)]
+            TrackedProcess::Command(child) => {
+                child.try_wait().ok().flatten().map(|status| status.code())
+            }
+            TrackedProcess::Forked => try_wait_pid(pid),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait(&mut self, pid: u32) -> Option<i32> {
+        match &mut self.process {
+            #[cfg(test)]
+            TrackedProcess::Command(child) => child.wait().ok().and_then(|status| status.code()),
+            TrackedProcess::Forked => wait_pid(pid),
         }
     }
 }
@@ -185,8 +228,8 @@ fn bind_worker_transport(path: &Path) -> Result<UnixListener, ProviderError> {
 #[cfg(unix)]
 fn start_worker_transport_bridge(
     listener: UnixListener,
-    mut stdin: std::process::ChildStdin,
-    mut stdout: std::process::ChildStdout,
+    mut stdin: impl std::io::Write + Send + 'static,
+    mut stdout: impl std::io::Read + Send + 'static,
     control: WorkerTransportControl,
 ) {
     thread::spawn(move || {
@@ -421,6 +464,12 @@ impl CgroupV2Runtime {
         let cgroup_kill = self.config.root.join("cgroup.kill").is_file();
         let required = !self.config.dev_mode;
         let facts = vec![
+            fact(
+                "platform-linux",
+                cfg!(target_os = "linux"),
+                !self.config.dev_mode,
+                "native cgroup v2 sandbox is a Linux system Adapter backend",
+            ),
             fact("cgroup-v2", cgroup_v2, required, "owned cgroup.controllers"),
             fact("cgroup-kill", cgroup_kill, required, "owned cgroup.kill"),
             fact(
@@ -702,16 +751,27 @@ impl CgroupV2Runtime {
         let deadline = Instant::now() + timeout;
         loop {
             let result = self.children.lock().ok().and_then(|mut children| {
-                children
-                    .get_mut(&pid)
-                    .and_then(|child| child.child.try_wait().ok())
-                    .flatten()
+                children.get_mut(&pid).and_then(|child| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        child.try_wait(pid)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        child
+                            .process
+                            .try_wait()
+                            .ok()
+                            .flatten()
+                            .map(|status| status.code())
+                    }
+                })
             });
             if let Some(status) = result {
                 if let Ok(mut children) = self.children.lock() {
                     children.remove(&pid);
                 }
-                return status.code();
+                return status;
             }
             if Instant::now() >= deadline {
                 return None;
@@ -747,7 +807,7 @@ impl CgroupV2Runtime {
         // readiness. The adapter owns this file descriptor for this call.
         let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_millis) };
         if ready > 0 {
-            return Some(tracked.child.wait().ok().and_then(|status| status.code()));
+            return Some(tracked.wait(pid));
         }
         if let Ok(mut children) = self.children.lock() {
             children.insert(pid, tracked);
@@ -764,7 +824,9 @@ impl CgroupV2Runtime {
         #[cfg(windows)]
         if let Ok(mut children) = self.children.lock() {
             if let Some(child) = children.get_mut(&pid) {
-                let _ = child.child.kill();
+                if let TrackedProcess::Command(process) = &mut child.process {
+                    let _ = process.kill();
+                }
             }
         }
     }
@@ -778,7 +840,9 @@ impl CgroupV2Runtime {
         #[cfg(windows)]
         if let Ok(mut children) = self.children.lock() {
             if let Some(child) = children.get_mut(&pid) {
-                let _ = child.child.kill();
+                if let TrackedProcess::Command(process) = &mut child.process {
+                    let _ = process.kill();
+                }
             }
         }
     }
@@ -854,120 +918,160 @@ impl ProcessRuntime for CgroupV2Runtime {
         } else {
             None
         };
-        let mut command = Command::new(&plan.executable);
-        command
-            .args(&plan.args)
-            .envs(environment)
-            .stderr(Stdio::inherit());
-        if let Some(dir) = &plan.working_dir {
-            command.current_dir(dir);
-        }
-        #[cfg(unix)]
-        if transport_listener.is_some() {
-            command.stdin(Stdio::piped()).stdout(Stdio::piped());
-        } else {
-            command.stdin(Stdio::null()).stdout(Stdio::null());
-        }
         #[cfg(target_os = "linux")]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            command.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
+        {
+            let gated = match spawn_gated_process(plan, &environment, transport_listener.is_some())
+            {
+                Ok(gated) => gated,
+                Err(error) => {
+                    if let Some(path) = plan.transport_socket.as_ref() {
+                        let _ = fs::remove_file(path);
+                    }
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(error);
                 }
-                Ok(())
-            });
-        }
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                if let Some(path) = plan.transport_socket.as_ref() {
-                    let _ = fs::remove_file(path);
-                }
+            };
+            let pid = gated.pid();
+            if let Err(error) = self.attach(&cgroup_path, pid) {
+                gated.abort();
                 let _ = self.kill_cgroup(&cgroup_path);
                 let _ = fs::remove_dir(&cgroup_path);
-                return Err(ProviderError::new(
-                    "native-process",
-                    "SPAWN_FAILED",
-                    &error.to_string(),
-                ));
+                return Err(error);
             }
-        };
-        #[cfg(unix)]
-        let transport = if let Some(listener) = transport_listener {
-            let stdin = match child.stdin.take() {
-                Some(stdin) => stdin,
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = fs::remove_file(
-                        plan.transport_socket
-                            .as_ref()
-                            .expect("transport listener has a path"),
-                    );
+            let forked = match gated.release() {
+                Ok(process) => process,
+                Err(error) => {
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(error);
+                }
+            };
+            #[cfg(unix)]
+            let transport = if let Some(listener) = transport_listener {
+                let Some(stdin) = forked.stdin else {
                     let _ = self.kill_cgroup(&cgroup_path);
                     let _ = fs::remove_dir(&cgroup_path);
                     return Err(ProviderError::new(
+                        "native-process",
+                        "WORKER_TRANSPORT_PIPE_FAILED",
+                        "worker stdin was not created",
+                    ));
+                };
+                let Some(stdout) = forked.stdout else {
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(ProviderError::new(
+                        "native-process",
+                        "WORKER_TRANSPORT_PIPE_FAILED",
+                        "worker stdout was not created",
+                    ));
+                };
+                let path = plan
+                    .transport_socket
+                    .as_ref()
+                    .expect("transport listener has a path")
+                    .clone();
+                let control = WorkerTransportControl::new(path);
+                start_worker_transport_bridge(listener, stdin, stdout, control.clone());
+                Some(control)
+            } else {
+                None
+            };
+            let tracked_child = TrackedChild::new_forked(forked.pid, transport);
+            self.children
+                .lock()
+                .map_err(|_| ProviderError::new("native-process", "LOCK_POISONED", "child table"))?
+                .insert(pid, tracked_child);
+            Ok(ProcessHandle {
+                pid,
+                cgroup_path,
+                start_time_ticks: proc_start_time(pid),
+                transport_socket: plan.transport_socket.clone(),
+            })
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut command = Command::new(&plan.executable);
+            command
+                .args(&plan.args)
+                .envs(environment)
+                .stderr(Stdio::inherit());
+            if let Some(dir) = &plan.working_dir {
+                command.current_dir(dir);
+            }
+            #[cfg(unix)]
+            if transport_listener.is_some() {
+                command.stdin(Stdio::piped()).stdout(Stdio::piped());
+            } else {
+                command.stdin(Stdio::null()).stdout(Stdio::null());
+            }
+            let mut child = match command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    if let Some(path) = plan.transport_socket.as_ref() {
+                        let _ = fs::remove_file(path);
+                    }
+                    let _ = self.kill_cgroup(&cgroup_path);
+                    let _ = fs::remove_dir(&cgroup_path);
+                    return Err(ProviderError::new(
+                        "native-process",
+                        "SPAWN_FAILED",
+                        &error.to_string(),
+                    ));
+                }
+            };
+            #[cfg(unix)]
+            let transport = if let Some(listener) = transport_listener {
+                let stdin = child.stdin.take().ok_or_else(|| {
+                    ProviderError::new(
                         "native-process",
                         "WORKER_TRANSPORT_PIPE_FAILED",
                         "worker stdin was not piped",
-                    ));
-                }
-            };
-            let stdout = match child.stdout.take() {
-                Some(stdout) => stdout,
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = fs::remove_file(
-                        plan.transport_socket
-                            .as_ref()
-                            .expect("transport listener has a path"),
-                    );
-                    let _ = self.kill_cgroup(&cgroup_path);
-                    let _ = fs::remove_dir(&cgroup_path);
-                    return Err(ProviderError::new(
+                    )
+                })?;
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    ProviderError::new(
                         "native-process",
                         "WORKER_TRANSPORT_PIPE_FAILED",
                         "worker stdout was not piped",
-                    ));
-                }
+                    )
+                })?;
+                let path = plan
+                    .transport_socket
+                    .as_ref()
+                    .expect("transport listener has a path")
+                    .clone();
+                let control = WorkerTransportControl::new(path);
+                start_worker_transport_bridge(listener, stdin, stdout, control.clone());
+                Some(control)
+            } else {
+                None
             };
-            let path = plan
-                .transport_socket
-                .as_ref()
-                .expect("transport listener has a path")
-                .clone();
-            let control = WorkerTransportControl::new(path);
-            start_worker_transport_bridge(listener, stdin, stdout, control.clone());
-            Some(control)
-        } else {
-            None
-        };
-        let pid = child.id();
-        if let Err(error) = self.attach(&cgroup_path, pid) {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = self.kill_cgroup(&cgroup_path);
-            let _ = fs::remove_dir(&cgroup_path);
-            return Err(error);
+            let pid = child.id();
+            if let Err(error) = self.attach(&cgroup_path, pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = self.kill_cgroup(&cgroup_path);
+                let _ = fs::remove_dir(&cgroup_path);
+                return Err(error);
+            }
+            #[cfg(unix)]
+            let tracked_child = TrackedChild::new(child, transport);
+            #[cfg(not(unix))]
+            let tracked_child = TrackedChild::new(child);
+            self.children
+                .lock()
+                .map_err(|_| ProviderError::new("native-process", "LOCK_POISONED", "child table"))?
+                .insert(pid, tracked_child);
+            Ok(ProcessHandle {
+                pid,
+                cgroup_path,
+                start_time_ticks: proc_start_time(pid),
+                transport_socket: plan.transport_socket.clone(),
+            })
         }
-        #[cfg(unix)]
-        let tracked_child = TrackedChild::new(child, transport);
-        #[cfg(not(unix))]
-        let tracked_child = TrackedChild::new(child);
-        self.children
-            .lock()
-            .map_err(|_| ProviderError::new("native-process", "LOCK_POISONED", "child table"))?
-            .insert(pid, tracked_child);
-        Ok(ProcessHandle {
-            pid,
-            cgroup_path,
-            start_time_ticks: proc_start_time(pid),
-            transport_socket: plan.transport_socket.clone(),
-        })
     }
 
     fn stop(
@@ -1090,7 +1194,10 @@ impl SandboxBackend for CgroupV2Runtime {
 #[cfg(all(test, unix))]
 mod transport_tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::{
+        io::{Read, Write},
+        process::{Command, Stdio},
+    };
 
     #[test]
     #[cfg(target_os = "linux")]
@@ -1131,6 +1238,31 @@ mod transport_tests {
         assert_eq!(report.exit_code, Some(0));
         assert!(!runtime.children.lock().unwrap().contains_key(&pid));
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gated_process_does_not_execute_before_release() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("released");
+        let plan = LaunchPlan {
+            instance_name: "gated-worker".to_string(),
+            executable: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_string(),
+                format!("printf ready > {}", marker.display()),
+            ],
+            environment: BTreeMap::new(),
+            cgroup_name: "instance-gated".to_string(),
+            limits: CgroupLimits::default(),
+            working_dir: None,
+            transport_socket: None,
+        };
+        let gated = spawn_gated_process(&plan, &BTreeMap::new(), false).unwrap();
+        assert!(!marker.exists(), "user code must remain behind the gate");
+        let process = gated.release().unwrap();
+        assert_eq!(wait_pid(process.pid), Some(0));
+        assert_eq!(fs::read_to_string(marker).unwrap(), "ready");
     }
 
     #[test]

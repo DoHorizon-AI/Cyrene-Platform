@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! End-to-end Node Agent UDS bridge integration tests.
+//!
+//! Node Agent UDS bridge 端到端集成测试。
 #![cfg(unix)]
 
 use std::{collections::HashMap, time::Duration};
@@ -19,12 +22,10 @@ use cy_proto::{
         kernel_authority_service_server::{KernelAuthorityService, KernelAuthorityServiceServer},
         kernel_command, kernel_command_result,
         kernel_service_server::{KernelService, KernelServiceServer},
-        node_to_control_plane, CancelOperationRequest, ControlPlaneToNode,
-        GetKernelCapabilitiesRequest, GetOperationRequest, KernelAuthorityCommand,
-        KernelCapabilities, KernelCommand, LaunchPluginRequest, NegotiateRequest, NodeRef,
-        NodeWelcome, Operation, ReleaseLeaseRequest, ReleaseResourcesRequest,
-        ReserveResourcesRequest, ResourceLease, StartWorkerRequest, StopWorkerRequest,
-        TerminatePluginRequest, WatchOperationsRequest,
+        node_to_control_plane, ControlPlaneToNode, GetKernelCapabilitiesRequest,
+        GetOperationRequest, KernelAuthorityCommand, KernelCapabilities, KernelCommand,
+        LegacyCancelOperationRequest, LegacyReleaseLeaseRequest, NegotiateRequest, NodeRef,
+        NodeWelcome, Operation, StartWorkerRequest, StopWorkerRequest, WatchOperationsRequest,
     },
     semantic_v1::{ContractRevision, OperationState, WorkerState},
 };
@@ -64,65 +65,30 @@ impl KernelService for MockKernelService {
         }))
     }
 
-    async fn reserve_resources(
-        &self,
-        request: Request<ReserveResourcesRequest>,
-    ) -> Result<Response<ResourceLease>, Status> {
-        let req = request.into_inner();
-        Ok(Response::new(ResourceLease {
-            name: "lease-model-eval".to_string(),
-            node: req.node,
-            state: cy_proto::core_v1::LeaseState::Active as i32,
-            granted: req.requirements,
-            enforcement: vec![],
-            expires_at: None,
-            fence_token: 100,
-            inventory_generation: 1,
-            ..Default::default()
-        }))
-    }
-
     async fn acquire_lease(
         &self,
-        _request: Request<cy_proto::core_v1::AcquireLeaseRequest>,
+        _request: Request<cy_proto::core_v1::LegacyAcquireLeaseRequest>,
     ) -> Result<Response<cy_proto::semantic_v1::Lease>, Status> {
         Err(Status::unimplemented("not needed in this test"))
-    }
-
-    async fn release_resources(
-        &self,
-        _request: Request<ReleaseResourcesRequest>,
-    ) -> Result<Response<ResourceLease>, Status> {
-        Ok(Response::new(ResourceLease {
-            name: "test-lease".to_string(),
-            node: None,
-            state: cy_proto::core_v1::LeaseState::Released as i32,
-            granted: None,
-            enforcement: vec![],
-            expires_at: None,
-            fence_token: 100,
-            inventory_generation: 1,
-            ..Default::default()
-        }))
     }
 
     async fn release_lease(
         &self,
-        _request: Request<ReleaseLeaseRequest>,
+        _request: Request<LegacyReleaseLeaseRequest>,
     ) -> Result<Response<cy_proto::semantic_v1::Lease>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
 
-    async fn launch_plugin(
+    async fn launch_process(
         &self,
-        _request: Request<LaunchPluginRequest>,
+        _request: Request<cy_proto::core_v1::LaunchProcessRequest>,
     ) -> Result<Response<Operation>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
 
-    async fn terminate_plugin(
+    async fn terminate_process(
         &self,
-        _request: Request<TerminatePluginRequest>,
+        _request: Request<cy_proto::core_v1::TerminateProcessRequest>,
     ) -> Result<Response<Operation>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
@@ -136,7 +102,7 @@ impl KernelService for MockKernelService {
 
     async fn cancel_operation(
         &self,
-        _request: Request<CancelOperationRequest>,
+        _request: Request<LegacyCancelOperationRequest>,
     ) -> Result<Response<Operation>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
@@ -168,9 +134,19 @@ impl KernelAuthorityService for MockKernelAuthorityService {
 
     async fn acquire_lease(
         &self,
-        _request: Request<cy_proto::core_v1::AcquireSemanticLeaseRequest>,
+        _request: Request<cy_proto::core_v1::AcquireLeaseRequest>,
     ) -> Result<Response<cy_proto::semantic_v1::Lease>, Status> {
-        Err(Status::unimplemented("not needed in this test"))
+        Ok(Response::new(cy_proto::semantic_v1::Lease {
+            identity: Some(cy_proto::semantic_v1::Identity {
+                id: "lease-model-eval".to_string(),
+                generation: 1,
+            }),
+            holder: None,
+            resources: Vec::new(),
+            state: cy_proto::semantic_v1::LeaseState::Active as i32,
+            fence_token: 100,
+            expires_at: None,
+        }))
     }
 
     async fn renew_lease(
@@ -182,7 +158,7 @@ impl KernelAuthorityService for MockKernelAuthorityService {
 
     async fn release_lease(
         &self,
-        _request: Request<cy_proto::core_v1::ReleaseSemanticLeaseRequest>,
+        _request: Request<cy_proto::core_v1::ReleaseLeaseRequest>,
     ) -> Result<Response<cy_proto::semantic_v1::Lease>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
@@ -206,9 +182,9 @@ impl KernelAuthorityService for MockKernelAuthorityService {
         }))
     }
 
-    async fn heartbeat_worker(
+    async fn report_heartbeat(
         &self,
-        _request: Request<cy_proto::core_v1::HeartbeatWorkerRequest>,
+        _request: Request<cy_proto::core_v1::ReportHeartbeatRequest>,
     ) -> Result<Response<cy_proto::semantic_v1::Worker>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
@@ -236,7 +212,7 @@ impl KernelAuthorityService for MockKernelAuthorityService {
 
     async fn cancel_operation(
         &self,
-        _request: Request<cy_proto::core_v1::CancelSemanticOperationRequest>,
+        _request: Request<cy_proto::core_v1::CancelOperationRequest>,
     ) -> Result<Response<cy_proto::semantic_v1::Operation>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
@@ -262,18 +238,25 @@ impl KernelAuthorityService for MockKernelAuthorityService {
         Ok(Response::new(()))
     }
 
-    type SubscribeEventsStream = std::pin::Pin<
+    async fn read_events(
+        &self,
+        _request: Request<cy_proto::core_v1::ReadEventsRequest>,
+    ) -> Result<Response<cy_proto::core_v1::ReadEventsResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+
+    type WatchEventsStream = std::pin::Pin<
         Box<
-            dyn tokio_stream::Stream<Item = Result<cy_proto::semantic_v1::Event, Status>>
+            dyn tokio_stream::Stream<Item = Result<cy_proto::core_v1::WatchEventsResponse, Status>>
                 + Send
                 + 'static,
         >,
     >;
 
-    async fn subscribe_events(
+    async fn watch_events(
         &self,
-        _request: Request<cy_proto::core_v1::SubscribeEventsRequest>,
-    ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
+        _request: Request<cy_proto::core_v1::WatchEventsRequest>,
+    ) -> Result<Response<Self::WatchEventsStream>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
 }
@@ -342,40 +325,52 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     };
     session.accept_welcome(welcome_frame)?;
 
-    // 5. Forward a ReserveResources command from Control Plane through the Bridge to Kernel UDS
-    let reserve_frame = ControlPlaneToNode {
+    // 5. Forward a canonical AcquireLease command through the Bridge to Kernel UDS
+    let acquire_frame = ControlPlaneToNode {
         frame_id: "frame-cmd-1".to_string(),
         sequence_number: 2,
         session_id: "sess-12345".to_string(),
         ack_sequence_number: 0,
         body: Some(control_plane_to_node::Body::Command(KernelCommand {
-            command_id: "cmd-res-1".to_string(),
-            request: Some(kernel_command::Request::ReserveResources(
-                ReserveResourcesRequest {
-                    node: Some(NodeRef {
-                        node_id: "node-worker-alpha".to_string(),
-                        node_epoch: 10,
-                    }),
-                    mutation: None,
-                    requirements: None,
-                    ttl: None,
-                },
-            )),
+            command_id: "cmd-acquire-lease-1".to_string(),
+            request: Some(kernel_command::Request::Authority(KernelAuthorityCommand {
+                request: Some(kernel_authority_command::Request::AcquireLease(
+                    cy_proto::core_v1::AcquireLeaseRequest {
+                        context: None,
+                        holder: Some(cy_proto::semantic_v1::Identity {
+                            id: "worker-embed-01".to_string(),
+                            generation: 1,
+                        }),
+                        query: Some(cy_proto::semantic_v1::ResourceQuery {
+                            resource_class: "accelerator".to_string(),
+                            count: 1,
+                            required_capabilities: Vec::new(),
+                            minimum_capacity: HashMap::new(),
+                        }),
+                        ttl: None,
+                    },
+                )),
+            })),
         })),
     };
 
-    let response_frame = bridge.forward(&mut session, reserve_frame).await?;
+    let response_frame = bridge.forward(&mut session, acquire_frame).await?;
     assert_eq!(response_frame.session_id, "sess-12345");
 
     match response_frame.body {
         Some(node_to_control_plane::Body::CommandResult(res)) => {
-            assert_eq!(res.command_id, "cmd-res-1");
+            assert_eq!(res.command_id, "cmd-acquire-lease-1");
             match res.outcome {
-                Some(kernel_command_result::Outcome::ResourceLease(lease)) => {
-                    assert_eq!(lease.name, "lease-model-eval");
-                    assert_eq!(lease.fence_token, 100);
+                Some(kernel_command_result::Outcome::Authority(authority)) => {
+                    match authority.outcome {
+                        Some(kernel_authority_command_result::Outcome::Lease(lease)) => {
+                            assert_eq!(lease.identity.unwrap().id, "lease-model-eval");
+                            assert_eq!(lease.fence_token, 100);
+                        }
+                        other => panic!("expected Lease authority outcome, got {other:?}"),
+                    }
                 }
-                other => panic!("expected ResourceLease outcome, got {other:?}"),
+                other => panic!("expected Authority outcome, got {other:?}"),
             }
         }
         other => panic!("expected CommandResult body, got {other:?}"),

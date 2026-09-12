@@ -2,25 +2,33 @@
 
 ## Purpose | 目录职责
 
-This directory groups one boundary of the CYRENE Platform source, protocol, fixture, or test tree.
-本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+This directory contains the reference host-system and vendor hardware Adapter
+Hosts. They report facts and bindings over versioned local protocols; they do
+not become Kernel authority.
+
+本目录包含参考的主机系统与厂商硬件 Adapter Host。它们通过版本化本地协议报告
+事实与 binding，不成为 Kernel authority。
 
 ## Contents | 内容
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
+| `linux_sys/` | Linux implementation of the public `SystemAdapter` port. | 公共 `SystemAdapter` 端口的 Linux 实现 |
+| `nvidia/` | NVIDIA vendor inventory and binding Adapter Host. | NVIDIA 厂商 inventory 与 binding 适配器 |
 
 ## Suggested reading / execution order | 推荐阅读 / 执行顺序
 
 Read this guide first, then the direct files above in dependency order, and finally the nested directory guides.
 先读本指南，再按依赖顺序阅读上方直接文件，最后进入嵌套目录指南。
 
-## Contents snapshot | 内容快照
+## Suggested reading | 推荐阅读
 
-| Entry | Responsibility | 一句话职责 |
-| --- | --- | --- |
-| `linux_sys/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `nvidia/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+1. Read [`linux_sys/README.md`](linux_sys/README.md) for target-system facts.
+2. Read [`nvidia/README.md`](nvidia/README.md) for vendor GPU facts.
+3. Read [`docs/architecture/system-adapter.md`](../../docs/architecture/system-adapter.md)
+   for the ownership and build-profile boundary.
 
-This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
-本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+1. 先读 [`linux_sys/README.md`](linux_sys/README.md) 了解目标系统事实。
+2. 再读 [`nvidia/README.md`](nvidia/README.md) 了解厂商 GPU 事实。
+3. 再读 [`docs/architecture/system-adapter.md`](../../docs/architecture/system-adapter.md)
+   了解职责归属与构建 profile 边界。

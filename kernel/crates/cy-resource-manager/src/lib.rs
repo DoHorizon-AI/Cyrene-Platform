@@ -209,7 +209,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
     /// 2. 校验 `lease_name` 是否已存在（防止重复创建）；
     /// 3. 通过有界 `ResourceQuery` 筛选未分配、未隔离且状态就绪的候选资源；
     /// 4. 资源数量充足则生成新围栏令牌并原子标记占用。
-    fn reserve(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
+    fn acquire_lease(&self, request: ResourceRequest) -> Result<ResourceLease, ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
         expire_due_leases(&mut state, now_unix_ms());
         if request.expected_inventory_generation != state.generation {
@@ -305,7 +305,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
 
     /// 延长已有的活跃租约，而不改变该租约已授予的资源权威。围栏令牌与
     /// 过期时间的单调性让重放包和陈旧控制面都无法缩短或劫持现有租约。
-    fn renew(
+    fn renew_lease(
         &self,
         lease_name: &str,
         fence_token: u64,
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_reservation_never_duplicates_a_resource() {
+    fn concurrent_acquisition_never_duplicates_a_resource() {
         let manager = Arc::new(InMemoryResourceManager::new(
             "node-1",
             vec![resource("resource-0")],
@@ -674,7 +674,7 @@ mod tests {
         for index in 0..100 {
             let manager = Arc::clone(&manager);
             workers.push(thread::spawn(move || {
-                manager.reserve(request(format!("lease-{index}"), generation))
+                manager.acquire_lease(request(format!("lease-{index}"), generation))
             }));
         }
         let successful = workers
@@ -686,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_reservation_assigns_distinct_fence_tokens() {
+    fn concurrent_acquisition_assigns_distinct_fence_tokens() {
         let resources = (0..64)
             .map(|index| resource(&format!("resource-{index}")))
             .collect::<Vec<_>>();
@@ -696,7 +696,7 @@ mod tests {
         for index in 0..64 {
             let manager = Arc::clone(&manager);
             workers.push(thread::spawn(move || {
-                manager.reserve(request(format!("lease-{index}"), generation))
+                manager.acquire_lease(request(format!("lease-{index}"), generation))
             }));
         }
         let successful = workers
@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(
             successful.len(),
             64,
-            "all concurrent reserves should succeed"
+            "all concurrent acquisitions should succeed"
         );
         let mut fences = successful
             .iter()
@@ -717,14 +717,14 @@ mod tests {
         assert_eq!(
             fences.len(),
             64,
-            "every reserved lease must receive a distinct, non-reused fence token"
+            "every acquired lease must receive a distinct, non-reused fence token"
         );
     }
 
     #[test]
     fn release_requires_current_fence_and_cleanup_confirmation() {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
-        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+        let lease = manager.acquire_lease(request("lease-1", 1)).unwrap();
         assert_eq!(
             manager
                 .begin_release(&lease.name, lease.fence_token + 1)
@@ -739,7 +739,7 @@ mod tests {
         assert!(manager.is_allocated("resource-0"));
         assert_eq!(
             manager
-                .reserve(request("lease-2", 1))
+                .acquire_lease(request("lease-2", 1))
                 .unwrap_err()
                 .reason_code,
             "INSUFFICIENT_RESOURCES"
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn failed_cleanup_keeps_the_resource_unavailable() {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
-        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+        let lease = manager.acquire_lease(request("lease-1", 1)).unwrap();
 
         manager
             .begin_release(&lease.name, lease.fence_token)
@@ -767,7 +767,7 @@ mod tests {
         assert!(manager.is_allocated("resource-0"));
         assert_eq!(
             manager
-                .reserve(request("lease-2", 1))
+                .acquire_lease(request("lease-2", 1))
                 .unwrap_err()
                 .reason_code,
             "INSUFFICIENT_RESOURCES"
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn failed_cleanup_can_retry_with_same_fence_after_wrong_fence_is_rejected() {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
-        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+        let lease = manager.acquire_lease(request("lease-1", 1)).unwrap();
 
         manager
             .begin_release(&lease.name, lease.fence_token)
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn revoke_advances_the_fence_and_waits_for_cleanup_confirmation() {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
-        let lease = manager.reserve(request("lease-1", 1)).unwrap();
+        let lease = manager.acquire_lease(request("lease-1", 1)).unwrap();
         let revoked = manager.revoke(&lease.name, lease.fence_token).unwrap();
 
         assert_eq!(revoked.state, LeaseState::Revoked);
@@ -817,7 +817,7 @@ mod tests {
         assert!(manager.is_allocated("resource-0"));
         assert_eq!(
             manager
-                .reserve(request("lease-2", 1))
+                .acquire_lease(request("lease-2", 1))
                 .unwrap_err()
                 .reason_code,
             "INSUFFICIENT_RESOURCES"
@@ -827,7 +827,7 @@ mod tests {
             .complete_revocation(&revoked.name, revoked.fence_token)
             .unwrap();
         assert!(!manager.is_allocated("resource-0"));
-        let replacement = manager.reserve(request("lease-2", 1)).unwrap();
+        let replacement = manager.acquire_lease(request("lease-2", 1)).unwrap();
         assert!(replacement.fence_token > revoked.fence_token);
     }
 
@@ -838,7 +838,9 @@ mod tests {
             vec![resource("resource-0")],
             42,
         );
-        let lease = manager.reserve(request("lease-after-restart", 1)).unwrap();
+        let lease = manager
+            .acquire_lease(request("lease-after-restart", 1))
+            .unwrap();
         assert_eq!(lease.fence_token, 42);
         assert_eq!(
             manager
@@ -854,24 +856,24 @@ mod tests {
         let manager = InMemoryResourceManager::new("node-1", vec![resource("resource-0")]);
         let mut requested = request("lease-1", 1);
         requested.expires_at_unix_ms = Some(now_unix_ms() + 1_000);
-        let lease = manager.reserve(requested).unwrap();
+        let lease = manager.acquire_lease(requested).unwrap();
 
         assert_eq!(
             manager
-                .renew(&lease.name, lease.fence_token + 1, now_unix_ms() + 2_000)
+                .renew_lease(&lease.name, lease.fence_token + 1, now_unix_ms() + 2_000)
                 .unwrap_err()
                 .reason_code,
             "STALE_FENCE_TOKEN"
         );
         assert_eq!(
             manager
-                .renew(&lease.name, lease.fence_token, now_unix_ms() + 500)
+                .renew_lease(&lease.name, lease.fence_token, now_unix_ms() + 500)
                 .unwrap_err()
                 .reason_code,
             "LEASE_EXPIRY_REGRESSION"
         );
         let renewed = manager
-            .renew(&lease.name, lease.fence_token, now_unix_ms() + 3_000)
+            .renew_lease(&lease.name, lease.fence_token, now_unix_ms() + 3_000)
             .unwrap();
         assert_eq!(renewed.fence_token, lease.fence_token);
         assert!(renewed.expires_at_unix_ms > lease.expires_at_unix_ms);
@@ -917,7 +919,7 @@ mod tests {
             required_properties: BTreeMap::new(),
         }];
         lease_request.expires_at_unix_ms = Some(now_unix_ms().saturating_add(25));
-        let lease = manager.reserve(lease_request).unwrap();
+        let lease = manager.acquire_lease(lease_request).unwrap();
         thread::sleep(std::time::Duration::from_millis(40));
 
         // Clock expiry invalidates active lease state (Expired), but does not

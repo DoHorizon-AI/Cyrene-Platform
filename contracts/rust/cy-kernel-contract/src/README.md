@@ -20,6 +20,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `endpoint.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
+| `adapter.rs` | Public adapter facts and implementation-free adapter ports. | 公共 Adapter 事实与无实现端口。 |
 | `event.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `identity.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |
 | `lease.rs` | Rust implementation, contract, or test file. | Rust 实现、契约或测试文件。 |

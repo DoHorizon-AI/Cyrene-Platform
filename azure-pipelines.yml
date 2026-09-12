@@ -22,9 +22,18 @@ jobs:
 - job: docs
   displayName: 'Platform / Documentation Validation'
   timeoutInMinutes: 10
+  variables:
+    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
   steps:
   - checkout: self
     displayName: 'Checkout repository'
+  - task: Cache@2
+    inputs:
+      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/pip'
+    displayName: 'Restore pip cache'
   - task: UsePythonVersion@0
     inputs:
       versionSpec: '3.12'
@@ -35,9 +44,18 @@ jobs:
 - job: governance
   displayName: 'Platform / Architecture Governance'
   timeoutInMinutes: 10
+  variables:
+    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
   steps:
   - checkout: self
     displayName: 'Checkout repository'
+  - task: Cache@2
+    inputs:
+      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/pip'
+    displayName: 'Restore pip cache'
   - task: UsePythonVersion@0
     inputs:
       versionSpec: '3.12'
@@ -59,9 +77,18 @@ jobs:
 - job: python_sdk
   displayName: 'Platform / Python SDKs & Tooling'
   timeoutInMinutes: 20
+  variables:
+    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
   steps:
   - checkout: self
     displayName: 'Checkout repository'
+  - task: Cache@2
+    inputs:
+      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/pip'
+    displayName: 'Restore pip cache'
   - task: UsePythonVersion@0
     inputs:
       versionSpec: '3.12'
@@ -83,9 +110,30 @@ jobs:
 - job: platform_core
   displayName: 'Platform / Core Rust Workspace'
   timeoutInMinutes: 30
+  variables:
+    CARGO_HOME: '$(Pipeline.Workspace)/.cargo'
   steps:
   - checkout: self
     displayName: 'Checkout repository'
+  - bash: |
+      set -euo pipefail
+      mkdir -p "$(Pipeline.Workspace)/.cargo"
+      mkdir -p "$(Pipeline.Workspace)/s/Cyrene-Platform/target"
+    displayName: 'Prepare Cargo cache directories'
+  - task: Cache@2
+    inputs:
+      key: 'cargo | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cargo.lock'
+      restoreKeys: |
+        cargo | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cargo'
+    displayName: 'Restore Cargo registry cache'
+  - task: Cache@2
+    inputs:
+      key: 'cargo-target | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cargo.lock'
+      restoreKeys: |
+        cargo-target | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/s/Cyrene-Platform/target'
+    displayName: 'Restore Cargo target cache'
   - script: |
       rustup update stable
       rustup component add rustfmt clippy

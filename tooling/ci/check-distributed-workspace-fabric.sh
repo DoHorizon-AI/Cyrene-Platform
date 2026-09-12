@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Contract/unit gate for Distributed Workspace Fabric v1.
 # Distributed Workspace Fabric v1 的 Contract 与单元测试门禁。
 
@@ -66,8 +67,12 @@ rg -q 'trait WorkspaceDirectory' "${workspace_crate}/src/directory.rs"
 rg -q 'trait RelayAuthenticator' "${workspace_crate}/src/auth.rs"
 rg -q 'trait WorkspaceApi' "${workspace_crate}/src/api.rs"
 rg -q 'LocalWorkspaceClient' "${workspace_crate}/src/api.rs"
-rg -q 'RelayConnectivityProvider' "${workspace_crate}/src/bin/cy-workspace-fabric-fixture.rs"
-rg -q 'cy-execution-fabric' "${workspace_crate}/Cargo.toml"
+if rg -n 'RelayConnectivityProvider|cy-execution-fabric' \
+  "${workspace_crate}/src/bin/cy-workspace-fabric-fixture.rs" \
+  "${workspace_crate}/Cargo.toml"; then
+  printf 'Workspace Fabric public/client surface depends on execution-fabric implementation\n' >&2
+  exit 1
+fi
 rg -q 'env -u CYRENE_WORKSPACE_SESSION_CREDENTIAL CYRENE_RUNTIME_GENERATION=1' \
   "${acceptance_root}/workspace-entrypoint.sh"
 

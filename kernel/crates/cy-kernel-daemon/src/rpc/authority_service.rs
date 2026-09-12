@@ -21,7 +21,8 @@ use crate::{
         semantic_identity_from_proto, semantic_operation_from_proto, semantic_query_from_proto,
         semantic_status, semantic_worker_from_proto, to_semantic_proto_contract_lease,
         to_semantic_proto_contract_revision, to_semantic_proto_endpoint,
-        to_semantic_proto_endpoint_grant, to_semantic_proto_operation, to_semantic_proto_worker,
+        to_semantic_proto_endpoint_grant, to_semantic_proto_event_continuity,
+        to_semantic_proto_event_page, to_semantic_proto_operation, to_semantic_proto_worker,
     },
     peer_cred::principal_from_request,
 };
@@ -37,6 +38,16 @@ pub(crate) fn authority_status(rejection: semantic::Rejection) -> Status {
         _ => tonic::Code::FailedPrecondition,
     };
     semantic_status(code, &rejection.reason_code, &rejection.message)
+}
+
+fn watch_continuity_response(
+    continuity: semantic::EventContinuity,
+) -> core_v1::WatchEventsResponse {
+    core_v1::WatchEventsResponse {
+        body: Some(core_v1::watch_events_response::Body::Continuity(
+            to_semantic_proto_event_continuity(&continuity),
+        )),
+    }
 }
 
 #[tonic::async_trait]
@@ -63,7 +74,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
 
     async fn acquire_lease(
         &self,
-        request: Request<core_v1::AcquireSemanticLeaseRequest>,
+        request: Request<core_v1::AcquireLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
         let principal = principal_from_request(&request)?;
         let request = request.into_inner();
@@ -122,7 +133,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
 
     async fn release_lease(
         &self,
-        request: Request<core_v1::ReleaseSemanticLeaseRequest>,
+        request: Request<core_v1::ReleaseLeaseRequest>,
     ) -> Result<Response<semantic_v1::Lease>, Status> {
         let principal = principal_from_request(&request)?;
         let request = request.into_inner();
@@ -155,9 +166,9 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         Ok(Response::new(to_semantic_proto_operation(&operation)))
     }
 
-    async fn heartbeat_worker(
+    async fn report_heartbeat(
         &self,
-        request: Request<core_v1::HeartbeatWorkerRequest>,
+        request: Request<core_v1::ReportHeartbeatRequest>,
     ) -> Result<Response<semantic_v1::Worker>, Status> {
         let principal = principal_from_request(&request)?;
         let request = request.into_inner();
@@ -166,7 +177,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         let lease = semantic_identity_from_proto(request.lease, "lease")?;
         let worker = self
             .authority()
-            .heartbeat_worker(&context, &principal, &worker, &lease, request.fence_token)
+            .report_heartbeat(&context, &principal, &worker, &lease, request.fence_token)
             .map_err(authority_status)?;
         Ok(Response::new(to_semantic_proto_worker(&worker)))
     }
@@ -241,7 +252,7 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
 
     async fn cancel_operation(
         &self,
-        request: Request<core_v1::CancelSemanticOperationRequest>,
+        request: Request<core_v1::CancelOperationRequest>,
     ) -> Result<Response<semantic_v1::Operation>, Status> {
         let principal = principal_from_request(&request)?;
         let request = request.into_inner();
@@ -306,14 +317,35 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         Ok(Response::new(()))
     }
 
-    type SubscribeEventsStream = std::pin::Pin<
-        Box<dyn tokio_stream::Stream<Item = Result<semantic_v1::Event, Status>> + Send + 'static>,
+    async fn read_events(
+        &self,
+        request: Request<core_v1::ReadEventsRequest>,
+    ) -> Result<Response<core_v1::ReadEventsResponse>, Status> {
+        let principal = principal_from_request(&request)?;
+        let request = request.into_inner();
+        let context = authority_call_context_from_proto(request.context.as_ref())?;
+        let cursor = semantic_event_cursor_from_proto(request.cursor)?;
+        let page = self
+            .authority()
+            .read_events(&context, &principal, &cursor, request.limit as usize)
+            .map_err(authority_status)?;
+        Ok(Response::new(core_v1::ReadEventsResponse {
+            page: Some(to_semantic_proto_event_page(&page)),
+        }))
+    }
+
+    type WatchEventsStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<core_v1::WatchEventsResponse, Status>>
+                + Send
+                + 'static,
+        >,
     >;
 
-    async fn subscribe_events(
+    async fn watch_events(
         &self,
-        request: Request<core_v1::SubscribeEventsRequest>,
-    ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
+        request: Request<core_v1::WatchEventsRequest>,
+    ) -> Result<Response<Self::WatchEventsStream>, Status> {
         let principal = principal_from_request(&request)?;
         let request = request.into_inner();
         let context = authority_call_context_from_proto(request.context.as_ref())?;
@@ -325,26 +357,8 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
 
         let initial_page = self
             .authority()
-            .events_after(&context, &principal, &initial_cursor, limit)
+            .read_events(&context, &principal, &initial_cursor, limit)
             .map_err(authority_status)?;
-
-        match initial_page.status {
-            semantic::ReplayStatus::SourceChanged => {
-                return Err(semantic_status(
-                    tonic::Code::OutOfRange,
-                    "SOURCE_CHANGED",
-                    "SOURCE_CHANGED: event source epoch changed, resnapshot required",
-                ));
-            }
-            semantic::ReplayStatus::Gap => {
-                return Err(semantic_status(
-                    tonic::Code::OutOfRange,
-                    "GAP",
-                    "GAP: cursor is older than retention window, resnapshot required",
-                ));
-            }
-            semantic::ReplayStatus::Current => {}
-        }
 
         let authority = self.authority();
         let notifier = authority.runtime.event_notifier.clone();
@@ -352,11 +366,22 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
             tokio::sync::mpsc::channel(crate::adapter::OPERATION_EVENT_SUBSCRIBER_CAPACITY);
 
         tokio::spawn(async move {
+            if initial_page.status != semantic::ReplayStatus::Current {
+                let _ = sender
+                    .send(Ok(watch_continuity_response(initial_page.continuity())))
+                    .await;
+                return;
+            }
+
             let mut cursor = initial_cursor;
             for event in initial_page.events {
                 cursor.sequence = event.sequence;
-                let proto_event = crate::convert::to_semantic_proto_event(&event);
-                if sender.try_send(Ok(proto_event)).is_err() {
+                let response = core_v1::WatchEventsResponse {
+                    body: Some(core_v1::watch_events_response::Body::Event(
+                        crate::convert::to_semantic_proto_event(&event),
+                    )),
+                };
+                if sender.try_send(Ok(response)).is_err() {
                     let _ = sender
                         .send(Err(Status::out_of_range(
                             "subscriber buffer full, slow consumer disconnected",
@@ -368,21 +393,17 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
 
             loop {
                 let notified = notifier.notified();
-                match authority.events_after(&context, &principal, &cursor, limit) {
+                match authority.read_events(&context, &principal, &cursor, limit) {
                     Ok(page) => match page.status {
                         semantic::ReplayStatus::SourceChanged => {
                             let _ = sender
-                                .send(Err(Status::out_of_range(
-                                    "SOURCE_CHANGED: event source epoch changed, resnapshot required",
-                                )))
+                                .send(Ok(watch_continuity_response(page.continuity())))
                                 .await;
                             return;
                         }
                         semantic::ReplayStatus::Gap => {
                             let _ = sender
-                                .send(Err(Status::out_of_range(
-                                    "GAP: cursor is older than retention window, resnapshot required",
-                                )))
+                                .send(Ok(watch_continuity_response(page.continuity())))
                                 .await;
                             return;
                         }
@@ -390,8 +411,12 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                             let had_events = !page.events.is_empty();
                             for event in page.events {
                                 cursor.sequence = event.sequence;
-                                let proto_event = crate::convert::to_semantic_proto_event(&event);
-                                if sender.try_send(Ok(proto_event)).is_err() {
+                                let response = core_v1::WatchEventsResponse {
+                                    body: Some(core_v1::watch_events_response::Body::Event(
+                                        crate::convert::to_semantic_proto_event(&event),
+                                    )),
+                                };
+                                if sender.try_send(Ok(response)).is_err() {
                                     let _ = sender
                                         .send(Err(Status::out_of_range(
                                             "subscriber buffer full, slow consumer disconnected",

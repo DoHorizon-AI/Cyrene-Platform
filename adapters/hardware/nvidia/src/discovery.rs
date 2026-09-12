@@ -24,10 +24,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{Capability, Identity, Quantity, Resource, ResourceState},
     CapabilityFact, DeviceBinding, DeviceNode, HealthReport, HostInventoryProvider,
-    InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,
+    InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider, TopologyLink,
 };
 
 /// 命令行执行输出结果
@@ -89,6 +89,13 @@ struct InventoryGeneration {
     fingerprint: String,
 }
 
+#[derive(Debug)]
+struct InventoryProbe {
+    resources: Vec<Resource>,
+    topology_available: bool,
+    topology_detail: String,
+}
+
 impl NvidiaSmiProvider {
     /// 创建 NVIDIA 硬件探测适配器实例
     pub fn new(command: impl Into<PathBuf>) -> Self {
@@ -147,6 +154,24 @@ impl NvidiaSmiProvider {
         parse_nvidia_query(&output.stdout)
     }
 
+    /// Query the topology matrix as a separate optional hardware fact.
+    ///
+    /// GPU inventory remains useful on drivers that expose inventory but not
+    /// topology. The result therefore carries availability explicitly instead
+    /// of silently turning a topology probe failure into an empty link list.
+    fn query_topology(&self) -> Result<Vec<(String, String, String)>, ProviderError> {
+        let args = vec!["topo".to_string(), "-m".to_string()];
+        let output = self.runner.run(&self.command, &args)?;
+        if output.status != 0 {
+            return Err(ProviderError::new(
+                "nvidia-smi",
+                "TOPOLOGY_PROBE_FAILED",
+                output.stderr.trim(),
+            ));
+        }
+        Ok(parse_nvidia_topology(&output.stdout))
+    }
+
     /// 从 `/sys/bus/pci/devices/<pci>/numa_node` 读取 GPU 绑定的 NUMA 节点编号
     fn numa_node(&self, pci_address: &str) -> Option<i32> {
         let path = self
@@ -189,6 +214,97 @@ impl NvidiaSmiProvider {
         }
         state.generation
     }
+
+    fn probe_inventory_snapshot(&self) -> Result<InventoryProbe, ProviderError> {
+        let gpus = self.query()?;
+        if gpus.is_empty() {
+            return Ok(InventoryProbe {
+                resources: Vec::new(),
+                topology_available: false,
+                topology_detail: "nvidia-smi returned no GPU inventory rows".to_string(),
+            });
+        }
+
+        let topology = match self.query_topology() {
+            Ok(links) => (true, topology_detail(&links), links),
+            Err(error) => (false, error.message.clone(), Vec::new()),
+        };
+        let links_by_gpu = topology_links_by_gpu(&gpus, &topology.2);
+        let resources = gpus
+            .into_iter()
+            .map(|gpu| {
+                let mut capacity = BTreeMap::new();
+                if let Some(value) = gpu.total_memory_bytes {
+                    capacity.insert(
+                        "memory.total".to_string(),
+                        Quantity {
+                            value,
+                            unit: "byte".to_string(),
+                        },
+                    );
+                }
+                if let Some(value) = gpu.free_memory_bytes {
+                    capacity.insert(
+                        "memory.allocatable".to_string(),
+                        Quantity {
+                            value,
+                            unit: "byte".to_string(),
+                        },
+                    );
+                }
+                let mut attributes = BTreeMap::from([
+                    ("vendor".to_string(), "nvidia".to_string()),
+                    ("family".to_string(), gpu.name),
+                    ("pci.address".to_string(), gpu.pci_address.clone()),
+                ]);
+                if self.wsl_shared_device {
+                    attributes.insert("device.binding".to_string(), "wsl-shared-soft".to_string());
+                }
+                if let Some(numa_node) = self.numa_node(&gpu.pci_address) {
+                    attributes.insert("numa.node".to_string(), numa_node.to_string());
+                }
+                Resource {
+                    identity: Identity {
+                        id: gpu.uuid,
+                        generation: 1,
+                    },
+                    provider: Identity {
+                        id: self.adapter_id().to_string(),
+                        generation: 1,
+                    },
+                    resource_class: "accelerator".to_string(),
+                    capabilities: vec![
+                        Capability {
+                            id: "accelerator.compute".to_string(),
+                            revision: 1,
+                            properties: BTreeMap::new(),
+                        },
+                        Capability {
+                            id: "accelerator.kind.gpu".to_string(),
+                            revision: 1,
+                            properties: BTreeMap::new(),
+                        },
+                        Capability {
+                            id: "vendor.nvidia.cuda".to_string(),
+                            revision: 1,
+                            properties: BTreeMap::new(),
+                        },
+                    ],
+                    capacity,
+                    attributes,
+                    state: ResourceState::Ready,
+                    reason_code: "nvidia-smi-probe-ok".to_string(),
+                    summary: "provider returned a complete resource row".to_string(),
+                    links: links_by_gpu.get(&gpu.index).cloned().unwrap_or_default(),
+                }
+            })
+            .collect();
+        Ok(InventoryProbe {
+            resources,
+            topology_available: topology.0,
+            topology_detail: topology.1,
+        })
+    }
 }
 
 impl ResourceProvider for NvidiaSmiProvider {
@@ -205,77 +321,8 @@ impl ResourceProvider for NvidiaSmiProvider {
     //   将 nvidia-smi 观测行转换为强类型资源事实，不虚构拓扑或设备身份。
     // ════════════════════════════════════════════════════════════════════════
     fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
-        self.query().map(|gpus| {
-            gpus.into_iter()
-                .map(|gpu| {
-                    let mut capacity = BTreeMap::new();
-                    if let Some(value) = gpu.total_memory_bytes {
-                        capacity.insert(
-                            "memory.total".to_string(),
-                            Quantity {
-                                value,
-                                unit: "byte".to_string(),
-                            },
-                        );
-                    }
-                    if let Some(value) = gpu.free_memory_bytes {
-                        capacity.insert(
-                            "memory.allocatable".to_string(),
-                            Quantity {
-                                value,
-                                unit: "byte".to_string(),
-                            },
-                        );
-                    }
-                    let mut attributes = BTreeMap::from([
-                        ("vendor".to_string(), "nvidia".to_string()),
-                        ("family".to_string(), gpu.name),
-                        ("pci.address".to_string(), gpu.pci_address.clone()),
-                    ]);
-                    if self.wsl_shared_device {
-                        attributes
-                            .insert("device.binding".to_string(), "wsl-shared-soft".to_string());
-                    }
-                    if let Some(numa_node) = self.numa_node(&gpu.pci_address) {
-                        attributes.insert("numa.node".to_string(), numa_node.to_string());
-                    }
-                    Resource {
-                        identity: Identity {
-                            id: gpu.uuid,
-                            generation: 1,
-                        },
-                        provider: Identity {
-                            id: self.adapter_id().to_string(),
-                            generation: 1,
-                        },
-                        resource_class: "accelerator".to_string(),
-                        capabilities: vec![
-                            Capability {
-                                id: "accelerator.compute".to_string(),
-                                revision: 1,
-                                properties: BTreeMap::new(),
-                            },
-                            Capability {
-                                id: "accelerator.kind.gpu".to_string(),
-                                revision: 1,
-                                properties: BTreeMap::new(),
-                            },
-                            Capability {
-                                id: "vendor.nvidia.cuda".to_string(),
-                                revision: 1,
-                                properties: BTreeMap::new(),
-                            },
-                        ],
-                        capacity,
-                        attributes,
-                        state: ResourceState::Ready,
-                        reason_code: "nvidia-smi-probe-ok".to_string(),
-                        summary: "provider returned a complete resource row".to_string(),
-                        links: Vec::new(),
-                    }
-                })
-                .collect()
-        })
+        self.probe_inventory_snapshot()
+            .map(|snapshot| snapshot.resources)
     }
 
     fn create_binding(&self, resource: &Resource) -> Result<DeviceBinding, ProviderError> {
@@ -367,9 +414,9 @@ impl ResourceProvider for NvidiaSmiProvider {
             joinable_environment_keys: nvidia_visibility_join_keys(),
             required_gids: Vec::new(),
             enforcement: if self.wsl_shared_device {
-                cy_kernel_api::EnforcementMode::Soft
+                cy_kernel_contract::EnforcementMode::Soft
             } else {
-                cy_kernel_api::EnforcementMode::Hard
+                cy_kernel_contract::EnforcementMode::Hard
             },
             adapter_id: self.adapter_id().to_string(),
             reason_code: if self.wsl_shared_device {
@@ -428,21 +475,34 @@ fn device_node(path: PathBuf, required: bool) -> DeviceNode {
 
 impl HostInventoryProvider for NvidiaSmiProvider {
     fn probe_inventory(&self) -> Result<InventorySnapshot, ProviderError> {
-        let resources = <Self as ResourceProvider>::probe_resources(self)?;
-        let generation = self.next_inventory_generation(&resources);
+        let snapshot = self.probe_inventory_snapshot()?;
+        let has_gpu = !snapshot.resources.is_empty();
+        let generation = self.next_inventory_generation(&snapshot.resources);
         // Free memory changes the inventory, not the UUID-addressed device incarnation.
         // 可用显存影响清单代次,不能把正在加载模型的同一 GPU 变成新设备。
         Ok(InventorySnapshot {
             generation,
-            resources,
+            resources: snapshot.resources,
             capabilities: NodeCapabilities {
-                ready: true,
-                facts: vec![CapabilityFact {
-                    name: "nvidia-smi".to_string(),
-                    available: true,
-                    required: false,
-                    detail: "NVIDIA inventory is supplied by the isolated CLI adapter".to_string(),
-                }],
+                ready: has_gpu,
+                facts: vec![
+                    CapabilityFact {
+                        name: "nvidia-smi".to_string(),
+                        available: has_gpu,
+                        required: true,
+                        detail: if has_gpu {
+                            "NVIDIA inventory is supplied by the isolated CLI adapter".to_string()
+                        } else {
+                            snapshot.topology_detail.clone()
+                        },
+                    },
+                    CapabilityFact {
+                        name: "nvidia-topology".to_string(),
+                        available: snapshot.topology_available,
+                        required: false,
+                        detail: snapshot.topology_detail,
+                    },
+                ],
                 enforcement: Vec::new(),
             },
         })
@@ -464,6 +524,42 @@ pub(crate) fn nvidia_visibility_environment(resource_id: &str) -> BTreeMap<Strin
             resource_id.to_string(),
         ),
     ])
+}
+
+fn topology_detail(links: &[(String, String, String)]) -> String {
+    format!(
+        "NVIDIA topology probe returned {} known link(s)",
+        links.len()
+    )
+}
+
+fn topology_links_by_gpu(
+    gpus: &[ParsedGpu],
+    links: &[(String, String, String)],
+) -> BTreeMap<usize, Vec<TopologyLink>> {
+    let identities = gpus
+        .iter()
+        .map(|gpu| (format!("GPU{}", gpu.index), gpu))
+        .collect::<BTreeMap<_, _>>();
+    let mut result = BTreeMap::<usize, Vec<TopologyLink>>::new();
+    for (source, target, kind) in links {
+        let (Some(source_gpu), Some(target_gpu)) = (identities.get(source), identities.get(target))
+        else {
+            continue;
+        };
+        result
+            .entry(source_gpu.index)
+            .or_default()
+            .push(TopologyLink {
+                peer: Identity {
+                    id: target_gpu.uuid.clone(),
+                    generation: 1,
+                },
+                kind: kind.clone(),
+                properties: BTreeMap::new(),
+            });
+    }
+    result
 }
 
 /// 内部结构体：解析自 `nvidia-smi` CSV 行的 GPU 原始信息
@@ -564,29 +660,35 @@ mod tests {
 
     struct FakeRunner {
         output: CommandOutput,
+        topology: Option<CommandOutput>,
     }
 
     impl CommandRunner for FakeRunner {
-        fn run(
-            &self,
-            _executable: &Path,
-            _args: &[String],
-        ) -> Result<CommandOutput, ProviderError> {
-            Ok(self.output.clone())
+        fn run(&self, _executable: &Path, args: &[String]) -> Result<CommandOutput, ProviderError> {
+            if args.first().is_some_and(|arg| arg == "topo") {
+                Ok(self.topology.clone().unwrap_or(CommandOutput {
+                    status: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }))
+            } else {
+                Ok(self.output.clone())
+            }
         }
     }
 
     struct SequenceRunner {
         outputs: Mutex<Vec<CommandOutput>>,
+        topology: CommandOutput,
     }
 
     impl CommandRunner for SequenceRunner {
-        fn run(
-            &self,
-            _executable: &Path,
-            _args: &[String],
-        ) -> Result<CommandOutput, ProviderError> {
-            Ok(self.outputs.lock().unwrap().remove(0))
+        fn run(&self, _executable: &Path, args: &[String]) -> Result<CommandOutput, ProviderError> {
+            if args.first().is_some_and(|arg| arg == "topo") {
+                Ok(self.topology.clone())
+            } else {
+                Ok(self.outputs.lock().unwrap().remove(0))
+            }
         }
     }
 
@@ -598,6 +700,7 @@ mod tests {
                 stdout: "0, GPU-uuid, NVIDIA A100, 00000000:01:00.0, 40960, 40000\n".into(),
                 stderr: String::new(),
             },
+            topology: None,
         }));
         let resources = ResourceProvider::probe_resources(&provider).unwrap();
         assert_eq!(resources.len(), 1);
@@ -608,6 +711,55 @@ mod tests {
         );
         assert!(resources[0].links.is_empty());
         assert!(!resources[0].attributes.contains_key("numa.node"));
+    }
+
+    #[test]
+    fn nvidia_probe_projects_topology_links_into_resource_inventory() {
+        let provider = NvidiaSmiProvider::new("nvidia-smi").with_runner(Arc::new(FakeRunner {
+            output: CommandOutput {
+                status: 0,
+                stdout: "0, GPU-a, NVIDIA A100, 00000000:01:00.0, 40960, 40000\n1, GPU-b, NVIDIA A100, 00000000:02:00.0, 40960, 40000\n".into(),
+                stderr: String::new(),
+            },
+            topology: Some(CommandOutput {
+                status: 0,
+                stdout: "GPU0 GPU1 CPU Affinity\nGPU0 X NV1 SYS 0-7\nGPU1 NV1 X SYS 8-15\n".into(),
+                stderr: String::new(),
+            }),
+        }));
+
+        let inventory = HostInventoryProvider::probe_inventory(&provider).unwrap();
+        assert!(inventory.capabilities.ready);
+        assert!(inventory
+            .capabilities
+            .facts
+            .iter()
+            .any(|fact| { fact.name == "nvidia-topology" && fact.available }));
+        assert_eq!(inventory.resources[0].links.len(), 1);
+        assert_eq!(inventory.resources[0].links[0].peer.id, "GPU-b");
+        assert_eq!(inventory.resources[0].links[0].kind, "vendor.nvidia.nvlink");
+        assert_eq!(inventory.resources[1].links[0].peer.id, "GPU-a");
+    }
+
+    #[test]
+    fn successful_nvidia_probe_without_rows_is_not_ready() {
+        let provider = NvidiaSmiProvider::new("nvidia-smi").with_runner(Arc::new(FakeRunner {
+            output: CommandOutput {
+                status: 0,
+                stdout: "\n".into(),
+                stderr: String::new(),
+            },
+            topology: None,
+        }));
+
+        let inventory = HostInventoryProvider::probe_inventory(&provider).unwrap();
+        assert!(!inventory.capabilities.ready);
+        assert!(inventory.resources.is_empty());
+        assert!(inventory
+            .capabilities
+            .facts
+            .iter()
+            .any(|fact| fact.name == "nvidia-smi" && !fact.available && fact.required));
     }
 
     #[test]
@@ -630,6 +782,7 @@ mod tests {
                     stdout: "0, GPU-uuid, NVIDIA RTX, 00000000:01:00.0, 12227, 11000\n".into(),
                     stderr: String::new(),
                 },
+                topology: None,
             }));
         let resource = provider.probe_resources().unwrap().remove(0);
         assert_eq!(
@@ -638,7 +791,10 @@ mod tests {
         );
         let provider = provider.with_wsl_shared_device(true);
         let binding = provider.create_binding(&resource).unwrap();
-        assert_eq!(binding.enforcement, cy_kernel_api::EnforcementMode::Soft);
+        assert_eq!(
+            binding.enforcement,
+            cy_kernel_contract::EnforcementMode::Soft
+        );
         assert_eq!(binding.reason_code, "WSL_SHARED_DEVICE_SOFT_BINDING");
         assert_eq!(binding.environment["CUDA_VISIBLE_DEVICES"], "GPU-uuid");
         assert_eq!(binding.nodes.len(), 1);
@@ -661,6 +817,7 @@ mod tests {
                     stdout: "0, GPU-A, NVIDIA RTX, 00000000:01:00.0, 12227, 11000\n1, GPU-B, NVIDIA RTX, 00000000:02:00.0, 12227, 11000\n".into(),
                     stderr: String::new(),
                 },
+                topology: None,
             }));
         let resource = provider.probe_resources().unwrap().remove(0);
         assert_eq!(
@@ -697,6 +854,11 @@ mod tests {
         };
         let provider = NvidiaSmiProvider::new("nvidia-smi").with_runner(Arc::new(SequenceRunner {
             outputs: Mutex::new(vec![normal.clone(), normal, changed]),
+            topology: CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         }));
         let first = HostInventoryProvider::probe_inventory(&provider).unwrap();
         let second = HostInventoryProvider::probe_inventory(&provider).unwrap();
@@ -714,7 +876,7 @@ mod tests {
             environment: nvidia_visibility_environment(resource_id),
             joinable_environment_keys: nvidia_visibility_join_keys(),
             required_gids: Vec::new(),
-            enforcement: cy_kernel_api::EnforcementMode::Hard,
+            enforcement: cy_kernel_contract::EnforcementMode::Hard,
             adapter_id: "nvidia".to_string(),
             reason_code: "TEST".to_string(),
         }

@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Adapter client protocol, credential, and binding regression tests.
+//!
+//! 适配器客户端协议、凭据与 binding 回归测试。
 #![allow(deprecated)]
 
 use std::{
@@ -14,7 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{self, Resource, ResourceState},
     DeviceBinding, EnforcementMode, HealthReport, HostInventoryProvider, InventorySnapshot,
     NodeCapabilities, ProviderError, ResourceProvider,

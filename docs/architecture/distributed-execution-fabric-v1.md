@@ -60,14 +60,18 @@ Product-neutral Attempt、package runtime 及 Artifact identity。Fabric 必须�
 authority；新增的 Attachment、Runtime session 和 Transfer session 都只是 Platform
 编排对象或传输对象，不得进入 Kernel 语义账本。
 
-Two current documents overstate implementation maturity: `docs/API.md` calls
-the current Node Agent and control plane stable, while the normative Kernel
-contract explicitly calls Node Agent and provider transport partial migration
-projections. This design follows the normative contract and executable
-evidence, not the optimistic status label.
+The normative Kernel contract and executable evidence now record the current
+projection status explicitly. Node Agent finite history forwarding is complete;
+continuous observation is intentionally owned by the Core gRPC stream because
+the Node control envelope is one-command/one-result. Hardware and Sandbox
+Adapters are complete for their local fact/process boundaries and do not own
+Event history. Cross-host identity, systemd recovery and privileged deployment
+acceptance remain deployment-validation work, not API naming gaps.
 
-现有 `docs/API.md` 对部分能力的成熟度描述高于规范 Contract。本文以 frozen Kernel
-Semantic Contract 和可执行证据为准，并把未完成部分明确列为 extension seam。
+现行规范 Contract 与可执行证据已经明确记录各投影状态：Node Agent 的有限历史转发已
+完成，连续观察由 Core gRPC stream 负责；Hardware/Sandbox Adapter 只负责各自事实与进程
+边界，不拥有 Event history。跨主机身份、systemd 恢复和特权部署验收仍属于部署验证，
+不是 API 命名缺口。
 
 ## 3. Architecture model / 架构模型
 
@@ -414,7 +418,7 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
 | Worker/Operation lifecycle | Kernel semantic authority | Fabric observations and Product Attempt mapping | package install state, connection state |
 | Capability | semantic Capability + existing resolver/catalog authorities | advertisement snapshots | agent-private ad-hoc schema |
 | Artifact identity | `cy-manifest` / Artifact schemas | Python/Rust SDK projections and transfer providers | URL, path, TransferSession |
-| Execution target placement | `cy-execution-fabric` deterministic planner over caller-supplied observations | control-plane assignment workflow | Resource reservation, Lease issuance, Artifact replica/ticket selection |
+| Execution target placement | `cy-execution-fabric` deterministic planner over caller-supplied observations | control-plane assignment workflow | Resource admission, Lease issuance, Artifact replica/ticket selection |
 | Wire | `NodeControlService.Connect` + `node_control.proto` | Host and Runtime agents | a second runtime-specific service |
 | Package/runtime lifecycle | `cy-package-runtime` | Fabric Runtime may host a binding | Fabric control session, Product binding state |
 | Product Run/Attempt | Product domain/state authority | control-plane execution projections | Kernel, Runtime Agent, container provider |
@@ -479,7 +483,7 @@ process crash 与 network partition。最终状态来自 authority + reconciliat
   HTTPS/capability enforcement, transfer cost/deadline, quote scope/expiry, and
   duplicate Node rejection are covered by the placement TCK.
 - **Current limit:** `ResourceMatchEvidence` is read-only snapshot evidence, not
-  a reservation. One placement request carries exactly one `ResourceQuery`
+  an admission. One placement request carries exactly one `ResourceQuery`
   because the canonical Kernel API currently acquires one Lease from one query.
   Atomic CPU + RAM + accelerator bundles require a Kernel contract extension;
   Framework must not emulate them with independently acquired Leases.

@@ -53,7 +53,7 @@ for noun in Principal Provider Resource Lease Worker Operation Capability Endpoi
   fi
 done
 
-for value_object in ContractRevision Rejection EventCursor EventPage; do
+for value_object in ContractRevision Rejection EventCursor EventPage EventContinuity; do
   if ! rg -q "^(message|enum) ${value_object}( |\\{)" "$semantic_proto"; then
     echo "Kernel semantic value object is missing: $value_object" >&2
     exit 1

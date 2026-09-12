@@ -1,3 +1,14 @@
+<!-- Status: non-normative design note. Normative semantic, wire, and ownership
+     sources are linked below and in docs/README.md. -->
+# C ABI and JDK SPI Design Note
+
+> This document is a non-normative design note, not a current public API
+> commitment. The semantic contract and repository boundary documents are
+> authoritative.
+>
+> 本文是非规范设计说明，不是当前公开 API 承诺。语义契约与仓库边界文档才是
+> 权威来源。
+
 可以。现在最值得做的不是马上写 `libcy.so` 和一堆 Kotlin class，而是先把它们当成**两个受约束的投影层**来规定。
 
 我会建议你把规则定成：
@@ -47,7 +58,7 @@ JVM SPI             v1
 我甚至不会一开始就暴露几十个：
 
 ```c
-cy_resource_acquire(...)
+cy_resource_acquire_lease(...)
 cy_worker_create(...)
 cy_operation_submit(...)
 cy_endpoint_open(...)
@@ -983,19 +994,19 @@ cy_resource_acquire(...)
 或者底层：
 
 ```c
-cy_call(... CY_MSG_RESOURCE_ACQUIRE ...)
+cy_call(... CY_MSG_ACQUIRE_LEASE ...)
 ```
 
 ### Java
 
 ```java
-cy.resources().acquire(...)
+cy.resources().acquireLease(...)
 ```
 
 ### Kotlin
 
 ```kotlin
-cy.resources.acquire(...)
+cy.resources.acquireLease(...)
 ```
 
 不要发生：
@@ -1016,12 +1027,12 @@ Wire    → CREATE_LEASE
 
 | Semantic | Wire | C Typed SDK | JVM SPI |
 |---|---|---|---|
-| Acquire Lease | `resource.acquire` | `cy_resource_acquire` | `resources.acquire()` |
-| Release Lease | `lease.release` | `cy_lease_release` | `leases.release()` |
+| Acquire Lease | `AcquireLease` | `cy_resource_acquire_lease` | `resources.acquireLease()` |
+| Release Lease | `ReleaseLease` | `cy_lease_release_lease` | `leases.releaseLease()` |
 | Submit Operation | `operation.submit` | `cy_operation_submit` | `operations.submit()` |
 | Cancel Operation | `operation.cancel` | `cy_operation_cancel` | `operations.cancel()` |
 | Publish Endpoint | `endpoint.publish` | `cy_endpoint_publish` | `endpoints.publish()` |
-| Subscribe Event | `event.subscribe` | `cy_event_poll` | `events.subscribe()` |
+| Watch Events | `WatchEvents` | `cy_event_watch` | `events.watchEvents()` |
 | Reconcile | `provider.reconcile` | provider SDK | `Reconciler.reconcile()` |
 
 这个表最好就是架构仓库的一部分。

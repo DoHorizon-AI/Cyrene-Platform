@@ -1,0 +1,24 @@
+[Unit]
+Description=CYRENE Linux System Adapter Host
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=cyrene
+# The Linux System Adapter is the required host-facts provider for the Linux
+# build. Kernel admission remains fail-closed on the peer identity below.
+ExecStart=/usr/bin/cyrene-linux-sys-adapter --socket /run/cyrene/linux-sys-adapter.sock --adapter-id linux-system --allowed-client-uid 991 --allowed-client-gid 992
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=cyrene
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/proc /sys
+ReadWritePaths=/run/cyrene
+
+[Install]
+WantedBy=multi-user.target

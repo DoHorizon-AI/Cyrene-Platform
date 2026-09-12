@@ -95,7 +95,53 @@ pub struct EventPage {
     pub next_sequence: u64,
 }
 
+/// One typed continuity/control frame emitted by `WatchEvents`.
+///
+/// This deliberately carries the replay result metadata without event
+/// records. `EventPage` remains the finite `ReadEvents` result; this type is
+/// the stream-side representation of a cursor continuity condition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventContinuity {
+    pub source: Identity,
+    pub status: ReplayStatus,
+    pub oldest_available_sequence: u64,
+    pub latest_available_sequence: u64,
+    pub next_sequence: u64,
+}
+
+impl EventContinuity {
+    /// Validates the bounded source and retained-history range carried by the
+    /// stream control frame.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.source.validate()?;
+        if self.oldest_available_sequence > self.latest_available_sequence {
+            return Err(ContractError::new(
+                "EVENT_RANGE_INVALID",
+                "event continuity range is inverted",
+            ));
+        }
+        if (self.oldest_available_sequence == 0) != (self.latest_available_sequence == 0) {
+            return Err(ContractError::new(
+                "EVENT_RANGE_INVALID",
+                "event continuity range must be wholly empty or wholly non-zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl EventPage {
+    /// Projects the finite page metadata into a stream continuity frame.
+    pub fn continuity(&self) -> EventContinuity {
+        EventContinuity {
+            source: self.source.clone(),
+            status: self.status,
+            oldest_available_sequence: self.oldest_available_sequence,
+            latest_available_sequence: self.latest_available_sequence,
+            next_sequence: self.next_sequence,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ContractError> {
         self.source.validate()?;
         if self.events.len() > MAX_EVENTS_PER_PAGE {

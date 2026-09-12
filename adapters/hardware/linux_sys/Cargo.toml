@@ -3,9 +3,10 @@ name = "cyrene-linux-sys-adapter"
 version = "0.1.0"
 edition = "2021"
 description = "CYRENE Linux host CPU, memory, NUMA, and OS capability facts adapter"
+license = "Apache-2.0"
 
 [dependencies]
-cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
+cy-kernel-contract = { version = "0.1.0", path = "../../../contracts/rust/cy-kernel-contract" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 prost = "0.12"
 prost-types = "0.12"

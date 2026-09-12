@@ -1,5 +1,7 @@
 # Implementation Status Audit — v2
 
+Status: **Historical snapshot**. It records an earlier audit checkout and does not describe the current Platform boundary.
+
 审计基准：`docs/contracts/kernel-semantic-contract-v1.md`，Frozen v1.0。  
 审计对象：当前工作树，分支 `fix/endpoint-authority-hardening`，`HEAD=e7725b9`。  
 对比基线：v1 报告（`HEAD=e725e57`，2026-08-20）。

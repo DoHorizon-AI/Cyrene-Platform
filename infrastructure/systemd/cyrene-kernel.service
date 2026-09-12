@@ -1,14 +1,15 @@
 [Unit]
 Description=CYRENE Rust Node Kernel
-After=local-fs.target cyrene-sandboxd.service
-Requires=cyrene-sandboxd.service
+After=local-fs.target cyrene-sandboxd.service cyrene-linux-sys-adapter.service
+Requires=cyrene-sandboxd.service cyrene-linux-sys-adapter.service
 
 [Service]
 Type=simple
 User=cyrene-kernel
 Group=cyrene
 # Each deployment supplies one or more generic UDS adapters. This example
-# registers the NVIDIA Sidecar; AMD/Ascend/custom adapters use the same flag.
+# registers the required Linux System Adapter and NVIDIA Sidecar; AMD/Ascend/
+# custom hardware adapters use the same flag.
 #
 # Peer-credential admission is FAIL-CLOSED: cyrene-kernel refuses to start
 # unless every Adapter endpoint is configured with at least one trusted peer
@@ -22,7 +23,7 @@ Group=cyrene
 #     example 991/992 -> `id -u cyrene-kernel`, `getent group cyrene`).
 #   See docs/operations/kernel-runtime.md for the full service-account UID/GID
 #   deployment example.
-ExecStart=/usr/bin/cyrene-kernel --socket /run/cyrene/kernel.sock --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock --sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992 --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock --hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992 --runtime-journal /var/lib/cyrene/runtime/journal.jsonl
+ExecStart=/usr/bin/cyrene-kernel --socket /run/cyrene/kernel.sock --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock --sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992 --system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock --system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system=992 --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock --hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992 --runtime-journal /var/lib/cyrene/runtime/journal.jsonl
 Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene

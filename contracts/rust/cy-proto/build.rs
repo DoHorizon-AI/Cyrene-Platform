@@ -6,11 +6,17 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Build-time generation of mirrored Protocol bindings and descriptors.
+//!
+//! 生成镜像 Protocol binding 与 descriptor 的构建步骤。
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
-    let proto_dir = manifest_dir.join("../../proto");
+    // Keep the package self-contained: Cargo packages cannot include files
+    // outside the crate. `contracts/proto` is the repository source of truth;
+    // the checked-in mirror under this crate is verified by CI.
+    let proto_dir = manifest_dir.join("proto");
     let core_proto = proto_dir.join("cyrene/core/v1/cyrene_core.proto");
     let authority_proto = proto_dir.join("cyrene/core/v1/kernel_authority.proto");
     let authority_v2_proto = proto_dir.join("cyrene/core/v2/kernel_authority.proto");

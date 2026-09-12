@@ -1,9 +1,12 @@
-//! Product-neutral production lifecycle for immutable capability packages.
+//! Internal Platform service for immutable capability package lifecycle.
 //!
 //! Package descriptors and repository manifests remain owned by Workspace and
 //! plugin repositories. This crate consumes those authorities, publishes verified
 //! installations atomically, prepares locked dependencies, and delegates
-//! Plugin process supervision to a Product-neutral service supervisor.
+//! Plugin process supervision to a Product-neutral service supervisor. The
+//! public package/control structs here are host implementation formats, not a
+//! supported arbitrary-license extension SDK; external integrations cross the
+//! documented process protocol.
 
 mod control;
 mod dependency;

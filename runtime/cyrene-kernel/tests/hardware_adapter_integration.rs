@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Kernel integration tests for hardware adapter discovery and binding.
+//!
+//! Kernel 硬件适配器发现与 binding 集成测试。
 #![cfg(unix)]
 
 use std::{
@@ -250,7 +253,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
         initial_snapshot.resources.len()
     );
 
-    // 8. Test Lease Reservation against discovered Linux resource
+    // 8. Test Lease Acquisition against discovered Linux resource
     let target_resource = &initial_snapshot.resources[0];
     let request = ResourceRequest {
         lease_name: "test-workload-lease-1".to_string(),
@@ -269,7 +272,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
         limits: CgroupLimits::default(),
     };
 
-    let lease = daemon.reserve(request)?;
+    let lease = daemon.acquire_lease(request)?;
     assert_eq!(lease.name, "test-workload-lease-1");
     assert_eq!(lease.fence_token, 1);
     assert_eq!(lease.state, LeaseState::Active);
@@ -297,7 +300,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
         expires_at_unix_ms: Some(9999999999999),
         limits: CgroupLimits::default(),
     };
-    let stale_err = daemon.reserve(stale_request).unwrap_err();
+    let stale_err = daemon.acquire_lease(stale_request).unwrap_err();
     assert_eq!(stale_err.reason_code, "STALE_INVENTORY_GENERATION");
 
     Ok(())

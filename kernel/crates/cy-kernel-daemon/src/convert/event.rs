@@ -6,6 +6,9 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Event and continuity projections between semantic and Core Proto models.
+//!
+//! 语义 Event/continuity 模型与 Core Proto 的 projection。
 use cy_kernel_api::semantic;
 use cy_proto::{core_v1, semantic_v1};
 use tonic::Status;
@@ -77,6 +80,22 @@ pub(crate) fn to_semantic_proto_event_page(page: &semantic::EventPage) -> semant
         oldest_available_sequence: page.oldest_available_sequence,
         latest_available_sequence: page.latest_available_sequence,
         next_sequence: page.next_sequence,
+    }
+}
+
+pub(crate) fn to_semantic_proto_event_continuity(
+    continuity: &semantic::EventContinuity,
+) -> semantic_v1::EventContinuity {
+    semantic_v1::EventContinuity {
+        source: Some(to_semantic_proto_identity(&continuity.source)),
+        status: match continuity.status {
+            semantic::ReplayStatus::Current => semantic_v1::ReplayStatus::Current,
+            semantic::ReplayStatus::Gap => semantic_v1::ReplayStatus::Gap,
+            semantic::ReplayStatus::SourceChanged => semantic_v1::ReplayStatus::SourceChanged,
+        } as i32,
+        oldest_available_sequence: continuity.oldest_available_sequence,
+        latest_available_sequence: continuity.latest_available_sequence,
+        next_sequence: continuity.next_sequence,
     }
 }
 

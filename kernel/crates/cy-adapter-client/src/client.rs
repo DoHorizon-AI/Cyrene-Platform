@@ -6,13 +6,16 @@
 // ║ 模块：CYRENE Platform
 // ║ 职责：Rust 实现、协议或一致性测试。
 // ╚══════════════════════════════════════════════════════════════════════╝
+//! Kernel-side adapter client for inventory, binding, and health requests.
+//!
+//! Kernel 侧适配器 inventory、binding 与 health 客户端。
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use cy_kernel_api::{
+use cy_kernel_contract::{
     semantic::{Resource, ResourceState},
     CapabilityFact, DeviceBinding, DeviceNode, HealthReport, HostInventoryProvider,
     InventorySnapshot, NodeCapabilities, ProviderError, ResourceProvider,

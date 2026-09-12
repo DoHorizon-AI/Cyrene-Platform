@@ -9,6 +9,8 @@ adapters cooperate without moving product semantics into the Kernel.
 | File | Responsibility | 文件职责 |
 | --- | --- | --- |
 | `overview.md` | Component map, layers, and end-to-end data flow. | 组件图、分层与端到端数据流 |
+| `system-adapter.md` | SystemAdapter port, Linux implementation, and target-build boundary. | SystemAdapter 端口、Linux 实现与目标系统构建边界 |
+| `sandbox-adapter.md` | SandboxBackend port, native cgroup backend, and Docker/OCI status. | SandboxBackend 端口、native cgroup 后端与 Docker/OCI 状态 |
 | `kernel-design-goals.md` | Kernel design constraints. | Kernel 设计约束 |
 | `kernel-vs-platform.md` | Kernel/platform responsibility boundary. | Kernel 与 Platform 的职责边界 |
 | `capability-and-plugin.md` | Capability vocabulary and plugin composition. | 能力词汇与插件组合 |
@@ -23,10 +25,12 @@ adapters cooperate without moving product semantics into the Kernel.
 
 ## Suggested reading | 推荐顺序
 
-Read `overview.md`, then `kernel-vs-platform.md`, `capability-and-plugin.md`,
-`execution-lifecycle.md`, `distributed-execution-fabric-v1.md`, and
-`distributed-workspace-fabric-v1.md` before opening implementation crates.
+Read `overview.md`, then `system-adapter.md`, `sandbox-adapter.md`,
+`kernel-vs-platform.md`, `capability-and-plugin.md`, `execution-lifecycle.md`,
+`distributed-execution-fabric-v1.md`, and `distributed-workspace-fabric-v1.md`
+before opening implementation crates.
 
-先读 `overview.md`，再读 `kernel-vs-platform.md`、`capability-and-plugin.md`，
-然后读 `execution-lifecycle.md`、`distributed-execution-fabric-v1.md` 与
+先读 `overview.md`，再读 `system-adapter.md`、`sandbox-adapter.md`、
+`kernel-vs-platform.md`、`capability-and-plugin.md`，然后读
+`execution-lifecycle.md`、`distributed-execution-fabric-v1.md` 与
 `distributed-workspace-fabric-v1.md`，之后再进入实现 crate。

@@ -1,0 +1,134 @@
+# Cyrene API Naming Constitution machine-readable policy.
+# The normative definitions live in docs/governance/API_NAMING_CONSTITUTION.md.
+
+version = 1
+status = "enforced"
+enforcement = "all_source"
+canonical_document = "docs/governance/API_NAMING_CONSTITUTION.md"
+
+[scope]
+roots = [
+  "contracts",
+  "kernel",
+  "framework",
+  "runtime",
+  "sdk",
+  "adapters",
+  "agents",
+]
+excluded_globs = [
+  "**/*.md",
+  "**/fixtures/**",
+  "**/compatibility/**",
+  "**/changelog/**",
+  "**/target/**",
+  "**/build/**",
+]
+
+[canonical_actions]
+lease_acquisition = ["Acquire", "AcquireLease", "acquire_lease"]
+lease_renewal = ["Renew", "RenewLease", "renew_lease"]
+lease_release = ["Release", "ReleaseLease", "release_lease"]
+lease_revoke = ["Revoke", "RevokeLease", "revoke_lease"]
+logical_start = ["Start", "StartWorker", "StartService", "StartPlugin"]
+execution_launch = ["Launch", "LaunchProcess", "launch_process"]
+logical_stop = ["Stop", "StopWorker", "StopService", "StopPlugin"]
+execution_terminate = ["Terminate", "TerminateProcess", "terminate_process"]
+execution_cleanup = ["Cleanup", "cleanup_execution"]
+single_get = ["Get", "GetWorker", "GetLease"]
+collection_list = ["List", "ListWorkers"]
+long_watch = ["Watch", "WatchEvents", "WatchOperations"]
+durable_subscribe = ["Subscribe", "SubscribeEventStream"]
+fact_report = ["Report", "ReportHeartbeat", "ReportOperation"]
+identity_register = ["Register", "RegisterWorker", "RegisterProvider"]
+operation_cancel = ["Cancel", "CancelOperation"]
+execution_abort = ["Abort", "abort_execution"]
+execution_prepare = ["Prepare", "PrepareExecution"]
+health_check = ["Check", "GetHealth", "health_check"]
+fact_refresh = ["Refresh", "RefreshInventory", "refresh_inventory"]
+
+[forbidden]
+# Retain the retired vocabulary as a regression guard. The all_source policy
+# now requires every configured source root to remain free of these symbols.
+symbols = [
+  "AcquireSemanticLeaseRequest",
+  "ReleaseSemanticLeaseRequest",
+  "CancelSemanticOperationRequest",
+  "ReserveResources",
+  "ReserveResourcesRequest",
+  "SubscribeEvents",
+  "SubscribeEventsRequest",
+  "HeartbeatWorker",
+  "HeartbeatWorkerRequest",
+  "LaunchPlugin",
+  "LaunchPluginRequest",
+  "TerminatePlugin",
+  "TerminatePluginRequest",
+]
+
+[semantic_contract]
+# These are qualified, contract-specific guards. They intentionally do not
+# forbid generic `acquire`, `renew`, or `release` vocabulary in unrelated
+# domains such as locks, containers, or execution dispatch.
+[[semantic_contract.exact_patterns]]
+name = "ResourceLeaseManager::acquire"
+paths = ["kernel/crates/cy-kernel-api/src/ports.rs", "kernel/crates/cy-resource-manager/src/lib.rs"]
+regex = '\bfn\s+acquire\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "ResourceLeaseManager::renew"
+paths = ["kernel/crates/cy-kernel-api/src/ports.rs", "kernel/crates/cy-resource-manager/src/lib.rs"]
+regex = '\bfn\s+renew\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "InMemoryResourceManager.acquire"
+paths = ["kernel/crates/cy-resource-manager/src/lib.rs"]
+regex = '\.acquire\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "InMemoryResourceManager.renew"
+paths = ["kernel/crates/cy-resource-manager/src/lib.rs"]
+regex = '\.renew\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "Lease receiver shorthand"
+paths = ["kernel/**/*.rs", "runtime/**/*.rs"]
+regex = '(?:\.daemon|\.resources|\.manager|\bdaemon)\.(?:acquire|renew)\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "KernelDaemon::acquire"
+paths = ["kernel/crates/cy-kernel-daemon/src/daemon.rs"]
+regex = '\bpub\s+fn\s+acquire\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "KernelDaemon::renew"
+paths = ["kernel/crates/cy-kernel-daemon/src/daemon.rs"]
+regex = '\bpub\s+fn\s+renew\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "Lease::renew"
+paths = ["contracts/rust/cy-kernel-contract/src/lease.rs"]
+regex = '\bpub\s+fn\s+renew\s*\('
+
+[[semantic_contract.exact_patterns]]
+name = "WatchEventsResponse.EventPage"
+paths = [
+  "contracts/proto/cyrene/core/v1/kernel_authority.proto",
+  "contracts/proto/cyrene/core/v2/kernel_authority.proto",
+  "contracts/rust/cy-proto/proto/cyrene/core/v1/kernel_authority.proto",
+  "contracts/rust/cy-proto/proto/cyrene/core/v2/kernel_authority.proto",
+]
+regex = '\bEventPage\s+continuity_change\b'
+
+[[semantic_contract.exact_patterns]]
+name = "WatchEventsResponse::ContinuityChange"
+paths = ["kernel/crates/cy-kernel-daemon/src/**/*.rs"]
+regex = '\bContinuityChange\b'
+
+[[semantic_contract.exact_patterns]]
+name = "watch_continuity_response(EventPage)"
+paths = [
+  "kernel/crates/cy-kernel-daemon/src/rpc/authority_service.rs",
+  "kernel/crates/cy-kernel-daemon/src/rpc/authority_v2_service.rs",
+]
+regex = 'watch_continuity_response\s*\([^)]*EventPage'

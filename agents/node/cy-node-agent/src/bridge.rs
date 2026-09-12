@@ -107,24 +107,12 @@ impl UdsKernelCommandExecutor {
                 .map(|response| {
                     kernel_command_result::Outcome::Capabilities(response.into_inner())
                 }),
-            kernel_command::Request::ReserveResources(request) => client
-                .reserve_resources(Request::new(request))
-                .await
-                .map(|response| {
-                    kernel_command_result::Outcome::ResourceLease(response.into_inner())
-                }),
-            kernel_command::Request::ReleaseResources(request) => client
-                .release_resources(Request::new(request))
-                .await
-                .map(|response| {
-                    kernel_command_result::Outcome::ResourceLease(response.into_inner())
-                }),
-            kernel_command::Request::LaunchPlugin(request) => client
-                .launch_plugin(Request::new(request))
+            kernel_command::Request::LaunchProcess(request) => client
+                .launch_process(Request::new(request))
                 .await
                 .map(|response| kernel_command_result::Outcome::Operation(response.into_inner())),
-            kernel_command::Request::TerminatePlugin(request) => client
-                .terminate_plugin(Request::new(request))
+            kernel_command::Request::TerminateProcess(request) => client
+                .terminate_process(Request::new(request))
                 .await
                 .map(|response| kernel_command_result::Outcome::Operation(response.into_inner())),
             kernel_command::Request::CancelOperation(request) => client
@@ -272,8 +260,8 @@ async fn execute_authority_command(
             .map(|response| {
                 kernel_authority_command_result::Outcome::Operation(response.into_inner())
             }),
-        kernel_authority_command::Request::HeartbeatWorker(request) => client
-            .heartbeat_worker(Request::new(request))
+        kernel_authority_command::Request::ReportHeartbeat(request) => client
+            .report_heartbeat(Request::new(request))
             .await
             .map(|response| {
                 kernel_authority_command_result::Outcome::Worker(response.into_inner())
@@ -318,31 +306,14 @@ async fn execute_authority_command(
             .revoke_endpoint(Request::new(request))
             .await
             .map(|_| kernel_authority_command_result::Outcome::Revoked(true)),
-        kernel_authority_command::Request::SubscribeEvents(request) => {
-            let mut stream = client
-                .subscribe_events(Request::new(request))
-                .await?
-                .into_inner();
-            let mut events = Vec::new();
-            while let Ok(Some(Ok(event))) = tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                tokio_stream::StreamExt::next(&mut stream),
-            )
+        kernel_authority_command::Request::ReadEvents(request) => client
+            .read_events(Request::new(request))
             .await
-            {
-                events.push(event);
-            }
-            Ok(kernel_authority_command_result::Outcome::EventPage(
-                cy_proto::semantic_v1::EventPage {
-                    source: None,
-                    status: cy_proto::semantic_v1::ReplayStatus::Current as i32,
-                    events,
-                    oldest_available_sequence: 0,
-                    latest_available_sequence: 0,
-                    next_sequence: 0,
-                },
-            ))
-        }
+            .map(|response| {
+                kernel_authority_command_result::Outcome::EventPage(
+                    response.into_inner().page.unwrap_or_default(),
+                )
+            }),
     }?;
     Ok(KernelAuthorityCommandResult {
         outcome: Some(outcome),
