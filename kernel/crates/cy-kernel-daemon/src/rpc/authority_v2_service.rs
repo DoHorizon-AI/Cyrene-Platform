@@ -195,6 +195,7 @@ impl core_v2::kernel_authority_service_server::KernelAuthorityService for Kernel
                 grace_period,
             )
             .map_err(authority_status)?;
+        self.request_semantic_worker_shutdown(&worker.id, "STOP_REQUESTED");
         Ok(Response::new(to_semantic_proto_operation(&operation)))
     }
 
