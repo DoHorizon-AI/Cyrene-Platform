@@ -1,0 +1,28 @@
+name: branch-flow
+
+on:
+  pull_request:
+    branches: [main, release]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source:
+    name: branch-flow / source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce promotion lineage
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          case "${BASE_REF}:${HEAD_REF}" in
+            main:develop|release:main) ;;
+            *)
+              echo "Invalid promotion path: ${HEAD_REF} -> ${BASE_REF}." >&2
+              echo 'Allowed paths are develop -> main and main -> release.' >&2
+              exit 1
+              ;;
+          esac

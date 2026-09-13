@@ -2,9 +2,9 @@ name: Distributed Workspace Fabric
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, release]
   pull_request:
-    branches: [develop, main, feat/distributed-execution-fabric-v1]
+    branches: [develop, main, release, feat/distributed-execution-fabric-v1]
   workflow_dispatch:
 
 permissions:
