@@ -2,7 +2,7 @@ name: Release Evidence
 
 on:
   pull_request:
-    branches: [main]
+    branches: [release]
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   pull_request_review:
     types: [submitted, edited, dismissed]
@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  main-release-entry:
-    if: github.event.pull_request.base.ref == 'main'
+  release-entry:
+    if: github.event.pull_request.base.ref == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Validate release entry
@@ -24,9 +24,9 @@ jobs:
             const labels = (pr.labels || []).map((label) => label.name);
             const body = pr.body || "";
 
-            // 1. Branch gate: only develop can be merged into main
-            if (pr.head.ref !== "develop") {
-              core.setFailed(`main accepts release PRs only from develop (current head: ${pr.head.ref})`);
+            // 1. Branch gate: only verified main can be promoted to release.
+            if (pr.head.ref !== "main") {
+              core.setFailed(`release accepts promotion PRs only from main (current head: ${pr.head.ref})`);
             }
 
             // 2. Release evidence verification label
@@ -79,7 +79,7 @@ jobs:
             );
 
             if (!hasApproval) {
-              core.setFailed("main release PR requires approval (APPROVED review) from at least one repository administrator/maintainer");
+              core.setFailed("release promotion requires approval (APPROVED review) from at least one repository administrator/maintainer");
             } else {
               core.info("Release evidence gate passed: valid branch, verified label, evidence link, and authorized approval.");
             }

@@ -1,12 +1,12 @@
 schema_version: cyrene.repository-policy.v1
 repository:
   logical_name: Cyrene-Platform
-  lifecycle_class: PRIVATE_FOUNDATION
-  visibility: private
+  lifecycle_class: PUBLIC_FOUNDATION
+  visibility: public
   source_owner: Platform Core Team
-  remote_default_branch: main
+  remote_default_branch: develop
   integration_branch: develop
-  release_branch: main
+  release_branch: release
   default_branch: develop
 ownership:
   owns:
@@ -43,7 +43,7 @@ distribution:
 integration:
   multi_repo_required: false
 authorities:
-  ci: azure_devops
+  ci: github
   release: github_releases
   deployment: consuming_repository
 trust:
