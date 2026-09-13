@@ -123,7 +123,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install release packaging tools
-        run: python -m pip install --disable-pip-version-check build PyYAML
+        run: python -m pip install --disable-pip-version-check build setuptools PyYAML
       - name: Build immutable release bundle
         env:
           ARTIFACT_NAME: cyrene-platform-${{ github.sha }}
