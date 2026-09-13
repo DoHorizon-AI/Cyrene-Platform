@@ -1,8 +1,8 @@
 # GitHub Actions owns automatic source/contract CI and builds the immutable artifact.
 # Azure owns only this CD handoff: download by explicit run ID, verify the commit
 # and SHA-256 manifest, then promote the verified bytes to the next Azure stage.
-# Self-hosted GPU, private-credential, and exact cross-repository acceptance lanes
-# remain in azure-pipelines-supplemental.yml and are never implicit CI/CD checks.
+# Specialized acceptance lanes belong in explicit GitHub Actions workflows;
+# Azure never acts as a second source CI authority.
 # GitHub Actions artifacts retain for 30 days; configure the secret variable
 # githubArtifactReadToken with a GitHub token that has Actions: read access.
 
