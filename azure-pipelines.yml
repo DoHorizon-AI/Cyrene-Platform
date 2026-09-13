@@ -1,208 +1,206 @@
-name: $(Date:yyyyMMdd)$(Rev:.r)
+# GitHub Actions owns automatic source/contract CI and builds the immutable artifact.
+# Azure owns only this CD handoff: download by explicit run ID, verify the commit
+# and SHA-256 manifest, then promote the verified bytes to the next Azure stage.
+# Specialized acceptance lanes belong in explicit GitHub Actions workflows;
+# Azure never acts as a second source CI authority.
+# GitHub Actions artifacts retain for 30 days; configure the secret variable
+# githubArtifactReadToken with a GitHub token that has Actions: read access.
 
-parameters:
-- name: runGpuRuntimeSmoke
-  displayName: 'Run Kernel Runtime Bootstrap Smoke (Trusted RTX 4080 Agent)'
-  type: boolean
-  default: false
-- name: gpuPoolName
-  displayName: 'Self-Hosted GPU Agent Pool Name'
-  type: string
-  default: 'Default'
+name: Cyrene-Platform CD artifact promotion
 
-# Platform is public: GitHub Actions owns automatic source, contract, and unit checks.
-# Keep Azure manual for self-hosted GPU/runtime acceptance and delivery work.
 trigger: none
 pr: none
 
-pool:
-  vmImage: 'ubuntu-latest'
+parameters:
+- name: githubRepository
+  displayName: 'GitHub repository (owner/name)'
+  type: string
+  default: DoHorizon-AI/Cyrene-Platform
+- name: githubRunId
+  displayName: 'Successful GitHub Actions run ID'
+  type: string
+  default: ''
+- name: expectedCommitSha
+  displayName: 'Expected GitHub commit SHA'
+  type: string
+  default: ''
+- name: githubArtifactName
+  displayName: 'GitHub artifact name (optional; defaults to cyrene-repo-SHA)'
+  type: string
+  default: ''
+- name: githubArtifactSlug
+  displayName: 'GitHub artifact slug used for the default name'
+  type: string
+  default: cyrene-platform
+- name: deploymentEnvironment
+  displayName: 'CD target label'
+  type: string
+  default: staging
 
 jobs:
-- job: docs
-  displayName: 'Platform / Documentation Validation'
-  timeoutInMinutes: 10
-  variables:
-    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
+- job: verify_github_artifact
+  displayName: 'CD / Download and verify GitHub artifact'
+  pool:
+    vmImage: ubuntu-latest
+  timeoutInMinutes: 15
   steps:
-  - checkout: self
-    displayName: 'Checkout repository'
-  - task: Cache@2
-    inputs:
-      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
-      restoreKeys: |
-        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
-      path: '$(Pipeline.Workspace)/.cache/pip'
-    displayName: 'Restore pip cache'
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '3.12'
-    displayName: 'Setup Python 3.12'
-  - script: python tooling/docs/validate_docs.py
-    displayName: 'Validate documentation links and indexes'
-
-- job: governance
-  displayName: 'Platform / Architecture Governance'
-  timeoutInMinutes: 10
-  variables:
-    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
-  steps:
-  - checkout: self
-    displayName: 'Checkout repository'
-  - task: Cache@2
-    inputs:
-      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
-      restoreKeys: |
-        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
-      path: '$(Pipeline.Workspace)/.cache/pip'
-    displayName: 'Restore pip cache'
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '3.12'
-    displayName: 'Setup Python 3.12'
-  - script: |
-      sudo apt-get update
-      sudo apt-get install -y ripgrep
-      python -m pip install pytest hypothesis "pyyaml>=6.0"
-      python tooling/ci/check_service_boundaries.py
-      python -m pytest tooling/ci/test_check_service_boundaries.py
-      python tooling/governance/validate_repository_policy.py
-      python -m pytest tooling/governance/tests/test_repository_policy.py
-      bash tooling/ci/check-architecture-governance.sh
-      bash tooling/ci/check-kernel-boundary.sh
-    displayName: 'Run architecture boundary guard'
-  - script: bash tooling/ci/check-no-legacy-surface.sh
-    displayName: 'Reject reintroduction of legacy/archive/backup surface'
-
-- job: python_sdk
-  displayName: 'Platform / Python SDKs & Tooling'
-  timeoutInMinutes: 20
-  variables:
-    PIP_CACHE_DIR: '$(Pipeline.Workspace)/.cache/pip'
-  steps:
-  - checkout: self
-    displayName: 'Checkout repository'
-  - task: Cache@2
-    inputs:
-      key: 'pip | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
-      restoreKeys: |
-        pip | "$(Agent.OS)" | "$(Build.Repository.Name)"
-      path: '$(Pipeline.Workspace)/.cache/pip'
-    displayName: 'Restore pip cache'
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '3.12'
-    displayName: 'Setup Python 3.12'
-  - script: |
-      python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0" ruff==0.16.5
-      python -m pip install -e sdk/python/cyrene_artifacts
-      python -m pip install -e sdk/python/cyrene_preflight
-    displayName: 'Install Python SDKs and dependencies'
-  - script: |
-      python -m pytest sdk/python/cyrene_artifacts/tests
-      python -m pytest sdk/python/cyrene_preflight/tests
-      python -m pytest tooling/docs/tests
-      python -m pytest tooling/ci/tests
-      python -m pytest tooling/runtime/tests
-      python -m ruff check tooling/runtime
-    displayName: 'Run SDK unit tests'
-
-- job: platform_core
-  displayName: 'Platform / Core Rust Workspace'
-  timeoutInMinutes: 30
-  variables:
-    CARGO_HOME: '$(Pipeline.Workspace)/.cargo'
-  steps:
-  - checkout: self
-    displayName: 'Checkout repository'
+  - checkout: none
   - bash: |
       set -euo pipefail
-      mkdir -p "$(Pipeline.Workspace)/.cargo"
-      mkdir -p "$(Pipeline.Workspace)/s/Cyrene-Platform/target"
-    displayName: 'Prepare Cargo cache directories'
-  - task: Cache@2
-    inputs:
-      key: 'cargo | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cargo.lock'
-      restoreKeys: |
-        cargo | "$(Agent.OS)" | "$(Build.Repository.Name)"
-      path: '$(Pipeline.Workspace)/.cargo'
-    displayName: 'Restore Cargo registry cache'
-  - task: Cache@2
-    inputs:
-      key: 'cargo-target | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cargo.lock'
-      restoreKeys: |
-        cargo-target | "$(Agent.OS)" | "$(Build.Repository.Name)"
-      path: '$(Pipeline.Workspace)/s/Cyrene-Platform/target'
-    displayName: 'Restore Cargo target cache'
-  - script: |
-      rustup update stable
-      rustup component add rustfmt clippy
-    displayName: 'Setup Rust toolchain'
-  - script: cargo fmt --check
-    displayName: 'Check Rust formatting'
-  - script: cargo check --locked --workspace --all-targets
-    displayName: 'Check Cargo workspace (--locked)'
-  - script: cargo clippy --locked --workspace --all-targets -- -D warnings
-    displayName: 'Run Clippy'
-  - script: cargo test --locked --workspace
-    displayName: 'Run Rust unit tests (--locked)'
 
-- ${{ if eq(parameters.runGpuRuntimeSmoke, true) }}:
-  - job: platform_gpu_runtime
-    displayName: 'Platform / Self-Hosted RTX 4080 Runtime Bootstrap'
-    dependsOn:
-    - python_sdk
-    - platform_core
-    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-    pool:
-      name: ${{ parameters.gpuPoolName }}
-      demands:
-      - cyrene.gpu -equals rtx4080
-    timeoutInMinutes: 60
-    steps:
-    - checkout: self
-      displayName: 'Checkout repository'
-    - bash: |
-        set -euo pipefail
-        case "$(Build.SourceBranch)" in
-          refs/heads/develop|refs/heads/main) ;;
-          *) echo 'GPU runtime is restricted to canonical branches.' >&2; exit 1 ;;
-        esac
-        runtime_home="$(Agent.TempDirectory)/cyrene-platform-runtime"
-        tooling/runtime/cyrene-runtime down --runtime-home "$runtime_home" >/dev/null || true
-        tooling/runtime/cyrene-runtime up --runtime-home "$runtime_home"
-        tooling/runtime/cyrene-runtime status --runtime-home "$runtime_home"
-      displayName: 'Bootstrap and probe adapters plus Kernel'
-    - bash: |
-        set -euo pipefail
-        tooling/runtime/cyrene-runtime down \
-          --runtime-home "$(Agent.TempDirectory)/cyrene-platform-runtime"
-      condition: always()
-      displayName: 'Teardown owned runtime processes'
-
-- job: platform_evidence
-  displayName: 'Platform / Assemble Evidence'
-  dependsOn:
-  - docs
-  - governance
-  - python_sdk
-  - platform_core
-  condition: succeeded()
-  steps:
-  - script: |
-      mkdir -p ci/evidence
-      cat <<EOF > ci/evidence/platform-summary.json
-      {
-        "suite": "Cyrene-Platform",
-        "commit": "$(Build.SourceVersion)",
-        "build_id": "$(Build.BuildId)",
-        "result": "HOSTED_SOURCE_GATES_COMPLETED",
-        "scope": "documentation, architecture governance, Python SDKs and tooling, Rust workspace",
-        "gpu_runtime": "NOT_RUN_BY_DEFAULT",
-        "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      : "${GITHUB_TOKEN:?Configure the secret Azure variable githubArtifactReadToken.}"
+      [[ "$GH_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+        echo 'githubRepository must be owner/name.' >&2
+        exit 1
       }
-      EOF
-    displayName: 'Generate Sanitized Platform Evidence'
-  - publish: ci/evidence
-    artifact: platform-evidence
-    displayName: 'Publish Platform Evidence Artifact'
+      [[ "$GH_RUN_ID" =~ ^[0-9]+$ ]] || {
+        echo 'githubRunId must be a numeric GitHub Actions run ID.' >&2
+        exit 1
+      }
+      [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+        echo 'expectedCommitSha must be a 40-character lowercase commit SHA.' >&2
+        exit 1
+      }
+
+      artifact_name="$REQUESTED_ARTIFACT"
+      if [[ -z "$artifact_name" ]]; then
+        artifact_name="${ARTIFACT_SLUG}-${EXPECTED_SHA}"
+      fi
+      [[ "$artifact_name" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+        echo 'githubArtifactName contains unsupported characters.' >&2
+        exit 1
+      }
+
+      artifact_root="$(Pipeline.Workspace)/github-artifact"
+      run_metadata_file="$(mktemp)"
+      metadata_file="$(mktemp)"
+      archive_file="$(mktemp --suffix=.zip)"
+      trap 'rm -f "$run_metadata_file" "$metadata_file" "$archive_file"' EXIT
+      rm -rf "$artifact_root"
+      mkdir -p "$artifact_root"
+
+      curl --fail-with-body --silent --show-error --location \
+        --header 'Accept: application/vnd.github+json' \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}" \
+        > "$run_metadata_file"
+      test "$(jq -r '.repository.full_name' "$run_metadata_file")" = "$GH_REPOSITORY"
+      test "$(jq -r '.head_sha' "$run_metadata_file")" = "$EXPECTED_SHA"
+      test "$(jq -r '.status' "$run_metadata_file")" = 'completed'
+      test "$(jq -r '.conclusion' "$run_metadata_file")" = 'success'
+
+      curl --fail-with-body --silent --show-error --location \
+        --header 'Accept: application/vnd.github+json' \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}/artifacts?per_page=100" \
+          > "$metadata_file"
+
+      artifact_json="$(jq -e --arg name "$artifact_name" '
+        [.artifacts[] | select(.name == $name)] |
+        if length == 1 then .[0] else error("expected exactly one matching artifact") end
+      ' "$metadata_file")"
+      [[ "$(jq -r '.expired' <<<"$artifact_json")" == 'false' ]] || {
+        echo 'The selected GitHub artifact is expired.' >&2
+        exit 1
+      }
+      download_url="$(jq -er '.archive_download_url' <<<"$artifact_json")"
+      api_digest="$(jq -r '.digest // empty' <<<"$artifact_json")"
+
+      curl --fail-with-body --silent --show-error --location \
+        --header 'Accept: application/vnd.github+json' \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        "$download_url" \
+        --output "$archive_file"
+
+      zip_sha="$(sha256sum "$archive_file" | awk '{print $1}')"
+      if [[ -n "$api_digest" ]]; then
+        expected_zip_sha="${api_digest#sha256:}"
+        [[ "$expected_zip_sha" =~ ^[0-9a-f]{64}$ ]] || {
+          echo 'GitHub returned an invalid artifact digest.' >&2
+          exit 1
+        }
+        test "$zip_sha" = "$expected_zip_sha"
+      fi
+
+      unzip -q "$archive_file" -d "$artifact_root"
+      manifest_file="$(find "$artifact_root" -type f -name artifact-manifest.json -print -quit)"
+      test -n "$manifest_file"
+      manifest_root="$(dirname "$manifest_file")"
+
+      test "$(jq -r '.schema_version' "$manifest_file")" = '1'
+      test "$(jq -r '.repository' "$manifest_file")" = "$GH_REPOSITORY"
+      test "$(jq -r '.commit_sha' "$manifest_file")" = "$EXPECTED_SHA"
+      test "$(jq -r '.workflow_run_id' "$manifest_file")" = "$GH_RUN_ID"
+      test "$(jq -r '.artifact_name' "$manifest_file")" = "$artifact_name"
+      jq -e '.payload | type == "array" and length > 0' "$manifest_file" >/dev/null
+
+      while IFS=$'\t' read -r relative_path expected_sha; do
+        case "$relative_path" in
+          ''|/*|../*|*/../*|*../*) echo "Unsafe artifact path: $relative_path" >&2; exit 1 ;;
+        esac
+        [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || {
+          echo "Invalid SHA-256 in manifest for $relative_path." >&2
+          exit 1
+        }
+        payload_path="$manifest_root/$relative_path"
+        test -f "$payload_path"
+      actual_sha="$(sha256sum "$payload_path" | awk '{print $1}')"
+        test "$actual_sha" = "$expected_sha"
+      done < <(jq -r '.payload[] | [.file, .sha256] | @tsv' "$manifest_file")
+
+      evidence_root="$(Pipeline.Workspace)/cd-evidence"
+      mkdir -p "$evidence_root"
+      jq -n \
+        --arg repository "$GH_REPOSITORY" \
+        --arg run_id "$GH_RUN_ID" \
+        --arg commit_sha "$EXPECTED_SHA" \
+        --arg artifact_name "$artifact_name" \
+        --arg zip_sha256 "$zip_sha" \
+        --arg target "$TARGET_ENVIRONMENT" \
+        '{
+          schema_version: 1,
+          status: "VERIFIED_GITHUB_ARTIFACT",
+          repository: $repository,
+          github_run_id: ($run_id | tonumber),
+          commit_sha: $commit_sha,
+          artifact_name: $artifact_name,
+          downloaded_zip_sha256: $zip_sha256,
+          target_environment: $target
+        }' > "$evidence_root/verification.json"
+      echo "Verified immutable GitHub artifact $artifact_name at $EXPECTED_SHA."
+    displayName: 'Download exact run artifact and verify SHA-256 manifest'
+    env:
+      GITHUB_TOKEN: $(githubArtifactReadToken)
+      GH_REPOSITORY: "${{ parameters.githubRepository }}"
+      GH_RUN_ID: "${{ parameters.githubRunId }}"
+      EXPECTED_SHA: "${{ parameters.expectedCommitSha }}"
+      REQUESTED_ARTIFACT: "${{ parameters.githubArtifactName }}"
+      ARTIFACT_SLUG: "${{ parameters.githubArtifactSlug }}"
+      TARGET_ENVIRONMENT: "${{ parameters.deploymentEnvironment }}"
+  - publish: $(Pipeline.Workspace)/github-artifact
+    artifact: verified-github-artifact
+    displayName: 'Promote verified bytes to Azure CD artifact'
+
+- job: cd_handoff
+  displayName: 'CD / Handoff to deployment target'
+  dependsOn: verify_github_artifact
+  condition: succeeded()
+  pool:
+    vmImage: ubuntu-latest
+  timeoutInMinutes: 10
+  steps:
+  - checkout: none
+  - download: current
+    artifact: verified-github-artifact
+    displayName: 'Download promoted verified artifact'
+  - bash: |
+      set -euo pipefail
+      manifest="$(find "$(Pipeline.Workspace)/verified-github-artifact" -type f -name artifact-manifest.json -print -quit)"
+      test -n "$manifest"
+      test "$(jq -r '.commit_sha' "$manifest")" = "${{ parameters.expectedCommitSha }}"
+      echo "CD handoff ready for ${{ parameters.deploymentEnvironment }} from immutable GitHub bytes."
+      echo 'No source checkout, build, or test is performed in Azure CD.'
+    displayName: 'Expose verified artifact to deployment integration'
