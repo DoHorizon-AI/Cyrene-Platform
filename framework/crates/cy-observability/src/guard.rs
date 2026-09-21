@@ -15,6 +15,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 /// When dropped, ensures that pending log records in the non-blocking queue
 /// are flushed to stderr or file sink before the process exits.
 /// ════════════════════════════════════════════════════════════════════════
+#[derive(Debug)]
 pub struct ObservabilityGuard {
     _guards: Vec<WorkerGuard>,
     flush_timeout: Duration,

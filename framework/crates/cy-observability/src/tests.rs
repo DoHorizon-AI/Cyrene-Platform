@@ -532,3 +532,84 @@ fn rolling_file_sink_tracks_dropped_writes_on_error() {
     let _ = std::fs::set_permissions(&active_path, perms_rw);
 }
 
+#[test]
+fn init_observability_fails_gracefully_on_invalid_config() {
+    use crate::init::{init_observability, ObservabilityError};
+
+    let invalid = ObservabilityConfig::managed("").with_log_level("invalid_level_syntax!!!");
+    let result = init_observability(invalid);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ObservabilityError::InvalidConfiguration(msg) => {
+            assert!(!msg.is_empty());
+        }
+        other => panic!("expected InvalidConfiguration, got {other:?}"),
+    }
+}
+
+#[test]
+fn concurrent_threads_maintain_isolated_correlation_contexts() {
+    let writer = TestWriter::default();
+    let config = ObservabilityConfig::managed("test-concurrency")
+        .with_instance_id("inst-conc")
+        .with_format(LogFormat::Json);
+
+    let layer = CyreneLayer::new(&config, writer.clone()).with_filter(EnvFilter::new("info"));
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let dispatch = tracing::Dispatch::new(subscriber);
+
+    let d1 = dispatch.clone();
+    let h1 = std::thread::spawn(move || {
+        let _guard = tracing::dispatcher::set_default(&d1);
+        emit_event!(
+            info,
+            "platform.test.concurrent",
+            "Task 1 event",
+            trace_id = "11111111111111111111111111111111",
+            span_id = "1111111111111111",
+            request_id = "req-1",
+        );
+    });
+
+    let d2 = dispatch.clone();
+    let h2 = std::thread::spawn(move || {
+        let _guard = tracing::dispatcher::set_default(&d2);
+        emit_event!(
+            info,
+            "platform.test.concurrent",
+            "Task 2 event",
+            trace_id = "22222222222222222222222222222222",
+            span_id = "2222222222222222",
+            request_id = "req-2",
+        );
+    });
+
+    h1.join().unwrap();
+    h2.join().unwrap();
+
+    let lines = writer.lines();
+    assert_eq!(lines.len(), 2, "expected exactly two records from concurrent threads");
+
+    let records: Vec<Value> = lines
+        .iter()
+        .map(|l| serde_json::from_str(l).expect("valid JSON"))
+        .collect();
+
+    let rec1 = records
+        .iter()
+        .find(|r| r["trace_id"] == "11111111111111111111111111111111")
+        .expect("record 1 must exist");
+    assert_eq!(rec1["span_id"], "1111111111111111");
+    assert_eq!(rec1["attributes"]["request_id"], "req-1");
+    assert_eq!(rec1["message"], "Task 1 event");
+
+    let rec2 = records
+        .iter()
+        .find(|r| r["trace_id"] == "22222222222222222222222222222222")
+        .expect("record 2 must exist");
+    assert_eq!(rec2["span_id"], "2222222222222222");
+    assert_eq!(rec2["attributes"]["request_id"], "req-2");
+    assert_eq!(rec2["message"], "Task 2 event");
+}
+
+
