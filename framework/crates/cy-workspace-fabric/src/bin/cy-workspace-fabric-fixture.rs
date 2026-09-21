@@ -5,6 +5,18 @@
 //! │                                                                     │
 //! │  模块职责：真实 Relay、Workspace Connector 与参考前端验收。              │
 //! └─────────────────────────────────────────────────────────────────────┘
+//!
+//! # STDOUT CONTRACT
+//!
+//! This fixture writes acceptance results to stdout as `KEY=VALUE` lines
+//! (for example `WORKSPACE_DISCOVERED_BY_IDENTITY=PASS`). Acceptance harnesses
+//! parse these lines, so anything else printed to stdout corrupts the result.
+//!
+//! - `println!` is reserved for `KEY=VALUE` result lines only.
+//! - All diagnostics and progress output MUST use `eprintln!`.
+//! - Failure details already reach stderr correctly: `main` returns `Result`,
+//!   so the runtime prints `Error: ...` to stderr on failure.
+//! - Never route tracing/log output to stdout here.
 
 use std::collections::BTreeSet;
 use std::env;

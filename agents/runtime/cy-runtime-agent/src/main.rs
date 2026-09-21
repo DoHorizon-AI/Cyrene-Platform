@@ -10,8 +10,57 @@ use cy_runtime_agent::{run_runtime_agent, RuntimeAgentConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run_runtime_agent(Args::parse()?.into_config()?).await?;
-    Ok(())
+    let log_format = std::env::var("CYRENE_LOG_FORMAT")
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(cy_observability::LogFormat::Json);
+    let log_level = std::env::var("CYRENE_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let obs_config = cy_observability::ObservabilityConfig::managed("cy-runtime-agent")
+        .with_format(log_format)
+        .with_log_level(log_level);
+    let _guard = cy_observability::init_observability(obs_config).ok();
+
+    let config = match Args::parse().and_then(|a| a.into_config().map_err(Into::into)) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.startup_failed",
+                error.code = cy_observability::PlatformErrorCode::NodeConnectFailed.as_str(),
+                message = "Runtime agent configuration parsing failed",
+                error = %err,
+            );
+            return Err(err);
+        }
+    };
+
+    tracing::info!(
+        event.name = cy_observability::EVENT_SERVICE_STARTED,
+        message = "Starting Cyrene Runtime Agent",
+        node_id = %config.node.node_id,
+        runtime_id = %config.runtime.id,
+    );
+
+    let result = run_runtime_agent(config).await;
+    match result {
+        Ok(()) => {
+            tracing::info!(
+                event.name = cy_observability::EVENT_SERVICE_STOPPED,
+                message = "Runtime agent finished successfully",
+            );
+            Ok(())
+        }
+        Err(ref err) => {
+            tracing::error!(
+                event.name = "platform.service.terminated_unexpectedly",
+                error.code = cy_observability::PlatformErrorCode::NodeConnectFailed.as_str(),
+                message = "Runtime agent terminated with error",
+                error = %err,
+            );
+            result.map_err(Into::into)
+        }
+    }
 }
 
 struct Args {

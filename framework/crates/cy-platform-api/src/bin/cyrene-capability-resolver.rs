@@ -9,6 +9,21 @@
 //! CLI entry point for capability manifest normalization and resolution.
 //!
 //! Capability manifest 标准化与解析 CLI 入口。
+//!
+//! # STDOUT CONTRACT
+//!
+//! This binary writes a **single JSON object and nothing else** to stdout.
+//! Any diagnostic or log line added here will be parsed as protocol output by
+//! callers such as `PlatformResolverAdapter` in Cyrene-Exchange, which reads
+//! stdout first and only falls back to stderr.
+//!
+//! - success → `{"resolutions": [...]}` and exit 0
+//! - failure → `{"error": "<message>"}` and exit 2
+//!
+//! Therefore:
+//! - Keep `println!` for exactly those two protocol objects.
+//! - All diagnostics, warnings, and progress output MUST use `eprintln!`.
+//! - Never emit free text (including tracing/log output) to stdout.
 use std::io::{self, Read};
 
 use cy_platform_api::{

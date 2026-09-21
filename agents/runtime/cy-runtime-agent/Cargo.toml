@@ -27,6 +27,8 @@ rustix = { version = "1", features = ["fs", "process"] }
 thiserror = "1.0"
 tokio = { version = "1.35", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+cy-observability = { path = "../../../framework/crates/cy-observability" }
+tracing = "0.1"
 tonic = { version = "0.11", features = ["transport", "tls"] }
 uuid = { version = "1", features = ["v4"] }
 

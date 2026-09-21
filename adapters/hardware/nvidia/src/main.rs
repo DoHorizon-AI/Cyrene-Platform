@@ -9,21 +9,35 @@
 //! Process entry point for the NVIDIA hardware adapter sidecar.
 
 #[cfg(unix)]
+use cy_proto::hardware_v1;
+#[cfg(unix)]
+use cyrene_nvidia_adapter::{discovery::NvidiaSmiProvider, handle_request};
+#[cfg(unix)]
+use prost::Message;
+#[cfg(unix)]
+use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+};
+
+/// Upper bound on a single framed request or response, shared by the read and
+/// write paths so a peer can never make the adapter allocate without limit.
+#[cfg(unix)]
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+#[cfg(unix)]
 fn main() -> std::io::Result<()> {
-    use cy_proto::hardware_v1;
-    use cyrene_nvidia_adapter::{discovery::NvidiaSmiProvider, handle_request, verify_client_peer};
-    use prost::Message;
+    use cy_kernel_contract::ResourceProvider;
+    use cyrene_nvidia_adapter::verify_client_peer;
     use std::{
         env, fs,
-        io::{Read, Write},
         os::unix::{
             fs::{FileTypeExt, PermissionsExt},
-            net::{UnixListener, UnixStream},
+            net::UnixListener,
         },
         path::PathBuf,
     };
 
-    const MAX_FRAME_BYTES: usize = 1024 * 1024;
     let AdapterArguments {
         socket_path,
         allowed_client_uid,
@@ -49,18 +63,21 @@ fn main() -> std::io::Result<()> {
     // The executable and the existing provider identity are separate concerns.
     // WSL must be explicitly selected; native binding continues to require BPF.
     let provider = NvidiaSmiProvider::new(nvidia_smi).with_wsl_shared_device(wsl_shared_device);
+    let adapter_id = provider.adapter_id().to_string();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 if let Err(error) =
                     verify_client_peer(&stream, allowed_client_uid, allowed_client_gid)
                 {
-                    eprintln!("adapter rejected UDS peer: {error}");
+                    eprintln!(
+                        "nvidia adapter rejected UDS peer: adapter_id={adapter_id} error={error}"
+                    );
                     continue;
                 }
-                let _ = serve_one(stream, &provider);
+                serve_admitted_connection(stream, &provider, &mut std::io::stderr());
             }
-            Err(error) => eprintln!("adapter accept failed: {error}"),
+            Err(error) => eprintln!("nvidia adapter accept failed: {error}"),
         }
     }
 
@@ -141,44 +158,140 @@ fn main() -> std::io::Result<()> {
         })
     }
 
-    fn serve_one(mut stream: UnixStream, provider: &NvidiaSmiProvider) -> std::io::Result<()> {
-        let payload = read_frame(&mut stream)?;
-        let request = hardware_v1::AdapterRequest::decode(payload.as_slice())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let response = handle_request(provider, request).encode_to_vec();
-        write_frame(&mut stream, &response)
-    }
-
-    fn read_frame(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
-        let mut length = [0_u8; 4];
-        reader.read_exact(&mut length)?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length > MAX_FRAME_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "adapter frame exceeds limit",
-            ));
-        }
-        let mut payload = vec![0; length];
-        reader.read_exact(&mut payload)?;
-        Ok(payload)
-    }
-
-    fn write_frame(mut writer: impl Write, payload: &[u8]) -> std::io::Result<()> {
-        if payload.len() > MAX_FRAME_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "adapter frame exceeds limit",
-            ));
-        }
-        writer.write_all(&(payload.len() as u32).to_be_bytes())?;
-        writer.write_all(payload)
-    }
-
     Ok(())
+}
+
+/// Serve one already-admitted connection, reporting any request failure to
+/// `diagnostics`.
+///
+/// Failures must not be dropped: from the Kernel's side a request that fails
+/// silently after admission is indistinguishable from a healthy GPU. `Write` is
+/// injected rather than hard-coded to `stderr` so tests can assert what an
+/// operator would see.
+#[cfg(unix)]
+fn serve_admitted_connection(
+    stream: UnixStream,
+    provider: &NvidiaSmiProvider,
+    diagnostics: &mut impl Write,
+) {
+    if let Err(error) = serve_one(stream, provider) {
+        let _ = writeln!(diagnostics, "nvidia adapter request failed: {error}");
+    }
+}
+
+#[cfg(unix)]
+fn serve_one(mut stream: UnixStream, provider: &NvidiaSmiProvider) -> std::io::Result<()> {
+    let payload = read_frame(&mut stream)?;
+    let request = hardware_v1::AdapterRequest::decode(payload.as_slice())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let response = handle_request(provider, request).encode_to_vec();
+    write_frame(&mut stream, &response)
+}
+
+#[cfg(unix)]
+fn read_frame(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut length = [0_u8; 4];
+    reader.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "adapter frame exceeds limit",
+        ));
+    }
+    let mut payload = vec![0; length];
+    reader.read_exact(&mut payload)?;
+    Ok(payload)
+}
+
+#[cfg(unix)]
+fn write_frame(mut writer: impl Write, payload: &[u8]) -> std::io::Result<()> {
+    if payload.len() > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "adapter frame exceeds limit",
+        ));
+    }
+    writer.write_all(&(payload.len() as u32).to_be_bytes())?;
+    writer.write_all(payload)
 }
 
 #[cfg(not(unix))]
 fn main() {
     eprintln!("cyrene-nvidia-adapter requires a Unix host with Unix domain sockets");
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn provider() -> NvidiaSmiProvider {
+        NvidiaSmiProvider::new(std::path::PathBuf::from("nvidia-smi"))
+    }
+
+    /// Regression guard for silently discarded adapter requests: a client that
+    /// disconnects mid-frame must surface on the diagnostic sink, not vanish.
+    #[test]
+    fn request_failure_is_reported_to_the_diagnostic_sink() {
+        let (client, server) = UnixStream::pair().unwrap();
+        // No frame is written and the peer is dropped, so reading the length
+        // prefix hits EOF.
+        drop(client);
+
+        let mut diagnostics = Vec::new();
+        serve_admitted_connection(server, &provider(), &mut diagnostics);
+
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains("nvidia adapter request failed:"),
+            "a failing request must be reported, got {diagnostics:?}"
+        );
+    }
+
+    /// An oversized frame must be rejected before the adapter allocates for it.
+    #[test]
+    fn oversized_frame_is_reported_to_the_diagnostic_sink() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let oversized = (MAX_FRAME_BYTES as u32) + 1;
+        client.write_all(&oversized.to_be_bytes()).unwrap();
+        drop(client);
+
+        let mut diagnostics = Vec::new();
+        serve_admitted_connection(server, &provider(), &mut diagnostics);
+
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(
+            diagnostics.contains("adapter frame exceeds limit"),
+            "an oversized frame must be reported with its cause, got {diagnostics:?}"
+        );
+    }
+
+    /// A successful exchange must stay quiet: diagnostics are for failures, and
+    /// per-request noise would bury the ones operators care about.
+    #[test]
+    fn successful_request_leaves_the_diagnostic_sink_empty() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let request = hardware_v1::AdapterRequest {
+            protocol_version: cyrene_nvidia_adapter::PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        let payload = request.encode_to_vec();
+        write_frame(&mut client, &payload).unwrap();
+
+        // The peer must stay open until the response is written, otherwise the
+        // write fails with EPIPE and we would be asserting on a failure.
+        let server = std::thread::spawn(move || {
+            let mut diagnostics = Vec::new();
+            serve_admitted_connection(server, &provider(), &mut diagnostics);
+            diagnostics
+        });
+        let _response = read_frame(&mut client).unwrap();
+        let diagnostics = server.join().unwrap();
+
+        assert!(
+            diagnostics.is_empty(),
+            "a successful exchange must not emit diagnostics, got {:?}",
+            String::from_utf8_lossy(&diagnostics)
+        );
+    }
 }

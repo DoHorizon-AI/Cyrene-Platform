@@ -41,16 +41,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::transport::Server;
 
-    let args = Args::parse()?;
+    let log_format = std::env::var("CYRENE_LOG_FORMAT")
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(cy_observability::LogFormat::Json);
+    let log_level = std::env::var("CYRENE_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let obs_config = cy_observability::ObservabilityConfig::managed("cyrene-kernel")
+        .with_format(log_format)
+        .with_log_level(log_level);
+    let _guard = cy_observability::init_observability(obs_config).ok();
+
+    let args = match Args::parse() {
+        Ok(args) => args,
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.startup_failed",
+                error.code = cy_observability::PlatformErrorCode::KernelStartupFailed.as_str(),
+                message = "Kernel daemon startup argument parsing failed",
+                error = %err,
+            );
+            return Err(err);
+        }
+    };
     // Persist and advance the epoch before accepting any Kernel request. The
     // journal is evidence only: it seeds fencing but is never used to adopt a
     // Worker left by an older sandboxd process.
     let journal = Arc::new(FileRuntimeJournal::open(&args.runtime_journal)?);
     let recovery = journal.begin_epoch(&args.node_id)?;
     if !recovery.runtime_processes.is_empty() {
-        eprintln!(
-            "recovery discovered {} unclosed runtime record(s); they remain fenced and require provider reconciliation",
-            recovery.runtime_processes.len()
+        tracing::warn!(
+            event.name = "platform.kernel.recovery_discovered",
+            unclosed_records = recovery.runtime_processes.len(),
+            message = "Recovery discovered unclosed runtime record(s); they remain fenced and require provider reconciliation",
         );
     }
     let sandbox = Arc::new(UdsSandboxAdapterClient::from_endpoint(
@@ -146,8 +170,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_incoming(PeerCredAccept::new(UnixListenerStream::new(
             provider_listener,
         )));
-    tokio::try_join!(authority_server, worker_control_server, provider_server)?;
-    Ok(())
+    tracing::info!(
+        event.name = cy_observability::EVENT_SERVICE_STARTED,
+        message = "Kernel daemon services initialized and listening",
+        node_id = %args.node_id,
+    );
+    let result = tokio::try_join!(authority_server, worker_control_server, provider_server);
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                event.name = cy_observability::EVENT_SERVICE_STOPPED,
+                message = "Kernel daemon servers shut down cleanly",
+            );
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.terminated_unexpectedly",
+                error.code = cy_observability::PlatformErrorCode::KernelUnknownError.as_str(),
+                message = "Kernel daemon server terminated with error",
+                error = %err,
+            );
+            Err(err.into())
+        }
+    }
 }
 
 #[cfg(unix)]

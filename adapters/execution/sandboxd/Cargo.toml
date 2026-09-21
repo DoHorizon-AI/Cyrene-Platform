@@ -15,6 +15,8 @@ cy-proto = { path = "../../../contracts/rust/cy-proto" }
 libc = "0.2"
 nix = { version = "0.29", features = ["socket", "user", "process"] }
 prost = "0.12"
+cy-observability = { path = "../../../framework/crates/cy-observability" }
+tracing = "0.1"
 
 [dev-dependencies]
 cy-sandbox-client = { path = "../../../kernel/crates/cy-sandbox-client" }

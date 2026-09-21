@@ -14,11 +14,55 @@ use cy_node_agent::{run_node_agent, NodeAgentConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Args::parse()?.into_config()?;
+    let log_format = std::env::var("CYRENE_LOG_FORMAT")
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(cy_observability::LogFormat::Json);
+    let log_level = std::env::var("CYRENE_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let obs_config = cy_observability::ObservabilityConfig::managed("cy-node-agent")
+        .with_format(log_format)
+        .with_log_level(log_level);
+    let _guard = cy_observability::init_observability(obs_config).ok();
+
+    let config = match Args::parse().and_then(|a| a.into_config().map_err(Into::into)) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.startup_failed",
+                error.code = cy_observability::PlatformErrorCode::NodeConnectFailed.as_str(),
+                message = "Node agent configuration error",
+                error = %err,
+            );
+            return Err(err);
+        }
+    };
+
+    tracing::info!(
+        event.name = cy_observability::EVENT_SERVICE_STARTED,
+        message = "Starting Cyrene Node Agent",
+        node_id = %config.node_id,
+    );
+
     tokio::select! {
-        result = run_node_agent(config) => result.map_err(Into::into),
+        result = run_node_agent(config) => {
+            if let Err(ref err) = result {
+                tracing::error!(
+                    event.name = "platform.service.terminated_unexpectedly",
+                    error.code = cy_observability::PlatformErrorCode::NodeConnectFailed.as_str(),
+                    message = "Node agent loop terminated with error",
+                    error = %err,
+                );
+            }
+            result.map_err(Into::into)
+        }
         signal = tokio::signal::ctrl_c() => {
             signal?;
+            tracing::info!(
+                event.name = cy_observability::EVENT_SERVICE_STOPPED,
+                message = "Node agent stopped by signal",
+            );
             Ok(())
         }
     }
