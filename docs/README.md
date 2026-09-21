@@ -40,6 +40,7 @@ recommended path from protocol definitions to executable adapters.
 - [`architecture/mcp-integration.md`](architecture/mcp-integration.md) — protocol integration rules.
 - [`glossary.md`](glossary.md) — English/Chinese terminology.
 - [`faq.md`](faq.md) — common questions and troubleshooting.
+- [`logging-and-errors.md`](logging-and-errors.md) — cross-repository logging, error codes, and diagnostics specification (草案 v0.1).
 
 The repository also contains historical reports and migration notes. They are
 useful context, but the normative contract and current ADRs take precedence.
