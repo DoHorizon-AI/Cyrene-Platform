@@ -169,11 +169,19 @@ where
         let mut span_id = None;
         let mut trace_id = None;
         if let Some(current_span) = ctx.lookup_current() {
-            span_id = Some(format!("{:x}", current_span.id().into_u64()));
-            // Check if current span has trace_id in extensions or attributes
-            if let Some(tid) = visitor.attributes.get("trace_id").and_then(|v| v.as_str()) {
-                trace_id = Some(tid.to_string());
-            }
+            span_id = Some(format!("{:016x}", current_span.id().into_u64()));
+        }
+        if let Some(tid) = visitor.attributes.remove("trace_id").and_then(|v| match v {
+            Value::String(s) => Some(s),
+            _ => None,
+        }) {
+            trace_id = Some(tid);
+        }
+        if let Some(sid) = visitor.attributes.remove("span_id").and_then(|v| match v {
+            Value::String(s) => Some(s),
+            _ => None,
+        }) {
+            span_id = Some(sid);
         }
 
         let raw_message = visitor.message.unwrap_or_default();

@@ -7,6 +7,7 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 
 pub mod config;
+pub mod correlation;
 pub mod error_catalog;
 pub mod events;
 pub mod formatter;
@@ -19,6 +20,11 @@ pub mod redaction;
 mod tests;
 
 pub use config::{LogFormat, ObservabilityConfig};
+pub use correlation::{
+    sanitize_correlation_id, sanitize_operation_id, sanitize_request_id, sanitize_resource_id,
+    CorrelationContext, CorrelationError, TraceContext, MAX_OPERATION_ID_LEN, MAX_REQUEST_ID_LEN,
+    MAX_RESOURCE_ID_LEN,
+};
 pub use error_catalog::PlatformErrorCode;
 pub use events::*;
 pub use formatter::CyreneLayer;

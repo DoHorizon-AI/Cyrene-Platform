@@ -30,6 +30,10 @@ pub const TRUNCATED_MARKER: &str = "... [TRUNCATED]";
 /// ════════════════════════════════════════════════════════════════════════
 pub fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
+    // Exclude usage metric counts like "tokens", "prompt_tokens", "completion_tokens", "total_tokens"
+    if lower == "tokens" || lower.ends_with("_tokens") || lower == "token_count" {
+        return false;
+    }
     let normalized = lower.replace(['-', '_', '.'], "");
     matches!(
         normalized.as_str(),

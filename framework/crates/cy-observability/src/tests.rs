@@ -278,3 +278,138 @@ fn oversize_record_is_pruned_without_breaking_json() {
     assert!(lines[0].len() <= 32 * 1024);
 }
 
+#[test]
+fn w3c_traceparent_parsing_and_formatting() {
+    use crate::correlation::TraceContext;
+
+    let valid_header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let tc = TraceContext::parse_traceparent(valid_header).expect("must parse valid W3C header");
+    assert_eq!(tc.trace_id_hex(), "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(tc.span_id_hex(), "00f067aa0ba902b7");
+    assert_eq!(tc.flags, 0x01);
+    assert_eq!(tc.to_traceparent(), valid_header);
+
+    // Child span preserves trace_id and flags, generates new span_id
+    let child = tc.child_span();
+    assert_eq!(child.trace_id, tc.trace_id);
+    assert_eq!(child.flags, tc.flags);
+    assert_ne!(child.span_id, tc.span_id);
+    assert_ne!(child.span_id, [0u8; 8]);
+}
+
+#[test]
+fn w3c_traceparent_invalid_formats_are_rejected() {
+    use crate::correlation::{CorrelationError, TraceContext};
+
+    // Invalid parts count
+    assert_eq!(
+        TraceContext::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7"),
+        Err(CorrelationError::InvalidFormat)
+    );
+    // Unsupported version
+    assert_eq!(
+        TraceContext::parse_traceparent("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        Err(CorrelationError::UnsupportedVersion("01".to_string()))
+    );
+    // All-zero trace_id
+    assert_eq!(
+        TraceContext::parse_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01"),
+        Err(CorrelationError::InvalidTraceId)
+    );
+    // All-zero span_id
+    assert_eq!(
+        TraceContext::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"),
+        Err(CorrelationError::InvalidSpanId)
+    );
+    // Invalid characters
+    assert_eq!(
+        TraceContext::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e47zz-00f067aa0ba902b7-01"),
+        Err(CorrelationError::InvalidTraceId)
+    );
+}
+
+#[test]
+fn correlation_hierarchy_and_sanitization() {
+    use crate::correlation::{
+        sanitize_correlation_id, sanitize_operation_id, sanitize_request_id, sanitize_resource_id,
+        CorrelationContext, TraceContext, MAX_OPERATION_ID_LEN, MAX_REQUEST_ID_LEN,
+        MAX_RESOURCE_ID_LEN,
+    };
+
+    // Control characters and newlines are stripped
+    let malicious = "req-123\r\nInjected: Header\x00";
+    let sanitized = sanitize_request_id(malicious).expect("must produce sanitized id");
+    assert_eq!(sanitized, "req-123Injected:Header");
+
+    // Generic correlation sanitizer
+    assert_eq!(
+        sanitize_correlation_id("safe-token_123", 50),
+        Some("safe-token_123".to_string())
+    );
+
+    // Length bounding for all ID types
+    let long_id = "A".repeat(300);
+    assert_eq!(
+        sanitize_request_id(&long_id).unwrap().len(),
+        MAX_REQUEST_ID_LEN
+    );
+    assert_eq!(
+        sanitize_operation_id(&long_id).unwrap().len(),
+        MAX_OPERATION_ID_LEN
+    );
+    assert_eq!(
+        sanitize_resource_id(&long_id).unwrap().len(),
+        MAX_RESOURCE_ID_LEN
+    );
+
+    // Context hierarchy
+    let tc = TraceContext::new_root();
+    let ctx = CorrelationContext::new()
+        .with_request_id("req-uuid-123")
+        .with_operation_id("op-train-456")
+        .with_resource_id("res-deployment-789")
+        .with_trace_context(tc);
+
+    assert_eq!(ctx.request_id.as_deref(), Some("req-uuid-123"));
+    assert_eq!(ctx.operation_id.as_deref(), Some("op-train-456"));
+    assert_eq!(ctx.resource_id.as_deref(), Some("res-deployment-789"));
+    assert_eq!(ctx.trace_context, Some(tc));
+}
+
+#[test]
+fn structured_record_promotes_trace_id_and_retains_correlation_attributes() {
+    let writer = TestWriter::default();
+    let config = ObservabilityConfig::managed("test-correlation")
+        .with_instance_id("inst-corr-1")
+        .with_format(LogFormat::Json);
+
+    let layer = CyreneLayer::new(&config, writer.clone()).with_filter(EnvFilter::new("info"));
+    let subscriber = tracing_subscriber::registry().with(layer);
+
+    tracing::subscriber::with_default(subscriber, || {
+        emit_event!(
+            info,
+            "platform.test.correlation",
+            "Executing correlated operation",
+            trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+            span_id = "00f067aa0ba902b7",
+            request_id = "req-abc-123",
+            operation_id = "op-deploy-999",
+            resource_id = "res-worker-1",
+        );
+    });
+
+    let lines = writer.lines();
+    assert_eq!(lines.len(), 1);
+
+    let record: Value = serde_json::from_str(&lines[0]).expect("must be valid JSON");
+    // Top-level trace fields
+    assert_eq!(record["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(record["span_id"], "00f067aa0ba902b7");
+
+    // Attributes retain request_id, operation_id, resource_id
+    assert_eq!(record["attributes"]["request_id"], "req-abc-123");
+    assert_eq!(record["attributes"]["operation_id"], "op-deploy-999");
+    assert_eq!(record["attributes"]["resource_id"], "res-worker-1");
+}
+
