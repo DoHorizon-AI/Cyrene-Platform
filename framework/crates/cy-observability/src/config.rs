@@ -50,6 +50,8 @@ pub struct ObservabilityConfig {
     pub log_level: String,
     /// Optional path to a local persistent log file sink.
     pub file_path: Option<PathBuf>,
+    /// Optional controlled rolling file persistence configuration.
+    pub rolling_file: Option<crate::sink::RollingFileConfig>,
     /// Bounded in-memory queue record budget.
     pub queue_size: usize,
     /// Maximum time to wait for bounded flush on shutdown.
@@ -75,6 +77,7 @@ impl ObservabilityConfig {
             format: LogFormat::Json,
             log_level: "info".to_string(),
             file_path: None,
+            rolling_file: None,
             queue_size: 10_000,
             flush_timeout: Duration::from_secs(2),
             max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
@@ -114,6 +117,12 @@ impl ObservabilityConfig {
     /// Set optional file path for controlled file sink.
     pub fn with_file_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.file_path = Some(path.into());
+        self
+    }
+
+    /// Set controlled rolling file persistence configuration.
+    pub fn with_rolling_file(mut self, rolling: crate::sink::RollingFileConfig) -> Self {
+        self.rolling_file = Some(rolling);
         self
     }
 

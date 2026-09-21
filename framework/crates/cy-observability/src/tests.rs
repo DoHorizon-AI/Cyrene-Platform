@@ -413,3 +413,122 @@ fn structured_record_promotes_trace_id_and_retains_correlation_attributes() {
     assert_eq!(record["attributes"]["resource_id"], "res-worker-1");
 }
 
+#[test]
+fn rolling_file_config_defaults_and_builder() {
+    use crate::sink::{RollingFileConfig, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_HISTORY_FILES};
+
+    let cfg = RollingFileConfig::new("/tmp/logs", "cy-test", 0, 0);
+    assert_eq!(cfg.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+    assert_eq!(cfg.max_history_files, DEFAULT_MAX_HISTORY_FILES);
+    assert_eq!(cfg.file_prefix, "cy-test");
+
+    let custom = RollingFileConfig::new("/tmp/logs", "cy-custom", 1024, 2);
+    assert_eq!(custom.max_file_bytes, 1024);
+    assert_eq!(custom.max_history_files, 2);
+
+    let obs = ObservabilityConfig::managed("test").with_rolling_file(custom.clone());
+    assert!(obs.rolling_file.is_some());
+    assert_eq!(obs.rolling_file.unwrap().max_history_files, 2);
+}
+
+#[test]
+fn rolling_file_sink_rotates_and_shifts_history() {
+    use std::io::Write;
+    use tempfile::tempdir;
+    use crate::sink::{BoundedRollingFileSink, RollingFileConfig};
+
+    let dir = tempdir().expect("create temp dir");
+    let config = RollingFileConfig::new(dir.path(), "test-app", 100, 3);
+    let mut sink = BoundedRollingFileSink::new(config).expect("create sink");
+
+    // 1. Write chunk 1 (60 bytes)
+    let chunk1 = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    sink.write_all(chunk1).expect("write chunk 1");
+    sink.flush().expect("flush chunk 1");
+    assert_eq!(sink.current_bytes(), 60);
+
+    let active_path = dir.path().join("test-app.log");
+    assert!(active_path.exists());
+    assert_eq!(std::fs::metadata(&active_path).unwrap().len(), 60);
+
+    // 2. Write chunk 2 (60 bytes) -> exceeds 100 bytes, triggers rotation!
+    let chunk2 = b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    sink.write_all(chunk2).expect("write chunk 2");
+    sink.flush().expect("flush chunk 2");
+    assert_eq!(sink.current_bytes(), 60);
+
+    let archive1 = dir.path().join("test-app.log.1");
+    assert!(active_path.exists());
+    assert!(archive1.exists());
+    assert_eq!(std::fs::read(&archive1).unwrap(), chunk1);
+    assert_eq!(std::fs::read(&active_path).unwrap(), chunk2);
+
+    // 3. Write chunk 3 (60 bytes) -> triggers rotation!
+    let chunk3 = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+    sink.write_all(chunk3).expect("write chunk 3");
+    sink.flush().expect("flush chunk 3");
+
+    let archive2 = dir.path().join("test-app.log.2");
+    assert!(archive2.exists());
+    assert_eq!(std::fs::read(&archive2).unwrap(), chunk1);
+    assert_eq!(std::fs::read(&archive1).unwrap(), chunk2);
+    assert_eq!(std::fs::read(&active_path).unwrap(), chunk3);
+
+    // 4. Write chunk 4 (60 bytes) -> triggers rotation!
+    let chunk4 = b"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+    sink.write_all(chunk4).expect("write chunk 4");
+    sink.flush().expect("flush chunk 4");
+
+    let archive3 = dir.path().join("test-app.log.3");
+    assert!(archive3.exists());
+    assert_eq!(std::fs::read(&archive3).unwrap(), chunk1);
+    assert_eq!(std::fs::read(&archive2).unwrap(), chunk2);
+    assert_eq!(std::fs::read(&archive1).unwrap(), chunk3);
+    assert_eq!(std::fs::read(&active_path).unwrap(), chunk4);
+
+    // 5. Write chunk 5 (60 bytes) -> max_history_files is 3, so oldest (.3 containing chunk1) is pruned!
+    let chunk5 = b"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
+    sink.write_all(chunk5).expect("write chunk 5");
+    sink.flush().expect("flush chunk 5");
+
+    assert_eq!(std::fs::read(&archive3).unwrap(), chunk2);
+    assert_eq!(std::fs::read(&archive2).unwrap(), chunk3);
+    assert_eq!(std::fs::read(&archive1).unwrap(), chunk4);
+    assert_eq!(std::fs::read(&active_path).unwrap(), chunk5);
+
+    // Verify .log.4 does not exist
+    let archive4 = dir.path().join("test-app.log.4");
+    assert!(!archive4.exists());
+    assert_eq!(sink.dropped_writes_count(), 0);
+}
+
+#[test]
+fn rolling_file_sink_tracks_dropped_writes_on_error() {
+    use std::io::Write;
+    use tempfile::tempdir;
+    use crate::sink::{BoundedRollingFileSink, RollingFileConfig};
+
+    let dir = tempdir().expect("create temp dir");
+    let config = RollingFileConfig::new(dir.path(), "readonly-app", 100, 2);
+    let mut sink = BoundedRollingFileSink::new(config).expect("create sink");
+
+    sink.write_all(b"initial data").expect("write initial");
+    assert_eq!(sink.dropped_writes_count(), 0);
+
+    let active_path = sink.active_file_path();
+    let mut perms = std::fs::metadata(&active_path).unwrap().permissions();
+    perms.set_readonly(true);
+    let _ = std::fs::set_permissions(&active_path, perms);
+
+    let huge = vec![b'X'; 200];
+    let res = sink.write_all(&huge);
+    if res.is_err() {
+        assert!(sink.dropped_writes_count() > 0);
+    }
+
+    let mut perms_rw = std::fs::metadata(&active_path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms_rw.set_readonly(false);
+    let _ = std::fs::set_permissions(&active_path, perms_rw);
+}
+

@@ -66,7 +66,25 @@ pub fn init_observability(config: ObservabilityConfig) -> Result<ObservabilityGu
     let mut guards = vec![stderr_guard];
 
     // 4. Optional local file sink (controlled persistence)
-    if let Some(ref path) = config.file_path {
+    if let Some(ref rolling) = config.rolling_file {
+        let rolling_sink = crate::sink::BoundedRollingFileSink::new(rolling.clone())?;
+        let (file_writer, file_guard) = NonBlockingBuilder::default()
+            .lossy(config.lossy)
+            .buffered_lines_limit(config.queue_size)
+            .finish(rolling_sink);
+        guards.push(file_guard);
+
+        let file_filter = EnvFilter::try_new(&config.log_level)
+            .map_err(|err| ObservabilityError::InvalidConfiguration(err.to_string()))?;
+        let file_layer = CyreneLayer::new(&config, file_writer).with_filter(file_filter);
+
+        let subscriber = tracing_subscriber::registry()
+            .with(stderr_layer)
+            .with(file_layer);
+
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(|_| ObservabilityError::AlreadyInitialized)?;
+    } else if let Some(ref path) = config.file_path {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

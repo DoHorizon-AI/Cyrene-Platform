@@ -15,6 +15,7 @@ pub mod guard;
 pub mod init;
 pub mod panic_hook;
 pub mod redaction;
+pub mod sink;
 
 #[cfg(test)]
 mod tests;
@@ -33,6 +34,9 @@ pub use init::{init_observability, ObservabilityError};
 pub use redaction::{
     is_sensitive_key, sanitize_field, truncate_bounded, DEFAULT_MAX_CAUSE_DEPTH,
     DEFAULT_MAX_MESSAGE_BYTES, DEFAULT_MAX_RECORD_BYTES, REDACTED_MARKER, TRUNCATED_MARKER,
+};
+pub use sink::{
+    BoundedRollingFileSink, RollingFileConfig, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_HISTORY_FILES,
 };
 
 /// ════════════════════════════════════════════════════════════════════════
