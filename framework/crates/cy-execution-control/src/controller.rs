@@ -225,12 +225,21 @@ impl ExecutionController {
         let lease = match semantic_lease_from_proto(&lease_proto) {
             Ok(lease) => lease,
             Err(error) => {
-                let _ = self.transition_intent(
+                if let Err(store_err) = self.transition_intent(
                     &intent,
                     IntentDisposition::UnknownRequiresReconciliation,
                     None,
                     now_unix_ms(),
-                );
+                ) {
+                    tracing::error!(
+                        event.name = "platform.reconcile.evaluated",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        assignment_id = %intent.assignment_id(),
+                        store_error = %store_err,
+                        error = %error,
+                        message = "Kernel returned an invalid Lease and durable intent transition to UnknownRequiresReconciliation failed",
+                    );
+                }
                 return Err(DispatchError::unknown(format!(
                     "Kernel returned an invalid Lease after acquisition: {error}"
                 )));
@@ -404,12 +413,20 @@ impl ExecutionController {
         let disposition = match AssignmentAckDisposition::try_from(ack.disposition) {
             Ok(disposition) => disposition,
             Err(_) => {
-                let _ = self.transition_intent(
+                if let Err(store_err) = self.transition_intent(
                     &intent,
                     IntentDisposition::UnknownRequiresReconciliation,
                     None,
                     now_unix_ms(),
-                );
+                ) {
+                    tracing::error!(
+                        event.name = "platform.reconcile.evaluated",
+                        error.code = "PLATFORM.WORKER.CLEANUP_UNCONFIRMED",
+                        assignment_id = %intent.assignment_id(),
+                        store_error = %store_err,
+                        message = "Runtime returned unknown AssignmentAck and durable intent transition failed",
+                    );
+                }
                 return Err(DispatchError::unknown(
                     "Runtime returned an unknown AssignmentAck disposition",
                 ));

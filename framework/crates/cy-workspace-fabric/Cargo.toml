@@ -13,6 +13,8 @@ thiserror = "1.0"
 tokio = { version = "1.35", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = { version = "0.11", features = ["transport", "tls"] }
+cy-observability = { path = "../cy-observability" }
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3.8"

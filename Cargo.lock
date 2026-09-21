@@ -338,6 +338,7 @@ dependencies = [
  "cy-kernel-daemon",
  "cy-manifest",
  "cy-node-agent",
+ "cy-observability",
  "cy-proto",
  "cy-resource-manager",
  "cy-runtime-agent",
@@ -352,6 +353,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tracing",
  "uuid",
 ]
 
@@ -395,6 +397,7 @@ version = "0.1.0"
 dependencies = [
  "cy-adapter-client",
  "cy-kernel-api",
+ "cy-observability",
  "cy-proto",
  "cy-resource-manager",
  "libc",
@@ -405,6 +408,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tower",
+ "tracing",
  "uuid",
 ]
 
@@ -543,6 +547,7 @@ dependencies = [
 name = "cy-workspace-fabric"
 version = "0.1.0"
 dependencies = [
+ "cy-observability",
  "cy-proto",
  "prost-types",
  "tempfile",
@@ -550,6 +555,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tracing",
 ]
 
 [[package]]

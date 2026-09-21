@@ -128,11 +128,31 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
     let mut resume_token = config.resume_token.clone();
     let mut observed_node: Option<NodeRef> = None;
     let mut delay = config.reconnect_min;
+    let mut retry_count: u64 = 0;
+    let mut first_failure_time: Option<std::time::Instant> = None;
+    let mut last_warn_time: Option<std::time::Instant> = None;
+    let mut connected_before = false;
 
     loop {
         let node = match kernel.discover_node().await {
             Ok(node) => node,
             Err(error) => {
+                let is_first = first_failure_time.is_none();
+                let first = first_failure_time.get_or_insert_with(std::time::Instant::now);
+                retry_count += 1;
+                let now = std::time::Instant::now();
+                if is_first || last_warn_time.map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10)) {
+                    last_warn_time = Some(now);
+                    tracing::warn!(
+                        event.name = "platform.node.reconnecting",
+                        error.code = "PLATFORM.KERNEL.UNKNOWN_ERROR",
+                        node_id = %config.node_id,
+                        retries = retry_count,
+                        elapsed_ms = now.duration_since(*first).as_millis() as u64,
+                        error = %error,
+                        message = "Local Kernel discovery failed; retrying with backoff",
+                    );
+                }
                 time::sleep(delay).await;
                 delay = backoff(delay, config.reconnect_max);
                 if matches!(error, crate::LocalKernelError::RelativeSocketPath) {
@@ -157,10 +177,60 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
 
         match connect_once(&config, &bridge, node, &resume_token).await {
             Ok(next_resume_token) => {
+                if retry_count > 0 || first_failure_time.is_some() {
+                    let elapsed_ms = first_failure_time.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
+                    tracing::info!(
+                        event.name = "platform.node.reconnected",
+                        node_id = %config.node_id,
+                        retries = retry_count,
+                        elapsed_ms = elapsed_ms,
+                        message = "Node successfully reconnected to control plane",
+                    );
+                }
+                connected_before = true;
+                retry_count = 0;
+                first_failure_time = None;
+                last_warn_time = None;
                 resume_token = next_resume_token;
                 delay = config.reconnect_min;
             }
-            Err(_) => {
+            Err(error) => {
+                let is_first = first_failure_time.is_none();
+                let first = first_failure_time.get_or_insert_with(std::time::Instant::now);
+                retry_count += 1;
+                let now = std::time::Instant::now();
+                if is_first {
+                    last_warn_time = Some(now);
+                    if connected_before {
+                        tracing::warn!(
+                            event.name = "platform.node.disconnected",
+                            error.code = "PLATFORM.NODE.DISCONNECTED",
+                            node_id = %config.node_id,
+                            error = %error,
+                            message = "Node disconnected from control plane; entering reconnect loop",
+                        );
+                    } else {
+                        tracing::warn!(
+                            event.name = "platform.node.reconnecting",
+                            error.code = "PLATFORM.NODE.CONNECT_FAILED",
+                            node_id = %config.node_id,
+                            retries = retry_count,
+                            error = %error,
+                            message = "Initial connection to control plane failed; initiating reconnect loop",
+                        );
+                    }
+                } else if last_warn_time.map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10)) {
+                    last_warn_time = Some(now);
+                    tracing::warn!(
+                        event.name = "platform.node.reconnecting",
+                        error.code = "PLATFORM.NODE.CONNECT_FAILED",
+                        node_id = %config.node_id,
+                        retries = retry_count,
+                        elapsed_ms = now.duration_since(*first).as_millis() as u64,
+                        error = %error,
+                        message = "Still attempting to reconnect to control plane",
+                    );
+                }
                 time::sleep(delay).await;
                 delay = backoff(delay, config.reconnect_max);
             }
@@ -177,7 +247,7 @@ async fn connect_once(
     let channel = control_plane_channel(config).await?;
     let mut client = NodeControlServiceClient::new(channel);
     let mut session = NodeControlSession::new(
-        node.node_id,
+        node.node_id.clone(),
         node.node_epoch,
         config.agent_version.clone(),
         config.min_protocol_version,
@@ -202,6 +272,12 @@ async fn connect_once(
             NodeAgentError::Transport("control-plane closed before welcome".to_string())
         })?;
     let welcome = session.accept_welcome(welcome)?;
+    tracing::info!(
+        event.name = "platform.node.connected",
+        node_id = %node.node_id,
+        node_epoch = node.node_epoch,
+        message = "Connected to control plane and established session",
+    );
     let heartbeat_every = proto_duration(welcome.heartbeat_interval.as_ref())
         .unwrap_or_else(|| Duration::from_secs(5));
     let mut heartbeat = time::interval(heartbeat_every);
@@ -212,7 +288,14 @@ async fn connect_once(
         tokio::select! {
             frame = inbound.message() => match frame.map_err(transport_status)? {
                 Some(frame) => forward_control_frame(&outbound, bridge, &mut session, frame).await?,
-                None => return Ok(session.resume_token().to_string()),
+                None => {
+                    tracing::info!(
+                        event.name = "platform.node.disconnected",
+                        node_id = %node.node_id,
+                        message = "Control plane closed inbound stream cleanly",
+                    );
+                    return Ok(session.resume_token().to_string());
+                }
             },
             _ = heartbeat.tick() => {
                 let observed_generation = session.desired_generation().unwrap_or_default();

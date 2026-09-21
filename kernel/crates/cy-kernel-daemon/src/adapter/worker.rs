@@ -471,7 +471,11 @@ impl KernelServiceAdapter {
 
     pub(crate) fn enforce_lease_expiry(&self) {
         if let Err(error) = self.authority.enforce_lease_expiry() {
-            eprintln!("lease expiry enforcement failed: {error:?}");
+            tracing::warn!(
+                event.name = "platform.lease.expiry_enforcement_failed",
+                error = ?error,
+                message = "Lease expiry enforcement failed",
+            );
         }
     }
 
@@ -526,7 +530,12 @@ impl KernelServiceAdapter {
                     // Class B fail-closed: the lost transition did not commit
                     // durably, so it is retried on the next scan. The Lease
                     // stays Active and is never silently released.
-                    eprintln!("worker lost authority transition failed: {error:?}");
+                    tracing::warn!(
+                        event.name = "platform.worker.lost_authority_transition_failed",
+                        error = ?error,
+                        worker_id = %worker.identity.id,
+                        message = "worker lost authority transition failed; retrying on next scan",
+                    );
                 }
                 continue;
             }
@@ -583,8 +592,12 @@ impl KernelServiceAdapter {
                     // (the instance was marked triggered above) so the next
                     // scan retries the write; the Worker keeps running and the
                     // Lease stays Active (fail-closed, recovery-required).
-                    eprintln!(
-                        "runtime journal LeaseReleaseStarted write failed: {error}; deferred to next watchdog scan"
+                    tracing::warn!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        instance_name = %name,
+                        error = %error,
+                        message = "runtime journal LeaseReleaseStarted write failed; deferred to next watchdog scan",
                     );
                     self.instances
                         .lock()
@@ -626,7 +639,13 @@ impl KernelServiceAdapter {
                             // Class B outcome: without the durable termination
                             // record the Lease fails closed (FAILED) so the
                             // resource is never silently reusable.
-                            eprintln!("runtime journal InstanceTerminated write failed: {error}");
+                            tracing::error!(
+                                event.name = "platform.kernel.journal_write_failed",
+                                error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                                instance_name = %journal_instance_name,
+                                error = %error,
+                                message = "runtime journal InstanceTerminated write failed during watchdog reap; failing lease closed",
+                            );
                             let _ = self
                                 .daemon
                                 .fail_release(&lease.lease_name, lease.fence_token);
@@ -659,8 +678,20 @@ impl KernelServiceAdapter {
                             ) {
                                 // Class C: the Lease is already durably RELEASED;
                                 // this record is best-effort telemetry.
-                                eprintln!("runtime journal WatchdogReaped write failed: {error}");
+                                tracing::warn!(
+                                    event.name = "platform.kernel.journal_write_failed",
+                                    instance_name = %journal_instance_name,
+                                    error = %error,
+                                    message = "runtime journal WatchdogReaped write failed",
+                                );
                             }
+                            tracing::info!(
+                                event.name = "platform.worker.reaped",
+                                instance_name = %name,
+                                lease_name = %lease.lease_name,
+                                fence_token = lease.fence_token,
+                                message = "Worker process reaped by watchdog and lease released",
+                            );
                             self.instances
                                 .lock()
                                 .expect("instance lock poisoned")
@@ -692,7 +723,13 @@ impl KernelServiceAdapter {
                     ) {
                         // Class C: the Lease was already fail_released (FAILED)
                         // with the allocation held; this record is telemetry.
-                        eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                        tracing::error!(
+                            event.name = "platform.kernel.journal_write_failed",
+                            error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                            instance_name = %name,
+                            error = %error,
+                            message = "runtime journal InstanceCleanupFailed write failed; lease quarantined",
+                        );
                     }
                 }
             } else {
@@ -711,7 +748,13 @@ impl KernelServiceAdapter {
                 ) {
                     // Class C: the Lease was already fail_released (FAILED)
                     // with the allocation held; this record is telemetry.
-                    eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                    tracing::error!(
+                        event.name = "platform.kernel.journal_write_failed",
+                        error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                        instance_name = %name,
+                        error = %error,
+                        message = "runtime journal InstanceCleanupFailed write failed on watchdog stop failure",
+                    );
                 }
             }
         }

@@ -411,7 +411,33 @@ impl CgroupV2Runtime {
         let complete = wait_until_empty(&cgroup_path, Duration::from_secs(10));
         let oom_killed = read_oom_kill_count(&cgroup_path) > before_oom;
         if complete {
-            let _ = fs::remove_dir(&cgroup_path);
+            if let Err(err) = fs::remove_dir(&cgroup_path) {
+                tracing::warn!(
+                    event.name = "platform.sandbox.cleanup_warning",
+                    error.code = "PLATFORM.SANDBOX.CGROUP_INIT_FAILED",
+                    cgroup_path = %cgroup_path.display(),
+                    error = %err,
+                    message = "Failed to remove cgroup directory during recovery cleanup",
+                );
+            }
+            tracing::info!(
+                event.name = "platform.sandbox.terminated",
+                pid = evidence.pid,
+                cgroup_path = %cgroup_path.display(),
+                exit_code = ?exit_code,
+                oom_killed = oom_killed,
+                message = "Stale sandbox process terminated and cgroup cleaned up during recovery",
+            );
+        } else {
+            tracing::error!(
+                event.name = "platform.sandbox.terminated",
+                error.code = "PLATFORM.SANDBOX.KILL_FAILED",
+                pid = evidence.pid,
+                cgroup_path = %cgroup_path.display(),
+                exit_code = ?exit_code,
+                oom_killed = oom_killed,
+                message = "Stale sandbox process or cgroup cleanup unconfirmed during recovery",
+            );
         }
         Ok(CleanupReport {
             complete,
@@ -732,6 +758,13 @@ impl CgroupV2Runtime {
             return Ok(());
         }
         fs::write(cgroup_path.join("cgroup.kill"), "1").map_err(|error| {
+            tracing::warn!(
+                event.name = "platform.sandbox.kill_warning",
+                error.code = "PLATFORM.SANDBOX.KILL_FAILED",
+                cgroup_path = %cgroup_path.display(),
+                error = %error,
+                message = "Failed to write 1 to cgroup.kill",
+            );
             ProviderError::new("linux-cgroup-v2", "CGROUP_KILL_FAILED", &error.to_string())
         })
     }
@@ -1142,6 +1175,24 @@ impl ProcessRuntime for CgroupV2Runtime {
                 reason_code: "CGROUP_NOT_EMPTY".to_string(),
                 summary: "resource lease remains held and accelerator is quarantined".to_string(),
             });
+            tracing::error!(
+                event.name = "platform.sandbox.terminated",
+                error.code = "PLATFORM.SANDBOX.KILL_FAILED",
+                pid = handle.pid,
+                cgroup_path = %handle.cgroup_path.display(),
+                exit_code = ?exit_code,
+                oom_killed = oom_killed,
+                message = "Sandbox process or cgroup cleanup unconfirmed; quarantine maintained",
+            );
+        } else {
+            tracing::info!(
+                event.name = "platform.sandbox.terminated",
+                pid = handle.pid,
+                cgroup_path = %handle.cgroup_path.display(),
+                exit_code = ?exit_code,
+                oom_killed = oom_killed,
+                message = "Sandbox process terminated and cgroup cleaned up successfully",
+            );
         }
         if oom_killed {
             conditions.push(ProcessCondition {
@@ -1150,10 +1201,19 @@ impl ProcessRuntime for CgroupV2Runtime {
             });
         }
         if complete {
-            if self.config.dev_mode {
-                let _ = fs::remove_dir_all(&handle.cgroup_path);
+            let res = if self.config.dev_mode {
+                fs::remove_dir_all(&handle.cgroup_path)
             } else {
-                let _ = fs::remove_dir(&handle.cgroup_path);
+                fs::remove_dir(&handle.cgroup_path)
+            };
+            if let Err(err) = res {
+                tracing::warn!(
+                    event.name = "platform.sandbox.cleanup_warning",
+                    error.code = "PLATFORM.SANDBOX.CGROUP_INIT_FAILED",
+                    cgroup_path = %handle.cgroup_path.display(),
+                    error = %err,
+                    message = "Failed to remove cgroup directory during completed cleanup",
+                );
             }
         }
         Ok(CleanupReport {

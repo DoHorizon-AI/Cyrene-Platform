@@ -1523,10 +1523,16 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
     let reader_running = running.clone();
     let reader = thread::spawn(move || {
         let mut checked = 0;
-        while reader_running.load(Ordering::SeqCst) {
+        loop {
+            let keep_running = reader_running.load(Ordering::SeqCst);
             let snapshot = match reader_authority.snapshot(&reader_context, &reader_principal) {
                 Ok(snapshot) => snapshot,
-                Err(_) => continue,
+                Err(_) => {
+                    if !keep_running {
+                        break;
+                    }
+                    continue;
+                }
             };
             let page = reader_authority
                 .read_events(&reader_context, &reader_principal, &snapshot.cursor, 256)
@@ -1547,6 +1553,9 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
             );
             assert!(page.latest_available_sequence >= snapshot.cursor.sequence);
             checked += 1;
+            if !keep_running {
+                break;
+            }
         }
         checked
     });

@@ -92,10 +92,28 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             // Durable fence record could not be persisted: roll back the
             // in-memory lease so it is never externally visible without the
             // durable evidence the contract requires.
-            let _ = self.daemon.begin_release(&lease.name, lease.fence_token);
+            if let Err(rollback_err) = self.daemon.begin_release(&lease.name, lease.fence_token) {
+                tracing::error!(
+                    event.name = "platform.lease.release_deferred",
+                    error.code = "PLATFORM.LEASE.RELEASE_ROLLBACK_FAILED",
+                    lease_name = %lease.name,
+                    fence_token = lease.fence_token,
+                    journal_error = %error,
+                    rollback_error = %rollback_err,
+                    allocation_released = false,
+                    message = "Could not persist release intent or rollback in-memory lease; allocation remains reserved",
+                );
+            }
             let _ = self.daemon.complete_release(&lease.name, lease.fence_token);
             return Err(provider_status(error));
         }
+        tracing::info!(
+            event.name = "platform.lease.acquired",
+            lease_name = %lease.name,
+            fence_token = lease.fence_token,
+            generation = lease.generation,
+            message = "Lease successfully acquired and recorded in journal",
+        );
         Ok(Response::new(to_semantic_proto_lease(&lease)))
     }
 
@@ -417,9 +435,17 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         self.publish_cleanup_events(&request.process_name, &report);
         if !report.complete {
             if let Some(lease) = lease.as_ref() {
-                let _ = self
-                    .daemon
-                    .fail_release(&lease.lease_name, lease.fence_token);
+                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                    tracing::error!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        lease_name = %lease.lease_name,
+                        fence_token = lease.fence_token,
+                        error = %fail_err,
+                        allocation_released = false,
+                        message = "Failed to mark lease failed_release during quarantine",
+                    );
+                }
             }
             if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
@@ -429,7 +455,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             ) {
                 // Class C: the Lease was already fail_released (FAILED) with
                 // the allocation held; this record is telemetry.
-                eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                tracing::error!(
+                    event.name = "platform.kernel.journal_write_failed",
+                    error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                    process_name = %request.process_name,
+                    error = %error,
+                    message = "runtime journal InstanceCleanupFailed write failed; lease remains quarantined",
+                );
             }
             let error =
                 ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
@@ -453,20 +485,45 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 Some(lease),
                 "LEASE_RELEASED",
             ) {
-                let _ = self
-                    .daemon
-                    .fail_release(&lease.lease_name, lease.fence_token);
+                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                    tracing::error!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        lease_name = %lease.lease_name,
+                        fence_token = lease.fence_token,
+                        journal_error = %error,
+                        fail_release_error = %fail_err,
+                        allocation_released = false,
+                        message = "Failed to record LeaseReleased to journal; fail_release in daemon also failed",
+                    );
+                }
                 return Err(provider_status(error));
             }
             if let Err(error) = self
                 .daemon
                 .complete_release(&lease.lease_name, lease.fence_token)
             {
-                let _ = self
-                    .daemon
-                    .fail_release(&lease.lease_name, lease.fence_token);
+                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                    tracing::error!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        lease_name = %lease.lease_name,
+                        fence_token = lease.fence_token,
+                        complete_release_error = %error,
+                        fail_release_error = %fail_err,
+                        allocation_released = false,
+                        message = "Failed to complete lease release; fail_release in daemon also failed",
+                    );
+                }
                 return Err(provider_status(error));
             }
+            tracing::info!(
+                event.name = "platform.lease.released",
+                lease_name = %lease.lease_name,
+                fence_token = lease.fence_token,
+                process_name = %request.process_name,
+                message = "Lease successfully released after termination",
+            );
         }
         // A terminated Worker that held the released Lease no longer has
         // authority: its Endpoint/Grant metadata must not outlive the Lease.
@@ -572,9 +629,17 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         self.publish_cleanup_events(&target, &report);
         if !report.complete {
             if let Some(lease) = lease.as_ref() {
-                let _ = self
-                    .daemon
-                    .fail_release(&lease.lease_name, lease.fence_token);
+                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                    tracing::error!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        lease_name = %lease.lease_name,
+                        fence_token = lease.fence_token,
+                        error = %fail_err,
+                        allocation_released = false,
+                        message = "Failed to mark lease failed_release during cancel quarantine",
+                    );
+                }
             }
             if let Err(error) = self.record_runtime(
                 RuntimeJournalEvent::InstanceCleanupFailed,
@@ -584,7 +649,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             ) {
                 // Class C: the Lease was already fail_released (FAILED) with
                 // the allocation held; this record is telemetry.
-                eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                tracing::error!(
+                    event.name = "platform.kernel.journal_write_failed",
+                    error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                    process_name = %target,
+                    error = %error,
+                    message = "runtime journal InstanceCleanupFailed write failed; lease remains quarantined",
+                );
             }
             let error =
                 ProviderError::new("kernel-daemon", "RESOURCE_QUARANTINED", &report.reason_code);
@@ -604,20 +675,45 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 Some(lease),
                 "LEASE_RELEASED",
             ) {
-                let _ = self
-                    .daemon
-                    .fail_release(&lease.lease_name, lease.fence_token);
+                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                    tracing::error!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        lease_name = %lease.lease_name,
+                        fence_token = lease.fence_token,
+                        journal_error = %error,
+                        fail_release_error = %fail_err,
+                        allocation_released = false,
+                        message = "Failed to record LeaseReleased to journal on cancel; fail_release in daemon also failed",
+                    );
+                }
                 return Err(provider_status(error));
             }
             if let Err(error) = self
                 .daemon
                 .complete_release(&lease.lease_name, lease.fence_token)
             {
-                let _ = self
-                    .daemon
-                    .fail_release(&lease.lease_name, lease.fence_token);
+                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                    tracing::error!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        lease_name = %lease.lease_name,
+                        fence_token = lease.fence_token,
+                        complete_release_error = %error,
+                        fail_release_error = %fail_err,
+                        allocation_released = false,
+                        message = "Failed to complete lease release on cancel; fail_release in daemon also failed",
+                    );
+                }
                 return Err(provider_status(error));
             }
+            tracing::info!(
+                event.name = "platform.lease.released",
+                lease_name = %lease.lease_name,
+                fence_token = lease.fence_token,
+                process_name = %target,
+                message = "Lease successfully released after cancellation",
+            );
         }
         // A cancelled Worker that held the released Lease no longer has
         // authority: its Endpoint/Grant metadata must not outlive the Lease.
