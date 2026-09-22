@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_log_level(log_level);
     let _guard = cy_observability::init_observability(obs_config).ok();
 
-    let config = match Args::parse().and_then(|a| a.into_config().map_err(Into::into)) {
+    let config = match Args::parse().and_then(Args::into_config) {
         Ok(c) => c,
         Err(err) => {
             tracing::error!(

@@ -213,17 +213,17 @@ impl FilesystemPackageRuntime {
             last_failure_message: None,
         };
         if let Err(error) = self.write_activation(&record) {
-            if let Ok(mut sup) = self.service_supervisor() {
-                if let Err(deact_err) = sup.deactivate(&request.binding_id) {
-                    tracing::error!(
-                        event.name = "platform.package.deactivation_failed",
-                        error.code = "PLATFORM.PACKAGE.DEACTIVATION_FAILED",
-                        binding_id = %request.binding_id,
-                        error = %deact_err,
-                        write_error = %error,
-                        message = "Failed to rollback service activation after write_activation failure",
-                    );
-                }
+            if let Ok(mut sup) = self.service_supervisor()
+                && let Err(deact_err) = sup.deactivate(&request.binding_id)
+            {
+                tracing::error!(
+                    event.name = "platform.package.deactivation_failed",
+                    error.code = "PLATFORM.PACKAGE.DEACTIVATION_FAILED",
+                    binding_id = %request.binding_id,
+                    error = %deact_err,
+                    write_error = %error,
+                    message = "Failed to rollback service activation after write_activation failure",
+                );
             }
             return Err(error);
         }
@@ -543,16 +543,17 @@ impl FilesystemPackageRuntime {
                 )),
             }
         })();
-        if result.is_err() && stage.exists() {
-            if let Err(err) = fs::remove_dir_all(&stage) {
-                tracing::warn!(
-                    event.name = "platform.package.staging_cleanup_warning",
-                    error.code = "PLATFORM.PACKAGE.STAGE_FAILED",
-                    stage_path = %stage.display(),
-                    error = %err,
-                    message = "Failed to clean up staging directory after installation failure",
-                );
-            }
+        if result.is_err()
+            && stage.exists()
+            && let Err(err) = fs::remove_dir_all(&stage)
+        {
+            tracing::warn!(
+                event.name = "platform.package.staging_cleanup_warning",
+                error.code = "PLATFORM.PACKAGE.STAGE_FAILED",
+                stage_path = %stage.display(),
+                error = %err,
+                message = "Failed to clean up staging directory after installation failure",
+            );
         }
         result
     }
@@ -683,16 +684,17 @@ impl FilesystemPackageRuntime {
                 )),
             }
         })();
-        if result.is_err() && stage.exists() {
-            if let Err(err) = fs::remove_dir_all(&stage) {
-                tracing::warn!(
-                    event.name = "platform.package.staging_cleanup_warning",
-                    error.code = "PLATFORM.PACKAGE.STAGE_FAILED",
-                    stage_path = %stage.display(),
-                    error = %err,
-                    message = "Failed to clean up dependency staging directory after failure",
-                );
-            }
+        if result.is_err()
+            && stage.exists()
+            && let Err(err) = fs::remove_dir_all(&stage)
+        {
+            tracing::warn!(
+                event.name = "platform.package.staging_cleanup_warning",
+                error.code = "PLATFORM.PACKAGE.STAGE_FAILED",
+                stage_path = %stage.display(),
+                error = %err,
+                message = "Failed to clean up dependency staging directory after failure",
+            );
         }
         result
     }

@@ -143,7 +143,7 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
                 let now = std::time::Instant::now();
                 if is_first
                     || last_warn_time
-                        .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10))
+                        .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(10))
                 {
                     last_warn_time = Some(now);
                     tracing::warn!(
@@ -225,7 +225,7 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
                         );
                     }
                 } else if last_warn_time
-                    .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10))
+                    .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(10))
                 {
                     last_warn_time = Some(now);
                     tracing::warn!(
