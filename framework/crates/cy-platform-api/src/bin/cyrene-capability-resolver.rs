@@ -14,8 +14,7 @@
 //!
 //! This binary writes a **single JSON object and nothing else** to stdout.
 //! Any diagnostic or log line added here will be parsed as protocol output by
-//! callers such as `PlatformResolverAdapter` in Cyrene-Exchange, which reads
-//! stdout first and only falls back to stderr.
+//! downstream consumers, which read stdout first and only fall back to stderr.
 //!
 //! - success → `{"resolutions": [...]}` and exit 0
 //! - failure → `{"error": "<message>"}` and exit 2
