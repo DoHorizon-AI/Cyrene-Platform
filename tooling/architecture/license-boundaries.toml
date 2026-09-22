@@ -7,6 +7,7 @@ public_permissive = [
     "cy-execution-fabric",
     "cy-kernel-contract",
     "cy-manifest",
+    "cy-observability",
     "cy-proto",
     "cy-workspace-fabric",
 ]
