@@ -132,8 +132,14 @@ mod tests {
     fn sensitive_values_are_redacted() {
         assert_eq!(sanitize_field("token", "secret123"), REDACTED_MARKER);
         assert_eq!(sanitize_field("api_key", "sk-12345"), REDACTED_MARKER);
-        assert_eq!(sanitize_field("custom", "Bearer my-jwt-token"), REDACTED_MARKER);
-        assert_eq!(sanitize_field("custom", "cyk_live_test_key"), REDACTED_MARKER);
+        assert_eq!(
+            sanitize_field("custom", "Bearer my-jwt-token"),
+            REDACTED_MARKER
+        );
+        assert_eq!(
+            sanitize_field("custom", "cyk_live_test_key"),
+            REDACTED_MARKER
+        );
         assert_eq!(sanitize_field("status", "healthy"), "healthy");
     }
 

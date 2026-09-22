@@ -127,7 +127,8 @@ impl TraceContext {
         if flags_str.len() != 2 || !flags_str.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(CorrelationError::InvalidFlags);
         }
-        let flags = u8::from_str_radix(flags_str, 16).map_err(|_| CorrelationError::InvalidFlags)?;
+        let flags =
+            u8::from_str_radix(flags_str, 16).map_err(|_| CorrelationError::InvalidFlags)?;
 
         Ok(Self {
             trace_id,
@@ -187,7 +188,12 @@ pub fn sanitize_correlation_id(raw: &str, max_len: usize) -> Option<String> {
     let filtered: String = trimmed
         .chars()
         .filter(|c| {
-            c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.' || *c == '/' || *c == ':'
+            c.is_ascii_alphanumeric()
+                || *c == '-'
+                || *c == '_'
+                || *c == '.'
+                || *c == '/'
+                || *c == ':'
         })
         .collect();
 

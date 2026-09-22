@@ -435,7 +435,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         self.publish_cleanup_events(&request.process_name, &report);
         if !report.complete {
             if let Some(lease) = lease.as_ref() {
-                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                if let Err(fail_err) = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token)
+                {
                     tracing::error!(
                         event.name = "platform.lease.release_deferred",
                         error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
@@ -485,7 +488,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 Some(lease),
                 "LEASE_RELEASED",
             ) {
-                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                if let Err(fail_err) = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token)
+                {
                     tracing::error!(
                         event.name = "platform.lease.release_deferred",
                         error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
@@ -503,7 +509,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 .daemon
                 .complete_release(&lease.lease_name, lease.fence_token)
             {
-                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                if let Err(fail_err) = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token)
+                {
                     tracing::error!(
                         event.name = "platform.lease.release_deferred",
                         error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
@@ -629,7 +638,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         self.publish_cleanup_events(&target, &report);
         if !report.complete {
             if let Some(lease) = lease.as_ref() {
-                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                if let Err(fail_err) = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token)
+                {
                     tracing::error!(
                         event.name = "platform.lease.release_deferred",
                         error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
@@ -675,7 +687,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 Some(lease),
                 "LEASE_RELEASED",
             ) {
-                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                if let Err(fail_err) = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token)
+                {
                     tracing::error!(
                         event.name = "platform.lease.release_deferred",
                         error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
@@ -693,7 +708,10 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                 .daemon
                 .complete_release(&lease.lease_name, lease.fence_token)
             {
-                if let Err(fail_err) = self.daemon.fail_release(&lease.lease_name, lease.fence_token) {
+                if let Err(fail_err) = self
+                    .daemon
+                    .fail_release(&lease.lease_name, lease.fence_token)
+                {
                     tracing::error!(
                         event.name = "platform.lease.release_deferred",
                         error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",

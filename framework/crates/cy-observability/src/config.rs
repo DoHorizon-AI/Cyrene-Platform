@@ -192,7 +192,8 @@ mod tests {
 
     #[test]
     fn invalid_log_level_fails_validation() {
-        let invalid = ObservabilityConfig::managed("test").with_log_level("invalid_level_syntax!!!");
+        let invalid =
+            ObservabilityConfig::managed("test").with_log_level("invalid_level_syntax!!!");
         let result = invalid.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid log level"));

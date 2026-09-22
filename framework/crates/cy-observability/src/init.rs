@@ -41,7 +41,9 @@ pub enum ObservabilityError {
 /// 4. 返回 RAII 守卫，确保有界刷新与安全关闭。
 ///
 /// ════════════════════════════════════════════════════════════════════════
-pub fn init_observability(config: ObservabilityConfig) -> Result<ObservabilityGuard, ObservabilityError> {
+pub fn init_observability(
+    config: ObservabilityConfig,
+) -> Result<ObservabilityGuard, ObservabilityError> {
     config
         .validate()
         .map_err(ObservabilityError::InvalidConfiguration)?;

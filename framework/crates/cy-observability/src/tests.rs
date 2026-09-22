@@ -242,7 +242,10 @@ fn log_injection_attempt_does_not_create_multiple_lines() {
     );
 
     let parsed: Value = serde_json::from_str(&lines[0]).expect("must remain valid JSON");
-    assert!(parsed["message"].as_str().unwrap().contains("Fake admin grant"));
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap()
+        .contains("Fake admin grant"));
     assert_eq!(parsed["attributes"]["user_input"], "malicious\r\nline2");
 }
 
@@ -271,7 +274,8 @@ fn oversize_record_is_pruned_without_breaking_json() {
     let lines = writer.lines();
     assert_eq!(lines.len(), 1);
 
-    let record: Value = serde_json::from_str(&lines[0]).expect("oversize record must remain valid JSON");
+    let record: Value =
+        serde_json::from_str(&lines[0]).expect("oversize record must remain valid JSON");
     assert_eq!(record["schema_version"], 1);
     assert_eq!(record["event.name"], "platform.test.oversize");
     assert_eq!(record["attributes"]["truncated"], true);
@@ -433,9 +437,9 @@ fn rolling_file_config_defaults_and_builder() {
 
 #[test]
 fn rolling_file_sink_rotates_and_shifts_history() {
+    use crate::sink::{BoundedRollingFileSink, RollingFileConfig};
     use std::io::Write;
     use tempfile::tempdir;
-    use crate::sink::{BoundedRollingFileSink, RollingFileConfig};
 
     let dir = tempdir().expect("create temp dir");
     let config = RollingFileConfig::new(dir.path(), "test-app", 100, 3);
@@ -504,9 +508,9 @@ fn rolling_file_sink_rotates_and_shifts_history() {
 
 #[test]
 fn rolling_file_sink_tracks_dropped_writes_on_error() {
+    use crate::sink::{BoundedRollingFileSink, RollingFileConfig};
     use std::io::Write;
     use tempfile::tempdir;
-    use crate::sink::{BoundedRollingFileSink, RollingFileConfig};
 
     let dir = tempdir().expect("create temp dir");
     let config = RollingFileConfig::new(dir.path(), "readonly-app", 100, 2);
@@ -588,7 +592,11 @@ fn concurrent_threads_maintain_isolated_correlation_contexts() {
     h2.join().unwrap();
 
     let lines = writer.lines();
-    assert_eq!(lines.len(), 2, "expected exactly two records from concurrent threads");
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected exactly two records from concurrent threads"
+    );
 
     let records: Vec<Value> = lines
         .iter()
@@ -611,5 +619,3 @@ fn concurrent_threads_maintain_isolated_correlation_contexts() {
     assert_eq!(rec2["attributes"]["request_id"], "req-2");
     assert_eq!(rec2["message"], "Task 2 event");
 }
-
-

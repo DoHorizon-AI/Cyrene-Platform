@@ -141,7 +141,10 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
                 let first = first_failure_time.get_or_insert_with(std::time::Instant::now);
                 retry_count += 1;
                 let now = std::time::Instant::now();
-                if is_first || last_warn_time.map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10)) {
+                if is_first
+                    || last_warn_time
+                        .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10))
+                {
                     last_warn_time = Some(now);
                     tracing::warn!(
                         event.name = "platform.node.reconnecting",
@@ -178,7 +181,9 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
         match connect_once(&config, &bridge, node, &resume_token).await {
             Ok(next_resume_token) => {
                 if retry_count > 0 || first_failure_time.is_some() {
-                    let elapsed_ms = first_failure_time.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
+                    let elapsed_ms = first_failure_time
+                        .map(|t| t.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
                     tracing::info!(
                         event.name = "platform.node.reconnected",
                         node_id = %config.node_id,
@@ -219,7 +224,9 @@ pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentErro
                             message = "Initial connection to control plane failed; initiating reconnect loop",
                         );
                     }
-                } else if last_warn_time.map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10)) {
+                } else if last_warn_time
+                    .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(10))
+                {
                     last_warn_time = Some(now);
                     tracing::warn!(
                         event.name = "platform.node.reconnecting",

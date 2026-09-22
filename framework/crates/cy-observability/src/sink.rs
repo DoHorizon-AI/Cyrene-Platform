@@ -117,9 +117,10 @@ impl BoundedRollingFileSink {
         let active_path = self.active_file_path();
         if active_path.exists() {
             // 1. Remove oldest file if at history capacity
-            let oldest_path = self
-                .directory
-                .join(format!("{}.log.{}", self.file_prefix, self.max_history_files));
+            let oldest_path = self.directory.join(format!(
+                "{}.log.{}",
+                self.file_prefix, self.max_history_files
+            ));
             if oldest_path.exists() {
                 let _ = fs::remove_file(&oldest_path);
             }

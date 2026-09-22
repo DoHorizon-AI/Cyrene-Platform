@@ -226,7 +226,9 @@ where
 
                 if serialized.len() > self.max_record_bytes {
                     // Prune attributes to ensure valid JSON within budget
-                    if let Some(attrs) = record.get_mut("attributes").and_then(|a| a.as_object_mut()) {
+                    if let Some(attrs) =
+                        record.get_mut("attributes").and_then(|a| a.as_object_mut())
+                    {
                         attrs.clear();
                         attrs.insert("truncated".to_string(), Value::Bool(true));
                     }
@@ -248,7 +250,13 @@ where
                 for (k, v) in &visitor.attributes {
                     let val_str = match v {
                         Value::String(s) => s.as_str(),
-                        Value::Bool(b) => if *b { "true" } else { "false" },
+                        Value::Bool(b) => {
+                            if *b {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                        }
                         Value::Number(n) => {
                             attrs_str.push_str(&format!(" {k}={n}"));
                             continue;
