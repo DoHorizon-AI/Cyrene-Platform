@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate the policy and lifecycle document of this Platform checkout.
 
-中文：验证当前 Platform 检出的仓库策略及生命周期文档。
+中文:验证当前 Platform 检出的仓库策略及生命周期文档。
 """
 
 import sys
@@ -31,7 +31,7 @@ VALID_ROLES = {
 def find_repository_root(start_path: Path | None = None) -> Path:
     """Locate the current repository without discovering sibling checkouts.
 
-    中文：定位当前仓库，不搜索相邻的仓库检出目录。
+    中文:定位当前仓库,不搜索相邻的仓库检出目录。
     """
     current = (start_path or Path(__file__)).resolve()
     for parent in [current, *current.parents]:
@@ -43,7 +43,7 @@ def find_repository_root(start_path: Path | None = None) -> Path:
 def validate_repository_policy(repository_root: Path) -> list[str]:
     """Validate one repository policy against its local lifecycle document.
 
-    中文：依据仓库本地的生命周期文档验证仓库策略。
+    中文:依据仓库本地的生命周期文档验证仓库策略。
     """
     errors: list[str] = []
     policy_file = repository_root / "repository-policy.yaml"

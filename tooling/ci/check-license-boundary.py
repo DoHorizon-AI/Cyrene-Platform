@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reject normal/build dependency edges from public crates into Platform Core.
 
-中文：禁止公开 crate 通过普通或构建依赖边依赖 Platform Core。
+中文:禁止公开 crate 通过普通或构建依赖边依赖 Platform Core。
 """
 
 from __future__ import annotations

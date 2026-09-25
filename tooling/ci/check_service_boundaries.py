@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate source boundaries owned by the Cyrene-Platform repository.
 
-中文：验证 Cyrene-Platform 仓库负责的源码边界。
+中文:验证 Cyrene-Platform 仓库负责的源码边界。
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ CODE_EXTENSIONS = {".py", ".cs", ".kt", ".rs", ".go", ".ts", ".js"}
 def find_platform_root(start_path: Path | None = None) -> Path:
     """Locate the current Platform checkout without discovering siblings.
 
-    中文：定位当前 Platform 检出目录，不搜索相邻仓库。
+    中文:定位当前 Platform 检出目录,不搜索相邻仓库。
     """
     current = (start_path or Path(__file__)).resolve()
     for parent in [current, *current.parents]:
@@ -51,7 +51,7 @@ def find_platform_root(start_path: Path | None = None) -> Path:
 def tracked_source_files(root: Path):
     """Yield Platform source files while excluding generated and build trees.
 
-    中文：枚举 Platform 源码文件，并排除生成目录和构建目录。
+    中文:枚举 Platform 源码文件,并排除生成目录和构建目录。
     """
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix not in CODE_EXTENSIONS:
@@ -64,7 +64,7 @@ def tracked_source_files(root: Path):
 def check_service_boundaries(platform_root: Path) -> list[Violation]:
     """Check Kernel purity and prevent imports of private implementations.
 
-    中文：检查 Kernel 的纯度，并阻止导入私有实现。
+    中文:检查 Kernel 的纯度,并阻止导入私有实现。
     """
     violations: list[Violation] = []
     kernel_dir = platform_root / "kernel" / "crates"

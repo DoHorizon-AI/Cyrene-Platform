@@ -2,7 +2,7 @@
 """
 Cyrene Unified Local Verification Orchestrator
 Provides a single-entry command for developers to run fast, deterministic checks before opening a PR.
-中文：Cyrene 统一本地验证编排器。为开发者提供单一入口，在创建 PR 前运行快速且确定性的检查。
+中文:Cyrene 统一本地验证编排器。为开发者提供单一入口,在创建 PR 前运行快速且确定性的检查。
 """
 
 import argparse

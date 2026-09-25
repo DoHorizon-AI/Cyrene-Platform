@@ -3,7 +3,7 @@
 │  📄 check-api-naming.py                                               │
 │  Module: tooling.ci.check_api_naming                                 │
 │  Role: Enforces the Cyrene API Naming Constitution during migration.  │
-│  角色：在迁移期间执行 Cyrene API 命名宪章。                            │
+│  角色:在迁移期间执行 Cyrene API 命名宪章。                            │
 │                                                                      │
 │  模块职责：在迁移期阻止新的 legacy API 命名回流。                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -24,7 +24,7 @@ from typing import Iterable
 def git_output(repo_root: Path, *args: str) -> str:
     """Run a read-only Git query and return UTF-8 text.
 
-    中文：执行只读 Git 查询并返回 UTF-8 文本。
+    中文:执行只读 Git 查询并返回 UTF-8 文本。
     """
 
     result = subprocess.run(
@@ -41,7 +41,7 @@ def git_output(repo_root: Path, *args: str) -> str:
 def source_paths(repo_root: Path, roots: Iterable[str]) -> list[str]:
     """Return tracked and untracked paths below the configured source roots.
 
-    中文：返回已配置源码根目录下受跟踪和未跟踪的路径。
+    中文:返回已配置源码根目录下受跟踪和未跟踪的路径。
     """
 
     tracked = git_output(repo_root, "ls-files", "-z", "--", *roots).split("\0")
@@ -60,7 +60,7 @@ def source_paths(repo_root: Path, roots: Iterable[str]) -> list[str]:
 def is_excluded(path: str, excluded_globs: Iterable[str]) -> bool:
     """Return whether a path is documentation, fixture, or generated output.
 
-    中文：判断路径是否属于文档、fixture 或生成输出的排除范围。
+    中文:判断路径是否属于文档、fixture 或生成输出的排除范围。
     """
 
     return any(fnmatch.fnmatch(path, pattern) for pattern in excluded_globs)
@@ -69,7 +69,7 @@ def is_excluded(path: str, excluded_globs: Iterable[str]) -> bool:
 def compile_patterns(symbols: Iterable[str]) -> list[tuple[str, re.Pattern[str]]]:
     """Compile exact identifier-boundary patterns for configured symbols.
 
-    中文：为已配置的符号编译精确的标识符边界匹配模式。
+    中文:为已配置的符号编译精确的标识符边界匹配模式。
     """
 
     return [
@@ -81,7 +81,7 @@ def compile_patterns(symbols: Iterable[str]) -> list[tuple[str, re.Pattern[str]]
 def diff_lines(repo_root: Path, base: str | None, paths: list[str]) -> list[tuple[str, int, str]]:
     """Read added lines from a branch diff and local staged/unstaged changes.
 
-    中文：读取分支差异以及本地暂存和未暂存更改中的新增行。
+    中文:读取分支差异以及本地暂存和未暂存更改中的新增行。
     """
 
     commands: list[list[str]] = []
@@ -136,7 +136,7 @@ def diff_lines(repo_root: Path, base: str | None, paths: list[str]) -> list[tupl
 def all_source_lines(repo_root: Path, paths: list[str]) -> list[tuple[str, int, str]]:
     """Read all configured source lines for post-migration enforcement.
 
-    中文：读取所有已配置的源码行，供迁移后的强制检查使用。
+    中文:读取所有已配置的源码行,供迁移后的强制检查使用。
     """
 
     lines: list[tuple[str, int, str]] = []
@@ -154,7 +154,7 @@ def semantic_shape_violations(
 ) -> list[tuple[str, int, str, str]]:
     """Enforce qualified Lease and Event projection rules without broad grep.
 
-    中文：按限定范围执行 Lease 和 Event 投影规则，不使用宽泛的 grep 搜索。
+    中文:按限定范围执行 Lease 和 Event 投影规则,不使用宽泛的 grep 搜索。
     """
 
     violations: list[tuple[str, int, str, str]] = []
@@ -172,7 +172,7 @@ def semantic_shape_violations(
 def main() -> int:
     """Validate configured source lines against the forbidden symbol inventory.
 
-    中文：依据禁止符号清单验证已配置的源码行。
+    中文:依据禁止符号清单验证已配置的源码行。
     """
 
     parser = argparse.ArgumentParser(description=__doc__)

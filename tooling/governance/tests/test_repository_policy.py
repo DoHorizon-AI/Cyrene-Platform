@@ -1,6 +1,6 @@
 """Tests for the Platform-local repository policy validator.
 
-中文：Platform 本地仓库策略验证器的测试。
+中文:Platform 本地仓库策略验证器的测试。
 """
 
 import subprocess

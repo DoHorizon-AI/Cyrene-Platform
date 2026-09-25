@@ -1,6 +1,6 @@
 """Unit test for the Platform-local source boundary guard.
 
-中文：Platform 本地源码边界守卫的单元测试。
+中文:Platform 本地源码边界守卫的单元测试。
 """
 
 import sys

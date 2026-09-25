@@ -40,7 +40,7 @@ PACKAGES = tuple(EXECUTABLES.values())
 class BootstrapFailure(RuntimeError):
     """Fail-closed bootstrap error with a stable, path-free public code.
 
-    中文：以稳定且不含路径的公开错误码表示启动失败，并按 fail-closed 方式处理。
+    中文:以稳定且不含路径的公开错误码表示启动失败,并按 fail-closed 方式处理。
     """
 
     def __init__(self, code: str, detail: str) -> None:
@@ -52,7 +52,7 @@ class BootstrapFailure(RuntimeError):
 class Layout:
     """Private paths rooted under one explicit runtime home.
 
-    中文：所有私有路径均位于一个明确指定的 runtime home 下。
+    中文:所有私有路径均位于一个明确指定的 runtime home 下。
     """
 
     home: Path
@@ -73,7 +73,7 @@ class Layout:
     def create(cls, home: Path) -> Layout:
         """Create the bounded runtime layout without deleting prior evidence.
 
-        中文：创建边界明确的 runtime 目录结构，不删除已有证据。
+        中文:创建边界明确的 runtime 目录结构,不删除已有证据。
         """
 
         if not home.expanduser().is_absolute():
@@ -115,7 +115,7 @@ class Layout:
 def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
     """Persist one JSON document atomically with private permissions.
 
-    中文：以原子方式并使用私有权限持久化单个 JSON 文档。
+    中文:以原子方式并使用私有权限持久化单个 JSON 文档。
     """
 
     pending = path.with_suffix(path.suffix + ".pending")
@@ -179,7 +179,7 @@ def _prepare_signing_key(layout: Layout) -> None:
 def _build_binaries(root: Path, layout: Layout) -> dict[str, Path]:
     """Build exact-source binaries and install stable copies under runtime home.
 
-    中文：从精确源码构建二进制文件，并在 runtime home 下安装稳定副本。
+    中文:从精确源码构建二进制文件,并在 runtime home 下安装稳定副本。
     """
 
     cargo = shutil.which("cargo")
@@ -289,7 +289,7 @@ def _start_component(
 ) -> tuple[subprocess.Popen[bytes], dict[str, Any]]:
     """Start one owned process and require its declared UDS readiness.
 
-    中文：启动一个受管理的进程，并要求其达到声明的 UDS 就绪状态。
+    中文:启动一个受管理的进程,并要求其达到声明的 UDS 就绪状态。
     """
 
     log = (layout.logs / f"{name}.log").open("ab", buffering=0)
@@ -332,7 +332,7 @@ def _remove_owned_sockets(layout: Layout) -> None:
 def _stop_records(records: dict[str, dict[str, Any]], timeout: float = 15) -> bool:
     """Stop exact recorded process groups in reverse dependency order.
 
-    中文：按依赖顺序的逆序停止已准确记录的进程组。
+    中文:按依赖顺序的逆序停止已准确记录的进程组。
     """
 
     forced = False
@@ -367,7 +367,7 @@ def _host_projection(wsl: bool) -> dict[str, Any]:
 def _public_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
     """Return only fields approved for CI/public acceptance evidence.
 
-    中文：仅返回获准用于 CI 或公开验收证据的字段。
+    中文:仅返回获准用于 CI 或公开验收证据的字段。
     """
 
     components = manifest.get("components", {})
@@ -427,7 +427,7 @@ def _manifest(
 def up(args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
     """Build and start the canonical adapters and Kernel in dependency order.
 
-    中文：按依赖顺序构建并启动规范 Adapter 和 Kernel。
+    中文:按依赖顺序构建并启动规范 Adapter 和 Kernel。
     """
 
     if sys.platform != "linux":
@@ -527,7 +527,7 @@ def up(args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
 def status(_args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
     """Read exact process identities and report sanitized component health.
 
-    中文：读取准确的进程身份，并报告经过净化的组件健康状态。
+    中文:读取准确的进程身份,并报告经过净化的组件健康状态。
     """
 
     processes = _load_processes(layout)
@@ -551,7 +551,7 @@ def status(_args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
 def down(_args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
     """Gracefully stop owned processes and clear only owned UDS files.
 
-    中文：优雅地停止受管理进程，并且只清理本流程拥有的 UDS 文件。
+    中文:优雅地停止受管理进程,并且只清理本流程拥有的 UDS 文件。
     """
 
     processes = _load_processes(layout)
@@ -574,7 +574,7 @@ def down(_args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     """Define the stable bootstrap command surface.
 
-    中文：定义稳定的 bootstrap 命令接口。
+    中文:定义稳定的 bootstrap 命令接口。
     """
 
     value = argparse.ArgumentParser(description="Cyrene canonical local GPU runtime")
@@ -594,7 +594,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     """Execute one locked runtime operation and print sanitized JSON only.
 
-    中文：执行一项受锁保护的 runtime 操作，并且只输出经过净化的 JSON。
+    中文:执行一项受锁保护的 runtime 操作,并且只输出经过净化的 JSON。
     """
 
     args = parser().parse_args()

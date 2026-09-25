@@ -2,14 +2,14 @@
 # ║ 📄 File: sdk/python/cyrene_preflight/src/cyrene_preflight/contracts.py
 # ║ Module: CYRENE Platform
 # ║ Role: Python SDK, TCK, or test module for this repository boundary.
-# ║ 中文：Python SDK、TCK 或用于此仓库边界的测试模块。
+# ║ 中文:Python SDK、TCK 或用于此仓库边界的测试模块。
 # ║
 # ║ 模块：CYRENE Platform
 # ║ 职责：Python SDK、TCK 或测试模块。
 # ╚══════════════════════════════════════════════════════════════════════╝
 """Generic Platform preflight contracts with no Product dependency.
 
-中文：不依赖 Product 的通用 Platform 预检契约。
+中文:不依赖 Product 的通用 Platform 预检契约。
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class PreflightIssue:
 class AcceleratorFacts:
     """Projection of one ``cyrene.core.v1.AcceleratorDevice``.
 
-    中文：一个 ``cyrene.core.v1.AcceleratorDevice`` 的投影。
+    中文:一个 ``cyrene.core.v1.AcceleratorDevice`` 的投影。
     """
 
     device_id: str
@@ -123,7 +123,7 @@ class HardwareFacts:
     probes or independent nvidia-smi queries. Preflight evaluators accept immutable
     HardwareFacts snapshots provided by the Platform.
 
-    中文：规范 Node 清单投影；不允许探测主机或厂商。根据 ADR-006，HardwareFacts 的权威来源严格限定为 Platform Node Agent 资源清单。Services 和 Plugins 均不得自行探测主机驱动或独立调用 nvidia-smi。预检评估器只接受 Platform 提供的不可变 HardwareFacts 快照。
+    中文:规范 Node 清单投影;不允许探测主机或厂商。根据 ADR-006,HardwareFacts 的权威来源严格限定为 Platform Node Agent 资源清单。Services 和 Plugins 均不得自行探测主机驱动或独立调用 nvidia-smi。预检评估器只接受 Platform 提供的不可变 HardwareFacts 快照。
     """
 
     node_id: str
