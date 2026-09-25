@@ -246,6 +246,7 @@ fn recovery_rejects_nonfinal_corruption() {
 /// the durably persisted journal (`recover()` returns max historical fence
 /// + 1); a fresh manager seeded with that floor must allocate a strictly
 ///   greater token than the lease that existed before the restart.
+///
 /// 中文：崩溃/重启后不得复用 Fence token。Fence 下限取自已持久化的 journal（recover() 返回历史 Fence 最大值 + 1）；用该下限初始化的新 manager 必须分配出严格大于重启前 Lease 的 token。
 #[test]
 fn crash_restart_does_not_reuse_fence_tokens() {
@@ -953,6 +954,7 @@ fn semantic_event_replay_ignores_an_incomplete_final_record() {
 /// - old cursor gets SOURCE_CHANGED;
 /// - fresh snapshot contains no stale authority;
 /// - replacement Fence is strictly newer.
+///
 /// 中文：黄金测试 C——Kernel 重启时仍有 Worker 运行。场景：在 Epoch N 启动真实 Worker、Lease 和 Endpoint；意外杀死 Kernel（模拟崩溃）；在 Epoch N+1 重启。验证旧 authority 不会被静默接管、恢复能正确分类现实状态、只有具备精确证据时才 reap 过期进程、不会杀死 Foreign/Unknown 进程、旧 cursor 返回 SOURCE_CHANGED、新 snapshot 不含过期 authority，且替代 Fence 严格更新。
 #[test]
 fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
@@ -1432,6 +1434,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
 /// - Recovery must not claim it as the old Worker;
 /// - Foreign process is never killed / never reaped;
 /// - Recovery fails closed rather than adopting or destroying foreign state.
+///
 /// 中文：黄金测试 D——PID 复用与过期证据。场景：模拟 PID 相同但进程启动身份不匹配的情况（例如 PID 相同，但 start_time_ticks 或 cgroup 不匹配）。验证恢复能正确分类现实状态（存活进程为 Foreign，旧记录为 Unknown）；恢复不得将其认作旧 Worker；绝不杀死或 reap Foreign 进程；并且必须 fail-closed，不能接管或销毁 Foreign 状态。
 #[test]
 fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {

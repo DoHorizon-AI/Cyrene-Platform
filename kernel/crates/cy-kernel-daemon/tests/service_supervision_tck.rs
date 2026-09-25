@@ -19,6 +19,7 @@
 //! 8. Immediate cancellation propagation.
 //! 9. Structured lifecycle event ordering.
 //! 10. Process tree cleanup with zero orphaned processes.
+//!
 //! 中文：通用进程与 workload 监督 TCK（技术兼容性套件）。一致性验证包括：进程启动和就绪观测（ProcessAlive、TCP Socket、HTTP GET）；Service 端点发布及停止时自动撤销；在配置期限内优雅关闭；超时后升级强制终止顽固进程；检测意外崩溃并结构化报告退出码；确定性的指数重启退避；重启次数耗尽后进入 Quarantined；立即传播取消；结构化生命周期事件排序；清理进程树且不遗留孤儿进程。
 
 use std::{

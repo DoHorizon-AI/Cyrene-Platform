@@ -386,6 +386,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
 /// - consume B's authority
 /// - collide with B's object keys
 ///   And vice versa for B against A.
+///
 /// 中文：黄金测试 B——完整命名空间隔离。Namespace A 和 Namespace B 使用相同裸 ID 表示 Worker、Lease、Operation、Endpoint 和 Grant 时，验证两个方向都完全隔离。A 不得查询或修改 B、接收 B 的事件、使用 B 的 authority 或与 B 的对象键冲突；B 对 A 也必须如此。
 #[test]
 fn golden_test_b_full_bidirectional_namespace_isolation() {
@@ -795,6 +796,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
 /// 3. existing runtime reality enters the real Discover/Classify/Recover startup path;
 /// 4. unresolved Foreign/Unknown reality keeps startup fail-closed;
 /// 5. replacement Lease Fence is strictly greater than the pre-crash Fence once recovery permits allocation.
+///
 /// 中文：黄金测试 C——真实进程下的 daemon 崩溃、重启与恢复冒烟 E2E。场景：在 Epoch N 启动真实 daemon 和受控 sandbox/Worker，建立 Lease/Worker authority，然后意外终止 daemon（不是优雅关闭，子进程仍存活）。使用同一 runtime journal / recovery state 在 Epoch N+1 重启 daemon，并运行正常的 recover_before_listeners 启动恢复。至少证明：崩溃前的 Worker/Lease/Endpoint 语义 authority 不会被静默恢复；旧事件 source/cursor 会被拒绝或要求重新构建；现存 runtime 状态进入真实 Discover/Classify/Recover 启动流程；无法分类的 Foreign/Unknown 状态会让启动保持 fail-closed；恢复允许分配后，替代 Lease 的 Fence 严格大于崩溃前的 Fence。
 #[test]
 fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
