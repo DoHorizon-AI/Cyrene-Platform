@@ -13,7 +13,7 @@ Synchronized By: scripts/sync-logging-spec.py
 - **状态**：`REVIEW_READY`；经仓库 owner 接受后作为后续实现约束
 - **实现状态**：本文件不代表日志系统已实现、已接入或已验收
 - **建议归属**：Cyrene-Workspace 的现有 standards / governance 文档区域
-- **适用范围**：Platform、Plugins、各 Product、Studio / Navigator 与安装运行工具
+- **适用范围**：Platform、Plugins、各 Product、Client / Navigator 与安装运行工具
 - **首轮实现重点**：Platform Rust 守护进程及 RC 用户流程涉及的诊断边界
 
 ---
@@ -53,7 +53,7 @@ Synchronized By: scripts/sync-logging-spec.py
 | **Platform** | 通用资源、Node、Worker、Package、Lease / Fence、准入、监管与清理诊断 |
 | **Plugins / 能力契约 owner** | 能力调用错误、具体实现诊断、第三方供应商错误映射 |
 | **Product** | 数据、训练、部署、路由、评估、会话等自身业务错误与业务操作结果 |
-| **Studio / Navigator UI** | 展示错误、关联诊断和提供操作入口；不重新判定底层生命周期结果 |
+| **Client / Navigator UI** | 展示错误、关联诊断和提供操作入口；不重新判定底层生命周期结果 |
 | **日志采集 / 查询组件** | 接收、存储、过滤、检索与访问控制；不拥有业务状态 |
 
 - 不得在 Platform 建立包含所有 Product / Plugin 业务错误的大枚举或全局业务 SDK。
@@ -630,7 +630,7 @@ Platform 与 Product 文档只引用共同规范；各域错误码实现和目�
 - **状态：** `REVIEW_READY`；经仓库 owner 接受后作为后续实现约束。
 - **实现状态：** 本文件不表示日志系统已经实现、接入或验收。
 - **建议归属：** Cyrene-Workspace 现有 standards/governance 文档区域。
-- **适用范围：** Platform、Plugins、各 Product、Studio/Navigator 和安装运行工具。
+- **适用范围：** Platform、Plugins、各 Product、Client/Navigator 和安装运行工具。
 - **首轮重点：** Platform Rust 守护进程以及 RC 用户流程涉及的诊断边界。
 
 ## 0. 目标、术语与实施边界
@@ -658,7 +658,7 @@ Platform 与 Product 文档只引用共同规范；各域错误码实现和目�
 | **Platform** | 通用资源、Node、Worker、Package、Lease/Fence、准入、监管和清理诊断 |
 | **Plugins / 能力契约 owner** | 能力调用错误、具体实现诊断及第三方供应商错误映射 |
 | **Product** | 自身的数据、训练、部署、路由、评估、会话等业务错误和操作结果 |
-| **Studio / Navigator UI** | 展示错误、关联诊断并提供操作入口；不重新判定底层生命周期结果 |
+| **Client / Navigator UI** | 展示错误、关联诊断并提供操作入口；不重新判定底层生命周期结果 |
 | **日志采集/查询组件** | 接收、存储、过滤、检索和访问控制；不拥有业务状态 |
 
 - 不得在 Platform 建立覆盖所有 Product/Plugin 业务错误的大枚举或全局业务 SDK。
