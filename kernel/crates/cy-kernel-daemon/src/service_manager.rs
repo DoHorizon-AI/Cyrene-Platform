@@ -21,17 +21,18 @@ use cy_kernel_api::{
 };
 use cy_proto::core_v1::{
     readiness_probe::Probe, restart_policy::Policy,
-    service_supervision_service_server::ServiceSupervisionService, CancelServiceRequest,
-    GetServiceStatusRequest, HttpGetProbe, RestartPolicyAlways, RestartPolicyOnFailure,
-    ServiceEvent as ProtoServiceEvent, ServiceSpec as ProtoServiceSpec,
-    ServiceState as ProtoServiceState, ServiceStatus as ProtoServiceStatus, StartServiceRequest,
-    StopServiceRequest, TcpSocketProbe, WatchServiceEventsRequest,
+    service_supervision_service_server::ServiceSupervisionService,
+    BackoffConfig as ProtoBackoffConfig, CancelServiceRequest, GetServiceStatusRequest,
+    HttpGetProbe, RestartPolicyAlways, RestartPolicyOnFailure, ServiceEvent as ProtoServiceEvent,
+    ServiceSpec as ProtoServiceSpec, ServiceState as ProtoServiceState,
+    ServiceStatus as ProtoServiceStatus, StartServiceRequest, StopServiceRequest, TcpSocketProbe,
+    WatchServiceEventsRequest,
 };
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tonic::{Request, Response, Status};
 
-use crate::watchdog::ServiceSupervisor;
+use crate::{convert::proto_duration, watchdog::ServiceSupervisor};
 
 /// Manager for generic service workloads hosted by the Cyrene Kernel.
 /// 托管由 Cyrene Kernel 运行的通用 service workload 的管理器。
@@ -42,6 +43,31 @@ pub struct ServiceSupervisionManager {
 }
 
 impl ServiceSupervisionManager {
+    fn backoff_config_from_proto(config: ProtoBackoffConfig) -> Result<BackoffConfig, Status> {
+        Ok(BackoffConfig {
+            initial_delay: config
+                .initial_delay
+                .map(proto_duration)
+                .transpose()?
+                .unwrap_or(Duration::from_millis(100)),
+            max_delay: config
+                .max_delay
+                .map(proto_duration)
+                .transpose()?
+                .unwrap_or(Duration::from_secs(30)),
+            multiplier: if config.multiplier > 0.0 {
+                config.multiplier
+            } else {
+                2.0
+            },
+            reset_after: config
+                .reset_after
+                .map(proto_duration)
+                .transpose()?
+                .unwrap_or(Duration::from_secs(60)),
+        })
+    }
+
     /// Create a new ServiceSupervisionManager with the given sandbox backend.
     /// 使用给定 sandbox backend 创建 ServiceSupervisionManager。
     pub fn new(runtime: Arc<dyn SandboxBackend>, default_binding: DeviceBinding) -> Self {
@@ -132,15 +158,18 @@ impl ServiceSupervisionManager {
                 ProbeConfig {
                     initial_delay: c
                         .initial_delay
-                        .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                        .map(proto_duration)
+                        .transpose()?
                         .unwrap_or_default(),
                     period: c
                         .period
-                        .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                        .map(proto_duration)
+                        .transpose()?
                         .unwrap_or(Duration::from_millis(50)),
                     timeout: c
                         .timeout
-                        .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+                        .map(proto_duration)
+                        .transpose()?
                         .unwrap_or(Duration::from_millis(500)),
                     success_threshold: c.success_threshold.max(1),
                     failure_threshold: c.failure_threshold.max(1),
@@ -154,7 +183,9 @@ impl ServiceSupervisionManager {
                 Some(Probe::TcpSocket(TcpSocketProbe { host, port })) => {
                     ReadinessProbe::TcpSocket {
                         host,
-                        port: port as u16,
+                        port: u16::try_from(port).map_err(|_| {
+                            Status::invalid_argument("tcp readiness port exceeds 65535")
+                        })?,
                     }
                 }
                 Some(Probe::HttpGet(HttpGetProbe {
@@ -164,9 +195,17 @@ impl ServiceSupervisionManager {
                     expected_status,
                 })) => ReadinessProbe::HttpGet {
                     host,
-                    port: port as u16,
+                    port: u16::try_from(port).map_err(|_| {
+                        Status::invalid_argument("http readiness port exceeds 65535")
+                    })?,
                     path,
-                    expected_status: expected_status.map(|s| s as u16),
+                    expected_status: expected_status
+                        .map(|status| {
+                            u16::try_from(status).map_err(|_| {
+                                Status::invalid_argument("expected HTTP status exceeds 65535")
+                            })
+                        })
+                        .transpose()?,
                 },
                 Some(Probe::WorkerControl(_)) => ReadinessProbe::WorkerControl,
                 None => ReadinessProbe::ProcessAlive,
@@ -184,25 +223,8 @@ impl ServiceSupervisionManager {
                     backoff,
                 })) => {
                     let backoff_cfg = backoff
-                        .map(|b| BackoffConfig {
-                            initial_delay: b
-                                .initial_delay
-                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
-                                .unwrap_or(Duration::from_millis(100)),
-                            max_delay: b
-                                .max_delay
-                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
-                                .unwrap_or(Duration::from_secs(30)),
-                            multiplier: if b.multiplier > 0.0 {
-                                b.multiplier
-                            } else {
-                                2.0
-                            },
-                            reset_after: b
-                                .reset_after
-                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
-                                .unwrap_or(Duration::from_secs(60)),
-                        })
+                        .map(Self::backoff_config_from_proto)
+                        .transpose()?
                         .unwrap_or_default();
                     RestartPolicy::OnFailure {
                         max_retries,
@@ -214,25 +236,8 @@ impl ServiceSupervisionManager {
                     backoff,
                 })) => {
                     let backoff_cfg = backoff
-                        .map(|b| BackoffConfig {
-                            initial_delay: b
-                                .initial_delay
-                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
-                                .unwrap_or(Duration::from_millis(100)),
-                            max_delay: b
-                                .max_delay
-                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
-                                .unwrap_or(Duration::from_secs(30)),
-                            multiplier: if b.multiplier > 0.0 {
-                                b.multiplier
-                            } else {
-                                2.0
-                            },
-                            reset_after: b
-                                .reset_after
-                                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
-                                .unwrap_or(Duration::from_secs(60)),
-                        })
+                        .map(Self::backoff_config_from_proto)
+                        .transpose()?
                         .unwrap_or_default();
                     RestartPolicy::Always {
                         max_retries,
@@ -247,18 +252,31 @@ impl ServiceSupervisionManager {
 
         let graceful_stop_timeout = spec
             .graceful_stop_timeout
-            .map(|d| Duration::new(d.seconds as u64, d.nanos as u32))
+            .map(proto_duration)
+            .transpose()?
             .unwrap_or(Duration::from_secs(5));
 
-        let endpoint = spec.endpoint.map(|e| ServiceEndpointSpec {
-            transport: e.transport,
-            schema_id: e.schema_id,
-            port: e.port.map(|p| p as u16),
-            path: e.path,
-            attributes: e.attributes.into_iter().collect(),
-            connection_ref: e.connection_ref,
-            credential_ref: e.credential_ref,
-        });
+        let endpoint = spec
+            .endpoint
+            .map(|e| -> Result<ServiceEndpointSpec, Status> {
+                Ok(ServiceEndpointSpec {
+                    transport: e.transport,
+                    schema_id: e.schema_id,
+                    port: e
+                        .port
+                        .map(|port| {
+                            u16::try_from(port).map_err(|_| {
+                                Status::invalid_argument("service endpoint port exceeds 65535")
+                            })
+                        })
+                        .transpose()?,
+                    path: e.path,
+                    attributes: e.attributes.into_iter().collect(),
+                    connection_ref: e.connection_ref,
+                    credential_ref: e.credential_ref,
+                })
+            })
+            .transpose()?;
 
         Ok(DomainServiceSpec {
             name: spec.name,

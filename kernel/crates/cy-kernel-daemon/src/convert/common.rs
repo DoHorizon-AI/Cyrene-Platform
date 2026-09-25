@@ -222,6 +222,11 @@ pub(crate) fn proto_duration(duration: prost_types::Duration) -> Result<Duration
             "duration seconds and nanos must be non-negative",
         ));
     }
+    if duration.seconds > 315_576_000_000 || duration.nanos >= 1_000_000_000 {
+        return Err(Status::invalid_argument(
+            "duration exceeds the protobuf range",
+        ));
+    }
     Ok(Duration::new(
         duration.seconds as u64,
         duration.nanos as u32,
