@@ -1226,6 +1226,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         kernel_authority_service_client::KernelAuthorityServiceClient,
         kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
+    use hyper_util::rt::TokioIo;
     use std::path::PathBuf;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::wrappers::UnixListenerStream;
@@ -1278,7 +1279,8 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         let channel = Endpoint::try_from("http://[::]:50051")
             .unwrap()
             .connect_with_connector(service_fn(move |_: Uri| {
-                UnixStream::connect(socket.clone())
+                let path = socket.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
             }))
             .await
             .expect("connect to UDS");
@@ -1486,6 +1488,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
         kernel_authority_service_client::KernelAuthorityServiceClient,
         kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
+    use hyper_util::rt::TokioIo;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
     use tonic::transport::{Endpoint, Server, Uri};
@@ -1532,7 +1535,10 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
         .unwrap()
         .connect_with_connector(service_fn({
             let path = socket_path.clone();
-            move |_: Uri| UnixStream::connect(path.clone())
+            move |_: Uri| {
+                let path = path.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
+            }
         }))
         .await
         .expect("connect to UDS");
@@ -1682,6 +1688,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
         kernel_authority_service_client::KernelAuthorityServiceClient,
         kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
+    use hyper_util::rt::TokioIo;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
     use tonic::transport::{Endpoint, Server, Uri};
@@ -1728,7 +1735,10 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
         .unwrap()
         .connect_with_connector(service_fn({
             let path = socket_path.clone();
-            move |_: Uri| UnixStream::connect(path.clone())
+            move |_: Uri| {
+                let path = path.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
+            }
         }))
         .await
         .expect("connect to UDS");

@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .build_server(true)
         .build_transport(false)
-        .compile(
+        .compile_protos(
             &[
                 core_proto,
                 authority_proto,

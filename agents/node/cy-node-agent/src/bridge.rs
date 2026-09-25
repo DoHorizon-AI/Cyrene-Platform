@@ -136,13 +136,15 @@ impl UdsKernelCommandExecutor {
 
     #[cfg(unix)]
     async fn connect_channel(&self) -> Result<tonic::transport::Channel, LocalKernelError> {
+        use hyper_util::rt::TokioIo;
         use tokio::net::UnixStream;
         use tower::service_fn;
 
         let socket_path = self.socket_path.clone();
         let channel = Endpoint::from_static("http://[::]:50051")
             .connect_with_connector(service_fn(move |_| {
-                UnixStream::connect(socket_path.clone())
+                let path = socket_path.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
             }))
             .await
             .map_err(|error| LocalKernelError::Transport(error.to_string()))?;

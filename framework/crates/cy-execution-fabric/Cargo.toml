@@ -10,9 +10,9 @@ repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 cy-kernel-contract = { version = "0.1.0", path = "../../../contracts/rust/cy-kernel-contract" }
 cy-manifest = { version = "0.1.0", path = "../../../contracts/rust/cy-manifest" }
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
-prost-types = "0.12"
+prost-types = "0.13"
 thiserror = "1.0"
 
 [dev-dependencies]
 cy-artifact-transfer = { version = "0.1.0", path = "../../../sdk/rust/cy-artifact-transfer" }
-prost = "0.12"
+prost = "0.13"

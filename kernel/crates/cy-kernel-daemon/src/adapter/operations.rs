@@ -49,7 +49,7 @@ impl KernelServiceAdapter {
             state: core_v1::OperationState::Succeeded as i32,
             target_resource_name: target,
             cancellable: false,
-            created_at: Some(timestamp.clone()),
+            created_at: Some(timestamp),
             updated_at: Some(timestamp),
             outcome: None,
         })
@@ -62,7 +62,7 @@ impl KernelServiceAdapter {
             state: core_v1::OperationState::Running as i32,
             target_resource_name: target,
             cancellable: true,
-            created_at: Some(timestamp.clone()),
+            created_at: Some(timestamp),
             updated_at: Some(timestamp),
             outcome: None,
         })
@@ -75,7 +75,7 @@ impl KernelServiceAdapter {
             state: core_v1::OperationState::Cancelled as i32,
             target_resource_name: target,
             cancellable: false,
-            created_at: Some(timestamp.clone()),
+            created_at: Some(timestamp),
             updated_at: Some(timestamp),
             outcome: None,
         })
@@ -93,7 +93,7 @@ impl KernelServiceAdapter {
             state: core_v1::OperationState::Failed as i32,
             target_resource_name: target,
             cancellable: false,
-            created_at: Some(timestamp.clone()),
+            created_at: Some(timestamp),
             updated_at: Some(timestamp),
             outcome: Some(core_v1::operation::Outcome::Error(
                 cy_proto::google::rpc::Status {

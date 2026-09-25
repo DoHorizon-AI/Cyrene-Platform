@@ -96,7 +96,7 @@ pub(crate) fn to_plugin_instance(
         restart_count: process.restart_count,
         created_at: None,
         updated_at: Some(now_timestamp()),
-        last_heartbeat_at: process.last_heartbeat_at.clone(),
+        last_heartbeat_at: process.last_heartbeat_at,
     }
 }
 

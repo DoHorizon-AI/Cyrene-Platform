@@ -6,4 +6,4 @@ publish = false
 
 [dependencies]
 cy-proto = { version = "0.1.0", path = "../../../../contracts/rust/cy-proto" }
-prost = "0.12"
+prost = "0.13"
