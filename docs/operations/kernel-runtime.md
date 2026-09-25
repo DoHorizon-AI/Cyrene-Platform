@@ -107,6 +107,20 @@ Kernel service 不再持有 Worker cgroup。sandboxd service 使用 `KillMode=co
 
 ## 重启、日志与围栏
 
+Release builds use `panic = "abort"`: any Rust panic terminates the Kernel
+process before a mutex can be recovered through poisoning. The shipped
+`cyrene-kernel.service` uses `Restart=on-failure` and `RestartSec=2s` to start a
+new process. In development and test builds, a panic may unwind and poison a
+mutex; lock acquisition then panics rather than continuing with potentially
+inconsistent authority state. This is the intended fail-fast boundary, not a
+claim that Worker ownership survives a Kernel crash.
+
+发布构建使用 `panic = "abort"`：任何 Rust panic 都会直接终止 Kernel 进程，不能依赖锁中毒
+后继续运行。随仓库交付的 `cyrene-kernel.service` 通过 `Restart=on-failure` 和
+`RestartSec=2s` 启动新进程。开发和测试构建可能在 panic 展开后出现锁中毒；再次获取锁时
+会 panic，避免在可能失去一致性的 authority 状态上继续执行。这是有意的快速失败边界，
+不代表 Kernel 崩溃后可以接管原有 Worker。
+
 `cyrene-kernel` 在接受任何 API 请求前会同步写入
 `/var/lib/cyrene/runtime/journal.jsonl`（可由 `--runtime-journal` 覆盖）。这是紧凑的
 JSONL 审计证据，不是 Worker 恢复数据库：只包含 node id/epoch、lease 名称、fence token、
