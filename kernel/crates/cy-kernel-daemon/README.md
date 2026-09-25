@@ -55,3 +55,41 @@ their existing authority.
 
 新的硬件采样通过独立发布代次刷新有效期;事实未变化也需要刷新,重复缓存采样不能
 延长在线状态。资源身份与分配检查继续使用既有权威。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# cy-kernel-daemon Directory Guide | kernel/crates/cy-kernel-daemon 目录指南
+
+## 目录职责
+
+本目录承载 CYRENE Platform source、protocol、fixture 或 test tree 中的一个 boundary。
+
+## Worker execution ceiling
+
+规范 StartWorker 会在启动前将 Worker.limits 映射到 sandbox LaunchPlan。支持的 limit 为单位 byte 的 memory.bytes 和单位 millicore 的 cpu.time；两者都必须为正数。Unsupported name/unit、零值和 CPU overflow 均以 WORKER_LIMIT_UNSUPPORTED 拒绝。现有 Lease ceiling 会保留或进一步收紧；Lease cpuset 得以保留。这些是执行上限，不是第二套 resource allocation authority。Hardware binding 强度独立处理。
+
+StartWorker 启动前将这些通用执行 ceiling 传给 sandboxd。不能用默认 Lease limit 覆盖 Worker 要求，也不能放宽现有 Lease 上限。Resource 仍由 Lease 分配；CPU/RAM cgroup limit 与 GPU device binding 强度分别报告。Regression test 会检查经权威启动入口传给 sandbox 的 LaunchPlan，避免只校验字段却没有实际执行约束。
+
+## 内容
+
+| 条目 | 职责 | 一句话职责 |
+|---|---|---|
+
+## 推荐阅读 / 执行顺序
+
+先阅读本指南，再按依赖顺序查看上方直接文件，最后进入嵌套目录指南。
+
+## 内容快照
+
+| 条目 | 职责 | 一句话职责 |
+|---|---|---|
+| Cargo.toml | Rust package manifest。 | Rust 包清单。 |
+| src/ | 嵌套源码或 contract boundary；下一步阅读其中的 README。 | 嵌套源码或契约边界，下一步阅读其 README。 |
+| tests/ | 嵌套源码或 contract boundary；下一步阅读其中的 README。 | 嵌套源码或契约边界，下一步阅读其 README。 |
+
+此快照有意只列直接条目；嵌套目录由各自 README 提供详细指南。
+
+Semantic StartWorker boundary 会校验 plugin environment key，但不会预先注入 device selection。sandboxd 只注入一次由 Adapter 所有的 key；plugin 试图覆盖这些 key 时仍会 fail closed。规范 launch test 同时验证该 merge boundary 和声明的 memory ceiling。
+
+新的 hardware sample 会使用独立 publication generation 刷新 semantic inventory expiry，即使观测事实没有变化也如此。Replay sample 不会延长 liveness；resource identity 与 allocation check 仍由原有 authority 负责。

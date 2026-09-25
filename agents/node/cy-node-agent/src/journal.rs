@@ -10,6 +10,7 @@
 //!
 //! Provides ring-buffered log entries, disk persistence, sequence tracking,
 //! filtering, and real-time local subscriptions.
+//! 提供 ring-buffer log entry、磁盘持久化、sequence tracking、过滤和本地实时 subscription。
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -32,6 +33,7 @@ pub enum JournalError {
 
 /// Query options for the local journal. This is intentionally not a Core RPC
 /// request; remote watch/query semantics belong to a later control-plane API.
+/// 本地 journal 的查询选项。它有意不作为 Core RPC request；远端 watch/query 语义属于后续 control-plane API。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalQuery {
     pub tail_lines: usize,
@@ -40,6 +42,7 @@ pub struct JournalQuery {
 }
 
 /// Persistent record with an auto-incrementing sequence number.
+/// 带自动递增 sequence number 的持久化记录。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JournalEntryRecord {
     pub sequence_number: u64,
@@ -57,6 +60,7 @@ pub struct JournalEntryInternal {
 }
 
 /// Local persistent and buffered journal for Node Agent.
+/// Node Agent 的本地持久化缓冲 journal。
 pub struct AgentJournal {
     target_id: String,
     max_capacity: usize,
@@ -98,6 +102,7 @@ impl AgentJournal {
     }
 
     /// Append a log entry to ring buffer and disk file, returning sequence number.
+    /// 将 log entry 追加到 ring buffer 和磁盘文件，并返回其 sequence number。
     pub fn append(
         &mut self,
         source: &str,
@@ -124,12 +129,14 @@ impl AgentJournal {
         };
 
         // Ring buffer management
+        // Ring buffer 管理
         if self.ring_buffer.len() >= self.max_capacity {
             self.ring_buffer.pop_front();
         }
         self.ring_buffer.push_back(record.clone());
 
         // Disk persistence
+        // 磁盘持久化
         if let Some(ref path) = self.file_path {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -140,12 +147,14 @@ impl AgentJournal {
         }
 
         // Broadcast to live stream subscribers
+        // 向活动 stream subscriber 广播
         let _ = self.broadcast_tx.send(record);
 
         Ok(seq)
     }
 
     /// Query historical log entries matching local filters.
+    /// 按本地过滤条件查询历史 log entry。
     pub fn query(&self, req: &JournalQuery) -> Vec<JournalEntryRecord> {
         let mut filtered: Vec<JournalEntryRecord> = self
             .ring_buffer
@@ -171,11 +180,13 @@ impl AgentJournal {
     }
 
     /// Subscribe to live stream updates.
+    /// 订阅实时 stream 更新。
     pub fn subscribe(&self) -> broadcast::Receiver<JournalEntryRecord> {
         self.broadcast_tx.subscribe()
     }
 
     /// Load persisted records from disk file.
+    /// 从磁盘文件加载持久化记录。
     pub fn load_from_disk(&mut self) -> Result<(), JournalError> {
         let path = match self.file_path {
             Some(ref p) if p.exists() => p,
@@ -243,6 +254,7 @@ mod tests {
         }
 
         // Capacity is 5, so only lines 6 through 10 remain.
+        // 容量为 5，因此只保留第 6 到第 10 行。
         assert_eq!(journal.len(), 5);
 
         let req = JournalQuery {
@@ -274,6 +286,7 @@ mod tests {
         }
 
         // Reload from disk
+        // 从磁盘重新加载
         let mut reloaded = AgentJournal::new("target-disk", 100, Some(path));
         assert_eq!(reloaded.len(), 2);
 
@@ -289,6 +302,7 @@ mod tests {
         assert_eq!(entries[1].sequence_number, 2);
 
         // Append again to check sequence continuation
+        // 再次追加，以检查 sequence 是否连续
         let seq = reloaded
             .append("sys", "INFO", "Disk info 3", HashMap::new())
             .unwrap();

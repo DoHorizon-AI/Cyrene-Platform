@@ -148,6 +148,7 @@ impl KernelServiceAdapter {
     /// Canonical, transport-neutral semantic action projection. It shares the
     /// same local UDS authorization boundary and does not expose legacy
     /// installation or vendor compatibility data.
+    /// 规范的、与传输无关的语义 action 投影。它使用相同的本地 UDS 授权边界，不暴露旧版 installation 或厂商兼容数据。
     pub fn authority_server(
         &self,
     ) -> core_v1::kernel_authority_service_server::KernelAuthorityServiceServer<Self> {
@@ -156,6 +157,7 @@ impl KernelServiceAdapter {
 
     /// Core v2 authority projection shares the authenticated authority UDS
     /// listener but requires a namespace in every stateful request.
+    /// Core v2 authority 投影与经过认证的 authority UDS listener 共用监听器，但每个有状态请求都必须包含 namespace。
     pub fn authority_v2_server(
         &self,
     ) -> core_v2::kernel_authority_service_server::KernelAuthorityServiceServer<Self> {
@@ -170,6 +172,7 @@ impl KernelServiceAdapter {
 
     /// Canonical Worker liveness/drain channel. It is registered only on the
     /// Worker UDS listener, separate from `KernelAuthorityService`.
+    /// 规范的 Worker 存活/排空通道。它只注册在 Worker UDS listener 上，与 KernelAuthorityService 分离。
     pub fn worker_control_server(
         &self,
     ) -> core_v1::worker_control_service_server::WorkerControlServiceServer<Self> {
@@ -178,6 +181,7 @@ impl KernelServiceAdapter {
 
     /// Provider lifecycle/reconciliation is exposed only on its authenticated
     /// UDS listener, never on the client authority or Worker sockets.
+    /// Provider 生命周期和协调操作仅通过其经过认证的 UDS listener 暴露，绝不通过客户端 authority 或 Worker 套接字暴露。
     pub fn provider_server(
         &self,
     ) -> cy_proto::provider_v1::kernel_provider_service_server::KernelProviderServiceServer<Self>
@@ -189,6 +193,7 @@ impl KernelServiceAdapter {
 
     /// Starts the bounded watchdog loop. A missing heartbeat executes the same
     /// SIGTERM -> cgroup.kill cleanup path as an explicit termination.
+    /// 启动有界 watchdog 循环。心跳缺失时会执行与显式终止相同的 SIGTERM -> cgroup.kill 清理路径。
     pub fn start_watchdog(&self) -> thread::JoinHandle<()> {
         let adapter = self.clone();
         thread::spawn(move || loop {
@@ -202,6 +207,7 @@ impl KernelServiceAdapter {
     /// The state only transitions when a fact source disconnects/expires or
     /// subsequently recovers, so callers receive actionable DEGRADED evidence
     /// without unbounded event noise.
+    /// 持续独立于分配路径刷新适配器事实。只有事实源断开/过期或随后恢复时，状态才会转换，因此调用方能获得可操作的 DEGRADED 证据，同时避免事件无限增长。
     pub fn start_adapter_monitor(&self) -> thread::JoinHandle<()> {
         let adapter = self.clone();
         thread::spawn(move || loop {
@@ -234,6 +240,7 @@ impl KernelServiceAdapter {
     /// every configured hardware adapter. Allocation still consumes the
     /// registry aggregate; these Provider snapshots never inherit its
     /// generation.
+    /// 为每个已配置硬件适配器注册、发布并协调一个仅含资源事实的 Provider。分配仍使用注册表聚合视图；这些 Provider 快照不会继承其 generation。
     pub fn sync_hardware_provider_facts(&self) -> Result<(), ProviderError> {
         let Some(observations) = self.daemon.hardware_adapter_observations() else {
             return self.daemon.refresh_inventory_facts().map(|_| ());
@@ -475,6 +482,9 @@ impl KernelServiceAdapter {
     /// `CleanupReport` authorizes `complete_release`. Any failure after
     /// `RELEASING` ends in `FAILED` with the allocation still held, so a
     /// half-cleaned resource can never be handed to a new lease.
+    /// 只有确认被该租约 fence 保护的实例已完成物理清理后，才释放租约。
+    ///
+    /// ACTIVE -> RELEASED 绝不是一次性状态修改。ledger 会先转为 RELEASING，再回收 sandbox；只有完整的 CleanupReport 才能授权 complete_release。RELEASING 之后的任何失败都会以 FAILED 结束，并继续占用分配资源，因此半清理状态的资源不会交给新租约。
     pub(crate) fn release_lease_with_cleanup(
         &self,
         lease_ref: &core_v1::ResourceLeaseRef,
@@ -514,6 +524,7 @@ impl KernelServiceAdapter {
                     // The Worker that held the released Lease no longer has
                     // authority: remove its Endpoint/Grant metadata before the
                     // instance record disappears.
+                    // 持有已释放 Lease 的 Worker 已不再具有 authority：必须在 instance 记录消失前移除它的 Endpoint/Grant 元数据。
                     let worker_identity = self
                         .instances
                         .lock()
@@ -547,6 +558,7 @@ impl KernelServiceAdapter {
     /// Reaps the sandboxed instance still fenced by `lease_ref` and returns its
     /// runtime name when one was cleaned. An incomplete report is an error so
     /// the caller keeps the physical allocation held.
+    /// 回收仍由 lease_ref fence 保护的 sandbox 实例，并返回已清理实例的 runtime 名称（若有）。报告不完整时返回错误，调用方必须继续占用物理分配资源。
     fn confirm_lease_cleanup(
         &self,
         lease_ref: &core_v1::ResourceLeaseRef,

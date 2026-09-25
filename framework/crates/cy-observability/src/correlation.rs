@@ -10,10 +10,13 @@ use std::fmt;
 use thiserror::Error;
 
 /// Maximum allowed length for a request_id.
+/// 中文：request_id 允许的最大长度。
 pub const MAX_REQUEST_ID_LEN: usize = 128;
 /// Maximum allowed length for an operation_id.
+/// 中文：operation_id 允许的最大长度。
 pub const MAX_OPERATION_ID_LEN: usize = 128;
 /// Maximum allowed length for a resource_id.
+/// 中文：resource_id 允许的最大长度。
 pub const MAX_RESOURCE_ID_LEN: usize = 256;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -33,6 +36,7 @@ pub enum CorrelationError {
 /// ════════════════════════════════════════════════════════════════════════
 /// W3C Trace Context representation (traceparent header).
 /// ════════════════════════════════════════════════════════════════════════
+/// 中文：W3C Trace Context 表示形式（traceparent header）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TraceContext {
     pub trace_id: [u8; 16],
@@ -42,6 +46,7 @@ pub struct TraceContext {
 
 impl TraceContext {
     /// Generates a new root trace context with random trace_id and span_id.
+    /// 中文：生成一个 root trace context，其中包含随机 trace_id 和 span_id。
     pub fn new_root() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
@@ -51,12 +56,14 @@ impl TraceContext {
         let pid = std::process::id() as u128;
 
         // Generate non-zero pseudorandom bytes without requiring heavy rand crate
+        // 中文：生成非零伪随机字节，不依赖体积较大的 rand crate。
         let mut trace_id = [0u8; 16];
         let mut span_id = [0u8; 8];
 
         let t_bytes = (nanos ^ (pid << 64) ^ 0x5a5a_3c3c_9696_c3c3).to_be_bytes();
         trace_id.copy_from_slice(&t_bytes);
         // Ensure non-zero
+        // 中文：确保值非零。
         if trace_id == [0u8; 16] {
             trace_id[15] = 1;
         }
@@ -70,11 +77,12 @@ impl TraceContext {
         Self {
             trace_id,
             span_id,
-            flags: 0x01, // Sampled
+            flags: 0x01, // Sampled | 中文：已采样标记
         }
     }
 
     /// Creates a child span context under the same trace_id.
+    /// 中文：在相同 trace_id 下创建 child span context。
     pub fn child_span(&self) -> Self {
         let mut child = Self::new_root();
         child.trace_id = self.trace_id;
@@ -85,6 +93,7 @@ impl TraceContext {
     /// Parses a standard W3C `traceparent` header string.
     ///
     /// Expected format: `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`
+    /// 中文：解析标准 W3C traceparent header 字符串。期望格式：00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01。
     pub fn parse_traceparent(raw: &str) -> Result<Self, CorrelationError> {
         let trimmed = raw.trim();
         let parts: Vec<&str> = trimmed.split('-').collect();
@@ -138,6 +147,7 @@ impl TraceContext {
     }
 
     /// Returns the trace_id formatted as a 32-character lowercase hex string.
+    /// 中文：将 trace_id 格式化为 32 位小写十六进制字符串并返回。
     pub fn trace_id_hex(&self) -> String {
         let mut s = String::with_capacity(32);
         for byte in &self.trace_id {
@@ -147,6 +157,7 @@ impl TraceContext {
     }
 
     /// Returns the span_id formatted as a 16-character lowercase hex string.
+    /// 中文：将 span_id 格式化为 16 位小写十六进制字符串并返回。
     pub fn span_id_hex(&self) -> String {
         let mut s = String::with_capacity(16);
         for byte in &self.span_id {
@@ -156,6 +167,7 @@ impl TraceContext {
     }
 
     /// Formats this context as a standard W3C `traceparent` header string.
+    /// 中文：将此 context 格式化为标准 W3C traceparent header 字符串。
     pub fn to_traceparent(&self) -> String {
         format!(
             "00-{}-{}-{:02x}",
@@ -178,6 +190,7 @@ impl fmt::Display for TraceContext {
 /// Ensures untrusted client headers cannot inject control characters,
 /// newlines, or oversized payloads into structured logging sinks.
 /// ════════════════════════════════════════════════════════════════════════
+/// 中文：不可信 correlation header 清洗器。确保不可信客户端 header 不会向结构化日志 sink 注入控制字符、换行符或过大的 payload。
 pub fn sanitize_correlation_id(raw: &str, max_len: usize) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -185,6 +198,7 @@ pub fn sanitize_correlation_id(raw: &str, max_len: usize) -> Option<String> {
     }
 
     // Filter out any control characters, newlines, tabs, carriage returns, or quotes
+    // 中文：过滤所有控制字符、换行符、制表符、回车符和引号。
     let filtered: String = trimmed
         .chars()
         .filter(|c| {
@@ -209,16 +223,19 @@ pub fn sanitize_correlation_id(raw: &str, max_len: usize) -> Option<String> {
 }
 
 /// Sanitizes an incoming `request_id` header with a 128-character bound.
+/// 中文：清洗传入的 request_id header，长度限制为 128 个字符。
 pub fn sanitize_request_id(raw: &str) -> Option<String> {
     sanitize_correlation_id(raw, MAX_REQUEST_ID_LEN)
 }
 
 /// Sanitizes an incoming `operation_id` header with a 128-character bound.
+/// 中文：清洗传入的 operation_id header，长度限制为 128 个字符。
 pub fn sanitize_operation_id(raw: &str) -> Option<String> {
     sanitize_correlation_id(raw, MAX_OPERATION_ID_LEN)
 }
 
 /// Sanitizes an incoming `resource_id` reference with a 256-character bound.
+/// 中文：清洗传入的 resource_id 引用，长度限制为 256 个字符。
 pub fn sanitize_resource_id(raw: &str) -> Option<String> {
     sanitize_correlation_id(raw, MAX_RESOURCE_ID_LEN)
 }
@@ -227,6 +244,7 @@ pub fn sanitize_resource_id(raw: &str) -> Option<String> {
 /// Full Correlation Context maintaining strict hierarchy between
 /// request, long-running operation, business resource, and distributed trace.
 /// ════════════════════════════════════════════════════════════════════════
+/// 中文：完整的 Correlation Context，严格维护 request、长期运行的 operation、业务 resource 与分布式 trace 之间的层级关系。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CorrelationContext {
     pub request_id: Option<String>,

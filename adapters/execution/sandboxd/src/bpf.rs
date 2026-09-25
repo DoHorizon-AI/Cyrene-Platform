@@ -19,6 +19,7 @@ use cy_kernel_api::{
 
 /// A policy-only mapper retained for callers that need a pre-launch decision.
 /// It no longer reports HARD as applied: only `attach_device_bpf_filter` can do that.
+/// 中文：仅用于策略判定的映射器，为需要在启动前作出决策的调用方保留。它不再报告 HARD 策略已应用；只有 `attach_device_bpf_filter` 可以作出此报告。
 #[derive(Debug, Clone, Copy)]
 pub struct LinuxDeviceMapper {
     pub device_bpf_enabled: bool,
@@ -250,9 +251,9 @@ pub(crate) struct BpfProgAttachAttr {
 #[cfg(target_os = "linux")]
 pub(crate) fn build_device_filter_program(rules: &[DeviceRule]) -> Vec<BpfInsn> {
     let mut program = vec![
-        insn(BPF_LDX_W_MEM, 4, 1, 0, 0), // ctx.access_type
-        insn(BPF_LDX_W_MEM, 2, 1, 4, 0), // ctx.major
-        insn(BPF_LDX_W_MEM, 3, 1, 8, 0), // ctx.minor
+        insn(BPF_LDX_W_MEM, 4, 1, 0, 0), // ctx.access_type | 中文：上下文中的访问类型
+        insn(BPF_LDX_W_MEM, 2, 1, 4, 0), // ctx.major | 中文：设备主编号
+        insn(BPF_LDX_W_MEM, 3, 1, 8, 0), // ctx.minor | 中文：设备次编号
         insn(BPF_ALU64_AND_K, 4, 0, 0, 0xffff_0000_u32 as i32),
     ];
     let mut skip_indices = Vec::new();

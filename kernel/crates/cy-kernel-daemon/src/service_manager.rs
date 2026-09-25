@@ -34,6 +34,7 @@ use tonic::{Request, Response, Status};
 use crate::watchdog::ServiceSupervisor;
 
 /// Manager for generic service workloads hosted by the Cyrene Kernel.
+/// 托管由 Cyrene Kernel 运行的通用 service workload 的管理器。
 pub struct ServiceSupervisionManager {
     runtime: Arc<dyn SandboxBackend>,
     default_binding: DeviceBinding,
@@ -42,6 +43,7 @@ pub struct ServiceSupervisionManager {
 
 impl ServiceSupervisionManager {
     /// Create a new ServiceSupervisionManager with the given sandbox backend.
+    /// 使用给定 sandbox backend 创建 ServiceSupervisionManager。
     pub fn new(runtime: Arc<dyn SandboxBackend>, default_binding: DeviceBinding) -> Self {
         Self {
             runtime,
@@ -51,6 +53,7 @@ impl ServiceSupervisionManager {
     }
 
     /// Convert a domain ServiceStatus into its Protobuf wire representation.
+    /// 将领域层 ServiceStatus 转换为 Protobuf wire 格式。
     pub fn domain_status_to_proto(status: DomainServiceStatus) -> ProtoServiceStatus {
         let (exit_code, oom_killed, reason_code) = if let Some(report) = &status.last_exit_report {
             (
@@ -93,7 +96,7 @@ impl ServiceSupervisionManager {
     //   Converts the transport request into the domain launch model and keeps
     //   validation at the wire-to-domain boundary.
     //
-    //   将传输层请求转换为领域启动模型，并把输入校验集中在协议到领域的边界。
+    // 将传输层请求转换为领域启动模型，并把输入校验集中在协议到领域的边界。
     // ════════════════════════════════════════════════════════════════════════
     pub fn proto_spec_to_domain(spec: ProtoServiceSpec) -> Result<DomainServiceSpec, Status> {
         if spec.name.trim().is_empty() {

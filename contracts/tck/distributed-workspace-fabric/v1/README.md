@@ -22,3 +22,19 @@ pass.
 
 发布验收必须执行 Docker proof。Docker/WSL transport 故障只能报告为 blocker，
 不得转换为 skip 或 fake pass。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Distributed Workspace Fabric v1 TCK
+
+此 TCK 冻结基于身份的 Workspace 发现、与 transport 无关的连接选择和 relay-first 远程访问的 authority 边界与可观测结果。`scenarios.tsv` 是跨语言矩阵；Rust 单元测试和真实 Docker relay acceptance 是可执行 adapter。
+
+运行：
+
+```bash
+bash tooling/ci/check-distributed-workspace-fabric.sh
+bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh
+```
+
+发布验收必须执行 Docker proof。Docker/WSL transport 故障只能报告 blocker，不得转换成 skip 或 fake pass。

@@ -92,6 +92,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             // Durable fence record could not be persisted: roll back the
             // in-memory lease so it is never externally visible without the
             // durable evidence the contract requires.
+            // 耐久 fence 记录无法持久化：回滚内存中的租约，确保它不会在缺少契约要求的耐久证据时对外可见。
             if let Err(rollback_err) = self.daemon.begin_release(&lease.name, lease.fence_token) {
                 tracing::error!(
                     event.name = "platform.lease.release_deferred",
@@ -137,6 +138,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         // A compatibility caller must not be able to free hardware that a
         // running instance still holds: RELEASED is reached only through
         // RELEASING plus a confirmed sandbox cleanup.
+        // 不能允许兼容调用方释放仍被运行中实例占用的硬件：只有经过 RELEASING 并确认 sandbox 清理完成后，状态才能进入 RELEASED。
         self.release_lease_with_cleanup(&journal_lease)
             .map_err(provider_status)?;
         let lease = self
@@ -283,6 +285,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         // Class B durable intent (canonical parity with start_worker): persist
         // BEFORE the physical spawn so restart recovery can classify a launch
         // whose outcome records are lost as intent-without-outcome.
+        // B 类耐久意图（与 start_worker 保持规范一致）：在物理 spawn 之前持久化，以便重启恢复能够识别结果记录丢失的启动，并归类为“有意图、无结果”。
         if let Err(error) = self.record_runtime(
             RuntimeJournalEvent::InstanceLaunching,
             Some(&instance_name),
@@ -458,6 +461,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             ) {
                 // Class C: the Lease was already fail_released (FAILED) with
                 // the allocation held; this record is telemetry.
+                // C 类：Lease 已经以 fail_released（FAILED）状态保持失败关闭，且分配资源仍被占用；此记录只用于 telemetry。
                 tracing::error!(
                     event.name = "platform.kernel.journal_write_failed",
                     error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
@@ -536,6 +540,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         }
         // A terminated Worker that held the released Lease no longer has
         // authority: its Endpoint/Grant metadata must not outlive the Lease.
+        // 持有已释放 Lease 的 Worker 已终止且不再具有 authority：其 Endpoint/Grant 元数据不能在 Lease 生命周期结束后继续存在。
         let worker_identity = self
             .instances
             .lock()
@@ -661,6 +666,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
             ) {
                 // Class C: the Lease was already fail_released (FAILED) with
                 // the allocation held; this record is telemetry.
+                // C 类：Lease 已经以 fail_released（FAILED）状态保持失败关闭，且分配资源仍被占用；此记录只用于 telemetry。
                 tracing::error!(
                     event.name = "platform.kernel.journal_write_failed",
                     error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
@@ -735,6 +741,7 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
         }
         // A cancelled Worker that held the released Lease no longer has
         // authority: its Endpoint/Grant metadata must not outlive the Lease.
+        // 持有已释放 Lease 的 Worker 已取消且不再具有 authority：其 Endpoint/Grant 元数据不能在 Lease 生命周期结束后继续存在。
         let worker_identity = self
             .instances
             .lock()

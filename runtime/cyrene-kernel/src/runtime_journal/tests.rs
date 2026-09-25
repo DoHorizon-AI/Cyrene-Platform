@@ -2,6 +2,7 @@
 //!
 //! These tests prove epoch/fence monotonicity, exact stale-process evidence,
 //! and durable semantic event replay.
+//! 中文：持久化 journal 与重启恢复测试。这些测试验证 epoch/Fence 单调性、精确的过期进程证据，以及语义事件的持久化重放。
 
 use super::*;
 
@@ -245,6 +246,7 @@ fn recovery_rejects_nonfinal_corruption() {
 /// the durably persisted journal (`recover()` returns max historical fence
 /// + 1); a fresh manager seeded with that floor must allocate a strictly
 ///   greater token than the lease that existed before the restart.
+/// 中文：崩溃/重启后不得复用 Fence token。Fence 下限取自已持久化的 journal（recover() 返回历史 Fence 最大值 + 1）；用该下限初始化的新 manager 必须分配出严格大于重启前 Lease 的 token。
 #[test]
 fn crash_restart_does_not_reuse_fence_tokens() {
     use cy_kernel_api::{
@@ -304,6 +306,7 @@ fn crash_restart_does_not_reuse_fence_tokens() {
     };
 
     // Pre-restart: acquire a lease with fence token N and durably record it.
+    // 中文：重启前：获取 Fence token 为 N 的 Lease，并将其持久化记录。
     let manager_before = InMemoryResourceManager::new("node-1", vec![resource.clone()]);
     let lease_before = manager_before.acquire_lease(request.clone()).unwrap();
     let fence_before = lease_before.fence_token;
@@ -322,6 +325,7 @@ fn crash_restart_does_not_reuse_fence_tokens() {
     drop(manager_before);
 
     // Restart: recover the durable fence floor and seed a fresh manager.
+    // 中文：重启后：恢复持久化的 Fence 下限，并用它初始化新的 manager。
     let recovery = journal.recover("node-1").unwrap();
     assert_eq!(recovery.next_fence_token, fence_before + 1);
     let manager_after = InMemoryResourceManager::with_next_fence_token(
@@ -487,6 +491,7 @@ fn two_epoch_restart_requires_client_resnapshot_and_never_adopts_old_authority()
         }
         // Recovery uses SandboxBackend's fail-closed defaults: this runtime
         // has no stale-process discovery or adoption path.
+        // 中文：恢复使用 SandboxBackend 的 fail-closed 默认行为：此 runtime 没有发现或接管过期进程的路径。
     }
 
     struct StaleCleanupRuntime {
@@ -611,6 +616,7 @@ fn two_epoch_restart_requires_client_resnapshot_and_never_adopts_old_authority()
 
     // Epoch N owns a lease, Worker, Operation, and Endpoint and persists
     // source-scoped events through the same FileRuntimeJournal.
+    // 中文：Epoch N 拥有 Lease、Worker、Operation 和 Endpoint，并通过同一个 FileRuntimeJournal 持久化按 source 区分的事件。
     let epoch_n = journal.begin_epoch("node-restart").unwrap();
     let hardware_n = Arc::new(TestHardware {
         resource: resource.clone(),
@@ -724,6 +730,7 @@ fn two_epoch_restart_requires_client_resnapshot_and_never_adopts_old_authority()
 
     // Epoch N+1 closes the exact stale process, then starts from a fresh
     // resource ledger and authority. It never restores any old authority.
+    // 中文：Epoch N+1 关闭精确匹配的过期进程，然后从全新的 resource ledger 和 authority 启动；它绝不会恢复任何旧 authority。
     let epoch_n_plus_one = journal.begin_epoch("node-restart").unwrap();
     assert!(epoch_n_plus_one.node_epoch > epoch_n.node_epoch);
     assert_eq!(epoch_n_plus_one.next_fence_token, fence_n + 1);
@@ -768,6 +775,7 @@ fn two_epoch_restart_requires_client_resnapshot_and_never_adopts_old_authority()
 
     // The same client binds anew in epoch N+1 before asking to replay its
     // old cursor; binding does not resurrect its prior authority objects.
+    // 中文：同一个客户端会在 Epoch N+1 重新绑定，然后请求重放旧 cursor；重新绑定不会复活该客户端之前的 authority 对象。
     let operation_n_plus_one = semantic::Operation {
         identity: semantic::Identity {
             id: "operation-after-restart".to_string(),
@@ -945,6 +953,7 @@ fn semantic_event_replay_ignores_an_incomplete_final_record() {
 /// - old cursor gets SOURCE_CHANGED;
 /// - fresh snapshot contains no stale authority;
 /// - replacement Fence is strictly newer.
+/// 中文：黄金测试 C——Kernel 重启时仍有 Worker 运行。场景：在 Epoch N 启动真实 Worker、Lease 和 Endpoint；意外杀死 Kernel（模拟崩溃）；在 Epoch N+1 重启。验证旧 authority 不会被静默接管、恢复能正确分类现实状态、只有具备精确证据时才 reap 过期进程、不会杀死 Foreign/Unknown 进程、旧 cursor 返回 SOURCE_CHANGED、新 snapshot 不含过期 authority，且替代 Fence 严格更新。
 #[test]
 fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
@@ -1182,6 +1191,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     // ==========================================
     // 1. Epoch N: Launch Worker, Lease, Endpoint
     // ==========================================
+    // 中文：1. Epoch N：启动 Worker、Lease 和 Endpoint。
     let epoch_n = journal.begin_epoch("node-golden-c").unwrap();
     let hardware_n = Arc::new(TestHardware {
         resource: resource.clone(),
@@ -1264,12 +1274,14 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     // ==========================================
     // 2. Kill Kernel Unexpectedly (Crash Simulation)
     // ==========================================
+    // 中文：2. 意外杀死 Kernel（模拟崩溃）。
     drop(authority_n);
     drop(adapter_n);
 
     // ==========================================
     // 3. Restart in Epoch N+1 and Recover
     // ==========================================
+    // 中文：3. 在 Epoch N+1 重启并执行恢复。
     let epoch_n_plus_one = journal.begin_epoch("node-golden-c").unwrap();
     assert!(
         epoch_n_plus_one.node_epoch > epoch_n.node_epoch,
@@ -1282,6 +1294,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
 
     // Verify recovery classification:
     // Add a foreign process evidence to sandbox observations to verify foreign is NOT killed
+    // 中文：验证恢复分类：向 sandbox observations 添加 foreign 进程证据，以确认不会杀死该进程。
     let foreign_evidence = RuntimeProcessEvidence {
         cgroup_name: "instance-foreign".to_string(),
         pid: 9999,
@@ -1311,12 +1324,13 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     );
 
     // Stale process is reaped with exact evidence
+    // 中文：使用精确证据 reap 过期进程。
     let exact_stale_evidence = stale_cand.unwrap().observed.clone().unwrap();
     sandbox
         .observed
         .lock()
         .unwrap()
-        .retain(|e| e != &foreign_evidence); // remove foreign before startup gate
+        .retain(|e| e != &foreign_evidence); // remove foreign before startup gate | 中文：在启动门禁前移除外部证据
     journal
         .recover_before_listeners("node-golden-c", &epoch_n_plus_one, &sandbox)
         .unwrap();
@@ -1330,6 +1344,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     // ==========================================
     // 4. Start Fresh Kernel in Epoch N+1
     // ==========================================
+    // 中文：4. 在 Epoch N+1 启动全新的 Kernel。
     let hardware_n_plus_one = Arc::new(TestHardware {
         resource: resource.clone(),
     });
@@ -1355,6 +1370,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     let authority_n_plus_one = adapter_n_plus_one.authority();
 
     // Verify old authority is NOT silently adopted
+    // 中文：验证旧 authority 不会被静默接管。
     let fresh_snapshot = authority_n_plus_one
         .snapshot(&context("fresh-snap"), &principal)
         .unwrap();
@@ -1372,6 +1388,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     );
 
     // Verify old cursor gets SOURCE_CHANGED
+    // 中文：验证旧 cursor 返回 SOURCE_CHANGED。
     let source_changed = authority_n_plus_one
         .read_events(&context("replay-old-cursor"), &principal, &cursor_n, 256)
         .unwrap();
@@ -1383,6 +1400,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
     assert!(source_changed.events.is_empty());
 
     // Verify replacement Fence is strictly newer
+    // 中文：验证替代 Fence 严格更新。
     let replacement_lease = authority_n_plus_one
         .acquire_lease(
             &context("repl-lease"),
@@ -1414,6 +1432,7 @@ fn golden_test_c_restart_with_running_worker_no_adoption_and_fencing() {
 /// - Recovery must not claim it as the old Worker;
 /// - Foreign process is never killed / never reaped;
 /// - Recovery fails closed rather than adopting or destroying foreign state.
+/// 中文：黄金测试 D——PID 复用与过期证据。场景：模拟 PID 相同但进程启动身份不匹配的情况（例如 PID 相同，但 start_time_ticks 或 cgroup 不匹配）。验证恢复能正确分类现实状态（存活进程为 Foreign，旧记录为 Unknown）；恢复不得将其认作旧 Worker；绝不杀死或 reap Foreign 进程；并且必须 fail-closed，不能接管或销毁 Foreign 状态。
 #[test]
 fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
     use cy_kernel_api::{
@@ -1426,6 +1445,7 @@ fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
     let journal = FileRuntimeJournal::open(&journal_path).unwrap();
 
     // 1. Durably record a worker launch in epoch 1 with PID 4040, ticks 10_000
+    // 中文：1. 在 epoch 1 中持久记录一个 Worker 启动，PID 为 4040、ticks 为 10_000。
     let epoch_1 = journal.begin_epoch("node-golden-d").unwrap();
     journal
         .append(RuntimeJournalRecord {
@@ -1445,6 +1465,7 @@ fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
         .unwrap();
 
     // 2. Kernel restarts in epoch 2
+    // 中文：2. Kernel 在 epoch 2 重启。
     let epoch_2 = journal.begin_epoch("node-golden-d").unwrap();
     assert_eq!(epoch_2.runtime_processes.len(), 1);
     assert_eq!(
@@ -1453,15 +1474,17 @@ fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
     );
 
     // 3. Observed in sandbox: an OS process with matching PID 4040, BUT ticks = 99_999 (PID reused!)
+    // 中文：3. sandbox 观察到 OS 进程 PID 为 4040，但 ticks = 99_999（PID 已复用）。
     let reused_pid_evidence = RuntimeProcessEvidence {
         cgroup_name: "instance-worker-pid-reuse".to_string(),
         pid: 4040,
-        start_time_ticks: 99_999, // Mismatched process start time!
+        start_time_ticks: 99_999, // Mismatched process start time! | 中文：进程启动时间不匹配！
     };
 
     // 4. Verify classification:
     // - Live reused process is classified as Foreign (NOT Stale!)
     // - Stale journal record is classified as Unknown
+    // 中文：4. 验证分类：复用后的存活进程归类为 Foreign（不是 Stale）；旧 journal 记录归类为 Unknown。
     let candidates =
         FileRuntimeJournal::classify_recovery(&epoch_2, std::slice::from_ref(&reused_pid_evidence));
     assert_eq!(candidates.len(), 2);
@@ -1481,6 +1504,7 @@ fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
     );
 
     // 5. Test recovery execution:
+    // 中文：5. 测试恢复执行。
     #[derive(Default)]
     struct MockPidReuseSandbox {
         reaped: Mutex<Vec<RuntimeProcessEvidence>>,
@@ -1541,6 +1565,7 @@ fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
     };
 
     // Recovery MUST fail closed and MUST NOT reap the foreign reused PID process!
+    // 中文：恢复必须 fail-closed，绝不能 reap 复用该 PID 的 Foreign 进程！
     let recovery_result = journal.recover_before_listeners("node-golden-d", &epoch_2, &sandbox);
     assert!(
         recovery_result.is_err(),
@@ -1557,6 +1582,7 @@ fn golden_test_d_pid_reuse_stale_evidence_protects_foreign_process() {
     );
 
     // Verification: The foreign process was NEVER reaped!
+    // 中文：验证：Foreign 进程从未被 reap！
     assert!(
         sandbox.reaped.lock().unwrap().is_empty(),
         "Recovery must NOT reap or terminate the foreign reused-PID process"

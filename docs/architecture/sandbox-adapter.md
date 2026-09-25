@@ -126,3 +126,87 @@ namespace 隔离、seccomp、capability dropping、完整主机文件系统隔�
 The Chinese mirror is [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md).
 
 中文镜像见 [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md)。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# SandboxBackend 边界
+
+
+本文区分已经完成的 API/runtime 边界、延期的生产加固，以及未来 Docker/OCI 实现。
+
+## 职责归属
+
+
+Kernel 拥有启动授权、Lease/Fence 决策、生命周期状态、heartbeat 策略和
+`cyrene.sandbox.v1` 的通用 client。它不启动 Worker、不打开 cgroup 文件、不读取
+cgroupfs、不调用 pidfd/BPF/prctl，也不加载 container runtime library。
+
+
+`adapters/execution/sandboxd` 是特权 Adapter Host。它拥有被委托的 cgroup 子树、
+native process start/stop、device-BPF 强制、pidfd/进程跟踪、OOM 证据和有界清理。
+它虽然进程外运行，仍属于 Platform Core，因为这些能力是强制执行与生命周期权威。
+
+## 端口与协议
+
+
+内部 Core 端口是 `kernel/crates/cy-kernel-api/src/ports.rs` 中的 `SandboxBackend`。
+它继承 `ProcessRuntime`：
+
+| Operation | 含义 |
+| --- | --- |
+| `preflight` | 报告主机能力与强制就绪状态 |
+| `launch` | 在选定后端下启动已批准计划 |
+| `stop` | 终止并证明有界清理 |
+| `telemetry` | 返回后端拥有的物理运行时 telemetry |
+| `discover_recovery_processes` | 只发现可证明由后端拥有的进程 |
+| `recover_stale_process` | 只清理与持久证据精确匹配的陈旧进程 |
+
+
+`cyrene.sandbox.v1` UDS envelope 将这些操作映射为 typed request/response body。
+它是 Core 协议投影，不是 Worker 可控制的 Docker 命令面。
+
+## Native Linux 后端
+
+
+当前后端是 backend ID 为 `native-cgroup-v2` 的 `CgroupV2Runtime`。其有界生命周期
+包括 cgroup v2 限制、可用时对 `HARD` binding 使用 device BPF、parent-death 清理、
+可用时的 pidfd 跟踪、OOM telemetry、`cgroup.kill`、wait/reap，以及陈旧进程精确证据校验。
+
+
+启动路径先创建并配置 cgroup，再 fork 一个被 execution gate 暂停的子进程，将子进程
+attach 到 cgroup 后才释放它 `exec`。因此旧的用户代码 spawn-to-attach 窗口已经关闭。
+这并不意味着实现已经成为完整的恶意代码沙箱。
+
+## Docker/OCI 边界
+
+
+Docker/OCI 是有效的未来后端边界，不是当前实现声明。未来选用时，runtime 必须拥有
+完整的容器 cgroup 与生命周期树，并提供稳定 runtime handle、stop/reap 证据、telemetry
+和 recovery 语义。native cgroup 不能再同时管理由 Docker 拥有的 Worker。
+
+
+Kernel 必须接收 backend-neutral 的 launch plan；image reference、daemon flags 和
+container-runtime 细节留在选定的 host profile 或 verified installation 层。
+
+## 安全非保证
+
+
+当前 `native-cgroup-v2` 是有边界的 cgroup 生命周期沙箱，不提供 user/mount/network/PID
+namespace 隔离、seccomp、capability dropping、完整主机文件系统隔离或 syscall containment。
+不能把它宣传为恶意任意代码隔离或完整多租户安全边界。
+
+## 当前 HEAD 状态
+
+
+| 范围 | 状态 | 精确含义 |
+| --- | --- | --- |
+| `SandboxBackend`/协议边界 | `COMPLETE` | Core 端口和 `cyrene.sandbox.v1` 映射存在。 |
+| Native cgroup 生命周期 | `COMPLETE` | 当前 Linux 后端拥有启动、停止、telemetry 和清理。 |
+| 第一条用户代码的强制窗口 | `COMPLETE` | gated fork/attach/exec 路径已实现。 |
+| 恶意任意代码隔离 | `NOT_COMPLETE` | 缺少所需 namespace/syscall/capability/filesystem 控制。 |
+| Docker/OCI 后端 | `DEFERRED` | 边界已接受；实现和真实验收尚不存在。 |
+| 生产 systemd 崩溃/重启验收 | `DEFERRED` | 需要真实特权部署环境。 |
+
+
+中文镜像见 [`../zh-CN/architecture/sandbox-adapter.md`](../zh-CN/architecture/sandbox-adapter.md)。

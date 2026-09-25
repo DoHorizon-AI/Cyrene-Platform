@@ -2,6 +2,7 @@
 r"""
 Cyrene Documentation Validator
 Validates relative Markdown links, ADR references, and ensures no local C:\ paths exist.
+中文：Cyrene 文档验证器。验证 Markdown 相对链接和 ADR 引用，并确保文档中不包含本机路径。
 """
 
 import os
@@ -41,16 +42,23 @@ def validate_docs(root: Path) -> list:
 
         for idx, line in enumerate(content.splitlines(), 1):
             # Check for forbidden obsolete paths
+            # 中文：检查是否存在禁止使用的过时路径
+            # 中文：检查是否引用了已禁止的过期路径。
             for ob in obsolete_paths:
                 if ob.search(line):
                     errors.append(f"{rel_f}:{idx} -> Obsolete path reference: {line.strip()}")
 
             # Check for local C:\ paths (allow file:/// links if they point to generic repo paths, but flag raw local paths)
+            # 中文：检查本机 C:\ 路径（指向通用仓库路径的 file:/// 链接可保留，但原始本机路径应报出）
+            # 中文：检查本机 C: 路径；指向通用仓库路径的 file:/// 链接可保留，但原始本机路径应标记。
             if c_drive_pattern.search(line) and not line.strip().startswith("#"):
                 # Ignore if inside a markdown link pointing to an existing file
+                # 中文：如果内容位于指向现有文件的 Markdown 链接内，则忽略
+                # 中文：如果该路径位于指向现有文件的 Markdown 链接中，则忽略。
                 pass
 
         # Check links
+        # 中文：检查文档链接。
         for match in link_pattern.finditer(content):
             text, target = match.groups()
             if (

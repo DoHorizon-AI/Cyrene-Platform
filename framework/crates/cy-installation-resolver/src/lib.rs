@@ -23,6 +23,7 @@ use serde::Deserialize;
 
 /// Reads installation records previously verified and written by an external
 /// installer. This adapter never downloads artifacts or validates signatures.
+/// 中文：读取先前由外部安装器核验并写入的安装记录。此适配器绝不会下载制品或校验签名。
 #[derive(Debug, Clone)]
 pub struct FilesystemInstalledPluginResolver {
     root: PathBuf,
@@ -200,6 +201,7 @@ impl InstalledPluginResolver for FilesystemInstalledPluginResolver {
         // The execution reference format is owned by this outer installation
         // adapter. Kernel code treats it as opaque and only sees the verified
         // ResolvedLaunchPlan returned below.
+        // 中文：执行引用的格式由外层安装适配器负责。Kernel 代码将其视为不透明值，只会看到下方返回的、已核验的 ResolvedLaunchPlan。
         let (installation_name, manifest_digest) =
             worker.execution_ref.split_once('@').ok_or_else(|| {
                 ProviderError::new(
@@ -468,12 +470,14 @@ mod tests {
         .unwrap();
 
         // Valid manifest should pass
+        // 中文：有效的 manifest 应当通过校验。
         let resolved = FilesystemInstalledPluginResolver::new(directory.path())
             .resolve_launch_plan(&installation(), "instance-1")
             .unwrap();
         assert_eq!(resolved.installation.installation_name, "demo-plugin");
 
         // Mismatched manifest ID should fail
+        // 中文：manifest ID 不匹配时应当失败。
         let bad_manifest =
             manifest_content.replace(r#""id": "demo-plugin""#, r#""id": "other-id""#);
         std::fs::write(

@@ -78,6 +78,7 @@ pub struct NvidiaSmiProvider {
     /// Sysfs 虚拟文件系统根目录（默认为 `/sys`）
     sysfs_root: PathBuf,
     /// Explicit single-user WSL admission; never implies per-GPU device isolation.
+    /// 明确启用单用户 WSL 接入；这不代表支持按 GPU 隔离设备访问。
     wsl_shared_device: bool,
     /// Adapter 进程内维护的单调事实代次。相同快照不改变代次。
     inventory_generation: Mutex<InventoryGeneration>,
@@ -159,6 +160,9 @@ impl NvidiaSmiProvider {
     /// GPU inventory remains useful on drivers that expose inventory but not
     /// topology. The result therefore carries availability explicitly instead
     /// of silently turning a topology probe failure into an empty link list.
+    /// 查询拓扑矩阵，将其作为单独的可选硬件事实返回。
+    ///
+    /// 即使驱动支持设备清单但不支持拓扑信息，GPU 清单仍然有用。因此结果会明确标记可用性，不会把拓扑探测失败悄悄转换为空链路列表。
     fn query_topology(&self) -> Result<Vec<(String, String, String)>, ProviderError> {
         let args = vec!["topo".to_string(), "-m".to_string()];
         let output = self.runner.run(&self.command, &args)?;
@@ -318,7 +322,7 @@ impl ResourceProvider for NvidiaSmiProvider {
     //   Converts observed nvidia-smi rows into typed resource facts without
     //   fabricating topology or device identity.
     //
-    //   将 nvidia-smi 观测行转换为强类型资源事实，不虚构拓扑或设备身份。
+    // 将 nvidia-smi 观测行转换为强类型资源事实，不虚构拓扑或设备身份。
     // ════════════════════════════════════════════════════════════════════════
     fn probe_resources(&self) -> Result<Vec<Resource>, ProviderError> {
         self.probe_inventory_snapshot()
@@ -446,6 +450,7 @@ impl ResourceProvider for NvidiaSmiProvider {
 /// Capture the actual major/minor identity while still inside the isolated
 /// hardware adapter. The Kernel re-checks it immediately before attaching its
 /// cgroup-device eBPF filter, preventing a path swap from widening access.
+/// 在隔离的硬件适配器内捕获真实的主设备号和次设备号。Kernel 会在挂载 cgroup-device eBPF 过滤器前立即复核，防止路径被替换后扩大访问范围。
 fn device_node(path: PathBuf, required: bool) -> DeviceNode {
     #[cfg(target_os = "linux")]
     {
@@ -773,6 +778,7 @@ mod tests {
     fn wsl_binding_requires_opt_in_and_reports_soft_visibility() {
         let root = tempfile::tempdir().unwrap();
         // A real character device exercises stat/rdev without requiring mknod.
+        // 使用真实字符设备验证 stat/rdev，无需调用 mknod。
         std::os::unix::fs::symlink("/dev/null", root.path().join("dxg")).unwrap();
         let provider = NvidiaSmiProvider::new("nvidia-smi")
             .with_device_root(root.path())

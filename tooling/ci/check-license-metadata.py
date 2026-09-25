@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Validate repository package metadata against the architecture classification."""
+"""Validate repository package metadata against the architecture classification.
+
+中文：依据架构分类验证仓库的软件包元数据。
+"""
 
 from __future__ import annotations
 

@@ -37,6 +37,7 @@ use crate::{
 /// Canonical state is owned by the local Kernel authority rather than by a
 /// transport service implementation. Compatibility projections borrow this
 /// runtime through `KernelServiceAdapter` during the migration.
+/// 规范状态由本地 Kernel authority 持有，而不是由传输服务实现持有。迁移期间，兼容性投影通过 KernelServiceAdapter 借用此 runtime。
 #[doc(hidden)]
 pub struct AuthorityRuntime {
     pub(crate) daemon: Arc<KernelDaemon>,
@@ -44,6 +45,7 @@ pub struct AuthorityRuntime {
     pub(crate) instances: Arc<Mutex<HashMap<String, ManagedProcess>>>,
     /// The legacy process map is keyed by a private runtime name. Canonical
     /// authority lookup always enters through this typed namespace index.
+    /// 旧版进程映射以私有 runtime 名称为键。规范 authority 查询始终通过类型化 namespace 索引进入。
     pub(crate) workers: Arc<Mutex<BTreeMap<ObjectRef, String>>>,
     pub(crate) leases: Arc<Mutex<BTreeMap<ObjectRef, String>>>,
     pub(crate) semantic_operations: Arc<Mutex<BTreeMap<ObjectRef, semantic::Operation>>>,
@@ -52,9 +54,11 @@ pub struct AuthorityRuntime {
     pub(crate) endpoint_grants: Arc<Mutex<BTreeMap<ObjectRef, semantic::EndpointGrant>>>,
     /// Provider records are keyed by namespace and logical ID, never by the
     /// transport socket or session-generation-bearing Identity.
+    /// Provider 记录以 namespace 和逻辑 ID 为键，绝不以传输套接字或包含 session generation 的 Identity 为键。
     pub(crate) providers: Arc<Mutex<BTreeMap<(NamespaceId, String), ProviderRecord>>>,
     /// First mutation binds a namespace to its authenticated Principal. This
     /// minimal local policy prevents an unrelated UDS peer from controlling it.
+    /// 首次状态修改会将 namespace 绑定到经过认证的 Principal。这项最小本地策略可防止无关 UDS 对端控制该 namespace。
     pub(crate) namespace_owners: Arc<Mutex<BTreeMap<NamespaceId, semantic::Identity>>>,
     pub(crate) heartbeat: WorkerHeartbeatConfig,
     pub(crate) next_control_connection: Arc<AtomicU64>,
@@ -75,6 +79,7 @@ pub(crate) struct ProviderRecord {
 
 /// Hardware observations describe resources only. This stays internal so the
 /// external Provider projection continues to carry the full contract shape.
+/// 硬件观测只描述资源。此信息保持内部可见，使外部 Provider 投影仍能携带完整契约形状。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProviderInventoryScope {
     Full,
@@ -88,6 +93,7 @@ pub(crate) struct NamespaceEventHistory {
 
 /// Production local authority for one Kernel process. It has no tonic request
 /// or response dependency; transports project requests onto this owner.
+/// 单个 Kernel 进程使用的生产级本地 authority。它不依赖 tonic 请求或响应；传输层会将请求投影到此 owner。
 #[derive(Clone)]
 pub struct LocalKernelAuthority {
     pub(crate) runtime: Arc<AuthorityRuntime>,
@@ -110,6 +116,7 @@ impl LocalKernelAuthority {
             }
             // A receipt only proves delivery. The executor must still report a
             // terminal Operation state before the bounded completion deadline.
+            // receipt 只能证明消息已送达。executor 仍必须在有界完成期限内报告 Operation 的终态。
             std::thread::sleep(completion_timeout.max(ack_timeout));
             authority.mark_cancelling_operation_lost(&context, &operation);
         });
@@ -258,6 +265,7 @@ impl LocalKernelAuthority {
 
     /// Returns a source-scoped authority snapshot. Clients use this after a
     /// replay gap or source change before resuming from the returned cursor.
+    /// 返回按 source 限定的 authority 快照。发生 replay 缺口或 source 变化后，客户端使用此快照，再从返回的 cursor 继续读取。
     pub fn snapshot(
         &self,
         context: &AuthorityCallContext,
@@ -273,6 +281,7 @@ impl LocalKernelAuthority {
         // losing a transition that publishes between the state read and the
         // cursor read (the single-mutex hole that previously let a Worker or
         // Operation vanish from both the snapshot and the incremental replay).
+        // 在读取 authority 状态之前，先捕获事件一致性边界。状态转换会先修改状态，再发布其耐久事件；因此，在读取 cursor 之后再读取状态，可保证快照包含 cursor 已计入的全部事件。这样 Snapshot @ C + read_events(C) 可以重建当前状态，不会丢失在读取状态和 cursor 之间发布的转换；此前单互斥锁方案会让 Worker 或 Operation 同时从快照和增量 replay 中消失。
         let source = self.semantic_event_source_for(&context.namespace);
         let cursor = semantic::EventCursor {
             source: source.clone(),
@@ -468,6 +477,7 @@ impl LocalKernelAuthority {
     /// Endpoint/Grant state cannot outlive the authority it depends on. The
     /// removed Endpoint identities are returned so callers can emit the
     /// corresponding revocation reconcile actions.
+    /// 移除不再具有有效 authority 的 Worker 元数据：删除其已发布 Endpoint，并丢弃引用这些 Endpoint 或将该 Worker 设为被授权方的所有 EndpointGrant。调用方会在 Worker 的 Lease 被撤销、释放或过期，或 Worker 丢失/替换时调用此操作，防止 Endpoint/Grant 状态超出其依赖的 authority 生命周期。返回已移除的 Endpoint 身份，供调用方发出对应的撤销协调 action。
     pub(crate) fn purge_endpoint_authority(
         &self,
         worker_identity: &semantic::Identity,
@@ -505,6 +515,7 @@ impl LocalKernelAuthority {
     /// caller must already have classified its evidence (heartbeat timeout,
     /// Provider reality, or runtime absence); a transport disconnect alone is
     /// intentionally insufficient to reach this transition.
+    /// 提交 Worker 异常消失时 authority 侧的状态变化。调用方必须先对证据分类（心跳超时、Provider 实际状态或 runtime 缺失）；仅传输断开有意不足以触发此转换。
     pub(crate) fn mark_worker_lost(
         &self,
         context: &AuthorityCallContext,
@@ -547,6 +558,7 @@ impl LocalKernelAuthority {
         }
         // This record is the durable intent boundary. Once it succeeds, every
         // following error still leaves authority fail-closed rather than active.
+        // 此记录是耐久意图边界。一旦写入成功，后续任何错误都会让 authority 保持失败关闭，而不是恢复为 active。
         self.record_runtime(
             RuntimeJournalEvent::WorkerLost,
             Some(&worker_name),
@@ -649,6 +661,7 @@ impl LocalKernelAuthority {
         // No visible state is published before both the revoke and its new
         // fence are journaled. If either write fails, the in-memory state is
         // already fail-closed and physical resources remain allocated.
+        // 只有 revoke 和新的 fence 都写入日志后，才会发布可见状态。任一写入失败时，内存状态已经失败关闭，物理资源仍保持分配占用。
         if revocation_required || lease.state == LeaseState::Revoked {
             self.record_runtime(
                 RuntimeJournalEvent::LeaseRevoked,
@@ -730,6 +743,7 @@ impl LocalKernelAuthority {
     /// Actively scans for expired leases and triggers authority revocation,
     /// worker termination, endpoint invalidation, fence advancement, and
     /// confirmed cleanup.
+    /// 主动扫描过期租约，并触发 authority 撤销、worker 终止、endpoint 失效、fence 前进以及已确认的清理。
     pub(crate) fn enforce_lease_expiry(
         &self,
     ) -> Result<Vec<ProviderReconcileAction>, semantic::Rejection> {
@@ -750,6 +764,7 @@ impl LocalKernelAuthority {
             }
 
             // Find semantic namespace and identity if tracked in self.runtime.leases
+            // 如果 self.runtime.leases 中跟踪了该租约，则查找其语义 namespace 和 identity。
             let lease_object = self
                 .runtime
                 .leases
@@ -772,6 +787,7 @@ impl LocalKernelAuthority {
                 });
 
             // Check if there is an active semantic worker bound to this lease
+            // 检查是否有绑定到此租约的 active semantic worker。
             let bound_worker = {
                 let instances = self
                     .runtime
@@ -813,6 +829,7 @@ impl LocalKernelAuthority {
             }
 
             // If no semantic worker is bound, check if it's a legacy plugin instance
+            // 如果没有绑定的 semantic worker，则检查是否为旧版 plugin 实例。
             let is_legacy_instance = {
                 let instances = self
                     .runtime
@@ -886,6 +903,7 @@ impl LocalKernelAuthority {
                 }
             } else {
                 // Standalone lease with no running process
+                // 没有运行中进程的独立租约。
                 let revoked = if lease.state == LeaseState::Revoked {
                     Ok(lease.clone())
                 } else {
@@ -1164,6 +1182,7 @@ impl LocalKernelAuthority {
                 ),
                 // A source cannot safely publish a new sequence when its
                 // durable history is unavailable or malformed.
+                // 当耐久历史不可用或格式错误时，source 无法安全地发布新的序列号。
                 Err(_) => return,
             }
         };
@@ -1204,6 +1223,10 @@ impl LocalKernelAuthority {
         // subscribed client miss the fact with no way to detect the gap.
         // Degrade the stream instead: no further events are emitted for this
         // namespace until the durable store recovers and clients resnapshot.
+        // 只有组合所选的耐久存储接受事件后，事件才对外可见。状态转换有各自的日志边界；这可防止内存 replay cursor 声称某个重启后会消失的事件。
+        // 按照 Contract，规范生命周期事实（worker/lease/endpoint/operation）是有序、可 replay、至少投递一次的语义事件。
+        // 耐久追加失败时，不能悄悄丢弃该事件后继续发送看似连续的后续事件，否则已订阅客户端会漏掉事实且无法发现缺口。
+        // 应降级事件流：耐久存储恢复且客户端重新获取快照之前，该 namespace 不再发出事件。
         if self
             .runtime
             .event_store
@@ -1247,6 +1270,7 @@ impl LocalKernelAuthority {
         // lost, an already-subscribed client must be told to resnapshot (Gap)
         // rather than silently receive an empty, apparently-contiguous stream
         // while its cursor goes stale.
+        // 降级的事件流必须能被外部观察到：一旦耐久追加丢失，必须通知已订阅客户端重新获取快照（Gap），不能在 cursor 已过期时静默发送空的、看似连续的事件流。
         if self
             .runtime
             .semantic_events
@@ -1546,6 +1570,7 @@ impl LocalKernelAuthority {
             .map_err(Self::provider_rejection)?;
         // The Worker that held the released Lease no longer has authority: its
         // published Endpoints and dependent Grants must not outlive the Lease.
+        // 持有已释放 Lease 的 Worker 已不再具有 authority：其已发布 Endpoint 和依赖它的 Grant 不能在 Lease 生命周期结束后继续存在。
         self.purge_endpoint_authority(&current.holder);
         Ok(Self::semantic_lease(&object, &released))
     }

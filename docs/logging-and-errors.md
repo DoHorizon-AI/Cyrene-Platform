@@ -620,3 +620,397 @@ Platform 与 Product 文档只引用共同规范；各域错误码实现和目�
 - [S8] <https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html>
 
 具体库版本由实现仓当前工具链、依赖锁和 CI 确定。本规范不要求为了追随 latest 文档而擅自升级依赖。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene 日志、错误码与诊断规范
+
+- **文档类型：** 跨仓工程规范草案，不是实施完成报告。
+- **规范版本：** 0.1。
+- **状态：** `REVIEW_READY`；经仓库 owner 接受后作为后续实现约束。
+- **实现状态：** 本文件不表示日志系统已经实现、接入或验收。
+- **建议归属：** Cyrene-Workspace 现有 standards/governance 文档区域。
+- **适用范围：** Platform、Plugins、各 Product、Studio/Navigator 和安装运行工具。
+- **首轮重点：** Platform Rust 守护进程以及 RC 用户流程涉及的诊断边界。
+
+## 0. 目标、术语与实施边界
+
+本规范的目标不是“让每个文件都有日志”，而是：
+
+1. 能解释关键操作何时开始、结果如何、为何失败、如何恢复以及最终资源状态。
+2. 相同错误有稳定的机器标识；用户获得可操作提示，开发者可定位对应记录。
+3. 日志不泄露敏感信息、不污染 stdout 协议，也不阻塞关键监管和资源清理。
+4. Product/Plugin 可独立演进业务错误，不必为了增加错误码而发布新版 Platform。
+5. 真实执行、模拟执行、未执行和未知结果不会相互冒充。
+
+“必须/不得”在接受本规范后为强制要求；“建议”是允许在有理由时偏离的默认方案。
+
+> **重要：** 输入审计中的 crate 数量、文件数、`let _ =` 数量和代码行号都是调查快照，不是永久规范。落库时不得把这些数字描述成已对当前源码复核的事实。本次落库任务只创建或对齐规范并补最少导航引用；不实施日志埋点、不批量改错误处理，也不修改状态机、鉴权、协议、依赖锁、CI 或安装程序。
+
+## 1. 架构与所有权
+
+### 1.1 统一格式，分散维护语义
+
+共同规范只定义日志字段、事件名和错误码命名规则，上下文关联、序列化、级别、脱敏和输出约束，以及诊断查询、支持材料导出和验收要求。各 owner 分别定义并维护自身语义：
+
+| Owner | 负责内容 |
+| --- | --- |
+| **Platform** | 通用资源、Node、Worker、Package、Lease/Fence、准入、监管和清理诊断 |
+| **Plugins / 能力契约 owner** | 能力调用错误、具体实现诊断及第三方供应商错误映射 |
+| **Product** | 自身的数据、训练、部署、路由、评估、会话等业务错误和操作结果 |
+| **Studio / Navigator UI** | 展示错误、关联诊断并提供操作入口；不重新判定底层生命周期结果 |
+| **日志采集/查询组件** | 接收、存储、过滤、检索和访问控制；不拥有业务状态 |
+
+- 不得在 Platform 建立覆盖所有 Product/Plugin 业务错误的大枚举或全局业务 SDK。
+- 新增 evaluator、Provider、数据类型或模型参数时，通常只更新对应 owner 的错误定义，不要求修改 Platform。
+- 共同规范的归属不等于运行依赖。Product 不得为记录日志而依赖 Workspace 源码 checkout，也不得仅为日志初始化重新引入 Platform 业务 SDK。
+
+### 1.2 技术实现保持轻薄
+
+Rust 可复用精简的初始化、格式化、过滤和脱敏辅助模块；该模块不得定义 Product 业务对象、转发业务 payload、接管重试/任务调度/租约/认证/恢复，也不得要求所有语言使用同一个私有日志 RPC。
+
+Python、.NET、JVM 可保留各自成熟的日志设施，只需在输出边界映射到共同字段。是否抽出独立共享包，由真实复用需求决定；不能为了发布规范先建仓库或新框架。
+
+## 2. 不得混淆的数据种类
+
+| 数据种类 | 用途 | 不能替代 |
+| --- | --- | --- |
+| **运行日志** | 排障、解释操作过程和运行诊断 | Product/Kernel 状态 |
+| **Trace / Span** | 关联分布式操作及其子操作 | 认证身份或业务任务 ID |
+| **指标** | 速率、延迟、显存、资源利用率和错误数 | 不应把每次采样都写成 INFO |
+| **Product 事件** | UI 订阅、进度、状态变化、loss/step/checkpoint 等事实 | 不得从易变日志文案反向推导 |
+| **安全审计记录** | 记录操作者、资源、安全敏感操作及结果 | 可随意采样的 DEBUG 日志 |
+| **恢复日志 / 状态 journal / WAL** | 崩溃恢复、事务或生命周期权威 | 普通 tracing 日志 |
+
+必须遵守以下规则：
+
+1. Lease 是否释放，由既有权威状态和物理清理确认决定，不取决于是否打印了 `released`。
+2. UI 不得匹配日志字符串来判断训练成功、部署 READY 或资源已释放。
+3. 第三方 trainer 只提供文本时，由对应 adapter 解析成类型化 Product 事件；UI 不直接解析其 stderr。
+4. 清理或轮转普通日志、导出支持包，不得修改 journal、数据库、checkpoint 或 Artifact。
+5. 安全审计可共用基础技术，但其保留、访问、投递和失败策略须独立声明；不能套用普通诊断采样而静默丢弃。
+6. 若某操作规定“先持久化审计才能执行”，这属于安全/业务策略；日志 Agent 不得自行添加或移除该门禁。
+
+## 3. 错误码与事件命名
+
+### 3.1 推荐的新错误码格式
+
+新错误码采用 `<OWNER>.<DOMAIN>.<REASON>` 格式，例如：
+
+```text
+PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED
+PLATFORM.WORKER.CLEANUP_UNCONFIRMED
+YIELD.RUNTIME.DEPENDENCY_UNAVAILABLE
+REACTOR.DEPLOYMENT.READINESS_PROBE_FAILED
+EXCHANGE.AUTH.API_KEY_REVOKED
+```
+
+这些只是命名示例，不代表相应代码已存在，也不授权替换已有公开错误码。
+
+强制规则：错误码必须稳定、可搜索且语义集合有限；不为每条日志分配错误码，正常事件不需要错误码；错误码不能包含 request ID、模型名、GPU 型号、文件路径、版本号或源码行号；不能用它编码日志级别、HTTP 状态或“是否自动重试”。已有公开 API/capability contract 的稳定错误码优先保留；兼容映射必须显式，禁止全仓静默改名。移动文件、更换语言或存储实现不能改变错误码含义。已发布错误码不得复用为其他含义；弃用时记录替代项和支持范围。本轮不建立全局数字号段，也不并行维护字符串与数字两套权威编号。
+
+### 3.2 事件名
+
+事件名建议使用小写点分形式，例如 `platform.worker.started`、`platform.lease.release_deferred`、`platform.node.reconnected`、`yield.training.checkpoint_saved`、`reactor.deployment.ready`。
+
+- 事件名表示事件类型，不是实例身份；不得动态拼接资源 ID。
+- 事件结构的字段含义须稳定。可兼容地增加可选字段；不得在同一事件名下悄然改变关键字段语义。
+
+### 3.3 错误目录
+
+每个 owner 选择一种权威来源：已有类型化错误定义，或已有 owner-scoped 契约目录；不得人工维护多份平行错误清单。
+
+错误定义至少说明：`code`；触发条件和明确不适用情形；`owner`；默认安全说明；能否向调用者展示；允许记录的上下文字段；已有 API/RPC 映射（如有）；兼容、弃用和替代规则。
+
+可为严重程度和恢复建议提供默认指导，但不能机械决定每次调用的级别或重试行为。全局索引及开发者错误文档应由 owner 定义生成；新增业务错误不要求修改 Platform 中央表。
+
+## 4. 结构化记录模型
+
+以下是 Cyrene 的逻辑记录模型，不要求每种语言采用新日志框架，也不表示普通 JSON 文件等于 OTLP。
+
+生产服务的第一方日志应可输出为 UTF-8 NDJSON，每行是一个完整 JSON 对象。统一出口只用一种字段布局，不同时人工维护 camelCase 与 snake_case 两套等价记录。
+
+### 4.1 字段
+
+| 字段 | 要求 |
+| --- | --- |
+| `schema_version` | 第一方结构化记录必填；表示日志格式版本，不是产品版本 |
+| `timestamp` | 必填；UTC / RFC 3339 事件时间 |
+| `level` | 必填；`TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` |
+| `event.name` | 第一方关键事件必填；稳定的事件类型 |
+| `service.name` | 必填；逻辑服务名，不是用户主机名 |
+| `service.instance.id` | 服务进程必填；每次启动唯一，避免 PID 重用混淆 |
+| `message` | 安全的人类可读摘要，不得用作程序分支依据 |
+| `trace_id` / `span_id` | 有追踪上下文时记录；没有则省略，不得伪造 |
+| `attributes` | 受控的结构化上下文集合 |
+
+`attributes` 可按实际场景包含 `error.code`、分类后的 `cause.kind`、`operation_id`、`request_id`、当前 owner 合法持有的资源 ID、`attempt`、`duration_ms`、`timeout_ms`、`previous_state`/`observed_state`/`desired_state`、`outcome`、`recovery.action`、获准使用的 `generation` 和非秘密 fence 身份引用，以及只在相关场景使用的 `execution.mode`（`real`/`simulated`/`test`）。
+
+未知字段不得用 `0`、空字符串或 `false` 伪装成已观测事实；未发生的结果不能预先写成成功。需要表达不确定性时使用 `outcome: unknown` 等约定。`duration_ms` 使用单调时钟计算；不能只依赖墙上时钟推断跨进程事件顺序。构建版本可由构建流程注入服务资源属性，或在启动事件中记录一次；不得人工把 SHA 重复写入每行日志和普通架构文档。
+
+### 4.2 OpenTelemetry 映射
+
+清晰映射到 OpenTelemetry 逻辑字段：`timestamp` 对应 `Timestamp`；`level` 对应 `SeverityText`/`SeverityNumber`；`message` 对应 `Body`；`event.name` 对应 `EventName`；service identity 对应 `Resource`；trace/span 对应 `TraceId`/`SpanId`；其余上下文对应 `Attributes`。使用现有 exporter 时由 adapter 转换，不创建私有遥测协议。首个 RC 不要求部署 Collector 或托管日志后端。
+
+### 4.3 记录大小
+
+建议单条结构化记录不超过 32 KiB、message 不超过 4 KiB、原因链不超过 8 层。它们是项目默认建议，不是外部标准要求；实现者要与现有运行预算核对后固定。
+
+超限时必须保持 JSON 合法，保留 event、error code、trace 和资源标识等核心字段并标明截断；不得直接截断序列化字节而生成破损 JSON。第三方进程输出还须限制单来源速率和总量，防止日志输出成为资源耗尽入口。
+
+## 5. 示例：清理失败但不能误报资源释放
+
+以下是纯合成示例：
+
+```json
+{
+  "schema_version": 1,
+  "timestamp": "2026-09-21T12:00:00Z",
+  "level": "ERROR",
+  "event.name": "platform.lease.release_deferred",
+  "service.name": "cyrene-kernel",
+  "service.instance.id": "synthetic-instance-1",
+  "message": "无法持久化释放意图；allocation 仍处于预留状态。",
+  "attributes": {
+    "error.code": "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+    "operation_id": "synthetic-operation-1",
+    "worker_id": "synthetic-worker-1",
+    "lease_id": "synthetic-lease-1",
+    "attempt": 2,
+    "cause.kind": "io.permission_denied",
+    "outcome": "deferred",
+    "recovery.action": "watchdog_reconcile",
+    "allocation_released": false
+  }
+}
+```
+
+只有权威状态证明 allocation 尚未释放，才能记录 `allocation_released: false`；状态未知时不能编造。之后恢复成功时，增加恢复结果事件并关联同一 operation/lease。不得覆盖、删除或改写首次失败记录，制造“从未失败”的历史。
+
+## 6. 级别、频率与重复记录
+
+| 级别 | 用途 |
+| --- | --- |
+| **TRACE** | 默认关闭的极细粒度调试；不得依靠它确认关键结果 |
+| **DEBUG** | 有界诊断和详细尝试过程 |
+| **INFO** | 关键生命周期、用户可见操作结果、正常取消及恢复成功 |
+| **WARN** | 可恢复退化、连接丢失、重试中或需关注但尚未终局失败 |
+| **ERROR** | 操作失败、关键持久化失败、清理无法确认或服务无法继续履责 |
+
+错误码和日志级别相互独立：同一错误原因在中间尝试和最终失败时可记录为不同级别。预期客户端取消或接收方已关闭不应自动作为 ERROR。取消后残留 Worker/Lease 等清理失败，须与正常取消分开记录。同一异常不应沿调用栈每层重复输出完整 ERROR；由负责处理或形成最终结果的边界记录，其他层仅补上下文或关联。重连/watchdog 不得每轮刷 ERROR；记录首次异常、有限频率摘要和恢复结果，摘要提供重试数、持续时间或抑制数。状态机只在有意义决策、状态转换或失败时记录，不得每次 reconcile 循环重复输出同一 INFO。高基数 operation/resource/trace ID 不得成为指标标签。普通诊断可受预算限制，但关键事件不得被任意随机采样排除；队列溢出仍可能丢失，必须另行计数，不能宣称零丢失。
+
+## 7. 跨层错误、API、重试与 UI
+
+### 7.1 API 错误契约
+
+优先保留已有 Product/RPC 错误格式。新增或统一 HTTP 错误格式时可采用 RFC 9457 Problem Details，并用安全扩展字段承载错误码和诊断标识。必须分清稳定机器错误码、面向用户的安全说明，以及仅授权运维可见的诊断详情。客户端不得解析 message/detail 文本来判断错误类型。日志 `error.code` 和 API `code` 的语义须相同或显式映射，不能建立含义不同的日志码和接口码。跨服务可映射成更适合调用者的错误，但须保留安全的下游原因和关联，不能把一切压成无法诊断的 `EXECUTION_FAILED`。未知下游错误须安全 fallback；UI 不崩溃，也不原样显示敏感异常正文。
+
+### 7.2 流式请求
+
+HTTP header 或流开始发送后，错误必须通过既有流协议的错误/终止语义表达；不得把普通 JSON 错误对象或日志行塞入 SSE、gRPC、JSON-RPC 或二进制数据流。请求取消、实际停止、资源回收和最终状态是不同事实，不能合并成“已取消所以已释放”。
+
+### 7.3 重试策略
+
+日志系统和错误码目录不得执行自动重试。恢复由操作 owner 根据幂等性、当前状态和下游事实决定，例如 `safely_retry`、`query_state_first`、`fix_configuration`、`user_action_required`、`none` 或 `unknown`。仅凭 HTTP 5xx、TIMEOUT 或连接中断，不能认定操作没有执行，也不能自动重复启动训练、发布或其他副作用操作。
+
+### 7.4 UI 最低要求
+
+UI 操作失败至少展示安全易懂的说明、存在时展示稳定错误码、可复制的 operation/diagnostic 关联标识，以及 Product 提供的合法恢复入口。不要求 UI 展示堆栈或完整 stderr。网络超时后不能直接说“训练失败且资源已释放”，应回读 Product 状态或显示结果未知。
+
+## 8. 上下文关联与信任边界
+
+- HTTP 分布式追踪使用 W3C Trace Context；其他传输映射到既有协议允许的 metadata/管理上下文。
+- `request_id` 表示一次请求，`operation_id` 表示长操作，`training_run_id`/`deployment_id` 等表示业务资源；不能混成同一 ID。
+- 重试沿用稳定操作身份并增加 `attempt`；子请求可有独立 request/span。
+- 崩溃后恢复可创建新 trace，但须通过既有资源/operation identity 关联；不得伪造不存在的旧 span。
+- 同一资源上的并发操作也须能区分。
+- 外部 trace/baggage/correlation header 均是不可信输入：校验格式、限制长度，不得用于认证、授权、提升日志级别或跨租户查询。
+- 进程间传递只使用已有允许的通用上下文渠道；不得为追踪泄露父进程完整环境或无计划改动所有业务 payload。
+- 日志查询权限不能仅凭“知道 trace_id”获得；必须验证调用者有权访问相应 tenant/workspace/resource。
+- 插件提供的 owner/service/actor 字段不能直接成为可信审计身份；收集层要区分实际进程/连接来源与插件自报值。
+- 不得使用全局可变变量作为当前 request context；异步任务需正确传播上下文，避免串入其他请求。
+
+## 9. Rust 实现约束
+
+建议 Rust 使用 `tracing` 和 `tracing-subscriber`；兼容版本由仓库工具链与依赖锁确定。
+
+### 9.1 初始化
+
+库 crate 只产生 event/span，不安装全局 subscriber、不改进程全局 panic hook。每个 binary 在启动入口尽早初始化一次，包括启动失败路径。嵌入式场景由 host 控制 subscriber，不得暗中覆盖已有实例。初始化失败须能诊断，不可无声退回无日志状态。只有实际依赖需要时才启用 log 兼容桥，禁止循环桥接或重复记录。服务默认使用 JSON/INFO，开发环境可选人类可读文本。日志级别配置必须可验证；无效配置不能静默关闭所有日志或启用全量 TRACE。若保留 `RUST_LOG`，它只控制明确允许的过滤行为，不能改变脱敏策略。
+
+### 9.2 埋点
+
+- `#[instrument]` 默认采用 `skip_all` 加字段 allowlist；禁止自动 Debug 整个 request/config。
+- 持有资源状态锁时，不做慢速格式化、磁盘或网络日志 I/O。
+- 默认不为 token chunk、每轮 heartbeat 或每次显存采样输出 INFO。
+- 不把日志函数包装成另一套异常、重试或业务事件框架。
+- 不要求每个 helper function 都创建 span；重点覆盖有诊断价值的操作边界。
+
+## 10. stdout/stderr 与子进程协议隔离
+
+必须遵守：第一方 runtime/daemon/CLI 诊断一律写 stderr，所有级别一致；stdout 保留现有机器可读响应、命令正常结果和协议流。不能用未指定 writer 的默认初始化来猜输出方向；官方 `tracing-subscriber::fmt` 默认写 stdout，必须显式指定 stderr。Cargo build.rs 指令输出、hash CLI 结果和 fixture 协议标记不能机械替换为普通日志。stdio MCP/plugin 的 stdout 属于协议时，监管层不能向其中写日志，也不能把协议内容作为普通日志泄露。必要时以独立 reader 捕获第三方 stdout/stderr，并有界消费，不能因不读某一 pipe 而阻塞子进程。第三方输出应标记来源并限长、限速、脱敏；不能把自报的“PASS/READY/RELEASED”视为权威状态。第三方非结构化行可封装为外部输出事件，但不能宣称为原生类型化事件。换行、控制字符和 ANSI 转义须安全处理，避免伪造日志行或终端控制效果。
+
+## 11. 首批关键路径覆盖
+
+优先覆盖有意义的行为；“所有源码文件都有日志”不是完成标准。
+
+| 路径 | 必须解释的事实 |
+| --- | --- |
+| 服务启动/停止 | 实例身份、配置 profile、安全的构建版本、就绪/失败原因和关闭结果 |
+| Node 连接/重连 | 首次失联、重试摘要、退避、恢复；不得把疑似网络分区写成已确认事实 |
+| Worker 启动 | 授权来源引用、启动阶段、实际 PID/实例及成功/失败结果 |
+| Lease/持久化 | 意图、提交/落盘结果、资源是否保留和失败后的恢复动作 |
+| 终止分类/reconcile | 观测依据、分类、所选动作及权威状态是否变化 |
+| sandbox 清理 | 终止请求、宽限期、必要的强制终止、进程树和资源清理确认 |
+| Package/插件运行 | 安装、准备器、启动、健康、升级/回滚失败；不得输出完整环境 |
+| 控制请求与 relay | 拒绝原因、预期断开与意外发送失败的区别、清理结果 |
+| Product 用户操作 | 同一 operation 下的开始、参数校验、交接、结果与恢复提示 |
+| Gateway 安全操作 | key 创建/撤销、route 发布/撤销、权限拒绝，按安全审计策略记录 |
+
+纯函数状态机优先由提交决策的调用边界记录；不能为了覆盖率强迫纯函数加入 I/O。
+
+## 12. `let _ =`、异常与 panic
+
+### 12.1 被忽略的结果
+
+关键路径中被忽略的结果必须分类，不能一律补 `error!`：
+
+- **EXPECTED_BENIGN：** 例如通知已关闭接收方失败；可不记录或限频为 DEBUG，并保留原因。
+- **BEST_EFFORT：** 不影响业务安全的附加操作；必要时记录 WARN/计数。
+- **RECOVERABLE_FAILURE：** 记录失败和已安排的恢复；恢复最终结果另行记录。
+- **SAFETY_CRITICAL：** 落盘、清理确认、授权或状态一致性失败；必须维持原 fail-closed 语义并提供诊断。
+- **BEHAVIOR_BUG：** 原本就不应忽略的结果；由功能 owner 修复行为，不能只加日志假装解决。
+
+### 12.2 Panic/终止
+
+- 普通 Rust panic 在 unwind/abort 模式下都会先调用 panic hook；“abort 一定不会输出”是错误假设。
+- hook 由 binary/host 控制；使用最小、经过脱敏的紧急诊断路径，不能依赖进程退出时仍能正常刷新的异步队列。
+- hook 不得再次取得可能已损坏的资源状态锁、执行耗时网络操作或公开输出任意 panic payload。
+- 不承诺捕获 SIGKILL、断电、进程直接 abort 等所有终止；由外部监管记录观察到的退出事实，原因未知就标记 unknown。
+- 不得为避免“无日志”而把 `.expect()` 全改成吞错，或使用不可信的中毒状态。
+- 不因日志修改切换项目 panic 策略，也不得擅自用 `catch_unwind` 改变已有安全语义。
+- 异常退出前的最后一条日志只提供线索，不是完整业务清理证明。
+
+## 13. 隐私、密钥与不可信内容
+
+默认禁止记录 Token、PAT、密码、私钥、cookie、签名 URL、数据库连接串；完整 request/response、prompt、模型回答、训练样本、embedding 向量；完整环境变量、命令行参数数组、配置对象或任意 Debug dump；以及可直接授予权限的 fence/lease/session credential。
+
+默认使用字段 allowlist。允许按已认证授权身份记录内部资源引用，但不能信任用户输入的身份字段。
+
+路径、主机名、IP 和模型私有名称可能属于受限运维 metadata；默认优先记逻辑引用或脱敏值。确需原值时，由受限诊断 profile 说明用途、权限和保留期，不能自动放入公开报告。
+
+绝不能以“打开 DEBUG”为由关闭密钥保护；即使显式开启内容诊断，也不得记录 credential。
+
+Support package/CI artifact/Git 文档默认视为可能对外提供：导出前需脱敏、限范围并可预览；不得默认外传或自动上传到公共 issue；普通 hash 不能冒充对可猜测短密钥的安全脱敏；脱敏材料不能冒充字节级原始收据。
+
+第三方文本和请求参数须 JSON 安全编码，防止换行/分隔符注入。日志查看器不得把内容当 HTML、命令或可自动执行建议。
+
+## 14. 输出、持久化、轮转与故障预算
+
+### 14.1 本地优先，后端可替换
+
+首个 RC 必须能在没有云日志账号和 Collector 时保留可排障记录。建议应用写 stderr，由受管安装的服务管理器或现有收集层保存；未由服务管理器管理的运行方式可提供一个受控文件 sink；后续可增加 OTel/托管后端，但不能成为本地运行前置条件。
+
+同一文件的轮转由应用或收集器二选一负责，不能两边同时处理。禁止每个 crate 单独建日志文件。日志位置来自部署 profile，不从源码 checkout 或个人 home 路径推导。
+
+### 14.2 有界预算
+
+实施方案必须明确单条大小、每来源速率、队列记录/字节预算、flush/shutdown 最大等待时间、文件大小/保留数或时长/每主机总磁盘预算，以及队列满、磁盘满、权限不足、输出断开时的行为，并说明如何计数和提示丢弃/截断/导出失败。
+
+没有有限预算的实现不能标为 RC 完成。不能用无限内存队列或无限重试来弥补外部日志服务故障。
+
+### 14.3 故障行为
+
+- 普通诊断 sink 故障不能阻塞 Worker 清理、Lease 回收和已有恢复流程。
+- 有界异步队列可优先考虑，但必须说明会丢什么及如何计数；non-blocking 不等于零丢失。
+- logger 内部失败不能递归调用同一个失效 logger 形成错误风暴。
+- 正常关闭须在有限预算内 flush；超时要明确报告 best-effort 结果，不能无限等待。
+- 日志不可用时要有可见的观测退化状态或紧急诊断，不能伪装成诊断完整。
+- 需要持久审计的特殊操作遵循既有明确策略；普通日志组件不能临时决定拒绝或允许业务。
+- 清理只能作用于明确受管的日志目录/文件，禁止广泛通配删除状态库、checkpoint、Artifact 或任意 worktree。
+- `tracing-appender` 非阻塞队列默认可能丢日志；关闭丢失会引入背压。实施者必须明确选择并测试，不能猜测默认值。
+
+## 15. 配置、查询与部署 profile
+
+必须区分 `development`（可读文本、可选 DEBUG，但仍保护密钥）、`managed/installed`（结构化输出、有限持久化和访问权限）、`test/CI`（独立接收器和可重复断言，无外部日志账号），以及 `restricted diagnostics`（显式授权、范围/期限有限，默认不启用）。
+
+配置优先级必须只有一套并遵循现有应用规则；若没有既有规则，则依次为：
+
+```text
+显式命令参数 > 受支持环境配置 > 配置文件 > 默认值
+```
+
+并测试实际解析结果。不因日志设计重写各 Product 配置系统，也不自动修改用户系统全局日志设置。
+
+日志读取/下载必须鉴权，并限制 tenant/resource 范围。开发模式只绑定 loopback 不自动成为所有情形的授权策略。RC 不要求新建日志 Web 产品；可先使用系统日志工具、受限文件和既有诊断入口。若接入 UI，须按 operation/resource 查询，不能把整个主机日志公开给普通用户。
+
+## 16. 与功能闭环 Agent 的分工
+
+| 事项 | 功能 Agent | 日志 Agent |
+| --- | --- | --- |
+| **安装/doctor** | 检查目标实际运行环境、所选 profile 和依赖 | 记录检查结果和失败上下文 |
+| **训练/部署/Gateway** | 修复请求参数保存、交接、就绪、取消、恢复等真实行为 | 记录关键步骤、操作关联和诊断 |
+| **错误定义** | 确定领域含义和合法恢复方式 | 按统一字段输出，不重新解释 |
+| **UI** | 展示稳定错误码、安全说明、合法操作和诊断关联 | 提供可查询记录 |
+| **生命周期缺陷** | 修复资源泄漏或状态不一致 | 暴露缺陷；不能用加日志替代修复 |
+| **证据** | 证明操作行为正确 | 证明失败可解释、无敏感信息泄露且输出不污染协议 |
+
+特别要求：doctor 检查所选 profile 的真实依赖，不以系统 Python import 结果代替 trainer/serving 环境。只安装 Gateway 的 profile 不会因缺训练器而失败；训练 profile 缺训练器时不能报告全部正常。功能日志错误码及 UI/API 映射须由两个 owner 对齐。同仓同文件只有一个 writer；跨 Agent 修改先交接，不能因为日志遍布仓库就覆盖他人工作。
+
+## 17. RC 实现验收标准
+
+下表是后续实现任务的验收要求，不是此次文档落库必须执行的代码测试。
+
+| ID | 最低验收内容 |
+| --- | --- |
+| **LOG-01** | 关键 binary 启动成功和配置失败都有结构化记录；库不抢装全局 subscriber |
+| **LOG-02** | JSON 字段、时间和大小限制均有正/负测试；普通事件不强制错误码 |
+| **LOG-03** | stdout JSON/stdio/fixture protocol 保持可解析且没有插入日志 |
+| **LOG-04** | 注入落盘/清理失败后准确记录原因、保留状态和恢复动作，不误报 RELEASED |
+| **LOG-05** | 重连/退避输出受限；恢复可关联，日志量受控 |
+| **LOG-06** | 正常取消不产生误导 ERROR；清理失败可单独定位 |
+| **LOG-07** | 并发请求和 async task 关联不串线；长操作可由稳定 ID 找到多次尝试 |
+| **LOG-08** | 合成 Token、URL 凭据、环境密钥、prompt 和训练样本不会进入默认日志或导出包 |
+| **LOG-09** | 日志注入、超长文本和第三方输出风暴不会污染格式或耗尽无界资源 |
+| **LOG-10** | 满盘、无写权限、慢接收器、队列满和 Collector 离线不会让资源清理无限等待；丢失可计数 |
+| **LOG-11** | 普通 panic 的紧急诊断已脱敏；异常终止不声称日志完整或业务清理完成 |
+| **LOG-12** | 日志轮转与支持包清理不影响状态库、Artifact 和 checkpoint |
+| **LOG-13** | API/UI 稳定错误码和 operation 关联能找到对应诊断；未知错误安全处理 |
+| **LOG-14** | 文档列出覆盖服务、事件和 OS/profile；未测项目不写 PASS |
+
+验收须断言结构化字段和行为，不能精确匹配完整自然语言来证明错误语义；不能以 grep 到 `tracing::` 的次数或“文件覆盖率”代替行为测试。测试配置要能控制预期级别、采样和限额。CI 故障注入使用隔离临时目录、测试进程和合成数据，不破坏开发环境。未修改 GPU 算法/训练行为时优先用轻量 Worker/fixture 验证；只有触及真实执行路径才安排对应硬件验收。模拟故障不能冒充 NVIDIA/多机/Windows 实测。证据分别记录 SOURCE/IMPLEMENTATION、LOCAL_TEST、HOSTED_CI、OS_PROFILE 范围；文档完成不代表日志系统通过。
+
+## 18. 非目标与禁止扩张
+
+首轮不做：新建一统遥测 RPC/业务事件总线；自研 Elasticsearch/Loki 替代品或日志 SaaS；为日志新增账号、租户、计费和认证体系；让所有业务流量重新经过 Platform；全仓重写业务异常类型；要求所有语言实现相同框架或所有第三方输出结构化；给每条 INFO 分配错误码；给每个函数埋点或每个 token 打一行；在日志任务中实现 trainer、部署向导或新 GPU adapter；用日志文本重建权威状态；把架构文档改成不断追 SHA 的手工证据账本。
+
+## 19. 文档落库任务要求
+
+将本规范交给落库 Agent 时：先读取当前 Workspace 拓扑、规范目录和文档治理规则，不假定旧路径仍有效；查找已有 Logging/Error/Observability 规范并选出唯一权威文档，避免冲突版本；只修改规范正文、必要索引链接和最小 ADR 引用，不改生产代码、CI 或 Cargo/uv/npm 锁文件；只读检查现有错误码/API/追踪机制的必要冲突，不扩成全仓重审；不确定事实写成待实现核验，不把候选字段说成已上线；保护脏文件和并行工作，不用 reset/clean/force push 清理现场；若流程允许文档提交，使用独立文档分支和正常提交，不擅自合并共享分支或开启功能实施；执行文档链接、现有格式和必要示例检查，不为纯文档工作构建全部 Rust/GPU 环境；最终只交付规范路径、修改文件、规范冲突及处理、文档检查结果和实际 Git 交付状态。
+
+落库后应停止并等待日志实现任务与功能任务分工。建议落库位置为 `Cyrene-Workspace/docs/standards/logging-and-errors.md`，但应按当前约定调整，不是强制新增目录。Platform 和 Product 文档只引用共同规范；各域错误码实现和目录仍由对应 owner 维护。
+
+## 20. 标准参考与项目决策的区别
+
+本规范中的所有权、命名示例、首轮范围、大小预算建议、目录位置和验收 ID 均是 Cyrene 拟定的工程决策，不声称由外部标准强制规定。外部参考只提供以下技术依据：
+
+- **[S1] OpenTelemetry Logs Data Model：** 区分 EventName、Severity、Body、Resource、Attributes、Trace/Span 字段。
+- **[S2] tracing-subscriber fmt：** 结构化事件格式输出；默认 writer 为 stdout，必须显式改为 stderr。
+- **[S3] tracing instrument：** 默认记录参数，因此须按敏感性排除并显式选择字段。
+- **[S4] tracing-appender NonBlockingBuilder：** 有界队列的 lossy/backpressure 选择。
+- **[S5] Rust panic::set_hook：** 普通 panic 的 hook 在 abort/unwind 前执行；默认输出 stderr。
+- **[S6] W3C Trace Context：** 跨服务 trace 上下文格式。
+- **[S7] RFC 9457：** HTTP Problem Details；自然语言 detail 不是机器错误契约。
+- **[S8] OWASP Logging Cheat Sheet：** 敏感信息保护、不可信事件输入、日志访问控制和故障测试。
+
+参考地址：
+- [S1] <https://opentelemetry.io/docs/specs/otel/logs/data-model/>
+- [S2] <https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/>
+- [S3] <https://docs.rs/tracing/latest/tracing/attr.instrument.html>
+- [S4] <https://docs.rs/tracing-appender/latest/tracing_appender/non_blocking/struct.NonBlockingBuilder.html>
+- [S5] <https://doc.rust-lang.org/stable/std/panic/fn.set_hook.html>
+- [S6] <https://www.w3.org/TR/trace-context/>
+- [S7] <https://www.rfc-editor.org/rfc/rfc9457.html>
+- [S8] <https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html>
+
+具体库版本由实现仓的当前工具链、依赖锁和 CI 确定。本规范不要求为了追随 latest 文档而擅自升级依赖。

@@ -2,6 +2,7 @@
 # ║ 📄 File: sdk/python/cyrene_artifacts/src/cy_artifacts/local.py
 # ║ Module: CYRENE Platform
 # ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║ 中文：Python SDK、TCK 或用于此仓库边界的测试模块。
 # ║
 # ║ 模块：CYRENE Platform
 # ║ 职责：Python SDK、TCK 或测试模块。
@@ -12,6 +13,8 @@ All content is copied with bounded chunks.  Files are committed to a
 content-addressed store through a temporary file and a single atomic directory
 entry operation.  Directories are represented by manifests whose entries point
 at individual immutable blobs.
+
+中文：本模块实现本地文件系统 Artifact Provider 和 Stager。所有内容都按有界块复制。文件先写入临时文件，再通过一次原子目录项操作提交到内容寻址存储。目录使用清单表示，清单条目指向各个不可变 blob。
 """
 
 from __future__ import annotations
@@ -47,7 +50,10 @@ LOCAL_DIRECTORY_MANIFEST_VERSION = 1
 
 
 class ArtifactError(RuntimeError):
-    """Base class for fail-closed artifact errors."""
+    """Base class for fail-closed artifact errors.
+
+    中文：按 fail-closed 方式处理的 Artifact 错误基类。
+    """
 
 
 class ArtifactNotFoundError(ArtifactError):
@@ -60,7 +66,10 @@ class ArtifactIntegrityError(ArtifactError):
 
 @dataclass(frozen=True)
 class LocalDirectoryFile:
-    """Provider-private file entry; never part of public Artifact identity."""
+    """Provider-private file entry; never part of public Artifact identity.
+
+    中文：Provider 私有文件条目，绝不属于公开 Artifact 身份的一部分。
+    """
 
     path: str
     digest: str
@@ -96,7 +105,10 @@ class LocalDirectoryFile:
 
 @dataclass(frozen=True)
 class LocalDirectoryManifest:
-    """Provider-private CAS index for a multi-file artifact."""
+    """Provider-private CAS index for a multi-file artifact.
+
+    中文：多文件 Artifact 的 Provider 私有 CAS 索引。
+    """
 
     version: int
     uri: str
@@ -184,7 +196,10 @@ class LocalDirectoryManifest:
 
 
 class LocalArtifactProvider:
-    """Reference provider backed by a local immutable CAS."""
+    """Reference provider backed by a local immutable CAS.
+
+    中文：由本地不可变 CAS 支持的参考 Provider。
+    """
 
     def __init__(self, root: str | Path, *, chunk_size: int = 1024 * 1024) -> None:
         self.root = Path(root)
@@ -236,6 +251,8 @@ class LocalArtifactProvider:
         The complete tree is checked before any blob is committed.  The
         resulting manifest contains only logical paths, raw blob digests and
         sizes; producer metadata remains provider-private.
+
+        中文：按照公开的 portable V2 契约发布目录。提交任何 blob 前都会检查完整目录树。生成的清单只包含逻辑路径、原始 blob 摘要和大小；生产者元数据仍由 Provider 私有持有。
         """
 
         source_path = Path(source)
@@ -267,7 +284,10 @@ class LocalArtifactProvider:
 
     @staticmethod
     def _collect_portable_source_files(source: Path) -> list[tuple[str, Path]]:
-        """Preflight a directory tree before copying any member into the CAS."""
+        """Preflight a directory tree before copying any member into the CAS.
+
+        中文：在将任何成员复制到 CAS 之前，预检整个目录树。
+        """
 
         files: list[tuple[str, Path]] = []
         for root, directories, names in os.walk(
@@ -323,7 +343,10 @@ class LocalArtifactProvider:
 
     @staticmethod
     def _raise_walk_error(error: OSError) -> None:
-        """Turn an unreadable source directory into a failed publication."""
+        """Turn an unreadable source directory into a failed publication.
+
+        中文：将无法读取源目录的情况转换为发布失败。
+        """
 
         raise ArtifactError(f"cannot read portable directory: {error}") from error
 
@@ -585,7 +608,10 @@ class LocalArtifactProvider:
 
 
 class LocalArtifactStager:
-    """Stage verified provider content into a worker-visible local path."""
+    """Stage verified provider content into a worker-visible local path.
+
+    中文：将已经验证的 Provider 内容暂存到 Worker 可见的本地路径。
+    """
 
     def __init__(self, provider: LocalArtifactProvider) -> None:
         self.provider = provider

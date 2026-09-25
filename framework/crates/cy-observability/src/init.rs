@@ -20,6 +20,7 @@ use crate::{
 /// ════════════════════════════════════════════════════════════════════════
 /// Errors occurring during observability initialization.
 /// ════════════════════════════════════════════════════════════════════════
+/// 中文：观测能力初始化期间发生的错误。
 #[derive(Debug, Error)]
 pub enum ObservabilityError {
     #[error("invalid observability configuration: {0}")]
@@ -49,16 +50,19 @@ pub fn init_observability(
         .map_err(ObservabilityError::InvalidConfiguration)?;
 
     // 1. Install emergency panic hook for unhandled panics
+    // 中文：1. 为未处理的 panic 安装紧急处理钩子。
     install_panic_hook(
         config.service_name.clone(),
         config.service_instance_id.clone(),
     );
 
     // 2. Parse explicit filter
+    // 中文：2. 解析显式指定的过滤器。
     let env_filter = EnvFilter::try_new(&config.log_level)
         .map_err(|err| ObservabilityError::InvalidConfiguration(err.to_string()))?;
 
     // 3. Set up non-blocking writer explicitly directed to stderr
+    // 中文：3. 设置明确写入 stderr 的非阻塞 writer。
     let (stderr_writer, stderr_guard) = NonBlockingBuilder::default()
         .lossy(config.lossy)
         .buffered_lines_limit(config.queue_size)
@@ -68,6 +72,7 @@ pub fn init_observability(
     let mut guards = vec![stderr_guard];
 
     // 4. Optional local file sink (controlled persistence)
+    // 中文：4. 可选的本地文件 sink（受控持久化）。
     if let Some(ref rolling) = config.rolling_file {
         let rolling_sink = crate::sink::BoundedRollingFileSink::new(rolling.clone())?;
         let (file_writer, file_guard) = NonBlockingBuilder::default()

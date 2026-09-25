@@ -2,6 +2,7 @@
 # ║ 📄 File: sdk/python/cyrene_artifacts/src/cy_artifacts/contracts.py
 # ║ Module: CYRENE Platform
 # ║ Role: Python SDK, TCK, or test module for this repository boundary.
+# ║ 中文：Python SDK、TCK 或用于此仓库边界的测试模块。
 # ║
 # ║ 模块：CYRENE Platform
 # ║ 职责：Python SDK、TCK 或测试模块。
@@ -11,6 +12,8 @@
 The contract deliberately describes content identity and verified staging only.
 Provider locations are returned by a provider and never become artifact
 identity.  No Training, Dataset, Kernel, or cloud-provider types belong here.
+
+中文：本模块定义与 Provider 无关的 Artifact Plane 契约。契约仅描述内容身份和已验证的暂存位置。Provider 返回的位置不会成为 Artifact 身份的一部分。这里不应包含 Training、Dataset、Kernel 或云 Provider 类型。
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ class ArtifactKind(str):
     Platform validates the identifier shape and does not maintain a Product
     category taxonomy. New Product categories therefore need no Platform
     release.
+
+    中文：Artifact 类别由 Artifact 生产者不透明地拥有。Platform 只验证标识符格式，不维护 Product 类别目录；因此新增 Product 类别无需发布新的 Platform 版本。
     """
 
     GENERIC: "ArtifactKind"
@@ -101,7 +106,10 @@ _canonical_json = canonical_json_bytes
 
 
 def _validate_portable_path(path: str) -> str:
-    """Validate a logical POSIX-relative path without normalizing it."""
+    """Validate a logical POSIX-relative path without normalizing it.
+
+    中文：验证逻辑 POSIX 相对路径，但不对路径进行规范化。
+    """
 
     if (
         not path
@@ -130,6 +138,8 @@ def _ascii_casefold_path(path: str) -> str:
     V2 deliberately folds ASCII letters only.  Unicode case mapping and
     normalization are runtime-version dependent and therefore stay outside
     the Linux-first identity and collision rules.
+
+    中文：返回供目标文件系统别名检查使用的稳定 V2 大小写键。V2 只折叠 ASCII 字母。Unicode 大小写映射和规范化依赖 runtime 版本，因此不纳入以 Linux 为先的身份与冲突规则。
     """
 
     return "/".join(
@@ -157,7 +167,10 @@ def _safe_integer(value: Any, field: str) -> int:
 
 @dataclass(frozen=True)
 class ArtifactRef:
-    """Stable content identity shared by all artifact providers."""
+    """Stable content identity shared by all artifact providers.
+
+    中文：所有 Artifact Provider 共用的稳定内容身份。
+    """
 
     uri: str
     digest: str
@@ -205,7 +218,10 @@ class ArtifactRef:
 
 @dataclass(frozen=True)
 class ArtifactDirectoryEntry:
-    """One raw CAS file in a portable directory artifact."""
+    """One raw CAS file in a portable directory artifact.
+
+    中文：portable 目录 Artifact 中的一个原始 CAS 文件。
+    """
 
     path: str
     digest: str
@@ -222,7 +238,10 @@ class ArtifactDirectoryEntry:
         object.__setattr__(self, "size_bytes", size_bytes)
 
     def validate(self) -> None:
-        """Validate this logical entry without reading the CAS blob."""
+        """Validate this logical entry without reading the CAS blob.
+
+        中文：验证此逻辑条目，不读取 CAS blob。
+        """
 
         _validate_portable_path(self.path)
         _validate_lowercase_digest(self.digest)
@@ -250,6 +269,8 @@ class PortableDirectoryManifest:
     The wire identity is exactly the JCS encoding of ``version``, sorted
     ``files`` and logical ``size_bytes``.  URI, timestamps, producer metadata,
     and the manifest byte length are deliberately outside this record.
+
+    中文：跨语言的内容寻址目录索引，版本为 2。线上身份严格等于对 version、排序后的 files 和逻辑 size_bytes 进行 JCS 编码的结果。URI、时间戳、生产者元数据以及清单字节长度均有意排除在该记录之外。
     """
 
     version: int
@@ -355,7 +376,10 @@ class PortableDirectoryManifest:
 
 @dataclass(frozen=True)
 class ResolvedArtifact:
-    """Provider location returned only after existence and digest verification."""
+    """Provider location returned only after existence and digest verification.
+
+    中文：仅在确认内容存在且摘要验证通过后返回的 Provider 位置。
+    """
 
     artifact_ref: ArtifactRef
     location: Path
@@ -399,7 +423,10 @@ class ArtifactProvider(Protocol):
         *,
         kind: ArtifactKind = ArtifactKind.GENERIC,
     ) -> ArtifactRef:
-        """Publish a directory through the public V2 directory contract."""
+        """Publish a directory through the public V2 directory contract.
+
+        中文：依据公开的 V2 目录契约发布目录。
+        """
         ...
 
     def resolve(self, artifact_ref: ArtifactRef) -> ResolvedArtifact: ...

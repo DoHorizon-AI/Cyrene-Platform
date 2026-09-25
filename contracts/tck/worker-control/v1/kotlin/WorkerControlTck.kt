@@ -1,7 +1,10 @@
 import java.io.File
 import java.security.MessageDigest
 
-/** Dependency-free Core v1 Worker-control conformance runner for Kotlin. */
+/**
+ * Dependency-free Core v1 Worker-control conformance runner for Kotlin.
+ * 中文：不依赖外部库的 Core v1 Worker Control 一致性测试运行器（Kotlin）。
+ */
 object WorkerControlTck {
     private fun rows(path: File): List<List<String>> = path.readLines()
         .map { it.trim() }

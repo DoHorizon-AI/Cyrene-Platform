@@ -2,6 +2,9 @@
 //!
 //! Provider facts remain resource observations; lifecycle authority stays in
 //! the parent Kernel authority state.
+//! Provider 注册、inventory 发布和协调操作。
+//!
+//! Provider 事实仍是资源观测；生命周期 authority 由父级 Kernel authority 状态持有。
 
 use super::*;
 
@@ -72,6 +75,7 @@ impl KernelProviderAuthority for LocalKernelAuthority {
                                 // its session-bound evidence. The logical
                                 // Provider identity remains unchanged until a
                                 // later registration establishes a new session.
+                                // 传输断开只会使绑定到该 session 的证据失效。逻辑 Provider 身份保持不变，直到后续注册建立新的 session。
                                 inventory: None,
                                 reconciled_snapshot_generation: None,
                                 pending_stale_workers: Vec::new(),
@@ -90,6 +94,7 @@ impl KernelProviderAuthority for LocalKernelAuthority {
                             inventory_scope: ProviderInventoryScope::Full,
                             // A reconnect invalidates evidence tied to the old
                             // transport session, not resource or snapshot numbers.
+                            // 重新连接会使绑定到旧传输 session 的证据失效，不会改变资源编号或快照编号。
                             inventory: None,
                             reconciled_snapshot_generation: None,
                             pending_stale_workers: Vec::new(),

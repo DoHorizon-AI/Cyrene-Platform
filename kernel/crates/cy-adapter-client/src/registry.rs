@@ -27,6 +27,7 @@ use crate::client::{
 /// Generic registry/aggregator for independent external hardware adapters.
 /// It owns routing provenance and a Kernel-local monotonic aggregate generation;
 /// it has no driver, topology, or vendor policy.
+/// 独立外部硬件适配器的通用注册表/聚合器。它负责路由来源信息和 Kernel 本地单调递增的聚合 generation；不包含驱动、拓扑或厂商策略。
 pub struct UdsHardwareAdapterRegistry {
     adapters: BTreeMap<String, Arc<dyn HardwareAdapter>>,
     generation: Mutex<AggregateGeneration>,
@@ -42,6 +43,7 @@ impl UdsHardwareAdapterRegistry {
     /// Builds a registry from explicit UDS endpoint configuration. At least one
     /// endpoint and unique, safe adapter IDs are required; the Kernel never
     /// discovers or loads adapters dynamically.
+    /// 根据显式 UDS 端点配置构造注册表。至少需要一个端点，并且 adapter ID 必须唯一且安全；Kernel 不会动态发现或加载 adapter。
     pub fn from_endpoints(
         endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
     ) -> Result<Self, ProviderError> {
@@ -71,6 +73,7 @@ impl UdsHardwareAdapterRegistry {
 
     /// Dependency-injection constructor used by tests and by future non-UDS
     /// test harnesses. Production Kernel composition uses [`Self::from_endpoints`].
+    /// 供测试和未来非 UDS 测试框架使用的依赖注入构造函数。生产 Kernel 组合使用 Self::from_endpoints。
     pub fn from_adapters(
         adapters: impl IntoIterator<Item = (String, Arc<dyn HardwareAdapter>)>,
     ) -> Result<Self, ProviderError> {
@@ -102,6 +105,7 @@ impl UdsHardwareAdapterRegistry {
     /// Collects each configured adapter independently. Callers that need
     /// provider lifecycle facts use this directly rather than the aggregate
     /// inventory generation retained for the resource ledger.
+    /// 分别收集每个已配置 adapter 的数据。需要 Provider 生命周期事实的调用方直接使用此结果，而不是资源 ledger 保留的聚合 inventory generation。
     pub fn adapter_observations(
         &self,
     ) -> BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>> {
@@ -118,6 +122,7 @@ impl UdsHardwareAdapterRegistry {
                     }
                     // Registry configuration, not adapter-supplied data, is
                     // the provenance authority used for binding routing.
+                    // binding 路由的来源权威是注册表配置，而不是 adapter 提供的数据。
                     for resource in &mut observation.snapshot.resources {
                         resource.provider.id = adapter_id.clone();
                     }
@@ -131,6 +136,7 @@ impl UdsHardwareAdapterRegistry {
     /// Builds the existing allocation ledger view from a coherent collection
     /// of individual observations. A failed adapter still makes allocation
     /// facts unavailable, but does not hide successful provider observations.
+    /// 根据一组一致的独立观测构建现有分配 ledger 视图。某个 adapter 失败时，分配事实仍不可用；但这不会隐藏其他 Provider 的成功观测。
     pub fn aggregate_observations(
         &self,
         observations: &BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>>,
@@ -168,6 +174,7 @@ impl UdsHardwareAdapterRegistry {
                 }
                 // Registry configuration, not adapter-supplied data, is the
                 // provenance authority used for binding routing.
+                // binding 路由的来源权威是注册表配置，而不是 adapter 提供的数据。
                 resource.provider.id = adapter_id.clone();
                 resources.push(resource);
             }

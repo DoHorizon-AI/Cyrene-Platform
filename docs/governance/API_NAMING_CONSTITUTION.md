@@ -307,3 +307,215 @@ Yield, Reactor, Exchange, Catalyst, Echo, Navigator, and Plugins must:
 Platform remains the language source. A future shared vocabulary package or
 TCK may distribute this policy, but it must reference this document rather than
 redefine the terms independently.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene API 命名宪法
+
+**状态：首个 public release 之前新建及迁移的 API 均须遵守本规范。**
+
+本文档是 Cyrene 的规范命名词汇表。Platform 拥有通用词汇；Yield、Reactor、Exchange、Catalyst、Echo、Navigator 和 Plugins 均应消费这些词汇。只有在领域差异真实存在且已有文档说明时，才可增加领域术语。
+
+## 1. 宪法原则
+
+这些规则关乎语义，而非外观：
+
+1. 每个概念只有一个首选词。
+2. 每个词只有一种含义。
+3. 名称必须标出所属抽象层：逻辑生命周期、具体执行、资源所有权、观测或控制面策略。
+4. 首个 public API 冻结之前允许 breaking rename。兼容名称必须明确标记并隔离，不能成为第二个 authority。
+5. 首次 public release 开启命名冻结：**Cyrene public API naming freeze begins with the first public release.**
+
+## 2. 规范 action 词汇
+
+| 概念 | 规范用词 | 精确含义 | 使用示例 | 此含义下应避免 |
+|---|---|---|---|---|
+| 获取 Lease | Acquire | 取得带 ownership/lease 语义的 resource。 | AcquireLease、acquire_lease | allocation 别名或 claim 类动词 |
+| 延长 Lease | Renew | 延长现有 Lease 的有效期。 | RenewLease、renew_lease | refresh_lease、extend_lease |
+| 持有人释放 | Release | holder 主动放弃 Lease。 | ReleaseLease、release_lease | free_resources、return_lease |
+| 控制面强制收回 | Revoke | authority 取消仍有效的 Lease 或 capability。 | RevokeLease、REVOKED | 用 Release 表示强制收回 |
+| 创建逻辑对象 | Create | 创建具有 identity 和 lifecycle 的 entity。 | CreateOperation、CreateWorker | 任意混用 new、make、provision |
+| 删除逻辑对象 | Delete | 删除持久或逻辑对象。 | DeleteWorkspace | remove 与 delete 混用 |
+| 启动逻辑 entity | Start | 将受管理 entity 转入运行生命周期。 | StartWorker、StartService、StartPlugin | 对逻辑对象使用进程启动动词 |
+| 启动具体执行 | Launch | 创建 process、execution 或 runtime instance。 | LaunchProcess、ProcessRuntime::launch | 对 fork/exec 使用 Start |
+| 停止逻辑 entity | Stop | 请求受管理 entity 有序停止。 | StopWorker、StopService、StopPlugin | 对逻辑对象使用进程终止动词 |
+| 终止具体执行 | Terminate | 结束具体 process 或 execution。 | TerminateProcess、terminate() | 混用 StopProcess 和 TerminateProcess |
+| 最终资源清理 | Cleanup | 执行结束后清除残余资源。 | cleanup_execution | 随意使用 delete、remove、purge |
+| 单对象查询 | Get | 按稳定 identity 读取已知对象或 snapshot。 | GetWorker、GetLease | 混用 Fetch、Read、Query |
+| 有限历史查询 | Read | 从 cursor 开始读取有界的持久历史页。 | ReadEvents | subscription 或 fetch 类别名 |
+| 集合枚举 | List | 返回对象集合。 | ListWorkers | GetWorkers、EnumerateWorkers |
+| 长期观测 | Watch | 通过 server stream 或长期连接观测变化。 | WatchEvents、WatchOperations | 除非确实创建 subscription，否则不用 subscription 动词 |
+| 持久订阅 | Subscribe | 创建具有 cursor/delivery 语义的订阅。 | 确实存在该资源时用 Subscribe | 把普通 watch 称为 subscription |
+| Agent/Provider 事实提交 | Report | 向其 authority 提交观测事实。 | ReportHeartbeat、ReportOperation | 用 heartbeat 命名 authority report |
+| Identity 注册 | Register | 将既有 identity 加入 control plane。 | RegisterWorker、RegisterProvider | 用 Create 表示注册 |
+| 取消未完成 operation | Cancel | 请求 operation 不再继续。 | CancelOperation | 随意使用 StopOperation、AbortOperation |
+| 强制内部中断 | Abort | 在不安全/错误路径立即中断执行。 | 内部 abort_execution | 普通用户取消 |
+| 执行准备 | Prepare | 在 launch 前准备工作。 | PrepareExecution | 混用 Initialize、Setup |
+| 健康检查/读取 | Check / GetHealth | 主动检查或读取健康状态。 | health_check()、GetHealth | 将 Ping 作为健康契约 |
+| 外部事实刷新 | Refresh | 重新读取外部世界中的事实。 | RefreshInventory | 用于刷新 Lease TTL |
+
+Start 与 Launch 有意区分：Start 改变受管理逻辑 entity 的 lifecycle；Launch 创建具体 runtime instance。同样，Stop 和 Terminate 不同；Cleanup 是 termination 之后的资源阶段。
+
+## 3. 规范概念词汇
+
+| 概念 | 规范含义 | 不要替换为 |
+|---|---|---|
+| State | 一个 lifecycle state machine 当前所在位置。 | Status、Phase |
+| Status | 由多项事实汇总出的当前结果。 | State |
+| Phase | 一个 operation 内部的步骤。 | State |
+| Event | 对已发生事实或状态变化的不可变记录。 | Notification |
+| Fact | 对外部世界的客观观测。 | State |
+| Spec | 对期望对象或执行的声明式描述。 | Config |
+| Config | daemon、client 或 runtime component 自身的配置。 | Spec |
+| Policy | 对允许、拒绝或限制事项的治理约束。 | Config |
+| Options | 单次 invocation 的非核心可选修饰项。 | Config |
+| Metadata | 描述性 label 和 annotation。 | Spec |
+| Id | 持久的逻辑 identity。 | Key、Handle |
+| Key | map 或 database 的 lookup key。 | Id |
+| Handle | 对活动 runtime object 的控制引用。 | Id |
+| Ref | 用来定位另一对象的引用。 | Handle |
+| Token | fencing、authentication 或 capability token。 | Id |
+| Error | API call 失败。 | Reason |
+| Reason | 当前 state/status 是因何进入。 | Error |
+| Cause | 形成 error 或 reason 的底层原因。 | Reason |
+
+例如，WorkerState、ServiceState 与 OperationPhase 可以同时成立，因为它们指向不同层级的 state machine。若 WorkerStatus 只是重复 Worker lifecycle state，就不得引入。
+
+## 4. Platform entity 词汇
+
+| Entity | 唯一含义 |
+|---|---|
+| Principal | 具有 identity 与 authorization 语义的主体。 |
+| Provider | 提供 resource 或 capability 的实现。 |
+| Resource | 可被发现、分配并租用的 capability/entity。 |
+| Lease | 对 Resource 的限时控制权。 |
+| Worker | 由 Platform 管理的执行主体。 |
+| Operation | 带有 lifecycle、可观测且可取消的工作请求。 |
+| Capability | 主体或 Provider 能够提供或执行的能力。 |
+| Endpoint | 正在运行的 service 可被访问的地址。 |
+| Event | 不可变的变化记录。 |
+| Binding | resource 与 execution/consumer 之间的具体关联。 |
+| Execution | 一个具体 runtime instance。 |
+| Process | OS 级进程。 |
+| Service | 长期运行、受管理的 service。 |
+
+以下区分是强制要求：
+
+- Worker 不等于 Process
+- Operation 不等于 Execution
+- Resource 不等于 Device
+- Lease 不等于 Allocation
+
+Adapter 可以把 Device 暴露为一种 Resource，但两个词不能互换。Allocation 是结果或 binding 细节；Lease 是约束它的限时 authority。
+
+## 5. Protobuf 与 RPC 规则
+
+### 5.1 名称
+
+Public RPC 使用 VerbNoun；request 和 response wrapper 与 RPC 使用完全相同的名称，例如：
+
+- AcquireLease 使用 AcquireLeaseRequest 和 AcquireLeaseResponse；
+- ReportHeartbeat 使用 ReportHeartbeatRequest 和 ReportHeartbeatResponse；
+- ReadEvents 使用 ReadEventsRequest 和 ReadEventsResponse；
+- WatchEvents 使用 WatchEventsRequest，并返回 WatchEventsResponse stream。
+
+不要为了绕过 symbol collision 而在 request 前添加 Semantic、Core、Sandbox、Hardware 或其他 adapter prefix。应通过选择 owner package、抽取共享 request，或显式命名 compatibility projection 来解决。不得在新 contract 中继续扩展或复制带 collision prefix 的 semantic request name；machine-readable forbidden-name list 是执行依据。
+
+### 5.2 Package 拥有领域
+
+Package 拥有领域，type name 描述概念。例如，cyrene.sandbox.v1 package 中可使用 LaunchRequest、ExecutionLimits 和 ProcessHandle。避免在同一 package 冗余命名为 SandboxLaunchRequest、SandboxLimits 和 SandboxProcessHandle；package 已经表达领域边界。
+
+### 5.3 Wire 演进
+
+重命名 Protobuf message 或 RPC 是 breaking contract change。首次 public release 之前，应在一次协调变更中迁移所有已跟踪的 contract input、generated binding、fixture、descriptor、adapter 和 consumer。发布后应使用有版本的 contract 或明确隔离的 compatibility package；绝不能静默重新指派 wire symbol 或 field number。
+
+## 6. Rust 与 SDK 规则
+
+跨语言 API 直接映射，不通过同义词转换：
+
+| Proto | Rust |
+|---|---|
+| AcquireLease | acquire_lease() |
+| RenewLease | renew_lease() |
+| ReleaseLease | release_lease() |
+| StartWorker | start_worker() |
+| StopWorker | stop_worker() |
+| ReportHeartbeat | report_heartbeat() |
+| ReadEvents | read_events() |
+| WatchEvents | watch_events() |
+
+Resource-manager 的 allocation 别名不是规范 Lease operation 可接受的 Rust 拼法。语义重命名必须与 Vec::reserve 等无关方法区分；使用 IDEA/RustRover symbol refactoring 或 compiler 引导的修改，绝不能盲目全仓替换。
+
+规范 semantic operation 必须跨语言保留完整 semantic noun。拼写只随语言惯例变化：
+
+| Proto | Rust | JavaScript |
+|---|---|---|
+| AcquireLease | acquire_lease | acquireLease |
+| RenewLease | renew_lease | renewLease |
+| ReleaseLease | release_lease | releaseLease |
+
+规范 Lease operation 不使用 acquire() 等依赖上下文的缩写。Receiver type 可以让另一个含义明确的领域 operation 使用缩写，但这不允许缩短规范 Lease 词汇。
+
+### 6.1 Envelope 与 type 的职责
+
+DTO 或 envelope 只有一个主要语义职责。Event contract 应作如下区分：
+
+| Type | 职责 |
+|---|---|
+| Event | 不可变 Event 记录 |
+| EventCursor | 持久位置与 source identity |
+| EventPage | 有限 ReadEvents history result |
+| EventContinuity | typed history/stream continuity condition |
+| WatchEventsResponse | 连续 observation 中的单个 item/control frame |
+
+EventPage 绝不用作 WatchEvents stream control payload。WatchEventsResponse 携带 Event 或专门的 EventContinuity frame。EventContinuity 复用规范 ReplayStatus 值 CURRENT、GAP、SOURCE_CHANGED，不另建第二套 continuity status 词汇。
+
+## 7. State machine 规则
+
+**一个规范 entity 只有一个规范 lifecycle state machine。**
+
+发现两个同名 type 时，不能只做 rename。在合并或删除 state type 前，逐项追踪：
+
+1. 每个 state 和 transition；
+2. 每个 caller 与 adapter boundary；
+3. persistence、replay 和 serialization/deserialization；
+4. terminal-state 与 recovery 行为；
+5. 断言该 state machine 的 test 和 fixture。
+
+若 model 完全相同，则合并到规范 type。若不同，则重命名非规范 model，显露其领域或 compatibility boundary。针对当前 Platform inventory，semantic cyrene.semantic.v1.LeaseState 是规范 Lease lifecycle；旧的 cyrene.core.v1.ResourceLease projection payload 不同，并有 ATTACHED compatibility state，因此在调用方和 persistence 退役之前必须作为独立迁移面处理。不能将它静默合并到 semantic type。
+
+## 8. 重构流程
+
+Breaking migration 必须按以下顺序进行：
+
+1. 阅读本宪法并建立规范词汇表。
+2. 盘点 Platform、Products 和 Plugins 中的 public/internal name。
+3. 将每个命中项归类为真正同义词、有意区分、legacy compatibility 或重复 model。
+4. 在可用时使用 IDEA/RustRover 的 Rename Symbol、Find Usages、Safe Delete、Change Signature 和 Move Symbol。
+5. 先规范化 Protobuf input；随后重新生成所有 binding 和 descriptor。
+6. 先对 Rust 进行 semantic refactoring，再迁移 Python、JVM 和 SDK consumer。
+7. 清理 adapter protocol、state-machine ownership、test、fixture 和文档。
+8. 运行 compiler/build check、针对性 test、相关完整 test suite 和 forbidden-vocabulary gate。
+
+当前 IDE integration 提供 semantic symbol lookup 和 rename action。Generated binding 及 descriptor/fixture reference 仍需仓库范围 contract search 与重新生成；IDE 的查找结果本身不能证明 wire contract 已全部迁移。
+
+## 9. Forbidden vocabulary gate
+
+机器可读 policy 位于 tooling/architecture/api-naming.toml，checker 位于 tooling/ci/check-api-naming.py。
+
+CI 已针对配置的 source root 以 all_source mode 运行，并拒绝所有已淘汰词汇。Documentation、changelog、migration note 和明确保留的 compatibility fixture 除外。被跳过或未运行的检查不能算通过。
+
+完整 forbidden symbol list 只在 tooling/architecture/api-naming.toml 中维护，作为 machine-readable regression guard。当前 API、comment、example 和治理正文应使用规范词汇，而不是重复已淘汰拼法。由于 Vec::reserve 等无关 API 必须保持有效，reserve 或 start 等通用词不会通过文本匹配直接拒绝；Platform resource port 使用规范拼法 acquire_lease。Qualified Lease 与 Event-shape 检查由 machine-readable policy 维护，使无关的通用动词继续有效。
+
+## 10. Product 与 Plugin 仓库采用规则
+
+Yield、Reactor、Exchange、Catalyst、Echo、Navigator 和 Plugins 必须：
+
+- 在 README 或 developer guide 中链接本宪法；
+- 在每个共享 seam 和跨仓示例中使用 Platform 术语；
+- 将 Product 自有 state、policy、spec 和 metadata 留在 Product，同时保留这些概念的规范名称；
+- 不得为 Acquire/Reserve、Start/Launch、Stop/Terminate 或 Watch/Subscribe 引入本地别名；
+- 在本仓 contract 文档中归类任何有意的领域例外，并添加有针对性的 regression test。
+
+Platform 仍是术语的 source of truth。未来可通过共享 vocabulary package 或 TCK 分发本 policy，但必须引用本文档，不能各自重新定义。

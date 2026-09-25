@@ -77,12 +77,14 @@ fn structured_json_matches_specification_schema() {
     assert_eq!(record["message"], "Successfully acquired worker lease");
 
     // Attributes check
+    // 中文：检查 attributes。
     let attrs = &record["attributes"];
     assert_eq!(attrs["lease_id"], "lease-456");
     assert_eq!(attrs["worker_id"], "worker-789");
     assert_eq!(attrs["generation"], 2);
 
     // Normal events must NOT have error.code
+    // 中文：普通事件绝不能包含 error.code。
     assert!(attrs.get("error.code").is_none());
 }
 
@@ -153,6 +155,7 @@ fn sensitive_tokens_are_strictly_redacted() {
     assert_eq!(attrs["safe_id"], "public-id-abc");
 
     // Double check that raw secrets appear nowhere in the raw JSON text
+    // 中文：再次确认 raw JSON 文本中完全不含原始 secret。
     let raw = &lines[0];
     assert!(!raw.contains("cyk_live_supersecrettoken"));
     assert!(!raw.contains("secret-jwt-token-12345"));
@@ -235,6 +238,7 @@ fn log_injection_attempt_does_not_create_multiple_lines() {
 
     let lines = writer.lines();
     // In NDJSON, exactly one line must be written; newlines must be safely escaped in JSON string values
+    // 中文：NDJSON 中必须只写一行；字符串值中的换行符必须在 JSON 中安全转义。
     assert_eq!(
         lines.len(),
         1,
@@ -260,6 +264,7 @@ fn oversize_record_is_pruned_without_breaking_json() {
     let subscriber = tracing_subscriber::registry().with(layer);
 
     // Create a large attribute that pushes the record over 32 KiB
+    // 中文：创建一个大 attribute，使记录大小超过 32 KiB。
     let huge_attr = "X".repeat(40_000);
 
     tracing::subscriber::with_default(subscriber, || {
@@ -294,6 +299,7 @@ fn w3c_traceparent_parsing_and_formatting() {
     assert_eq!(tc.to_traceparent(), valid_header);
 
     // Child span preserves trace_id and flags, generates new span_id
+    // 中文：子 span 保留 trace_id 和 flags，并生成新的 span_id。
     let child = tc.child_span();
     assert_eq!(child.trace_id, tc.trace_id);
     assert_eq!(child.flags, tc.flags);
@@ -306,26 +312,31 @@ fn w3c_traceparent_invalid_formats_are_rejected() {
     use crate::correlation::{CorrelationError, TraceContext};
 
     // Invalid parts count
+    // 中文：parts 数量无效。
     assert_eq!(
         TraceContext::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7"),
         Err(CorrelationError::InvalidFormat)
     );
     // Unsupported version
+    // 中文：不支持的版本。
     assert_eq!(
         TraceContext::parse_traceparent("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
         Err(CorrelationError::UnsupportedVersion("01".to_string()))
     );
     // All-zero trace_id
+    // 中文：trace_id 全为零。
     assert_eq!(
         TraceContext::parse_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01"),
         Err(CorrelationError::InvalidTraceId)
     );
     // All-zero span_id
+    // 中文：span_id 全为零。
     assert_eq!(
         TraceContext::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"),
         Err(CorrelationError::InvalidSpanId)
     );
     // Invalid characters
+    // 中文：包含无效字符。
     assert_eq!(
         TraceContext::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e47zz-00f067aa0ba902b7-01"),
         Err(CorrelationError::InvalidTraceId)
@@ -341,17 +352,20 @@ fn correlation_hierarchy_and_sanitization() {
     };
 
     // Control characters and newlines are stripped
+    // 中文：移除控制字符和换行符。
     let malicious = "req-123\r\nInjected: Header\x00";
     let sanitized = sanitize_request_id(malicious).expect("must produce sanitized id");
     assert_eq!(sanitized, "req-123Injected:Header");
 
     // Generic correlation sanitizer
+    // 中文：通用 correlation sanitizer。
     assert_eq!(
         sanitize_correlation_id("safe-token_123", 50),
         Some("safe-token_123".to_string())
     );
 
     // Length bounding for all ID types
+    // 中文：限制所有 ID 类型的长度。
     let long_id = "A".repeat(300);
     assert_eq!(
         sanitize_request_id(&long_id).unwrap().len(),
@@ -367,6 +381,7 @@ fn correlation_hierarchy_and_sanitization() {
     );
 
     // Context hierarchy
+    // 中文：上下文层级。
     let tc = TraceContext::new_root();
     let ctx = CorrelationContext::new()
         .with_request_id("req-uuid-123")
@@ -408,10 +423,12 @@ fn structured_record_promotes_trace_id_and_retains_correlation_attributes() {
 
     let record: Value = serde_json::from_str(&lines[0]).expect("must be valid JSON");
     // Top-level trace fields
+    // 中文：顶层 trace 字段。
     assert_eq!(record["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
     assert_eq!(record["span_id"], "00f067aa0ba902b7");
 
     // Attributes retain request_id, operation_id, resource_id
+    // 中文：attributes 保留 request_id、operation_id 和 resource_id。
     assert_eq!(record["attributes"]["request_id"], "req-abc-123");
     assert_eq!(record["attributes"]["operation_id"], "op-deploy-999");
     assert_eq!(record["attributes"]["resource_id"], "res-worker-1");
@@ -446,6 +463,7 @@ fn rolling_file_sink_rotates_and_shifts_history() {
     let mut sink = BoundedRollingFileSink::new(config).expect("create sink");
 
     // 1. Write chunk 1 (60 bytes)
+    // 中文：1. 写入第 1 个 chunk（60 字节）。
     let chunk1 = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     sink.write_all(chunk1).expect("write chunk 1");
     sink.flush().expect("flush chunk 1");
@@ -456,6 +474,7 @@ fn rolling_file_sink_rotates_and_shifts_history() {
     assert_eq!(std::fs::metadata(&active_path).unwrap().len(), 60);
 
     // 2. Write chunk 2 (60 bytes) -> exceeds 100 bytes, triggers rotation!
+    // 中文：2. 写入第 2 个 chunk（60 字节）：超过 100 字节并触发轮转！
     let chunk2 = b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     sink.write_all(chunk2).expect("write chunk 2");
     sink.flush().expect("flush chunk 2");
@@ -468,6 +487,7 @@ fn rolling_file_sink_rotates_and_shifts_history() {
     assert_eq!(std::fs::read(&active_path).unwrap(), chunk2);
 
     // 3. Write chunk 3 (60 bytes) -> triggers rotation!
+    // 中文：3. 写入第 3 个 chunk（60 字节）：触发轮转！
     let chunk3 = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
     sink.write_all(chunk3).expect("write chunk 3");
     sink.flush().expect("flush chunk 3");
@@ -479,6 +499,7 @@ fn rolling_file_sink_rotates_and_shifts_history() {
     assert_eq!(std::fs::read(&active_path).unwrap(), chunk3);
 
     // 4. Write chunk 4 (60 bytes) -> triggers rotation!
+    // 中文：4. 写入第 4 个 chunk（60 字节）：触发轮转！
     let chunk4 = b"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
     sink.write_all(chunk4).expect("write chunk 4");
     sink.flush().expect("flush chunk 4");
@@ -491,6 +512,7 @@ fn rolling_file_sink_rotates_and_shifts_history() {
     assert_eq!(std::fs::read(&active_path).unwrap(), chunk4);
 
     // 5. Write chunk 5 (60 bytes) -> max_history_files is 3, so oldest (.3 containing chunk1) is pruned!
+    // 中文：5. 写入第 5 个 chunk（60 字节）：max_history_files 为 3，因此最旧的文件（包含 chunk 1 的 .3）会被清除！
     let chunk5 = b"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
     sink.write_all(chunk5).expect("write chunk 5");
     sink.flush().expect("flush chunk 5");
@@ -501,6 +523,7 @@ fn rolling_file_sink_rotates_and_shifts_history() {
     assert_eq!(std::fs::read(&active_path).unwrap(), chunk5);
 
     // Verify .log.4 does not exist
+    // 中文：验证 .log.4 不存在。
     let archive4 = dir.path().join("test-app.log.4");
     assert!(!archive4.exists());
     assert_eq!(sink.dropped_writes_count(), 0);

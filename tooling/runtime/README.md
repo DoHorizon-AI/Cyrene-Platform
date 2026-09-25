@@ -41,3 +41,27 @@ WSL2 必须显式选择 `--profile WSL_DEV_PROFILE`；该模式仅用于共享�
 | `cyrene-runtime` | Stable operator entrypoint / 固定运维入口 |
 | `cyrene_runtime.py` | Build, process lifecycle, health and manifest logic / 构建、进程、健康与清单逻辑 |
 | `tests/test_cyrene_runtime.py` | Fail-closed state and evidence regressions / 失败关闭与证据回归 |
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 本地 GPU 标准 Runtime
+
+`cyrene-runtime` 按顺序构建并启动 NVIDIA adapter、`sandboxd` 和 Kernel。它从 service account 推导 UDS peer 身份，将二进制安装到显式指定的 runtime home，检查组件启动，并写出私有、可机器读取的 `runtime.json`。标准输出仅包含经过清理的证据字段。
+
+生成的 manifest profile 是 `CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU`。组合训练、服务、网关或应用 profile 由 consumer 定义，不改变 Platform bootstrap contract。
+
+```bash
+export CYRENE_RUNTIME_HOME=/var/lib/cyrene/reference-runtime
+tooling/runtime/cyrene-runtime up
+tooling/runtime/cyrene-runtime status
+tooling/runtime/cyrene-runtime down
+```
+
+原生 Linux 是规范模式，并保持 cgroup/device isolation 启用。Azure agent 必须拥有已委派的 cgroup v2 subtree；如果 service account 的 subtree 不叫 `cyrene`，使用 `--sandbox-cgroup-root` 指定。WSL2 必须显式使用 `--profile WSL_DEV_PROFILE`；该模式启用现有的共享设备软隔离开发路径，不宣称具备原生 Linux 硬隔离。
+
+| 文件 | 职责 |
+|---|---|
+| `cyrene-runtime` | 稳定的 operator 入口。 |
+| `cyrene_runtime.py` | 构建、进程生命周期、健康状态与 manifest 逻辑。 |
+| `tests/test_cyrene_runtime.py` | 失败关闭状态和证据回归。 |

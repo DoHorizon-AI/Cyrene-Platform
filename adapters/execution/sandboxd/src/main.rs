@@ -236,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
             // In dev mode, default allowed_client_uid to own UID if not specified
+            // 中文：开发模式下，如果未指定 allowed_client_uid，则默认使用当前进程的 UID。
             #[cfg(unix)]
             if dev_mode && allowed_client_uid.is_none() && allowed_client_gid.is_none() {
                 allowed_client_uid = Some(unsafe { libc::getuid() });
@@ -243,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Fail-closed: sandboxd must be configured with at least one trusted
             // Kernel peer UID/GID; otherwise UDS admission silently allows any
             // local user able to reach the socket.
+            // 中文：失败关闭：sandboxd 至少必须配置一个受信任的 Kernel 对端 UID/GID；否则，任何能够访问套接字的本地用户都会被 UDS 准入检查静默放行。
             if allowed_client_uid.is_none() && allowed_client_gid.is_none() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

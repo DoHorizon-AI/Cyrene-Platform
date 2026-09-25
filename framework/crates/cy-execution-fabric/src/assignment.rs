@@ -23,6 +23,7 @@ use crate::{admission::validate_assignment_payload, validate_assignment, FabricC
 /// The builder never chooses a target, allocates resources, or creates Lease,
 /// fence, Runtime, Operation, Attempt, or workload identities. Callers must
 /// persist those identities before invoking the canonical Kernel authority.
+/// 由 Product-neutral controller 提供的不可变非 authority field。Builder 不选择 target、不分配 resource，也不创建 Lease、fence、Runtime、Operation、Attempt 或 workload identity。调用方必须先持久化这些 identity，再调用规范 Kernel authority。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeAssignmentBuilder {
     assignment_id: String,
@@ -59,6 +60,7 @@ impl RuntimeAssignmentBuilder {
 
     /// Add immutable identity projections for Artifacts already verified on the
     /// selected Node. No local path, locator, ticket, or credential is accepted.
+    /// 为已在所选 Node 上验证的 Artifact 添加不可变 identity projection。不接受本地 path、locator、ticket 或 credential。
     pub fn with_local_artifacts(
         mut self,
         local_artifacts: Vec<core_v1::ArtifactLocalInput>,
@@ -83,9 +85,11 @@ impl RuntimeAssignmentBuilder {
     /// candidate. Local inputs and transfer specs must form an exact, disjoint
     /// projection of the placement request; replica selection and ticket
     /// issuance remain outside Framework.
+    /// Placement 选择 candidate 后，校验不可变 Artifact projection。本地 input 与 transfer spec 必须精确且互不重叠地覆盖 placement request；Replica 选择与 ticket 签发都留在 Framework 之外。
     ///
     /// Zero-byte local Artifacts remain valid. Remote transfers require a
     /// positive size and preserve the producer-owned opaque category.
+    /// 零字节本地 Artifact 仍有效。远端 transfer 要求 size 为正，并保留由 producer 所有的不透明 category。
     pub fn validate_artifact_projection(
         &self,
         placement: &ExecutionPlacementRequest,
@@ -226,6 +230,7 @@ impl RuntimeAssignmentBuilder {
     ///
     /// Controllers call this before `acquire_lease`, so malformed payloads do
     /// not consume resources and wait for expiry as their cleanup mechanism.
+    /// 校验所有不需要 Lease authority 的 assignment field。Controller 在调用 acquire_lease 前执行此项，因此格式错误的 payload 不会消耗 resource，也不会依赖等待 expiry 来清理。
     pub fn validate(&self, now_unix_ms: u64) -> Result<(), FabricContractError> {
         let assignment = self.assignment(None);
         validate_assignment_payload(&self.runtime, &assignment, now_unix_ms).map(|_| ())
@@ -233,6 +238,7 @@ impl RuntimeAssignmentBuilder {
 
     /// Bind an authority-returned Lease and run the same admission validation
     /// that the Runtime Agent applies before starting its workload.
+    /// 绑定 authority 返回的 Lease，并执行与 Runtime Agent 启动 workload 前相同的 admission validation。
     pub fn build(
         &self,
         lease: &semantic::Lease,

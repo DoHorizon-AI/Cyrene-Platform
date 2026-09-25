@@ -26,6 +26,7 @@ pub(crate) use common::{
     to_semantic_proto_identity, unix_ms_from_timestamp, validate_authority_context,
 };
 // The legacy v1 lease-name helper exists solely for unit tests.
+// 中文：旧版 v1 租约名称辅助函数仅供单元测试使用。
 #[cfg(test)]
 pub(crate) use common::authority_lease_name;
 pub(crate) use event::{

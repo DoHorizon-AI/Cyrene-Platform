@@ -68,6 +68,7 @@ impl<W: Write + 'static> CyreneLayer<W> {
     }
 
     /// Returns the number of records dropped due to serialization/sink errors.
+    /// 中文：返回因序列化或 sink 错误而被丢弃的记录数量。
     pub fn dropped_records_count(&self) -> u64 {
         self.dropped_records.load(Ordering::Relaxed)
     }
@@ -166,6 +167,7 @@ where
         event.record(&mut visitor);
 
         // Inherit span attributes if within a span
+        // 中文：如果当前位于 span 内，则继承该 span 的属性。
         let mut span_id = None;
         let mut trace_id = None;
         if let Some(current_span) = ctx.lookup_current() {
@@ -216,6 +218,7 @@ where
                 }
 
                 // Check serialized size budget
+                // 中文：检查序列化后的大小预算。
                 let mut serialized = match serde_json::to_string(&record) {
                     Ok(s) => s,
                     Err(_) => {
@@ -226,6 +229,7 @@ where
 
                 if serialized.len() > self.max_record_bytes {
                     // Prune attributes to ensure valid JSON within budget
+                    // 中文：精简属性，确保 JSON 在大小预算内仍然有效。
                     if let Some(attrs) =
                         record.get_mut("attributes").and_then(|a| a.as_object_mut())
                     {

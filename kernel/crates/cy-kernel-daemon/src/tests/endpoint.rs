@@ -2,6 +2,7 @@
 //!
 //! These tests cover namespace, principal, lease, endpoint, and grant
 //! authority relationships.
+//! 中文：Endpoint authority 与 grant 生命周期测试。这些测试覆盖 namespace、principal、lease、endpoint 和 grant 的 authority 关系。
 
 use super::*;
 
@@ -14,9 +15,11 @@ use super::*;
 // revocation remove the related Endpoint/Grant authority state so stale
 // metadata cannot outlive its authority.
 // ---------------------------------------------------------------------------
+// 中文：阶段 5：Endpoint authority 加固（control plane）。拥有 Endpoint 的 Worker 通过其活动 Lease、owner Principal 和 Namespace 派生 authority。这些测试验证 Endpoint 的 publish/authorize/revoke 都要求 owner Principal；Namespace 隔离有效；Lease 释放、Worker 丢失或替换，以及 Grant 撤销都会清除相关 Endpoint/Grant authority 状态，避免过期 metadata 脱离其 authority 而继续存在。
 
 /// Builds a namespace where one Worker owns an active Lease, a published
 /// Endpoint, and an authorized EndpointGrant.
+/// 中文：构造一个 namespace，其中有一个 Worker 拥有活动 Lease、已发布的 Endpoint 和已授权的 EndpointGrant。
 fn endpoint_authority_scenario(
     adapter: &KernelServiceAdapter,
     namespace: &str,
@@ -132,6 +135,7 @@ fn endpoint_accelerator_query() -> semantic::ResourceQuery {
 
 // Test A — cross-Principal Publish denied: an authenticated Principal A cannot
 // publish an Endpoint for a Worker owned by Principal B.
+// 中文：测试 A——拒绝跨 Principal Publish：经过认证的 Principal A 不能替 Principal B 所有的 Worker 发布 Endpoint。
 #[test]
 fn endpoint_cross_principal_publish_denied() {
     let adapter = semantic_worker_adapter();
@@ -148,6 +152,7 @@ fn endpoint_cross_principal_publish_denied() {
         generation: 1,
     };
     // A owns the namespace; the Lease is held by worker-b.
+    // 中文：Namespace 由 A 所有，但 Lease 由 worker-b 持有。
     let lease = authority
         .acquire_lease(
             &context,
@@ -158,6 +163,7 @@ fn endpoint_cross_principal_publish_denied() {
         )
         .unwrap();
     // Register a live Worker incarnation that is owned by Principal B.
+    // 中文：注册一个属于 Principal B 的活动 Worker incarnation。
     let mut process = managed_test_process(
         "worker-b",
         1,
@@ -220,6 +226,7 @@ fn endpoint_cross_principal_publish_denied() {
 }
 
 // Test B — cross-Principal Authorize denied.
+// 中文：测试 B——拒绝跨 Principal Authorize。
 #[test]
 fn endpoint_cross_principal_authorize_denied() {
     let adapter = semantic_worker_adapter();
@@ -256,6 +263,7 @@ fn endpoint_cross_principal_authorize_denied() {
 }
 
 // Test C — cross-Principal Revoke denied.
+// 中文：测试 C——拒绝跨 Principal Revoke。
 #[test]
 fn endpoint_cross_principal_revoke_denied() {
     let adapter = semantic_worker_adapter();
@@ -287,6 +295,7 @@ fn endpoint_cross_principal_revoke_denied() {
 }
 
 // Test D — the Worker owner Principal is allowed to publish/authorize/revoke.
+// 中文：测试 D——允许 Worker 所有者 Principal 执行 publish/authorize/revoke。
 #[test]
 fn endpoint_owner_principal_allowed() {
     let adapter = semantic_worker_adapter();
@@ -294,6 +303,7 @@ fn endpoint_owner_principal_allowed() {
     let (context, principal, _, _, endpoint, grant) =
         endpoint_authority_scenario(&adapter, "ns-a", AUTHORITY_TEST_PEER, "worker-a");
     // publish + authorize already succeeded inside the scenario.
+    // 中文：publish 和 authorize 已在此场景中成功。
     assert!(authority
         .runtime
         .endpoints
@@ -326,6 +336,7 @@ fn endpoint_owner_principal_allowed() {
 
 // Test E — Namespace isolation: identical bare Worker/Endpoint/Lease IDs in two
 // Namespaces cannot be operated across Namespace boundaries.
+// 中文：测试 E——Namespace 隔离：两个 Namespace 中相同的裸 Worker/Endpoint/Lease ID 不能跨 Namespace 操作。
 #[test]
 fn endpoint_namespace_isolation() {
     let adapter = semantic_worker_adapter_with_resources(vec![
@@ -347,6 +358,7 @@ fn endpoint_namespace_isolation() {
             "worker-x",
         );
     // The bare IDs are identical across Namespaces, but the records are scoped.
+    // 中文：裸 ID 在各 Namespace 中相同，但记录按作用域分别归属。
     assert_eq!(endpoint_a.identity, endpoint_b.identity);
     assert_eq!(worker_a, worker_b);
     assert_eq!(grant_a.identity, grant_b.identity);
@@ -355,6 +367,7 @@ fn endpoint_namespace_isolation() {
 
     // A cannot operate B's record through A's Namespace: revoking the same bare
     // grant id in ns-a must not remove the ns-b copy.
+    // 中文：A 不能通过自己的 Namespace 操作 B 的记录：在 ns-a 中撤销相同裸 grant ID，不得删除 ns-b 中的副本。
     authority
         .revoke_endpoint(&context_a, &principal_a, &grant_a.identity)
         .unwrap();
@@ -379,6 +392,7 @@ fn endpoint_namespace_isolation() {
 
     // A cannot wield B's authority: authorizing a grant for the same endpoint
     // id with B's Lease/Fence is denied inside A's Namespace.
+    // 中文：A 不能使用 B 的 authority：在 A 的 Namespace 中，使用 B 的 Lease/Fence 为相同 endpoint ID 授权 grant 会被拒绝。
     let denied = authority
         .authorize_endpoint(
             &context_a,
@@ -408,6 +422,7 @@ fn endpoint_namespace_isolation() {
 
 // Test F — stale Worker generation: loss/replacement of the Worker removes its
 // Endpoint/Grant authority state and the old generation cannot republish.
+// 中文：测试 F——Worker generation 过期：Worker 丢失或被替换后，会清除其 Endpoint/Grant authority 状态，旧 generation 不能再次发布。
 #[test]
 fn endpoint_stale_generation_invalidated() {
     let adapter = semantic_worker_adapter();
@@ -428,6 +443,7 @@ fn endpoint_stale_generation_invalidated() {
         .contains_key(&context.object_ref(grant.identity.clone())));
 
     // Worker loss / replacement revokes the Lease and purges its authority.
+    // 中文：Worker 丢失或替换会撤销 Lease 并清除其 authority。
     authority
         .mark_worker_lost(&context, &worker_identity, "TEST_WORKER_REPLACED")
         .unwrap();
@@ -451,6 +467,7 @@ fn endpoint_stale_generation_invalidated() {
     );
 
     // The stale generation can no longer publish: its Lease is revoked.
+    // 中文：旧 generation 已无法发布：其 Lease 已撤销。
     let denied = authority
         .publish_endpoint(
             &context,
@@ -482,6 +499,7 @@ fn endpoint_stale_generation_invalidated() {
 
 // Test G — Lease release (without Worker loss) must invalidate the related
 // Endpoint/Grant authority state.
+// 中文：测试 G——释放 Lease（未发生 Worker 丢失）也必须使相关 Endpoint/Grant authority 状态失效。
 #[test]
 fn lease_release_invalidates_endpoint_grant_authority() {
     let adapter = semantic_worker_adapter();
@@ -496,6 +514,7 @@ fn lease_release_invalidates_endpoint_grant_authority() {
         .contains_key(&context.object_ref(grant.identity.clone())));
 
     // Release the Lease through the canonical release path (not worker loss).
+    // 中文：通过规范 release 路径释放 Lease（不是 Worker 丢失路径）。
     authority
         .release_lease(&context, &principal, &lease.identity, lease.fence_token)
         .unwrap();
@@ -519,6 +538,7 @@ fn lease_release_invalidates_endpoint_grant_authority() {
     );
 
     // The grant is gone, so a fresh authorize against the released lease fails.
+    // 中文：Grant 已删除，因此使用已释放 Lease 重新 authorize 会失败。
     let denied = authority
         .authorize_endpoint(
             &context,
@@ -544,6 +564,7 @@ fn lease_release_invalidates_endpoint_grant_authority() {
 
 // Test H — a revoked Grant is removed from Kernel authority state and can no
 // longer be relied on by any consumer.
+// 中文：测试 H——撤销的 Grant 会从 Kernel authority 状态中删除，任何消费者都不能继续依赖它。
 #[test]
 fn revoked_grant_removed_from_authority_state() {
     let adapter = semantic_worker_adapter();
@@ -552,6 +573,7 @@ fn revoked_grant_removed_from_authority_state() {
         endpoint_authority_scenario(&adapter, "ns-a", AUTHORITY_TEST_PEER, "worker-a");
     let grant_key = context.object_ref(grant.identity.clone());
     // Before revocation the Grant is present (the consumer's authority ticket).
+    // 中文：撤销前 Grant 存在（它是消费者的 authority ticket）。
     assert!(authority
         .runtime
         .endpoint_grants

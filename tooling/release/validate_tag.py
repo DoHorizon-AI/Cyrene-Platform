@@ -2,6 +2,7 @@
 """
 Cyrene Release Tag Validator
 Validates Semantic Versioning syntax, repository tag format, and ensures tag does not already exist.
+中文：Cyrene 发布标签验证器。验证 Semantic Versioning 语法和仓库标签格式，并确保该标签尚不存在。
 """
 
 import argparse

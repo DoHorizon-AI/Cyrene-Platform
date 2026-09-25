@@ -343,3 +343,291 @@ machine-verifiable dependency firewall
 It does not mean a lawyer has approved the license choice, that hosted CI has
 run for this local change set, or that sandboxd is a hostile-code containment
 mechanism.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 开源架构就绪度
+
+本报告记录候选整改阶段的架构事实与可验证性。它不是法律意见；正式许可证布局现已在 canonical develop 中由 LICENSES/、LICENSING.md 和 package metadata 表达。
+
+## 1. 基线
+
+| 项目 | 证据 |
+|---|---|
+| 分支 | canonical checkout 中的 develop；当前 live HEAD 是已推送的文档后续提交。 |
+| 本次 adapter promotion 前的 HEAD | 7b279d237161d8a6181c80d78b780c61af0fd548 |
+| 本次 adapter promotion 后的 HEAD | 8a6a6c0bde136f474ffb15b39dba2619db9157bf；历史 adapter boundary checkpoint。 |
+| 当前 HEAD | bc3327bdbe1edba6449a0f34d6954b022e4c3dd0；System/Sandbox 双语文档提交，已从 origin/develop 读回。 |
+| 任务 worktree | 先前隔离的 adapter worktree 属于历史状态；当前文档后续工作在 canonical develop 提交。 |
+| Canonical checkout | /home/baijin/Dev/Cyrene/Cyrene-Platform；develop 上干净并与 origin/develop 对齐。 |
+| PR #41 | Merge commit dc37791a806bd6c405932f0f0457518db6e6aaa0 仍是当前 HEAD 的祖先。 |
+| 清理后的 worktree | 预期的 architecture、adapter、documentation 和 systemd 改动已提交到 develop；没有接管无关的 canonical 变更。 |
+
+此前 licensing audit 基线 f56a7f30c31a729a7d4c030813356018a7be3dc1 和 adapter-boundary checkpoint 8a6a6c0 仅作为历史证据。当前 live 状态是 develop@bc3327b；PR #41 也只是历史 lineage 证据，其 hosted check rollup 不视为当前绿色验收结果。
+
+## 2. 真实 inventory 与分类
+
+仓库当前事实：Rust workspace 有 21 个 package，2 个 Python SDK package，contracts/proto 下有 15 个规范 Protobuf 文件。旧的“16 个 core crate”说法已过时。PR #41 之后，旧 cy-plugin-sdk 和 cy-plugin-protocol 路径仍不存在。未找到既有的 examples/hello-worker 或等效的完整 lease-to-cleanup demo；新的独立 consumer 是编译边界测试，并非伪造的 lifecycle demo。
+
+| 组件 | 架构分类 | 边界处理 |
+|---|---|---|
+| contracts/rust/cy-kernel-contract | PUBLIC_CONTRACT | 公共 semantic vocabulary，以及不含实现的 adapter facts/ports。 |
+| contracts/rust/cy-proto | PUBLIC_CONTRACT | 有版本的 wire contract 和生成的 binding。 |
+| contracts/rust/cy-manifest | PUBLIC_CONTRACT | 通用 manifest 与 identity contract。 |
+| sdk/rust/cy-artifact-transfer | PUBLIC_SDK | Provider-neutral Artifact transfer SDK。 |
+| framework/crates/cy-execution-fabric | PUBLIC_SDK | 使用公共 contract 的 Product-neutral admission/attachment/reconciliation API。 |
+| framework/crates/cy-workspace-fabric | PUBLIC_SDK | 面向 public/client 的 relay API；不再导入 execution-fabric 实现类型。 |
+| sdk/python/cyrene_artifacts | PUBLIC_SDK | Provider-neutral Python Artifact interface。 |
+| sdk/python/cyrene_preflight | PUBLIC_SDK | 公共 resource-fact/preflight interface。 |
+| cyrene-linux-sys-adapter、cyrene-nvidia-adapter | OUT_OF_PROCESS_ADAPTER / SEPARATE_DECISION | 参考实现；只依赖公共 cy-kernel-contract 和 cy-proto 编译。 |
+| cyrene-sandboxd | PRIVILEGED_PLATFORM_SERVICE / CORE_IMPLEMENTATION | 虽在进程外运行，仍属 Core：负责 cgroups、BPF device policy、process ownership、pidfd/reaping 和 cleanup。 |
+| cyrene-kernel | CORE_IMPLEMENTATION | Kernel composition root 与 authority runtime。 |
+| cy-kernel-daemon、cy-resource-manager、cy-kernel-api | CORE_IMPLEMENTATION / INTERNAL_HOST_API | Lease/fence authority、resource accounting、内部 port 与 orchestration。 |
+| cy-adapter-client、cy-sandbox-client | INTERNAL_LIBRARY / INTERNAL_HOST_API | Kernel 侧的有界 UDS client，不是第三方 SDK。 |
+| cy-execution-control、cy-installation-resolver | CORE_IMPLEMENTATION | Core control/session 与 verified-installation handoff。 |
+| cy-platform-api | INTERNAL_LIBRARY | Registry、resolver 与 repository-manifest normalization；名称中有 api 不代表它是 public。 |
+| cy-package-runtime | CORE_IMPLEMENTATION / INTERNAL_HOST_API | Package lifecycle、activation 和 supervisor 实现。 |
+| cy-node-agent、cy-runtime-agent | CORE_IMPLEMENTATION | 使用 typed control protocol 的 Platform Agent；二者都不是第二个 authority。 |
+| tooling/architecture、tooling/ci、tooling/acceptance/licensing-boundary | TOOLING / TEST_ONLY | 可由机器验证的 boundary、package、mirror 与 external-consumer gate。 |
+| Worker/provider/service plugin | OUT_OF_PROCESS_PLUGIN | 不是当前 workspace crate；通过有版本的 wire contract 和 public SDK 支持。 |
+
+## 3. 重新验证先前发现
+
+| 先前发现 | 当前事实 | 处理结果 |
+|---|---|---|
+| Workspace 有 21 个 Rust package、2 个 Python package、15 个 proto 文件 | 当前 HEAD 仍符合；旧 16-crate 描述已过时 | 从 live metadata 报告，不沿用旧报告计数。 |
+| PR #41 移除了旧 plugin 路径 | 仍然如此；merge commit 是祖先，旧 crate 不存在 | 没有恢复 legacy path。 |
+| cy-kernel-api 混合了 public fact 与内部 port | 基线时确认；清理后共享 adapter fact 由 cy-kernel-contract 唯一持有。cy-kernel-api 仍是面向 Core 实现的 crate，带有 public compatibility surface；只有部分 export 标为 doc(hidden)，且仍可调用 | 内部 port 和 compatibility export 仍属于 Core；pub 或 doc(hidden) 都不是受支持的第三方 extension API。 |
+| 不存在 cy-kernel-api → cy-resource-manager 反向依赖 | 仍然如此；当前方向是 cy-resource-manager → cy-kernel-api | 未引入不必要的反向依赖。 |
+| 独立 consumer 可在不依赖 Core 时使用 contract/protocol | 使用两个 detached Cargo consumer 重新验证并加强 | Worker 和 Hardware consumer 均可编译，其 normal/build dependency tree 不含 Core crate。 |
+| cy-platform-api 因名称看起来像 public | 当前代码仍包含 registry/resolver/normalization logic | 已归类并记录为内部组件；没有强行拆分。 |
+| cy-workspace-fabric::RelayClientConfig 泄漏 ConnectivityRoute | 已确认并修复 | 配置现在持有 endpoint/server-name/TLS primitive；normal dependency 不再包含 cy-execution-fabric。 |
+| cy-package-runtime 混合 control format 与 host lifecycle | 当前实现仍是 lifecycle/supervisor host logic | 保持内部实现；没有宣称它是未受支持的 public SDK。 |
+| SandboxBackend、Worker transport 和 raw invoke 看似 plugin API | 当前 SandboxBackend/Worker transport 仍是 Rust host internals；InstanceActor::invoke_raw 已明确标为内部 hook | 不做不必要的 RPC 重写；外部扩展指向 wire protocol。 |
+| 官方 hardware adapter 导入 cy-kernel-api | 清理前确认过；现在仅导入公共 cy-kernel-contract fact 和 cy-proto | 第三方 adapter 编译依赖闭包不再要求 Kernel 实现。 |
+| sandboxd 在进程外运行 | 仍然如此，但它拥有特权 enforcement 和 lifecycle | 明确归类为 PRIVILEGED_PLATFORM_SERVICE，而不是任意许可证 plugin。 |
+| cy-proto package 缺少外部 proto input | 已复现并修复 | 检查 package-local proto mirror 与 core fixture mirror 是否对应 canonical source。 |
+| Artifact SDK path dependency 缺少版本 | 对其公共 path dependency 已复现并修复 | 使用带版本的 path dependency，并通过 package verification patch 验证。 |
+| README 缺少 clean-machine command | 当前干净任务 worktree 的 README 已提供 build/test、gate、Linux/GPU/root 要求 | 仍未声称存在完整零配置 daemon demo。 |
+| Sandbox 是完整的恶意代码安全 sandbox | 当前 source 仍缺少 namespace、seccomp 和 capability dropping | Security 文档现在说明资源/lifecycle 保证及不保证事项。 |
+
+## 4. 最终编译依赖图
+
+此图仅表示编译期依赖。箭头代表 normal/build dependency；dev-only test dependency 不计入 public package closure gate。
+
+```text
+PUBLIC CONTRACTS
+  cy-kernel-contract  (semantic + adapter facts/ports)
+  cy-proto            (versioned wire bindings)
+  cy-manifest         (generic manifest contract)
+        ^                  ^              ^
+        |                  |              |
+  cy-artifact-transfer    |       cy-execution-fabric
+        ^                  |              ^
+        +------------------+--------------+
+                           |
+                   cy-workspace-fabric
+
+OFFICIAL / THIRD-PARTY ADAPTER SIDE
+  hardware adapter -> cy-kernel-contract + cy-proto
+  external worker  -> cy-proto / public SDK
+  external provider/service -> public contract / SDK
+
+CORE SIDE
+  cy-kernel-api -> cy-kernel-contract
+  cy-adapter-client -> cy-kernel-contract + cy-proto
+  cy-resource-manager -> cy-kernel-api
+  cy-kernel-daemon -> cy-kernel-api + cy-resource-manager + cy-adapter-client + cy-proto
+  cyrene-kernel -> Core crates
+  cyrene-sandboxd -> cy-kernel-api + cy-proto
+  agents/control/runtime/package services -> Core and/or public contract crates
+```
+
+机器可读的 source of truth 是 tooling/architecture/license-boundaries.toml。Gate 执行完整的 cargo metadata --locked --all-features，遍历 normal/build dependency edge，并拒绝任何 public 到 Core 的传递依赖路径；同时检查 public Rust source 是否引用 Core crate。
+
+## 5. 最终运行时边界图
+
+```text
+External worker / provider / service / hardware adapter
+             |
+             | versioned Protobuf, documented UDS/gRPC/IPC
+             v
+     Public Contracts / SDK
+             |
+             | explicit process boundary
+             v
+       Kernel Core authority
+       (principal, lease, fence, event, lifecycle)
+             |
+             | bounded UDS + peer credentials
+             v
+       cyrene-sandboxd
+       privileged Core service
+             |
+             | spawn, cgroup ownership, pidfd/reap, BPF device policy
+             v
+       worker process tree
+
+Node/Runtime agents -- typed control session --> Kernel Core
+Workspace client -- authenticated mTLS relay --> Workspace relay service
+```
+
+编译图与运行时图刻意分开。sandboxd 不会仅因使用 UDS 就变成 plugin；它承担特权 runtime 职责，因此仍属于 Platform Core。
+
+## 6. 本地最终许可证映射
+
+以下架构类别现已反映在本地 package metadata 和仓库级 LICENSES/ 与 LICENSING.md 布局中。法律审查与这份技术映射仍是分开的工作。
+
+| 路径 / Crate | 架构角色 | 建议许可证类别 | 原因 |
+|---|---|---|---|
+| runtime/cyrene-kernel | Kernel composition root | AGPL_CORE | 拥有 Core process 与 authority composition。 |
+| kernel/crates/cy-kernel-daemon | Kernel authority/host | AGPL_CORE | 实现 lifecycle、authority 与 worker orchestration。 |
+| kernel/crates/cy-kernel-api | 内部 Kernel port | AGPL_CORE | 内部 lease/journal/sandbox/runtime port；其 public compatibility surface 不是受支持的第三方 API。 |
+| kernel/crates/cy-resource-manager | Resource/lease authority | AGPL_CORE | 拥有 allocation 与正确性语义。 |
+| kernel/crates/cy-adapter-client | Kernel 侧 adapter client | AGPL_CORE | 虽消费 public contract，仍负责 Core routing/provenance。 |
+| kernel/crates/cy-sandbox-client | Kernel 侧特权 service client | AGPL_CORE | Core 拥有的 sandbox lifecycle seam。 |
+| framework/crates/cy-execution-control | Core control/session | AGPL_CORE | 通用 execution authority 与 fencing integration。 |
+| framework/crates/cy-installation-resolver | Verified installation handoff | AGPL_CORE | Platform 拥有的 installation/runtime trust boundary。 |
+| framework/crates/cy-platform-api | Registry/resolver 实现 | AGPL_CORE | 内部实现；名称中的 api 不是 public license 规则。 |
+| framework/crates/cy-package-runtime | Package lifecycle host | AGPL_CORE | Installation、activation 与 supervision 实现。 |
+| agents/node/cy-node-agent | Platform node Agent | AGPL_CORE | 官方 Platform process，不是 extension SDK。 |
+| agents/runtime/cy-runtime-agent | Platform runtime Agent | AGPL_CORE | 官方 Platform lifecycle/reporting process。 |
+| adapters/execution/sandboxd | 特权 enforcement service | AGPL_CORE | 拥有 cgroups/BPF/process cleanup authority；进程外运行不等于 plugin。 |
+| contracts/rust/cy-kernel-contract | Semantic + adapter public contract | APACHE_PUBLIC_INTERFACE | 不依赖 Core 实现；提供独立 fact、DTO 与 port。 |
+| contracts/rust/cy-proto | Public wire contract | APACHE_PUBLIC_INTERFACE | 有版本的 generated binding 与 package-local input。 |
+| contracts/rust/cy-manifest | Public generic contract | APACHE_PUBLIC_INTERFACE | 纯通用 manifest/identity model。 |
+| sdk/rust/cy-artifact-transfer | Public SDK | APACHE_PUBLIC_INTERFACE | Public Artifact transport SDK；只依赖 public contract。 |
+| framework/crates/cy-execution-fabric | Public SDK/framework interface | APACHE_PUBLIC_INTERFACE | 排除 dev-only test dependency 后，normal closure 仅含 public dependency。 |
+| framework/crates/cy-workspace-fabric | Public/client SDK | APACHE_PUBLIC_INTERFACE | Public wire client 使用 primitive route config，不依赖 Core implementation。 |
+| sdk/python/cyrene_artifacts | Public Python SDK | APACHE_PUBLIC_INTERFACE | Provider-neutral SDK surface。 |
+| sdk/python/cyrene_preflight | Public Python contract/SDK | APACHE_PUBLIC_INTERFACE | Provider-neutral preflight surface。 |
+| adapters/hardware/linux_sys | Reference hardware adapter | SEPARATE_DECISION | 协议兼容的 public 实现；作者/发布选择另行决策。 |
+| adapters/hardware/nvidia | Reference hardware adapter | SEPARATE_DECISION | 边界相同；vendor-specific 实现可以替换。 |
+| 根 LICENSE、LICENSES/ 与 LICENSING.md | 仓库许可证映射 | SEPARATE_DECISION | 仓库指针和标准文本描述 package metadata；legal notice 与未来 relicensing policy 仍由单独流程治理。 |
+
+当前没有组件仍处于 REQUIRES_SPLIT：此前 cy-kernel-api 的歧义已通过将共享 adapter fact 移至现有 public contract crate、并仅在 Core crate 中保留内部 port 解决。若未来 cy-platform-api 或 cy-package-runtime 增加 public DTO，则需要新的 split，不能静默扩展其受支持 API。
+
+## 7. Extension 矩阵
+
+“能否使用专有许可证？”是架构判断，不是法律意见。
+
+| Extension | 进程模型 | Transport | 编译依赖 | 所需 SDK | 能否使用专有许可证？ | 架构原因 |
+|---|---|---|---|---|---|---|
+| Worker | sandboxd 下的独立 child process | Worker control IPC/UDS，有版本的 payload | cy-proto 和可选 public SDK | cy-proto | 可以，按目标架构允许 | Product/worker 行为留在 Core 之外。 |
+| Service plugin | 独立受监管进程 | 有版本的 service/control protocol | 仅 public protocol/SDK | 按需使用 cy-proto 与 public SDK | 可以 | cy-package-runtime/supervisor 承载 lifecycle；service logic 可替换。 |
+| Provider | 独立进程 | 经 UDS 传输的 Provider/hardware protocol | cy-kernel-contract + cy-proto | Public contract | 可以 | Kernel 消费通用 fact 与 provenance，不消费 Provider 实现。 |
+| Hardware adapter | 独立 sidecar | Hardware Adapter v1 UDS | cy-kernel-contract + cy-proto | Public adapter fact 与 wire contract | 可以 | 官方 NVIDIA/Linux code 是参考实现，不是必需链接依赖。 |
+| Sandbox | 独立特权 Core service | Sandbox v1 UDS | Core crate | 内部 host API + cy-proto | 需单独决定 Core 许可 | 它负责 cgroups/BPF/process cleanup，不是生态 plugin。 |
+| Node Agent | 官方 Platform process | Typed node control protocol | 按当前图使用 Core/public contract | cy-proto | 不是受支持的任意许可证 extension point | 拥有 Platform session/reporting 行为。 |
+| Runtime Agent | 官方 Platform process | Typed runtime control protocol | 按当前图使用 Core/public contract | cy-proto 加 Core runtime 组件 | 不是受支持的任意许可证 extension point | 维护 runtime lifecycle/reporting boundary。 |
+| Future integration | 优先采用独立进程 | 文档化的 gRPC/UDS/IPC | 仅 public contract/SDK | 按 capability 选择 contract | 若留在 public process seam，则可以 | 避免共享实现表示。 |
+
+## 8. Package 就绪情况
+
+| Package | 结果 | 证据 |
+|---|---|---|
+| cy-kernel-contract | PASS | cargo package --locked 与 verifier 成功。 |
+| cy-manifest | PASS | cargo package --locked 与 verifier 成功。 |
+| cy-proto | PASS | cargo package --locked 成功；包含 15 个 proto 文件和本地 fixture；打包后 crate test 也以 6/6 通过。 |
+| cy-artifact-transfer | PASS | cargo package --locked verifier 使用临时的 checked-out public dependency patch 后成功。 |
+| cy-execution-fabric | PASS | 同一 package verifier 成功；存在 public dependency version。 |
+| cy-workspace-fabric | PASS | 同一 package verifier 成功；不存在 cy-execution-fabric implementation dependency。 |
+| cargo publish --dry-run | cy-kernel-contract、cy-manifest 和 cy-proto 为 PASS；依赖其他 package 的 SDK dry-run 在首次发布前为 FAIL | 依赖 package 的 dry-run 按预期因 crates.io “no matching package” 失败，直到前置 public version 发布且 registry index 传播完成。没有上传 package。 |
+
+tooling/ci/check-public-packages.sh 使用临时的 [patch.crates-io] mapping 指向已 checkout 的 public crate 来执行 package verification。这能在首次发布之前证明 package 内容和编译，同时保留 manifest 中的版本要求；它不代表未发布的 crate 已可从 crates.io 获取。
+
+
+## 9. 独立 consumer 验证
+
+tooling/acceptance/licensing-boundary 是拥有独立 lockfile 的独立 Cargo workspace，不继承 root dependency：
+
+| Consumer | 直接依赖 | 结果 |
+|---|---|---|
+| worker-consumer | cy-proto + prost | cargo check --locked：PASS；编码有版本的 WorkerToKernel hello。 |
+| hardware-consumer | cy-kernel-contract | cargo check --locked：PASS；实现 HostInventoryProvider 和 ResourceProvider。 |
+
+tooling/acceptance/licensing-boundary/run.sh 还运行 cargo tree --locked --edges normal,build，并拒绝任何 Core implementation package。因此，已检查的 consumer 证据为：
+
+```text
+external consumer dependency closure ∩ Platform Core crates = empty
+```
+
+编译期 boundary gate 还证明：
+
+```text
+normal/build transitive closure(public crates) ∩ core_copyleft = empty
+```
+
+## 10. CI architecture/licensing gate
+
+.github/workflows/ci.yml 中新增的 ci / licensing-boundary job 会运行：
+
+1. 使用完整 Cargo metadata 和分类 source of truth 的 tooling/ci/check-license-boundary.py；
+2. 对全部 15 个 proto 文件和 package fixture mirror 执行 tooling/ci/check-public-proto-sync.sh；
+3. tooling/ci/check-public-packages.sh；
+4. 独立 consumer workspace。
+
+该 gate 拒绝 public 到 Core 的直接或传递 normal/build dependency，检查 workspace package 是否全部分类，拒绝 public Rust source 中出现 Core crate 名称，并确保未来 dependency 变更会在 CI 中失败。Dev-only test 可以使用 Core fixture，但这些 edge 不属于已发布的 normal closure。
+
+## 11. Security 就绪情况
+
+当前 sandboxd source 证据确认：
+
+- cgroups v2 resource control 和 cgroup.kill cleanup；
+- 在已配置时提供 CPU/memory/PID/IO 相关 accounting/control；
+- 通过 cgroup-device BPF policy 实施硬件设备强制策略；
+- 在可用时跟踪 pidfd，执行有界 wait/reap 和 parent-death cleanup；
+- sandboxd/NVIDIA 使用有界 UDS frame 和 peer UID/GID 检查；Linux system adapter 的可选 peer flag 已明确记录。
+
+当前 source 证据没有显示 user、mount、network 或 PID namespace isolation、seccomp、capability dropping、完整 filesystem isolation 或 syscall containment。仓库现在包含 SECURITY.md、docs/security/threat-model.md 和更新后的 docs/operations/kernel-runtime.md。
+
+准确的能力描述应是资源/lifecycle governance，而不是恶意任意代码 containment，也不是“任何情况下都没有孤儿进程”。Linux system adapter 的可选 UID/GID policy 是 P2 hardening follow-up；本任务没有静默改变其 authentication model。
+
+## 12. Clean-machine 就绪情况
+
+状态：READY_WITH_DOCUMENTATION。
+
+已记录的 CPU-only 路径为：
+
+```bash
+cargo build --locked --workspace --all-targets
+cargo test --locked --workspace
+```
+
+仓库锁定的 Python environment 也已通过 uv run --locked python tooling/ci/verify.py --scope all-light 验证：governance、documentation、SDK 和 tooling check 通过（20 项 test）。最初用裸系统 interpreter 运行相同 Python test 时，由于未安装 pytest 而被标记为 BLOCKED_BY_ENVIRONMENT；该 interpreter 状态不作为代码证据。
+
+完整本地验证路径还记录了 boundary gate。常规 workspace build/test 不需要 GPU。生产 sandbox execution 需要 Linux cgroup v2 delegation、受保护的 service socket 和已配置 peer identity；NVIDIA operation 还需要 NVIDIA tool/device。本次清理没有虚构零配置生产 daemon 或完整的 hello-worker lifecycle。
+
+本地 Workspace Fabric wire validation 因任务环境没有安装 buf 而被标记为 BLOCKED_BY_ENVIRONMENT。CI workflow 会安装 Buf；不会把这一项本地限制报告为 protocol PASS。
+
+## 13. 剩余阻塞项
+
+| 优先级 | 项目 | 状态/处理 |
+|---|---|---|
+| P0 | Public/Core dependency firewall | 本地已关闭并在 CI 强制执行；当前没有 public 到 Core 的 normal/build edge。 |
+| P1 | 正式许可证迁移与 exception/notice policy | 本地已完成架构决策：Core metadata 为 AGPL-3.0-only，public metadata 为 Apache-2.0，且未创建自定义 plugin exception。法律审查及任何未来 notice policy 仍属外部决策。 |
+| P1 | Registry release 顺序 | 已明确记录 DAG。使用临时 checked-out patch 的 package verification 通过；在前置版本出现在 registry index 前，依赖它们的 cargo publish --dry-run 按预期失败。 |
+| P1 | 恶意 workload 隔离 | 当前 sandboxd 未实现。若要作为产品承诺，则需另立 security architecture 项目实现 namespace/seccomp/capability/filesystem/network isolation。 |
+| P2 | Linux system adapter 默认 peer authentication | 可选 UID/GID flag 仍是有意保留的 compatibility/deployment 差异；生产环境应显式配置，或另一个 hardening 变更应让启动 fail closed。 |
+| P2 | 完整 hello-worker lifecycle 示例 | 目前不存在；独立编译 consumer 证明 firewall，但不证明真实 lease/fence/spawn/release demo。 |
+| P2 | 本环境中的完整 Buf/workspace wire check | 本地缺少 buf；CI setup 已具备。 |
+| P3 | 更深入的 rustdoc/public-API diff gate | 对当前 supported surface，dependency/source gate 足够可靠；若未来 public Rust API 增长显著，可增加 rustdoc JSON/public-api gate。 |
+
+## 14. 最终结论
+
+READY_FOR_LICENSE_FINALIZATION
+
+此结论表示目标架构形态所需的技术基础现已具备：
+
+```text
+strongly protected Platform Core
+        +
+public permissive contracts / SDKs
+        +
+arbitrary-license external process extensions
+        +
+machine-verifiable dependency firewall
+```
+
+它不表示律师已批准许可证选择，不表示 hosted CI 已针对这组本地变更运行，也不表示 sandboxd 是恶意代码 containment 机制。

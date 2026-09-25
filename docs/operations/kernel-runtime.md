@@ -24,6 +24,11 @@ Kernel 是租约、fence token、已批准设备绑定、实例状态与心跳�
 #   * cyrene-kernel service account = uid 991, group cyrene = gid 992
 #     (replace with `id -u cyrene-kernel` / `getent group cyrene`)
 #   * cyrene-sandboxd / cyrene-nvidia-adapter run as root (uid 0) in the units
+# 中文：Kernel 校验每个 Adapter 的 identity；Adapter 也反向校验 Kernel 的 identity。
+# 中文：下方数值与随仓库交付的 systemd unit 一致：
+#   * cyrene-kernel 服务账户 uid=991，组 cyrene 的 gid=992
+#     （部署时替换为 id -u cyrene-kernel / getent group cyrene 的实际结果）
+#   * unit 中 cyrene-sandboxd / cyrene-nvidia-adapter 以 root（uid 0）运行
 cyrene-kernel \
   --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
   --sandbox-adapter-peer-uid sandboxd=0 \
@@ -37,6 +42,8 @@ cyrene-kernel \
 ```
 
 The matching reverse flags live on the Adapter units:
+
+对应的反向校验参数由各 Adapter unit 配置：
 
 ```text
 cyrene-sandboxd --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock \

@@ -33,3 +33,27 @@ classes and drive the canonical `WorkerControlToKernel`/
 `KernelToWorkerControl` sequence through the semantic scenarios. A TCK pass
 does not authorize access to a Worker command channel: the UDS endpoint,
 instance generation, lease, fence and sandbox policy remain Kernel-controlled.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Worker-control TCK v1
+
+这是针对 Core v1 旧版兼容协议 `PluginLifecycleService.ConnectWorker` 和规范 `WorkerControlService` 协议的跨语言符合性测试套件。它覆盖 Python、Kotlin/JVM 和 native Worker 使用的 Worker 侧 control 状态机：
+
+```text
+WorkerHello -> WorkerWelcome -> WorkerHeartbeat/WorkerHeartbeatAck
+                                     -> WorkerShutdown -> WorkerShutdownAck
+```
+
+`vectors.tsv` 和 `scenarios.tsv` 覆盖旧版兼容 envelope。`semantic_scenarios.tsv` 覆盖规范 Worker control 状态机：Hello、Heartbeat 和 ShutdownAck frame 都必须保留 Kernel 签发的 Worker generation、Lease generation 和 fence token。附带的 Python 与 Kotlin runner 独立验证相同的有界场景，不会把 Python/JVM runtime 引入 Kernel。`HEARTBEAT_WORKER` action 由 `heartbeat_worker_accepted`（接受路径）和既有的 `semantic_heartbeat_fence_mismatch`（拒绝路径）覆盖。
+
+在本目录运行参考 runner：
+
+```text
+python python/worker_control_tck.py
+kotlinc kotlin/WorkerControlTck.kt -include-runtime -d worker-control-tck.jar
+java -jar worker-control-tck.jar .
+```
+
+SDK 集成规则：生成的 Proto/gRPC Worker client 必须使用自身生成的 `WorkerToKernel`/`KernelToWorker` class 解码旧 wire vector，并根据 semantic scenario 驱动规范的 `WorkerControlToKernel`/`KernelToWorkerControl` 序列。TCK 通过并不授权访问 Worker command channel：UDS endpoint、instance generation、lease、fence 和 sandbox policy 仍由 Kernel 控制。

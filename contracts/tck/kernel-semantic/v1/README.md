@@ -84,3 +84,81 @@ The suite now exercises every v1 action and every v1 `reason_code` from
 | lifecycle | `STATE_TRANSITION_INVALID` | `transitions_invalid.tsv` (new) |
 | lifecycle | `REPLAY_GAP` | `replay.tsv` (`GAP`) |
 | lifecycle | `EVENT_SOURCE_CHANGED` | `replay.tsv` (`SOURCE_CHANGED`) |
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Kernel Semantic TCK v1
+
+本目录是冻结的 `cyrene.kernel.semantic/v1` 契约可执行的兼容性基线。规范说明仍位于 `docs/contracts/kernel-semantic-contract-v1.md`；这些 TSV fixture 是其机器可读验收向量。Python、Kotlin 和 Rust 分别独立评估相同决策。
+
+该测试套件冻结了各语言投影不得出现分歧的四个方面：
+
+- identifier 语法、timestamp 范围和数值上限；
+- 完整的 Lease、Worker 和 Operation 状态转换矩阵；
+- semantic revision 协商以及精确的 Capability/Quantity 匹配；
+- Lease 和 EndpointGrant 的 fencing/expiry authority；
+- Event source、replay gap 和有界分页行为。
+
+在本目录运行不依赖外部服务的参考 runner：
+
+```text
+python python/kernel_semantic_tck.py
+kotlinc kotlin/KernelSemanticTck.kt -include-runtime -d kernel-semantic-tck.jar
+java -jar kernel-semantic-tck.jar .
+```
+
+Rust 投影会在其单元测试中消费这些文件。语言 SDK 只有在其公开类型和 transport decoder 通过同一组向量、拒绝缺失/未知必需值且不添加较宽松的本地默认值时才符合契约。通过该套件不代表某种 transport、认证策略、scheduler 或 Provider 实现已经通过认证。
+
+Frozen-v1 变更规则：已接受输入、状态转换、authority 决策、字段含义和数值上限均不可原地更改。任何此类变化都需要 semantic v2。只有在忽略新增字段后仍保留全部 v1 决策时，才允许新增可选投影字段。
+
+## 覆盖矩阵
+
+本套件目前覆盖 `docs/contracts/kernel-semantic-contract-v1.md` §11 列出的所有 v1 action 和每个 v1 `reason_code`。
+
+### Actions（18/18）
+
+| Action | Fixture 文件 |
+|---|---|
+| `NEGOTIATE` | `negotiation.tsv` |
+| `REGISTER_PROVIDER` | `provider.tsv`（新增） |
+| `PUBLISH_INVENTORY` | `provider.tsv`（新增） |
+| `RECONCILE_PROVIDER` | `provider.tsv`（新增） |
+| `ACQUIRE_LEASE` | `lease_acquire.tsv`（新增） |
+| `RENEW_LEASE` | `renewal.tsv` |
+| `RELEASE_LEASE` | `transitions.tsv`、`authority.tsv` |
+| `START_WORKER` | `transitions.tsv`（worker 矩阵） |
+| `HEARTBEAT_WORKER` | worker-control TCK `semantic_scenarios.tsv` |
+| `STOP_WORKER` | `transitions.tsv`（worker 矩阵） |
+| `CREATE_OPERATION` | `transitions.tsv`（operation 矩阵） |
+| `REPORT_OPERATION` | `transitions.tsv`（operation 矩阵） |
+| `CANCEL_OPERATION` | `transitions.tsv`（operation 矩阵） |
+| `PUBLISH_ENDPOINT` | `endpoint.tsv`（新增） |
+| `AUTHORIZE_ENDPOINT` | `authority.tsv`（grant 行） |
+| `REVOKE_ENDPOINT` | `endpoint.tsv`（新增） |
+| `READ_EVENTS` | `replay.tsv` |
+| `WATCH_EVENTS` | `replay.tsv` 中的初始 replay 和连续性向量 |
+
+### Reason Code（全部覆盖）
+
+| 类别 | Reason Code | Fixture 文件 |
+|---|---|---|
+| compatibility | `CONTRACT_INCOMPATIBLE` | `negotiation.tsv` |
+| authentication | `AUTHENTICATION_REQUIRED` | `denials.tsv`（新增） |
+| authority | `AUTHORITY_DENIED` | `endpoint.tsv`（新增） |
+| validity | `REQUIRED_FIELD_MISSING` | `denials.tsv`（新增） |
+| validity | `UNKNOWN_ENUM_VALUE` | `denials.tsv`（新增） |
+| validity | `TEXT_INVALID` | `identifiers.tsv` |
+| validity | `NAMESPACED_ID_INVALID` | `identifiers.tsv` |
+| validity | `REASON_CODE_INVALID` | `denials.tsv`（新增） |
+| validity | `TIMESTAMP_INVALID` | `identifiers.tsv` |
+| authority | `GENERATION_INVALID` | `provider.tsv`（新增） |
+| authority | `STALE_GENERATION` | `provider.tsv`（新增） |
+| authority | `FENCE_TOKEN_INVALID` | `denials.tsv`（新增） |
+| authority | `FENCE_MISMATCH` | `renewal.tsv` |
+| authority | `LEASE_EXPIRED` | `renewal.tsv`、`lease_acquire.tsv`（新增） |
+| authority | `LEASE_NOT_ACTIVE` | `renewal.tsv` |
+| authority | `LEASE_RENEWAL_INVALID` | `renewal.tsv` |
+| lifecycle | `STATE_TRANSITION_INVALID` | `transitions_invalid.tsv`（新增） |
+| lifecycle | `REPLAY_GAP` | `replay.tsv`（`GAP`） |
+| lifecycle | `EVENT_SOURCE_CHANGED` | `replay.tsv`（`SOURCE_CHANGED`） |
