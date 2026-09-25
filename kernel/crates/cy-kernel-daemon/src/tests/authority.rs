@@ -699,8 +699,8 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
         .into_inner();
     assert_eq!(renewed.fence_token, lease.fence_token);
     assert!(
-        unix_ms_from_timestamp(renewed.expires_at.clone().unwrap(), "renewed").unwrap()
-            > unix_ms_from_timestamp(lease.expires_at.clone().unwrap(), "lease").unwrap()
+        unix_ms_from_timestamp(renewed.expires_at.unwrap(), "renewed").unwrap()
+            > unix_ms_from_timestamp(lease.expires_at.unwrap(), "lease").unwrap()
     );
     let mut process = managed_test_process(
         "worker-1",
@@ -787,7 +787,7 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
         grantee: renewed.holder.clone(),
         lease: renewed.identity.clone(),
         fence_token: renewed.fence_token,
-        expires_at: renewed.expires_at.clone(),
+        expires_at: renewed.expires_at,
     };
     let denied_authorize = runtime.block_on(adapter.authorize_endpoint(authority_request_for(
         non_owner,

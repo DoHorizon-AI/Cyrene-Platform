@@ -10,15 +10,15 @@ cy-execution-fabric = { path = "../cy-execution-fabric" }
 cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
 cy-kernel-contract = { path = "../../../contracts/rust/cy-kernel-contract" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.13"
+prost-types = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "1.0"
 tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
-tonic = { version = "0.11", features = ["transport", "tls"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
 uuid = { version = "1", features = ["v4"] }
 cy-observability = { path = "../cy-observability" }
 tracing = "0.1"

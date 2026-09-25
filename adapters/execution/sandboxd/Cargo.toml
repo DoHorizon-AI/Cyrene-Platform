@@ -14,7 +14,7 @@ cy-kernel-api = { path = "../../../kernel/crates/cy-kernel-api" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 libc = "0.2"
 nix = { version = "0.29", features = ["socket", "user", "process"] }
-prost = "0.12"
+prost = "0.13"
 cy-observability = { path = "../../../framework/crates/cy-observability" }
 tracing = "0.1"
 

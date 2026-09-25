@@ -15,6 +15,7 @@ mod endpoint;
 mod golden;
 mod lifecycle;
 mod recovery;
+mod service_supervision_wire;
 
 use authority::{
     hardware_provider_adapter, heartbeat_adapter, semantic_worker_adapter,
