@@ -22,6 +22,7 @@ use std::{
 
 /// Upper bound on a single framed request or response, shared by the read and
 /// write paths so a peer can never make the adapter allocate without limit.
+/// 单个分帧请求或响应的大小上限，读写路径共用此上限，避免对端导致适配器无限分配内存。
 #[cfg(unix)]
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -62,6 +63,8 @@ fn main() -> std::io::Result<()> {
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660))?;
     // The executable and the existing provider identity are separate concerns.
     // WSL must be explicitly selected; native binding continues to require BPF.
+    // 可执行文件和现有 Provider 身份是两个独立概念。
+    // 必须显式选择 WSL；原生绑定仍要求 BPF。
     let provider = NvidiaSmiProvider::new(nvidia_smi).with_wsl_shared_device(wsl_shared_device);
     let adapter_id = provider.adapter_id().to_string();
     for stream in listener.incoming() {
@@ -143,6 +146,7 @@ fn main() -> std::io::Result<()> {
         // Fail-closed: the adapter must be configured with at least one trusted
         // Kernel peer UID/GID; otherwise UDS admission silently allows any local
         // user able to reach the socket.
+        // 失败时关闭：适配器必须配置至少一个受信任的 Kernel 对端 UID/GID；否则 UDS 接入会悄悄允许任何能够访问套接字的本地用户。
         if allowed_client_uid.is_none() && allowed_client_gid.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -168,6 +172,9 @@ fn main() -> std::io::Result<()> {
 /// silently after admission is indistinguishable from a healthy GPU. `Write` is
 /// injected rather than hard-coded to `stderr` so tests can assert what an
 /// operator would see.
+/// 为一个已通过接入检查的连接提供服务，并将请求失败报告到 diagnostics。
+///
+/// 不能丢弃失败：从 Kernel 侧看，接入后静默失败与 GPU 健康无异。这里注入 Write，而不固定写入 stderr，以便测试能够断言运维人员实际看到的内容。
 #[cfg(unix)]
 fn serve_admitted_connection(
     stream: UnixStream,
@@ -231,11 +238,13 @@ mod tests {
 
     /// Regression guard for silently discarded adapter requests: a client that
     /// disconnects mid-frame must surface on the diagnostic sink, not vanish.
+    /// 防止适配器请求被静默丢弃的回归保护：客户端在帧传输中途断开时，必须将问题写入诊断输出，不能无声消失。
     #[test]
     fn request_failure_is_reported_to_the_diagnostic_sink() {
         let (client, server) = UnixStream::pair().unwrap();
         // No frame is written and the peer is dropped, so reading the length
         // prefix hits EOF.
+        // 不会写入任何帧，并且对端已断开，因此读取长度前缀时会遇到 EOF。
         drop(client);
 
         let mut diagnostics = Vec::new();
@@ -249,6 +258,7 @@ mod tests {
     }
 
     /// An oversized frame must be rejected before the adapter allocates for it.
+    /// 超大帧必须在适配器为其分配内存之前被拒绝。
     #[test]
     fn oversized_frame_is_reported_to_the_diagnostic_sink() {
         let (mut client, server) = UnixStream::pair().unwrap();
@@ -268,6 +278,7 @@ mod tests {
 
     /// A successful exchange must stay quiet: diagnostics are for failures, and
     /// per-request noise would bury the ones operators care about.
+    /// 成功的请求往返应保持安静：诊断信息用于报告失败；逐请求输出的噪声会淹没运维人员真正需要关注的内容。
     #[test]
     fn successful_request_leaves_the_diagnostic_sink_empty() {
         let (mut client, server) = UnixStream::pair().unwrap();
@@ -280,6 +291,7 @@ mod tests {
 
         // The peer must stay open until the response is written, otherwise the
         // write fails with EPIPE and we would be asserting on a failure.
+        // 必须保持对端连接，直到响应写入完成；否则写操作会因 EPIPE 失败，测试断言到的就会是失败情形。
         let server = std::thread::spawn(move || {
             let mut diagnostics = Vec::new();
             serve_admitted_connection(server, &provider(), &mut diagnostics);

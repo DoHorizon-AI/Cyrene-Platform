@@ -14,4 +14,23 @@
 | TCK | 技术兼容性套件 | Cross-language conformance vectors and runners. 跨语言一致性向量与运行器。 |
 | Projection | 投影 | Transport or language representation of an authoritative semantic model. 权威语义模型在传输或语言中的表示。 |
 | Reconciliation | 协调 | Converging desired state and observed lifecycle evidence. 让期望状态与观测生命周期证据最终一致。 |
+---
 
+<!-- Chinese Translation / 中文翻译 -->
+
+# CYRENE 术语表
+
+| English | 中文 | 含义 |
+| --- | --- | --- |
+| Kernel | 内核 | 节点本地的租约、fencing、生命周期与通用传输权威。 |
+| Framework | 框架层 | 策略、发现、registry 与扩展组合层。 |
+| Contract | 契约 | 组件间版本化的语义或 wire 协议约定。 |
+| Capability | 能力 | Plugin 或 Provider 可以实现的有类型操作。 |
+| Provider | 提供者 | 向 host 暴露资源、模型或能力的组件。 |
+| Worker | 工作进程 | 由 host 激活并监管的进程外实现。 |
+| Lease | 租约 | 在指定时间与 fence 范围内使用资源的权利。 |
+| Fence token | 围栏令牌 | 防止过期持有者继续操作的单调递增令牌。 |
+| Adapter Host | 适配器主机 | 单独监管、负责特权或厂商专属操作的进程。 |
+| TCK | 技术兼容性套件 | 跨语言一致性向量与运行器。 |
+| Projection | 投影 | 权威语义模型在传输或语言中的表示。 |
+| Reconciliation | 协调 | 使期望状态与观测到的生命周期证据最终收敛一致。 |

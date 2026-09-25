@@ -2,6 +2,9 @@
 //!
 //! The parent module owns the authority state; this projection implements the
 //! transport-independent semantic action trait over that state.
+//! 租约、worker、endpoint 和事件的规范 authority 操作。
+//!
+//! 父模块拥有 authority 状态；本投影在该状态上实现与传输无关的语义 action trait。
 
 use super::*;
 
@@ -206,6 +209,7 @@ impl KernelAuthority for LocalKernelAuthority {
         // so a launch whose post-spawn outcome records are all lost (including
         // a crash after a double persistence failure) is still classifiable by
         // restart recovery as "intent present, outcome unknown".
+        // B 类耐久意图：在执行物理 spawn 之前持久化启动意图。如果此记录无法持久化，就不能开始 spawn；这样即使 spawn 后的结果记录全部丢失（包括连续两次持久化失败后崩溃），重启恢复仍可将其归类为“意图存在，结果未知”。
         self.record_runtime(
             RuntimeJournalEvent::InstanceLaunching,
             Some(&worker.identity.id),
@@ -220,6 +224,7 @@ impl KernelAuthority for LocalKernelAuthority {
                 // synchronously. If it cannot be reaped, leave durable cleanup
                 // evidence so restart recovery can classify the incomplete
                 // launch instead of losing an untracked execution domain.
+                // 物理进程已经启动，必须同步回收。如果无法回收，则保留耐久清理证据，以便重启恢复能够识别这次未完成的启动，而不会丢失一个未跟踪的执行域。
                 let stop_report = actor.stop(&cy_kernel_api::StopRequest {
                     grace_period: std::time::Duration::ZERO,
                     immediate: true,
@@ -243,6 +248,7 @@ impl KernelAuthority for LocalKernelAuthority {
             // before the failure is returned. If it cannot be reaped, durable
             // cleanup evidence keeps restart recovery able to classify the
             // incomplete launch.
+            // B 类结果：InstanceLaunched 在物理 spawn 之后持久化，因此返回失败前必须同步回收已启动进程。若无法回收，耐久清理证据仍可让重启恢复识别未完成的启动。
             let stop_report = actor.stop(&cy_kernel_api::StopRequest {
                 grace_period: std::time::Duration::ZERO,
                 immediate: true,
@@ -428,6 +434,7 @@ impl KernelAuthority for LocalKernelAuthority {
                 .map_err(Self::provider_rejection)?;
             // The stopped Worker no longer holds an active Lease; its Endpoints
             // and Grants lose authority and must not remain in Kernel state.
+            // 已停止的 Worker 不再持有 active Lease；其 Endpoint 和 Grant 失去 authority，不能继续留在 Kernel 状态中。
             self.purge_endpoint_authority(worker_identity);
         } else {
             let _ = self

@@ -161,6 +161,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     let nvidia_socket = dir.path().join("nvidia.sock");
 
     // 1. Bind and serve linux_sys adapter on UDS
+    // 中文：1. 绑定 linux_sys 适配器，并通过 UDS 提供服务。
     let linux_listener = UnixListener::bind(&linux_sys_socket)?;
     let linux_provider = cyrene_linux_sys_adapter::LinuxSystemProvider::new("linux-sys");
     thread::spawn(move || {
@@ -168,6 +169,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     });
 
     // 2. Bind and serve nvidia adapter on UDS
+    // 中文：2. 绑定 nvidia 适配器，并通过 UDS 提供服务。
     let nvidia_listener = UnixListener::bind(&nvidia_socket)?;
     let nvidia_provider = cyrene_nvidia_adapter::discovery::NvidiaSmiProvider::new("nvidia-smi")
         .with_runner(Arc::new(MockNvidiaRunner));
@@ -176,9 +178,11 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     });
 
     // Give servers a brief moment to accept connections
+    // 中文：稍等片刻，让服务器有时间接受连接。
     thread::sleep(Duration::from_millis(50));
 
     // 3. Configure HardwareAdapterEndpoints for KernelDaemon
+    // 中文：3. 为 KernelDaemon 配置 HardwareAdapterEndpoints。
     let linux_endpoint = HardwareAdapterEndpoint::new("linux-sys", &linux_sys_socket)
         .with_peer_credentials(PeerCredentialExpectation::default());
 
@@ -193,6 +197,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     ));
 
     // 4. Construct KernelDaemon with dual hardware adapters
+    // 中文：4. 使用两个硬件适配器构造 KernelDaemon。
     let daemon = Arc::new(KernelDaemon::with_hardware_adapters(
         vec![linux_endpoint, nvidia_endpoint],
         resources.clone(),
@@ -202,6 +207,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     )?);
 
     // 5. Verify Preflight Check Passes
+    // 中文：5. 验证 Preflight 检查通过。
     let inv_result = daemon.inventory();
     println!("Inventory probe result: {inv_result:?}");
     let sandbox_preflight = daemon.preflight_ready();
@@ -212,6 +218,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     );
 
     // 6. Bootstrap Initial Inventory Facts
+    // 中文：6. 初始化首批硬件清单事实。
     let initial_snapshot = daemon.refresh_inventory_facts()?;
     assert!(
         initial_snapshot.generation >= 1,
@@ -243,6 +250,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     );
 
     // 7. Verify KernelCapabilities API reports the aggregated inventory
+    // 中文：7. 验证 KernelCapabilities API 返回聚合后的硬件清单。
     let capabilities = daemon.get_kernel_capabilities()?;
     assert!(
         capabilities.inventory_generation >= initial_snapshot.generation,
@@ -254,6 +262,7 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     );
 
     // 8. Test Lease Acquisition against discovered Linux resource
+    // 中文：8. 尝试为发现的 Linux 资源获取租约。
     let target_resource = &initial_snapshot.resources[0];
     let request = ResourceRequest {
         lease_name: "test-workload-lease-1".to_string(),
@@ -278,15 +287,17 @@ fn test_kernel_daemon_dual_hardware_adapters_bootstrap_and_leasing(
     assert_eq!(lease.state, LeaseState::Active);
 
     // 9. Release Lease after its (empty) physical cleanup is confirmed.
+    // 中文：9. 确认物理清理为空操作后释放租约。
     daemon.begin_release("test-workload-lease-1", 1)?;
     daemon.complete_release("test-workload-lease-1", 1)?;
     let released_lease = daemon.lease("test-workload-lease-1")?;
     assert_eq!(released_lease.state, LeaseState::Released);
 
     // 10. Stale-generation rejection assertion (ADR Gate 4)
+    // 中文：10. 验证拒绝过期代次的断言（ADR Gate 4）。
     let stale_request = ResourceRequest {
         lease_name: "test-stale-lease".to_string(),
-        expected_inventory_generation: initial_snapshot.generation + 999, // Stale generation
+        expected_inventory_generation: initial_snapshot.generation + 999, // Stale generation | 中文：库存版本已过期
         holder: semantic::Identity {
             id: "worker-1".to_string(),
             generation: 1,
@@ -313,12 +324,15 @@ fn test_kernel_daemon_rejects_corrupted_adapter_frame_fail_closed(
     let bad_socket = dir.path().join("bad_adapter.sock");
 
     // Start a server that writes garbage protobuf bytes
+    // 中文：启动一个会写入无效 protobuf 字节的服务器。
     let bad_listener = UnixListener::bind(&bad_socket)?;
     thread::spawn(move || {
         for mut stream in bad_listener.incoming().flatten() {
             // Read client request
+            // 中文：读取客户端请求。
             let _ = read_frame(&mut stream);
             // Return corrupted payload (e.g. invalid protobuf bytes)
+            // 中文：返回损坏的负载（例如无效的 protobuf 字节）。
             let garbage = vec![0xFF, 0xFF, 0xFF, 0xFF];
             let _ = write_frame(&mut stream, &garbage);
         }
@@ -345,6 +359,7 @@ fn test_kernel_daemon_rejects_corrupted_adapter_frame_fail_closed(
     )?;
 
     // Probing a corrupted adapter must fail-closed (return ProviderError) and not panic
+    // 中文：探测损坏的适配器必须失败关闭（返回 ProviderError），且不得触发 panic。
     let probe_result = daemon.inventory();
     assert!(
         probe_result.is_err(),

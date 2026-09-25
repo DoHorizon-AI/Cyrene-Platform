@@ -10,6 +10,7 @@
 //!
 //! Handles checksum verification, update payload staging, atomic file replacement,
 //! and restart sequence execution on the node agent.
+//! 负责校验 checksum、暂存更新 payload、原子替换文件，并在 Node Agent 上执行重启流程。
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ pub enum UpgradeError {
 }
 
 /// Agent Self-Upgrader.
+/// Agent 自升级器。
 #[derive(Debug, Clone)]
 pub struct AgentUpgrader {
     current_version: String,
@@ -50,6 +52,7 @@ impl AgentUpgrader {
     }
 
     /// Calculate SHA256 checksum of data slice.
+    /// 计算数据切片的 SHA-256 checksum。
     pub fn calculate_sha256(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
@@ -57,6 +60,7 @@ impl AgentUpgrader {
     }
 
     /// Verify payload, stage binary to disk, and trigger restart sequence.
+    /// 校验 payload，将 binary 暂存到磁盘，并触发重启流程。
     pub fn apply_upgrade(
         &mut self,
         target_version: &str,
@@ -70,6 +74,7 @@ impl AgentUpgrader {
         }
 
         // 1. Verify SHA-256 binary hash
+        // 1. 校验 binary 的 SHA-256 hash
         let actual_hash = Self::calculate_sha256(binary_bytes);
         if actual_hash.to_lowercase() != expected_sha256.to_lowercase() {
             return Err(UpgradeError::ChecksumMismatch {
@@ -79,6 +84,7 @@ impl AgentUpgrader {
         }
 
         // 2. Stage binary payload to staging file
+        // 2. 将 binary payload 写入暂存文件
         std::fs::create_dir_all(&self.agent_dir)?;
         let temp_bin_path = self.agent_dir.join("cy-node-agent.tmp");
         let final_bin_path = self.agent_dir.join("cy-node-agent");
@@ -86,6 +92,7 @@ impl AgentUpgrader {
         std::fs::write(&temp_bin_path, binary_bytes)?;
 
         // Set executable permissions on unix-like systems
+        // 在类 Unix 系统上设置可执行权限
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -95,6 +102,7 @@ impl AgentUpgrader {
         }
 
         // 3. Atomic rename/replace
+        // 3. 原子重命名/替换
         std::fs::rename(&temp_bin_path, &final_bin_path)?;
 
         let old_ver = self.current_version.clone();

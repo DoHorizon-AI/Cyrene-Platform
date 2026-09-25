@@ -23,6 +23,7 @@ use cy_kernel_contract::{
 };
 
 /// Parsed host CPU facts.
+/// 已解析的主机 CPU 事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCpuInfo {
     pub model_name: String,
@@ -33,6 +34,7 @@ pub struct ParsedCpuInfo {
 }
 
 /// Parsed host memory facts.
+/// 已解析的主机内存事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMemInfo {
     pub total_bytes: u64,
@@ -42,6 +44,7 @@ pub struct ParsedMemInfo {
 }
 
 /// Host Linux system provider.
+/// 主机 Linux 系统 Provider。
 pub struct LinuxSystemProvider {
     adapter_id: String,
     procfs_root: PathBuf,
@@ -83,6 +86,7 @@ impl LinuxSystemProvider {
     }
 
     /// Read and parse `/proc/cpuinfo`.
+    /// 读取并解析 /proc/cpuinfo。
     pub fn probe_cpu(&self) -> Result<ParsedCpuInfo, ProviderError> {
         let path = self.procfs_root.join("cpuinfo");
         let content = fs::read_to_string(&path).map_err(|err| {
@@ -96,6 +100,7 @@ impl LinuxSystemProvider {
     }
 
     /// Read and parse `/proc/meminfo`.
+    /// 读取并解析 /proc/meminfo。
     pub fn probe_memory(&self) -> Result<ParsedMemInfo, ProviderError> {
         let path = self.procfs_root.join("meminfo");
         let content = fs::read_to_string(&path).map_err(|err| {
@@ -109,6 +114,7 @@ impl LinuxSystemProvider {
     }
 
     /// Read NUMA node count from `/sys/devices/system/node`.
+    /// 读取 /sys/devices/system/node 中的 NUMA 节点数量。
     pub fn probe_numa_nodes(&self) -> usize {
         let path = self.sysfs_root.join("devices/system/node");
         if let Ok(entries) = fs::read_dir(path) {
@@ -127,6 +133,7 @@ impl LinuxSystemProvider {
     }
 
     /// Read Linux kernel release string via `uname`.
+    /// 通过 uname 读取 Linux 内核版本字符串。
     pub fn probe_kernel_release(&self) -> String {
         #[cfg(target_os = "linux")]
         {
@@ -147,6 +154,7 @@ impl LinuxSystemProvider {
     }
 
     /// Probe OS capability facts.
+    /// 探测操作系统 capability 事实。
     pub fn probe_capabilities(&self) -> NodeCapabilities {
         let controllers_file = self.cgroup_root.join("cgroup.controllers");
         let controllers_content = fs::read_to_string(&controllers_file).ok();
@@ -425,6 +433,7 @@ impl ResourceProvider for LinuxSystemProvider {
         }
 
         // Host CPU / RAM are managed by kernel cgroup allocations, requiring no /dev device node bindings.
+        // 主机 CPU 和内存由内核 cgroup 分配管理，无需绑定 /dev 设备节点。
         Ok(DeviceBinding {
             resource_id: resource.identity.id.clone(),
             nodes: Vec::new(),
@@ -472,6 +481,7 @@ impl ResourceProvider for LinuxSystemProvider {
 impl SystemAdapter for LinuxSystemProvider {}
 
 /// Parse `/proc/cpuinfo` text into `ParsedCpuInfo`.
+/// 将 /proc/cpuinfo 文本解析为 ParsedCpuInfo。
 pub fn parse_cpuinfo(content: &str) -> Result<ParsedCpuInfo, ProviderError> {
     let mut model_name = String::new();
     let mut logical_cores = 0;
@@ -547,6 +557,7 @@ pub fn parse_cpuinfo(content: &str) -> Result<ParsedCpuInfo, ProviderError> {
 }
 
 /// Parse `/proc/meminfo` text into `ParsedMemInfo`.
+/// 将 /proc/meminfo 文本解析为 ParsedMemInfo。
 pub fn parse_meminfo(content: &str) -> Result<ParsedMemInfo, ProviderError> {
     let mut total_kb: Option<u64> = None;
     let mut available_kb: Option<u64> = None;
@@ -581,6 +592,7 @@ pub fn parse_meminfo(content: &str) -> Result<ParsedMemInfo, ProviderError> {
     let available = available_kb
         .or_else(|| {
             // Fallback for older Linux kernels without MemAvailable: Free + Buffers + Cached
+            // 对于不提供 MemAvailable 的旧版 Linux 内核，使用 Free + Buffers + Cached 作为回退值。
             let free = free_kb.unwrap_or(0);
             let buf = buffers_kb.unwrap_or(0);
             let cache = cached_kb.unwrap_or(0);
@@ -604,6 +616,7 @@ fn probe_pidfd_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: pidfd_open has no pointer arguments. A valid return closes it.
+        // 安全性：pidfd_open 不接收指针参数。成功返回的有效文件描述符可用于关闭该进程句柄。
         let fd =
             unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id() as libc::pid_t, 0) };
         if fd >= 0 {

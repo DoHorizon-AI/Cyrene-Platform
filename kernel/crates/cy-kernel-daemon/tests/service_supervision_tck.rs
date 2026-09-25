@@ -19,6 +19,8 @@
 //! 8. Immediate cancellation propagation.
 //! 9. Structured lifecycle event ordering.
 //! 10. Process tree cleanup with zero orphaned processes.
+//!
+//! 中文：通用进程与 workload 监督 TCK（技术兼容性套件）。一致性验证包括：进程启动和就绪观测（ProcessAlive、TCP Socket、HTTP GET）；Service 端点发布及停止时自动撤销；在配置期限内优雅关闭；超时后升级强制终止顽固进程；检测意外崩溃并结构化报告退出码；确定性的指数重启退避；重启次数耗尽后进入 Quarantined；立即传播取消；结构化生命周期事件排序；清理进程树且不遗留孤儿进程。
 
 use std::{
     collections::BTreeMap,
@@ -40,6 +42,7 @@ use cy_kernel_daemon::watchdog::ServiceSupervisor;
 use tokio::net::TcpListener;
 
 // --- Test Fixture Backend ---
+// 中文：测试 fixture backend。
 
 #[derive(Clone)]
 struct MockExecutionBackend {
@@ -146,6 +149,7 @@ impl SandboxBackend for MockExecutionBackend {
 }
 
 // --- Real OS Subprocess Backend for Zero-Orphan Verification ---
+// 中文：用于验证不遗留孤儿进程的真实 OS 子进程 backend。
 
 struct OsSubprocessBackend;
 
@@ -246,6 +250,7 @@ fn sample_plan(name: &str) -> LaunchPlan {
 }
 
 // --- TCK Test Cases ---
+// 中文：TCK 测试用例。
 
 #[tokio::test]
 async fn test_generic_service_launch_and_process_alive_readiness() {
@@ -265,6 +270,7 @@ async fn test_generic_service_launch_and_process_alive_readiness() {
     assert_eq!(backend.launched_count.load(Ordering::SeqCst), 1);
 
     // Verify event ordering: Starting -> Ready -> Running
+    // 中文：验证事件顺序：Starting -> Ready -> Running。
     let ev1 = events.recv().await.unwrap();
     assert_eq!(ev1.state, ServiceState::Starting);
     let ev2 = events.recv().await.unwrap();
@@ -276,6 +282,7 @@ async fn test_generic_service_launch_and_process_alive_readiness() {
 #[tokio::test]
 async fn test_generic_service_tcp_readiness_probe_success() {
     // Start a mock TCP listener to simulate the service socket opening
+    // 中文：启动一个 mock TCP listener，模拟 Service socket 开始监听。
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind tcp listener");
@@ -310,6 +317,7 @@ async fn test_generic_service_tcp_readiness_probe_success() {
 #[tokio::test]
 async fn test_generic_service_http_get_readiness_probe_success() {
     // Start a mock HTTP listener responding with 200 OK
+    // 中文：启动一个 mock HTTP listener，并让其返回 200 OK。
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind http listener");
@@ -357,6 +365,7 @@ async fn test_generic_service_http_get_readiness_probe_success() {
 #[tokio::test]
 async fn test_generic_service_readiness_probe_timeout_transitions_to_failed() {
     // Probe a non-existent port -> must fail after failure_threshold
+    // 中文：探测不存在的端口；必须在达到 failure_threshold 后失败。
     let backend = Arc::new(MockExecutionBackend::new());
     let plan = sample_plan("failing-probe-svc");
     let probe_config = ProbeConfig {
@@ -370,7 +379,7 @@ async fn test_generic_service_readiness_probe_timeout_transitions_to_failed() {
         .with_readiness_probe(
             ReadinessProbe::TcpSocket {
                 host: "127.0.0.1".to_string(),
-                port: 59999, // unopened port
+                port: 59999, // unopened port | 中文：尚未打开的端口
             },
             probe_config,
         )
@@ -416,9 +425,11 @@ async fn test_generic_service_endpoint_lifecycle() {
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
 
     // 1. Before start: no published endpoint
+    // 中文：1. 启动前：没有已发布的端点。
     assert!(supervisor.status().published_endpoint.is_none());
 
     // 2. Start service -> endpoint published on ready
+    // 中文：2. 启动 Service：就绪后发布端点。
     supervisor.start().await.expect("start must succeed");
     let status = supervisor.status();
     assert_eq!(status.state, ServiceState::Running);
@@ -439,6 +450,7 @@ async fn test_generic_service_endpoint_lifecycle() {
     );
 
     // 3. Stop service -> endpoint unpublished
+    // 中文：3. 停止 Service：取消发布端点。
     supervisor.stop().await.expect("stop must succeed");
     assert_eq!(supervisor.state(), ServiceState::Stopped);
     assert!(
@@ -475,6 +487,7 @@ async fn test_generic_service_forced_termination_when_cleanup_incomplete() {
 
     let status = supervisor.stop().await.expect("stop returns status");
     // When cleanup is incomplete, state reports Failed with reason
+    // 中文：清理未完成时，状态会以对应 reason 报告 Failed。
     assert_eq!(status.state, ServiceState::Failed);
     assert_eq!(
         status.last_exit_report.unwrap().reason_code,
@@ -507,6 +520,7 @@ async fn test_generic_service_unexpected_crash_exit_code_reporting() {
     supervisor.start().await.expect("start must succeed");
 
     // Simulate unexpected crash with exit code 137 (SIGKILL/OOM)
+    // 中文：模拟意外崩溃，退出码为 137（SIGKILL/OOM）。
     let crash_report = CleanupReport {
         complete: true,
         exit_code: Some(137),
@@ -551,6 +565,7 @@ async fn test_generic_service_restart_policy_on_failure_with_deterministic_backo
     assert_eq!(supervisor.restart_count(), 0);
 
     // 1st crash -> triggers attempt 1 with 20ms backoff
+    // 中文：第 1 次崩溃：触发第 1 次重启尝试，退避 20ms。
     let start_t = Instant::now();
     let crash_1 = CleanupReport {
         complete: true,
@@ -568,11 +583,13 @@ async fn test_generic_service_restart_policy_on_failure_with_deterministic_backo
     );
 
     // Step supervisor -> launches generation 2
+    // 中文：推进 supervisor：启动 generation 2。
     supervisor.step_supervision().await.expect("restart start");
     assert_eq!(supervisor.state(), ServiceState::Running);
     assert_eq!(supervisor.generation(), 2);
 
     // 2nd crash -> triggers attempt 2 with 40ms backoff (20 * 2^1)
+    // 中文：第 2 次崩溃：触发第 2 次重启尝试，退避 40ms（20 * 2^1）。
     let start_t2 = Instant::now();
     let crash_2 = CleanupReport {
         complete: true,
@@ -622,16 +639,19 @@ async fn test_generic_service_restart_exhaustion_quarantine() {
     };
 
     // 1st crash: attempt 1 (allowed, <= 2)
+    // 中文：第 1 次崩溃：第 1 次尝试，允许（不超过 2）。
     supervisor.handle_observed_exit(crash.clone()).await;
     assert_eq!(supervisor.state(), ServiceState::Restarting);
     supervisor.step_supervision().await.expect("restart 1");
 
     // 2nd crash: attempt 2 (allowed, <= 2)
+    // 中文：第 2 次崩溃：第 2 次尝试，允许（不超过 2）。
     supervisor.handle_observed_exit(crash.clone()).await;
     assert_eq!(supervisor.state(), ServiceState::Restarting);
     supervisor.step_supervision().await.expect("restart 2");
 
     // 3rd crash: attempt 3 (> 2 max retries) -> must QUARANTINE!
+    // 中文：第 3 次崩溃：第 3 次尝试，超过最多 2 次重试，必须进入 QUARANTINE！
     supervisor.handle_observed_exit(crash).await;
     assert_eq!(supervisor.state(), ServiceState::Quarantined);
 }
@@ -650,6 +670,7 @@ async fn test_generic_service_clean_exit_does_not_restart_on_failure_policy() {
     supervisor.start().await.expect("start");
 
     // Clean exit with code 0
+    // 中文：以退出码 0 正常退出。
     let clean_exit = CleanupReport {
         complete: true,
         exit_code: Some(0),
@@ -696,12 +717,14 @@ async fn test_generic_service_real_os_child_process_lifecycle_and_cleanup() {
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
 
     // 1. Launch real OS process
+    // 中文：1. 启动真实 OS 进程。
     let status = supervisor.start().await.expect("real process launch");
     assert_eq!(status.state, ServiceState::Running);
     let handle = supervisor.handle().expect("process handle must exist");
     assert!(handle.pid > 0);
 
     // 2. Stop real OS process
+    // 中文：2. 停止真实 OS 进程。
     let stop_status = supervisor.stop().await.expect("real process stop");
     assert_eq!(stop_status.state, ServiceState::Stopped);
 }
@@ -737,6 +760,7 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     let mut supervisor = ServiceSupervisor::new(spec, backend.clone(), sample_binding());
 
     // 1. Initial start -> Generation 1 becomes Ready and Running
+    // 中文：1. 首次启动：Generation 1 进入 Ready 和 Running。
     let status_gen1 = supervisor.start().await.expect("initial start succeeds");
     assert_eq!(status_gen1.state, ServiceState::Running);
     assert_eq!(supervisor.generation(), 1);
@@ -757,6 +781,7 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     );
 
     // 2. Process crashes
+    // 中文：2. 进程崩溃。
     let crash_report = CleanupReport {
         complete: true,
         exit_code: Some(1),
@@ -777,6 +802,7 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     );
 
     // 3. Step supervisor -> Exactly one replacement generation launches
+    // 中文：3. 推进 supervisor：恰好启动一个替代 generation。
     let status_gen2 = supervisor
         .step_supervision()
         .await
@@ -791,6 +817,7 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     );
 
     // 4. Exactly one process and exactly one endpoint remain active
+    // 中文：4. 只保留一个活动进程和一个活动端点。
     let handle = supervisor
         .handle()
         .expect("exactly one active process handle");
@@ -803,6 +830,7 @@ async fn test_generic_service_single_restart_authority_and_worker_active_isolati
     assert_eq!(ep.owner.generation, 2);
 
     // 5. Subsequent step_supervision on healthy running service does NOT cause duplicate restarts
+    // 中文：5. Service 健康运行后再次执行 step_supervision，不得触发重复重启。
     let status_noop = supervisor
         .step_supervision()
         .await
@@ -845,6 +873,7 @@ async fn test_generic_service_stale_endpoint_protection_across_generations() {
     let mut supervisor = ServiceSupervisor::new(spec, backend, sample_binding());
 
     // 1. Generation N (1) ready -> Endpoint published with generation 1
+    // 中文：1. Generation N（1）就绪，发布带 generation 1 的 Endpoint。
     supervisor.start().await.expect("start");
     let ep_gen1 = supervisor
         .status()
@@ -854,6 +883,7 @@ async fn test_generic_service_stale_endpoint_protection_across_generations() {
     assert_eq!(ep_gen1.identity.id, "endpoint/stale-endpoint-svc");
 
     // 2. Generation 1 crashes -> Endpoint revoked immediately
+    // 中文：2. Generation 1 崩溃，立即撤销 Endpoint。
     let crash = CleanupReport {
         complete: true,
         exit_code: Some(1),
@@ -869,10 +899,12 @@ async fn test_generic_service_stale_endpoint_protection_across_generations() {
     );
 
     // 3. Generation N+1 (2) launches -> Endpoint is NOT published until ready
+    // 中文：3. 启动 Generation N+1（2）；就绪前不得发布 Endpoint。
     supervisor.step_supervision().await.expect("restart");
     assert_eq!(supervisor.state(), ServiceState::Running);
 
     // 4. Endpoint is published with Generation 2, old Generation 1 endpoint NEVER reappears
+    // 中文：4. 使用 Generation 2 发布 Endpoint；绝不能重新出现旧 Generation 1 的 Endpoint。
     let ep_gen2 = supervisor
         .status()
         .published_endpoint

@@ -23,3 +23,25 @@ when investigating deployment provenance.
 
 System 与 Sandbox Adapter 的中文镜像见 [`../zh-CN/operations/`](../zh-CN/operations/README.md)
 以及 [`../zh-CN/architecture/`](../zh-CN/architecture/README.md)。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 运维
+
+本目录说明 runtime 操作、Node Agent 行为、执行目标和已验证安装证据。
+
+| 文件 | 职责 |
+|---|---|
+| `kernel-runtime.md` | Kernel runtime 操作。 |
+| `../architecture/system-adapter.md` | System Adapter 部署边界。 |
+| `../architecture/sandbox-adapter.md` | Sandbox Adapter 后端边界。 |
+| `node-agent.md` | Node Agent 操作与归属。 |
+| `kernel-execution-goals.md` | 执行安全目标。 |
+| `verified-installation-record.md` | 安装证据记录。 |
+
+## 推荐顺序
+
+先读 `kernel-runtime.md`，再读 `node-agent.md`；排查部署来源时使用安装记录。
+
+System 与 Sandbox Adapter 的中文镜像见 [`../zh-CN/operations/`](../zh-CN/operations/README.md) 和 [`../zh-CN/architecture/`](../zh-CN/architecture/README.md)。

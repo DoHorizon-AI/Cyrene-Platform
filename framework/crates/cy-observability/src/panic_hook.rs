@@ -56,6 +56,7 @@ pub fn install_panic_hook(service_name: String, service_instance_id: String) {
         });
 
         // Write directly to stderr without locks or memory buffering
+        // 中文：不获取锁，也不使用内存缓冲，直接写入 stderr。
         let mut stderr = std::io::stderr().lock();
         if let Ok(serialized) = serde_json::to_vec(&record) {
             let _ = stderr.write_all(&serialized);
@@ -64,6 +65,7 @@ pub fn install_panic_hook(service_name: String, service_instance_id: String) {
         }
 
         // Invoke the previous hook (so standard abort / backtrace behavior is preserved)
+        // 中文：调用先前安装的 hook，以保留标准的 abort 与回溯行为。
         default_hook(info);
     }));
 }

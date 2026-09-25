@@ -69,3 +69,42 @@ UUID-addressed GPU resource identity. Loading a model must not make its leased
 device appear replaced.
 
 显存变化推进清单代次,但保留 GPU 的 UUID 资源身份,避免将模型加载误判为设备更换。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# nvidia Directory Guide | adapters/hardware/nvidia 目录指南
+
+## 目录职责
+
+本目录承载 CYRENE Platform source、protocol、fixture 或 test tree 中的一个 boundary。
+
+## CUDA execution 范围
+
+CLI 默认运行 nvidia-smi；使用 --nvidia-smi PATH 可选择已安装的 executable。Provider identity 仍为 nvidia-smi。原生 Linux 要求选定的 /dev/nvidia* device，并要求 HARD device-BPF enforcement。
+
+WSL 必须显式允许 --wsl-shared-device。它只接受一张已观测到的 NVIDIA GPU 和真实的 /dev/dxg character device。Binding 报告 SOFT enforcement 和所选 CUDA UUID；它不承诺逐 GPU 或多租户隔离。Kernel Lease/Fence 和正常 process supervision 仍然适用。多张 GPU 或缺少 dxg 时 fail closed。Cgroup enforcement 是独立的 sandbox capability，不会被此选项禁用。
+
+Legacy KernelCapabilities.enforcement projection 必须保留各项 report 的范围：其粗粒度 resource enum 中 process-tree enforcement 应为 UNSPECIFIED，绝不能标为 ACCELERATOR。实际 device enforcement 来自 Lease binding。
+
+2026-09-06 验证：cargo test --locked -p cy-kernel-daemon -p cyrene-nvidia-adapter 得到 107 项通过、0 项失败，以及 2 项既有且依赖环境的 ignore（external .NET hosting 与跨账号 UDS）。对应的 cargo clippy --all-targets -- -D warnings 和限定范围的 formatting 也通过。真实 WSL NVIDIA adapter、sandboxd 与 Kernel 在用户 systemd delegated cgroup 下通过 UDS 通信，未使用 dev mode。Kernel 观测到一张 RTX 5070、其 CUDA capability 和 wsl-shared-soft。这是硬件/控制证据，不代表 Reactor model Deployment 已验收，也不代表第二张物理 GPU 已验证。
+
+## 内容
+
+| 条目 | 职责 | 一句话职责 |
+|---|---|---|
+
+## 推荐阅读 / 执行顺序
+
+先阅读本指南，再按依赖顺序查看上方直接文件，最后查看嵌套目录指南。
+
+## 内容快照
+
+| 条目 | 职责 | 一句话职责 |
+|---|---|---|
+| Cargo.toml | Rust package manifest。 | Rust 包清单。 |
+| src/ | 嵌套源码或 contract boundary；下一步阅读其中的 README。 | 嵌套目录的详细说明由其 README 提供。 |
+
+此快照有意只列直接条目；嵌套目录各自维护详细指南。
+
+可用内存变化会推进 inventory generation，同时保留由 UUID 标识的 GPU resource identity。加载 model 不得使已租用的设备看起来像被替换。

@@ -22,3 +22,16 @@ fixture 通过父目录测试命令运行：
 ```bash
 cargo test --locked -p cy-artifact-transfer --test portable_directory_materialize
 ```
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 跨 SDK Fixture Adapter
+
+`publish_portable_directory.py` 是仅用于测试的 adapter。它调用 Python `LocalArtifactProvider`，然后将生成的 V2 manifest 和原始 blobs 导出为中性、以 digest 为 key 的视图，供 Rust 集成测试使用。Python provider 的私有 CAS 路径有意限制在此 adapter 中，不属于 Rust 生产契约。
+
+Fixture 通过父级测试命令运行：
+
+```bash
+cargo test --locked -p cy-artifact-transfer --test portable_directory_materialize
+```

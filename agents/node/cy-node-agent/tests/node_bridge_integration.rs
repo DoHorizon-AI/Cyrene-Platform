@@ -35,6 +35,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
 // --- Mock Kernel gRPC Server Implementation on local UDS ---
+// --- 本地 UDS 上的 Mock Kernel gRPC Server 实现 ---
 
 #[derive(Default)]
 struct MockKernelService {
@@ -262,6 +263,7 @@ impl KernelAuthorityService for MockKernelAuthorityService {
 }
 
 // --- End-to-End Integration Test ---
+// --- 端到端集成测试 ---
 
 #[tokio::test]
 async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
@@ -269,6 +271,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     let kernel_socket = dir.path().join("kernel.sock");
 
     // 1. Bind and start mock Kernel UDS gRPC Server
+    // 绑定并启动 Mock Kernel UDS gRPC Server
     let listener = UnixListener::bind(&kernel_socket)?;
     let mock_kernel = MockKernelService {
         node_id: "node-worker-alpha".to_string(),
@@ -288,15 +291,18 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 2. Initialize Node Agent's UdsKernelCommandExecutor and Bridge
+    // 初始化 Node Agent 的 UdsKernelCommandExecutor 和 Bridge
     let executor = UdsKernelCommandExecutor::new(&kernel_socket)?;
     let bridge = NodeCommandBridge::new(executor.clone());
 
     // 3. Test Node Discovery from local Kernel UDS
+    // 测试通过本地 Kernel UDS 发现 Node
     let discovered_node = executor.discover_node().await?;
     assert_eq!(discovered_node.node_id, "node-worker-alpha");
     assert_eq!(discovered_node.node_epoch, 10);
 
     // 4. Establish a Fenced NodeControlSession
+    // 建立经过 fencing 的 NodeControlSession
     let mut session =
         NodeControlSession::new("node-worker-alpha", 10, "1.0.0".to_string(), 1, 1, "");
     session.hello();
@@ -326,6 +332,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     session.accept_welcome(welcome_frame)?;
 
     // 5. Forward a canonical AcquireLease command through the Bridge to Kernel UDS
+    // 通过 Bridge 将规范 AcquireLease command 转发到 Kernel UDS
     let acquire_frame = ControlPlaneToNode {
         frame_id: "frame-cmd-1".to_string(),
         sequence_number: 2,
@@ -377,6 +384,7 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     }
 
     // 6. Forward a KernelAuthorityService StartWorker command through the Bridge to Kernel UDS
+    // 通过 Bridge 将 KernelAuthorityService StartWorker command 转发到 Kernel UDS
     let start_worker_frame = ControlPlaneToNode {
         frame_id: "frame-cmd-2".to_string(),
         sequence_number: 3,
@@ -427,9 +435,10 @@ async fn test_node_agent_uds_bridge_end_to_end() -> Result<(), Box<dyn std::erro
     }
 
     // 7. Verify session fencing rejects old sequence numbers or stale session IDs
+    // 验证 session fencing 会拒绝旧 sequence number 或过期 session ID
     let stale_frame = ControlPlaneToNode {
         frame_id: "frame-stale".to_string(),
-        sequence_number: 2, // sequence already consumed!
+        sequence_number: 2, // sequence already consumed! | 中文：该序号已被使用！
         session_id: "sess-12345".to_string(),
         ack_sequence_number: 0,
         body: Some(control_plane_to_node::Body::Command(KernelCommand {

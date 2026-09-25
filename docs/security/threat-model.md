@@ -54,3 +54,40 @@ It does not show user/mount/network namespace setup, seccomp installation, or
 capability dropping. Full systemd crash/restart and cross-host mTLS acceptance
 remain deployment-level tests; they are not inferred from unit tests or a
 successful compilation.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Platform 信任与特权模型
+
+本文描述当前代码边界，可作为架构与部署参考，但不保证资源沙箱能够隔离恶意代码。
+
+## 组件与信任边界
+
+| 组件 | 当前角色 | 边界与权威 |
+| --- | --- | --- |
+| Kernel daemon | Platform Core 权威组件 | 拥有 principals、leases、围栏令牌、生命周期决策和通用事件；不负责厂商探测或 cgroup 文件。 |
+| `cyrene-sandboxd` | 特权 Platform Core 服务 | 虽在进程外运行，仍属于 Core，因为它创建并清理自有 cgroup、应用设备 BPF 策略、启动/停止 worker 并报告运行证据。 |
+| Node agent | Platform agent | 与 Kernel 交换类型化控制消息；不会成为 lease authority。 |
+| Runtime agent | Platform agent | 通过类型化协议报告运行状态与进度；不会成为第二个生命周期权威。 |
+| Provider / hardware Adapter | 外部扩展或参考实现 | 通过版本化硬件 UDS 协议运行，并报告资源事实/绑定；其实现不会链接进 Kernel。 |
+| Worker / service plugin | 外部扩展 | 作为经 Kernel 批准、由 sandboxd 启动的子进程运行，并交换不透明或版本化的 worker 消息。Product 行为留在 Platform 之外。 |
+
+因此，进程外边界本身并不会自动形成许可或信任边界：sandboxd 就是一个特权 Core 服务的例子。
+
+## 认证与传输
+
+- Kernel 与 sandboxd、Kernel 与硬件 Adapter 之间的通信使用有界、版本化的 Unix domain socket 帧。Socket 模式和所有权属于部署边界的一部分。
+- sandboxd 和 NVIDIA Adapter 可以使用 `SO_PEERCRED` 校验 Kernel 的 UID/GID。Kernel 也可以针对各个已配置端点反向校验对端身份。Linux system Adapter 的对端校验开关当前是可选的；未启用时，访问依赖受保护的 socket 权限。
+- Workspace relay 连接使用 TLS 证书、配置的服务器名称，以及 relay 协议中经过认证的 hello/session 流程。
+- Worker 负载不是 Rust trait object 插件 ABI。Kernel 的 `InstanceActor` transport hook 保留关联关系、generation、fence、timeout 与 cancellation；外部 worker 使用文档规定的线协议边界。
+
+## 特权与强制执行
+
+沙箱服务需要访问委派给它的 cgroup 子树；如果要实施严格的设备策略，还需要主机提供 Linux BPF/device-control 所需能力。生产部署必须只授予 sandboxd 和任何 NVIDIA sidecar 执行这些操作所需的权限，配置明确的 UDS 对端设置，并确保不受信任的 worker 无法访问服务 socket。
+
+当前实现提供资源记账/限额、进程所有权与监管、在已配置后端支持时的设备可见性/强制策略、可用时的 pidfd 跟踪，以及 fence/生命周期完整性。这些是机制保证，不构成通用的任意代码安全边界。
+
+## 不作保证的事项与证据状态
+
+对当前 sandboxd 的源码检查显示已使用 cgroup v2 控制、`cgroup.kill`、pidfd 支持、父进程死亡信号以及 cgroup-device BPF；没有看到设置 user/mount/network namespace、安装 seccomp 或丢弃 capabilities 的实现。完整的 systemd 崩溃/重启和跨主机 mTLS 验收仍属于部署级测试；不能从单元测试或成功编译推断这些能力已获验证。

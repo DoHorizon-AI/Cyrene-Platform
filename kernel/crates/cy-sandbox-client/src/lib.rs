@@ -39,6 +39,7 @@ const RECOVERY_CLEANUP_WAIT: Duration = Duration::from_secs(10);
 
 /// Static configuration for the one privileged Sandbox Adapter Host used by a
 /// Kernel process. Its ID is a protocol identity, never a backend selector.
+/// 单个 Kernel 进程使用的特权 Sandbox Adapter Host 静态配置。其 ID 是协议身份，绝不是 backend 选择器。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxAdapterEndpoint {
     pub adapter_id: String,
@@ -59,6 +60,7 @@ impl SandboxAdapterEndpoint {
 }
 
 /// Kernel-side implementation of the generic sandbox lifecycle port.
+/// 通用 sandbox 生命周期接口的 Kernel 侧实现。
 #[derive(Debug, Clone)]
 pub struct UdsSandboxAdapterClient {
     adapter_id: String,
@@ -532,6 +534,7 @@ fn exchange(
 /// Pure admission decision for the Kernel-side sandbox peer check, mirroring
 /// the `cy_adapter_client::credential` style: the SO_PEERCRED lookup lives in
 /// the thin `verify_connected_peer` shell below.
+/// Kernel 侧 sandbox 对端检查的纯接入判定，采用与 cy_adapter_client::credential 相同的方式：SO_PEERCRED 查询位于下面精简的 verify_connected_peer 外壳中。
 #[cfg(any(test, target_os = "linux"))]
 fn verify_sandbox_peer_credentials(
     adapter_id: &str,
@@ -554,6 +557,7 @@ fn verify_sandbox_peer_credentials(
 /// Verifies the connected Sandbox Adapter Host against the configured UDS
 /// peer identity. The Kernel checks it after connect, before sending any
 /// sandbox request; a mismatch fails closed and drops the connection.
+/// 根据配置的 UDS 对端身份验证已连接的 Sandbox Adapter Host。Kernel 会在 connect 后、发送任何 sandbox 请求前完成检查；身份不匹配时会失败关闭并丢弃连接。
 #[cfg(unix)]
 fn verify_connected_peer(
     adapter_id: &str,
@@ -667,6 +671,7 @@ mod tests {
     #[test]
     fn sandbox_peer_credential_policy_covers_all_expectation_shapes() {
         // (expected_uid, expected_gid, actual_uid, actual_gid, accepted)
+        // 元组字段依次为：期望 UID、期望 GID、实际 UID、实际 GID、是否接纳。
         let cases = [
             (Some(1000), Some(2000), 1000, 2000, true),
             (Some(1000), Some(2000), 1001, 2000, false),
@@ -743,6 +748,7 @@ mod tests {
 /// Real Unix-domain-socket coverage for the Kernel↔sandboxd peer-credential
 /// admission check. Gated to Linux because SO_PEERCRED is the supported
 /// credential source; these cases are compiled out on other hosts.
+/// 对 Kernel 与 sandboxd 之间的真实 Unix domain socket 对端凭证接入检查进行覆盖。由于 SO_PEERCRED 是受支持的凭证来源，此项仅在 Linux 上启用；其他主机不会编译这些用例。
 #[cfg(all(test, target_os = "linux"))]
 mod linux_uds {
     use std::{
@@ -768,6 +774,7 @@ mod linux_uds {
 
     /// SO_PEERCRED on a loopback socket pair reports this process, which is
     /// the ground truth both sides compare against.
+    /// loopback socket pair 上的 SO_PEERCRED 会返回当前进程身份，这是通信双方比对的基准事实。
     fn own_peer_credentials() -> PeerCredentialExpectation {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let credentials =
@@ -1045,6 +1052,7 @@ mod linux_uds {
         assert_eq!(error.reason_code, "SANDBOX_PEER_CREDENTIAL_MISMATCH");
         // The sandboxd side must never observe a protocol frame from the
         // rejected Kernel client: its bounded read has to time out.
+        // sandboxd 端绝不能看到被拒绝 Kernel 客户端发来的协议帧：其有界读取必须超时。
         let observed = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let error = observed.unwrap_err();
         assert!(

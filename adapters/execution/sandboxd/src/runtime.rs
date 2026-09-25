@@ -56,6 +56,7 @@ const CPU_PERIOD_USEC: u64 = 100_000;
 
 /// Linux cgroup v2 execution backend. The `children` map exists solely for
 /// bounded reaping; cgroup.kill remains the authority for the whole tree.
+/// 中文：Linux cgroup v2 执行后端。`children` 映射仅用于有界回收；整个进程树的权威终止方式仍是 cgroup.kill。
 #[derive(Debug)]
 pub struct CgroupV2Runtime {
     config: CgroupV2Config,
@@ -65,6 +66,7 @@ pub struct CgroupV2Runtime {
 /// A child and its Linux wait handle. The pidfd is opened immediately after
 /// spawn, so a later PID reuse cannot make a cleanup path wait for the wrong
 /// process. Platforms without pidfd retain the bounded Child fallback.
+/// 中文：子进程及其 Linux 等待句柄。派生进程后会立即打开 pidfd，因此即使之后发生 PID 重用，清理路径也不会等待到错误进程。没有 pidfd 的平台会保留有界的 Child 回退方式。
 #[derive(Debug)]
 struct TrackedChild {
     process: TrackedProcess,
@@ -278,6 +280,7 @@ impl CgroupV2Runtime {
     /// controllers on its parent. Restart cleanup is intentionally deferred to
     /// the Kernel's journal-backed recovery pass; sandboxd never guesses that a
     /// direct child belongs to a previous Kernel process.
+    /// 中文：创建并校验专用根目录，并在其父级启用可用控制器。重启清理会有意延后到 Kernel 基于日志的恢复阶段；sandboxd 不会猜测某个直接子进程是否属于此前的 Kernel 进程。
     pub fn initialize_owned_root(&self) -> Result<OwnedCgroupCleanupReport, ProviderError> {
         self.validate_owned_root()?;
         fs::create_dir_all(&self.config.root).map_err(|error| {
@@ -294,6 +297,7 @@ impl CgroupV2Runtime {
     }
 
     /// Validates a direct instance group name and resolves it beneath the owned root.
+    /// 中文：校验直接实例组名称，并解析其在受管理根目录下的位置。
     pub fn cgroup_path(&self, name: &str) -> Result<PathBuf, ProviderError> {
         if !is_owned_instance_name(name) {
             return Err(ProviderError::new(
@@ -463,6 +467,7 @@ impl CgroupV2Runtime {
     /// Reads the cgroup v2 physical counters used by the supervisor and
     /// telemetry exporters. Missing optional files stay `None`; no estimate is
     /// substituted for a kernel counter.
+    /// 中文：读取 supervisor 和遥测导出器使用的 cgroup v2 物理计数器。缺失的可选文件保持为 `None`；不会用估算值替代内核计数器。
     pub fn telemetry(&self, handle: &ProcessHandle) -> CgroupTelemetry {
         let cpu = read_key_values(handle.cgroup_path.join("cpu.stat"));
         CgroupTelemetry {
@@ -589,6 +594,7 @@ impl CgroupV2Runtime {
         if !subtree.exists() {
             // Unit tests use a synthetic cgroup filesystem. A real kernel root
             // always has this file, so launch/preflight still gates production.
+            // 中文：单元测试使用合成的 cgroup 文件系统。真实内核根目录始终包含此文件，因此生产环境仍会由 launch/preflight 检查把关。
             return Ok(());
         }
         let available = read_trimmed(parent.join("cgroup.controllers")).unwrap_or_default();
@@ -817,6 +823,7 @@ impl CgroupV2Runtime {
     /// notification is then followed by `Child::wait` to reap the zombie;
     /// timeout leaves the child tracked for the cgroup.kill phase or a later
     /// cleanup attempt.
+    /// 中文：只有受跟踪子进程拥有 pidfd 时才返回 `Some`。收到 pidfd 就绪通知后，还会调用 `Child::wait` 回收僵尸进程；超时会让子进程继续处于受跟踪状态，留待 cgroup.kill 阶段或后续清理尝试处理。
     #[cfg(target_os = "linux")]
     fn wait_child_with_pidfd(&self, pid: u32, timeout: Duration) -> Option<Option<i32>> {
         let mut tracked = self
@@ -838,6 +845,7 @@ impl CgroupV2Runtime {
         let timeout_millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
         // SAFETY: descriptor points to the owned pidfd, and poll only observes
         // readiness. The adapter owns this file descriptor for this call.
+        // 中文：安全性说明：该描述符指向已拥有的 pidfd，poll 只观察就绪状态。本次调用期间，此文件描述符由适配器持有。
         let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_millis) };
         if ready > 0 {
             return Some(tracked.wait(pid));

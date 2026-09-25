@@ -15,3 +15,20 @@ or Artifact identity authorities.
 
 Relay 与 Directory 代码不得成为 Product、Execution、Lease/Event 或 Artifact
 identity 权威。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# cy-workspace-fabric 源码导航
+
+| 文件 | 职责 |
+|---|---|
+| `lib.rs` | 与 Product 无关的公共接口。 |
+| `auth.rs` | 用户/设备会话分离与 verifier port。 |
+| `directory.rs` | 成员关系和 descriptor 校验。 |
+| `api.rs` | Workspace 所有的 API port 与 LOCAL adapter。 |
+| `relay.rs` | 临时认证路由。 |
+| `transport.rs` | 出站 mTLS client transport。 |
+| `bin/` | 仅用于 acceptance 的可执行 fixture。 |
+
+Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。

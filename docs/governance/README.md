@@ -26,3 +26,28 @@ Read `repository-model.md`, then `code-ownership.md`, `ci-trust-model.md`, and
 
 先读 `repository-model.md`，再读 `code-ownership.md`、`ci-trust-model.md` 和
 `source-control-and-delivery.md`。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 治理
+
+本目录定义公共 Core 边界的责任归属、仓库生命周期、CI 信任和交付规则。
+
+| 文件 | 职责 |
+|---|---|
+| `repository-model.md` | 仓库归属模型 |
+| `code-ownership.md` | 维护者与路径归属 |
+| `repository-lifecycle-matrix.md` | Platform 仓库生命周期权威 |
+| `ci-trust-model.md` | CI 证据与信任边界 |
+| `source-control-and-delivery.md` | 本地与远端交付规则 |
+| [`OPEN_SOURCE_ARCHITECTURE_READINESS.md`](OPEN_SOURCE_ARCHITECTURE_READINESS.md) | 当前开源许可边界就绪证据 |
+| [`PUBLIC_RELEASE_PREFLIGHT.md`](PUBLIC_RELEASE_PREFLIGHT.md) | 当前公开发布前检查与证据状态 |
+| [`CONTRIBUTOR_LICENSING_POLICY.md`](CONTRIBUTOR_LICENSING_POLICY.md) | 贡献者版权归属与组件入站许可 |
+| [`CLA_STRATEGY.md`](CLA_STRATEGY.md) | 当前不转让版权决定与未来 CLA 决策边界 |
+| [`API_NAMING_CONSTITUTION.md`](API_NAMING_CONSTITUTION.md) | 跨项目统一 API 词汇、抽象层规则与迁移门禁 |
+| [`API_NAMING_MIGRATION_PLAN.md`](API_NAMING_MIGRATION_PLAN.md) | P0 盘点、处置、工作包与当前门禁状态 |
+
+## 推荐顺序
+
+先读 `repository-model.md`，再读 `code-ownership.md`、`ci-trust-model.md` 和 `source-control-and-delivery.md`。

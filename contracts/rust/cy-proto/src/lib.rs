@@ -20,6 +20,7 @@
 
 // Prost owns the generated enum representation; wire compatibility takes
 // precedence over hand-boxing generated variants in this projection crate.
+// 中文：枚举的生成表示由 Prost 管理；在此投影 crate 中手动装箱生成的枚举变体必须让位于 wire 兼容性。
 #![allow(clippy::large_enum_variant)]
 
 pub mod google {
@@ -74,16 +75,22 @@ pub mod cyrene {
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
 pub use cyrene::core::v1 as core_v1;
 /// Core v2 authority projection with explicit namespace scope.
+/// 中文：显式限定命名空间范围的 Core v2 权限投影。
 pub use cyrene::core::v2 as core_v2;
 /// Versioned local protocol between the Kernel and external hardware adapters.
+/// 中文：Kernel 与外部硬件适配器之间的带版本本地协议。
 pub use cyrene::hardware::v1 as hardware_v1;
 /// Dedicated local Provider lifecycle and reconciliation projection.
+/// 中文：专用于 Provider 生命周期与协调的本地投影。
 pub use cyrene::provider::v1 as provider_v1;
 /// Versioned local protocol between the Kernel and the external Sandbox Adapter Host.
+/// 中文：Kernel 与外部 Sandbox Adapter Host 之间的带版本本地协议。
 pub use cyrene::sandbox::v1 as sandbox_v1;
 /// Transport projection of the Kernel Semantic Contract v1 nouns.
+/// 中文：Kernel Semantic Contract v1 术语的传输投影。
 pub use cyrene::semantic::v1 as semantic_v1;
 /// Transport-neutral Workspace discovery and relay API projection.
+/// 中文：与传输方式无关的 Workspace 发现与中继 API 投影。
 pub use cyrene::workspace::v1 as workspace_v1;
 
 #[cfg(test)]

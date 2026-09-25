@@ -112,6 +112,7 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
     let client = UdsSandboxAdapterClient::from_endpoint(endpoint).expect("client creation failed");
 
     // 1. Preflight test over UDS
+    // 中文：1. 通过 UDS 执行 preflight 测试。
     let caps = client.preflight();
     assert!(
         caps.ready,
@@ -119,6 +120,7 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
     );
 
     // 2. Hard device enforcement denial when device-bpf is disabled
+    // 中文：2. 在禁用 device-bpf 时，验证设备强制策略会拒绝请求。
     let plan = LaunchPlan {
         instance_name: "test-proc".to_string(),
         executable: PathBuf::from("/bin/true"),
@@ -154,6 +156,7 @@ fn test_uds_kernel_sandbox_preflight_and_device_denial() {
     assert_eq!(err.reason_code, "HARD_ENFORCEMENT_UNAVAILABLE");
 
     // Stop server
+    // 中文：停止服务器。
     let _ = stop_tx.send(());
     let _ = server.join();
 }
@@ -202,9 +205,11 @@ fn test_uds_kernel_sandbox_soft_enforcement_roundtrip() {
     let launch_result = client.launch(&plan, &soft_binding);
     if let Ok(handle) = launch_result {
         // Read telemetry
+        // 中文：读取遥测信息。
         let _telemetry = client.telemetry(&handle);
 
         // Stop process
+        // 中文：停止进程。
         let stop_res = client.stop(
             &handle,
             &StopRequest {

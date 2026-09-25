@@ -134,3 +134,93 @@ provider 必须实现同一标准化端口和协议投影，再在该目标的�
 The Chinese mirror is [`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md).
 
 中文镜像见 [`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md)。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# SystemAdapter 边界
+
+
+本文是目标系统适配器的 canonical 架构说明。它描述当前 Linux 实现，但不声称
+所有操作系统都已经有对应实现。
+
+## 目的
+
+
+`SystemAdapter` 是单个构建目标的主机事实与通用主机资源边界。它让 Kernel 消费
+标准化的 CPU、内存、NUMA、操作系统能力、binding 和 health 事实，而不把 Linux
+`/proc`/`sysfs` 解析或其他操作系统 API 嵌入 Kernel 代码。
+
+
+适配器由目标构建和部署 profile 选择。一个节点不会同时启用 Linux、Windows、macOS
+或其他系统实现。
+
+## 规范端口
+
+
+实现无关的端口位于 `contracts/rust/cy-kernel-contract/src/adapter.rs`：
+
+| Port | 职责 |
+| --- | --- |
+| `HostInventoryProvider::probe_inventory` | 返回带 generation 的 inventory snapshot 与节点能力 |
+| `ResourceProvider::adapter_id` | 稳定的本地适配器身份 |
+| `ResourceProvider::probe_resources` | 返回本适配器拥有的标准化资源 |
+| `ResourceProvider::create_binding` | 将资源投影为 Kernel 批准的 binding |
+| `ResourceProvider::read_health` | 返回当前资源健康证据 |
+| `SystemAdapter::system_id` | 标识目标系统实现 |
+
+
+`SystemAdapter` 继承 host inventory 和 resource-provider 端口。它不拥有租约、fence
+token、生命周期策略、产品状态或厂商 GPU 语义；这些仍分别属于 Kernel、Framework
+或 Hardware Adapter。
+
+## Linux 参考实现
+
+
+当前实现是 `adapters/hardware/linux_sys/src/probe.rs` 中的
+`LinuxSystemProvider`，由 `cyrene-linux-sys-adapter` 二进制提供服务。它报告：
+
+
+- `cpu-host`：逻辑/物理 CPU 容量、架构、型号、内核版本、NUMA 数量和 CPU 能力；
+- `ram-host`：总内存/可用内存、存在时的 swap 事实、NUMA 数量，以及可用内存低于实现
+  阈值时的 degraded 状态；
+- 节点能力与 enforcement 事实、inventory generation，以及两个主机资源的 health 响应。
+
+
+CPU 与 RAM binding 不包含设备节点，并报告 `Soft` enforcement；资源分配和 cgroup
+强制仍由 Kernel/sandbox 负责。NVIDIA discovery、topology、设备节点和厂商健康信息
+仍属于独立的 NVIDIA Hardware Adapter。
+
+## 传输与部署
+
+
+Linux host 是独立监管的进程，使用有界帧格式的 `cyrene.hardware.v1` UDS 请求。
+Kernel 注册绝对 socket 路径与预期适配器身份；在资源可分配前，会校验响应身份与
+inventory provenance。
+
+
+参考 systemd unit 是 `infrastructure/systemd/cyrene-linux-sys-adapter.service`。
+当前 unit 为兼容性允许省略 peer UID/GID 参数，但生产部署指南要求两侧都显式配置
+peer identity。这是部署加固状态，不是语义端口缺失。
+
+## 构建 profile
+
+
+公共契约与目标系统无关；当前随仓库提供的 provider 仅支持 Linux。未来目标系统的
+provider 必须实现同一标准化端口和协议投影，再在该目标的构建/profile 中选择，不能
+向 Kernel semantic authority 添加目标系统专属方法。
+
+## 当前 HEAD 状态
+
+
+| 范围 | 状态 | 精确含义 |
+| --- | --- | --- |
+| 公共 `SystemAdapter` 端口 | `COMPLETE` | 定义在公共 contract crate，并由 Kernel API re-export。 |
+| Linux inventory/binding/health | `COMPLETE` | 由 `LinuxSystemProvider` 实现，并通过适配器进程接入。 |
+| Kernel 集成 | `COMPLETE` | Linux adapter 是显式注册 endpoint，不是进程内 discovery。 |
+| NVIDIA 厂商事实 | `NOT_APPLICABLE` | 属于 NVIDIA Hardware Adapter，不属于 system adapter。 |
+| 非 Linux provider | `DEFERRED` | 本仓库尚未交付其他操作系统实现。 |
+| 真实特权/systemd 部署 | `DEFERRED` | 需要环境要求的验收运行。 |
+
+
+中文镜像见 [`../zh-CN/architecture/system-adapter.md`](../zh-CN/architecture/system-adapter.md)。

@@ -39,3 +39,18 @@ state.
 跨仓库工作流归属、已接受版本和整改状态记录在
 [Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace)。历史报告仅是
 证据快照，不能覆盖当前契约或实时 Git 状态。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 仓库边界
+
+Cyrene-Platform 拥有与 Product 无关的机制：Kernel 进程和资源生命周期、通用执行控制、ArtifactRef 与传输、Plugin package 安装与监管、兼容性解析以及不透明 endpoint grant。它必须能够脱离所有 Product 和 Plugin 仓库独立构建与测试。
+
+Products 拥有用户意图、领域状态、生命周期策略、重试策略、持久化、计费、路由决策和面向用户的工作流。Plugins 拥有自己的调用 payload 契约、方法、SDK、实现入口、runtime adapter、配置与直连 endpoint 协议。
+
+## 变更规则
+
+增加或修改 Product capability 不得要求变更 Platform 源码。Platform 可以验证通用身份、版本、执行模式、权限、健康状态和 package 所有的启动元数据；不得解析、代理、转换、路由或持久化 capability 的业务 payload。
+
+跨仓工作流所有权、接受的 revision 与整改状态记录在 Cyrene-Workspace。历史报告只是证据快照，不会覆盖当前契约或实时 Git 状态。

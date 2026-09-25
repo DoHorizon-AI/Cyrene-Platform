@@ -22,3 +22,24 @@ Read `component-vs-distribution.md`, `versioning-model.md`, and
 
 准备发布前先读 `component-vs-distribution.md`、`versioning-model.md` 和
 `release-topology.md`。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 发布指南
+
+本目录说明组件、Artifact、版本、tag 与 distribution 目标之间的关系。
+
+| 文件 | 职责 |
+|---|---|
+| `component-vs-distribution.md` | 组件与 distribution 的区别。 |
+| `distribution-manifest.md` | Distribution manifest 语义。 |
+| `artifact-destinations.md` | Artifact 发布目标策略。 |
+| `versioning-model.md` | 版本规则。 |
+| `tagging.md` | Tag 规则。 |
+| `release-topology.md` | 发布拓扑。 |
+| `PUBLIC_PACKAGE_RELEASE_ORDER.md` | 公共 Rust package 发布依赖顺序和 dry-run 流程。 |
+
+## 推荐顺序
+
+准备发布前先读 `component-vs-distribution.md`、`versioning-model.md` 和 `release-topology.md`。

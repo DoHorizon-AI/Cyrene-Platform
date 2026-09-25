@@ -163,6 +163,7 @@ fn protocol_request_handling_returns_valid_inventory_and_binding() {
     let provider = LinuxSystemProvider::new("hardware-adapter-linux-sys").with_procfs_root(&procfs);
 
     // Test GetInventory request
+    // 中文：测试 GetInventory 请求。
     let req = hardware_v1::AdapterRequest {
         protocol_version: PROTOCOL_VERSION,
         body: Some(hardware_v1::adapter_request::Body::GetInventory(
@@ -184,6 +185,7 @@ fn protocol_request_handling_returns_valid_inventory_and_binding() {
     assert_eq!(inventory.resources.len(), 2);
 
     // Test CreateBinding request
+    // 中文：测试 CreateBinding 请求。
     let bind_req = hardware_v1::AdapterRequest {
         protocol_version: PROTOCOL_VERSION,
         body: Some(hardware_v1::adapter_request::Body::CreateBinding(
@@ -216,12 +218,13 @@ fn binding_rejects_stale_inventory_or_resource_generation() {
     let provider = LinuxSystemProvider::new("hardware-adapter-linux-sys").with_procfs_root(&procfs);
 
     // 1. Stale inventory generation
+    // 中文：1. 验证过期的清单代次。
     let stale_inv_req = hardware_v1::AdapterRequest {
         protocol_version: PROTOCOL_VERSION,
         body: Some(hardware_v1::adapter_request::Body::CreateBinding(
             hardware_v1::CreateBindingRequest {
                 device_id: "cpu-host".to_string(),
-                expected_inventory_generation: 999, // stale!
+                expected_inventory_generation: 999, // stale! | 中文：库存版本已过期！
                 resource: None,
             },
         )),
@@ -235,6 +238,7 @@ fn binding_rejects_stale_inventory_or_resource_generation() {
     }
 
     // 2. Stale resource generation
+    // 中文：2. 验证过期的资源代次。
     let stale_res_req = hardware_v1::AdapterRequest {
         protocol_version: PROTOCOL_VERSION,
         body: Some(hardware_v1::adapter_request::Body::CreateBinding(
@@ -243,7 +247,7 @@ fn binding_rejects_stale_inventory_or_resource_generation() {
                 expected_inventory_generation: 1,
                 resource: Some(cy_proto::semantic_v1::Identity {
                     id: "cpu-host".to_string(),
-                    generation: 999, // stale resource generation!
+                    generation: 999, // stale resource generation! | 中文：资源版本已过期！
                 }),
             },
         )),
@@ -257,6 +261,7 @@ fn binding_rejects_stale_inventory_or_resource_generation() {
     }
 
     // 3. Absent resource
+    // 中文：3. 验证资源不存在时的行为。
     let absent_req = hardware_v1::AdapterRequest {
         protocol_version: PROTOCOL_VERSION,
         body: Some(hardware_v1::adapter_request::Body::CreateBinding(
@@ -279,9 +284,11 @@ fn binding_rejects_stale_inventory_or_resource_generation() {
 #[test]
 fn peer_credential_policy_allows_matching_and_rejects_mismatch() {
     // Neither configured -> allow all
+    // 中文：未配置 UID 或 GID 时，允许所有客户端。
     assert!(client_peer_credentials_allowed(1000, 2000, None, None));
 
     // Only UID configured
+    // 中文：仅配置 UID 时的行为。
     assert!(client_peer_credentials_allowed(
         1000,
         9999,
@@ -296,6 +303,7 @@ fn peer_credential_policy_allows_matching_and_rejects_mismatch() {
     ));
 
     // Only GID configured
+    // 中文：仅配置 GID 时的行为。
     assert!(client_peer_credentials_allowed(
         9999,
         2000,
@@ -310,6 +318,7 @@ fn peer_credential_policy_allows_matching_and_rejects_mismatch() {
     ));
 
     // Both UID and GID configured (AND semantics)
+    // 中文：UID 与 GID 均已配置时按逻辑 AND 语义校验。
     assert!(client_peer_credentials_allowed(
         1000,
         2000,

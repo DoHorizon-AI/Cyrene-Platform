@@ -2,6 +2,7 @@
 # ║ 📄 File: sdk/python/cyrene_artifacts/tests/test_portable_directory.py ║
 # ║ Module: CYRENE Platform                                             ║
 # ║ Role: Cross-language portable Artifact directory contract tests.     ║
+# ║ 中文:跨语言可移植 Artifact 目录契约测试。
 # ║                                                                     ║
 # ║ 模块：CYRENE Platform                                                ║
 # ║ 职责：跨语言 portable Artifact 目录契约测试。                         ║

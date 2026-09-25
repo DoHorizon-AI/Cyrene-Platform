@@ -16,12 +16,14 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlatformErrorCode {
     // Kernel Lifecycle & Recovery
+    // 中文：Kernel 生命周期与恢复错误。
     KernelStartupFailed,
     KernelRecoveryFailed,
     KernelJournalWriteFailed,
     KernelUnknownError,
 
     // Lease & Fencing
+    // 中文：Lease 与 fencing 错误。
     LeaseAcquireFailed,
     LeaseReleaseRollbackFailed,
     LeaseReleaseIntentPersistFailed,
@@ -29,6 +31,7 @@ pub enum PlatformErrorCode {
     LeaseStaleGeneration,
 
     // Worker Lifecycle
+    // 中文：Worker 生命周期错误。
     WorkerLaunchFailed,
     WorkerCleanupFailed,
     WorkerCleanupUnconfirmed,
@@ -36,34 +39,40 @@ pub enum PlatformErrorCode {
     WorkerLostAuthority,
 
     // Node & Communication
+    // 中文：Node 与通信错误。
     NodeConnectFailed,
     NodeDisconnected,
     NodePeerRejected,
     NodeReconnectExhausted,
 
     // Sandbox & Isolation
+    // 中文：Sandbox 与隔离错误。
     SandboxCgroupInitFailed,
     SandboxKillFailed,
     SandboxProcessSpawnFailed,
     SandboxOversizedFrame,
 
     // Package Runtime & Plugins
+    // 中文：Package runtime 与 Plugin 错误。
     PackageActivationFailed,
     PackageDeactivationFailed,
     PackageRollbackFailed,
     PackageStageFailed,
 
     // Relay & Transport
+    // 中文：Relay 与传输错误。
     RelayFrameError,
     RelayStreamDisconnected,
     RelayConnectionRejected,
 
     // Panic
+    // 中文：Panic 错误。
     PanicUnhandled,
 }
 
 impl PlatformErrorCode {
     /// Returns the canonical machine string (e.g. "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED").
+    /// 中文：返回规范机器字符串，例如 PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::KernelStartupFailed => "PLATFORM.KERNEL.STARTUP_FAILED",
@@ -107,6 +116,7 @@ impl PlatformErrorCode {
     }
 
     /// Domain category for this error.
+    /// 中文：此错误所属的 domain 类别。
     pub fn domain(&self) -> &'static str {
         match self {
             Self::KernelStartupFailed

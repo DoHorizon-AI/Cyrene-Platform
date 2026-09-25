@@ -30,11 +30,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryState {
     /// The newly persisted epoch for this Kernel process.
+    /// 此 Kernel 进程新持久化的 epoch。
     pub node_epoch: u64,
     pub next_fence_token: u64,
     /// Evidence for a process that was launched but never durably recorded as
     /// terminated. A restart must classify it as stale and reconcile actual
     /// Provider/runtime reality; it must never silently adopt it.
+    /// 某个进程已启动，但其终止状态从未被耐久记录。重启时必须将其归类为 stale，并与 Provider/runtime 的实际情况协调；绝不能悄悄接管该进程。
     pub runtime_processes: Vec<RuntimeProcessRecord>,
 }
 
@@ -50,6 +52,7 @@ pub struct RuntimeProcessRecord {
 /// A local-only recovery verdict. No verdict rehydrates a Worker into the new
 /// Kernel process; only stale, exactly verified evidence is eligible for
 /// sandbox cleanup.
+/// 仅供本地使用的恢复判定。任何判定都不会将旧 Worker 重新载入新 Kernel 进程；只有过期且经过精确验证的证据才允许用于 sandbox 清理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryClassification {
     Valid,
@@ -161,6 +164,7 @@ impl FileRuntimeJournal {
             // represents a completed lifecycle transition, so ignore it; a
             // malformed earlier line is durable evidence corruption and must
             // stop startup rather than silently weakening fencing.
+            // 断电可能留下不完整的最后一行 JSON。它不代表已完成的生命周期转换，因此可以忽略；更早位置的格式错误则属于耐久证据损坏，必须停止启动，不能悄悄放宽 fencing。
             let record = match serde_json::from_str::<PersistedRuntimeRecord>(line) {
                 Ok(record) => record,
                 Err(_) if index + 1 == lines.len() && !has_terminal_newline => continue,
@@ -238,6 +242,7 @@ impl FileRuntimeJournal {
     ) -> Result<Vec<DurableEventRecord>, ProviderError> {
         // A replay must observe whole appends: an append writes the JSON value,
         // newline and sync as one lock-held operation.
+        // replay 必须观察到完整的 append：一次追加会在持有同一把锁期间写入 JSON 值、换行符并执行 sync。
         let _guard = self.write_lock.lock().map_err(|_| {
             ProviderError::new(
                 "runtime-journal",
@@ -258,6 +263,7 @@ impl FileRuntimeJournal {
         for (index, line) in lines.iter().enumerate() {
             // Match recovery: a torn final write was never durable, while every
             // earlier malformed record invalidates the replay source.
+            // 与恢复逻辑保持一致：撕裂的最后一次写入从未耐久化；更早记录中的任何格式错误都会使 replay source 无效。
             let record = match serde_json::from_str::<PersistedRuntimeRecord>(line) {
                 Ok(record) => record,
                 Err(_) if index + 1 == lines.len() && !terminal_newline => continue,
@@ -392,6 +398,7 @@ impl FileRuntimeJournal {
     /// Completes the local-only restart boundary before any listener can make
     /// fresh allocations. Unknown and foreign processes are never adopted or
     /// killed; they instead keep startup fail-closed for operator action.
+    /// 在任何 listener 开始接受新的分配之前，完成仅限本地的重启边界。不会接管或终止身份未知的进程和其他归属的进程；这类进程会使启动失败关闭，并等待运维人员处理。
     pub fn recover_before_listeners(
         &self,
         node_id: &str,

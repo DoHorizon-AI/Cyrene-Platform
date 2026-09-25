@@ -12,6 +12,8 @@
 //! commands over the protected local Kernel UDS. It is intentionally outside
 //! the Kernel process: a control-plane outage, certificate rotation, or Agent
 //! restart cannot place network parsing or reconnect policy in Kernel memory.
+//! Agent 持有远端 mTLS 连接，并通过受保护的本地 Kernel UDS 转发类型安全的 Core v1 command。
+//! 它有意运行在 Kernel 进程之外：控制面故障、证书轮换或 Agent 重启不会把网络解析或重连策略放入 Kernel 内存。
 
 use std::{fs, path::PathBuf, time::Duration};
 
@@ -111,14 +113,16 @@ impl NodeAgentConfig {
 /// Runs a single Agent forever. Every reconnect rereads the local Kernel's
 /// NodeRef. If a Kernel restart changed the epoch, the previous resume cursor
 /// is discarded and the control plane sees a fenced new node epoch.
+/// 持续运行单个 Agent。每次重连都会重新读取本地 Kernel 的 NodeRef。若 Kernel 重启导致 epoch 变化，
+/// 则丢弃旧 resume cursor，使控制面看到一个经过 fencing 的新 node epoch。
 // ════════════════════════════════════════════════════════════════════════════
 // 🔧 FUNCTION: run_node_agent
 //
 //   Maintains the outbound node session and reconnects from fresh local Kernel
 //   identity evidence, fencing the previous epoch when it changes.
 //
-//   维护出站节点会话，并依据本地 Kernel 的最新身份事实重连；节点纪元变化时，
-//   丢弃旧游标并围栏之前的会话。
+// 维护出站节点会话，并依据本地 Kernel 的最新身份事实重连；节点纪元变化时，
+// 丢弃旧游标并围栏之前的会话。
 // ════════════════════════════════════════════════════════════════════════════
 pub async fn run_node_agent(config: NodeAgentConfig) -> Result<(), NodeAgentError> {
     config.validate()?;

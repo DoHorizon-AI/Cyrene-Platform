@@ -88,3 +88,38 @@ the normative boundary.
 
 规范边界请阅读 [`docs/architecture/sandbox-adapter.md`](../../../docs/architecture/sandbox-adapter.md)
 和 [`docs/security/threat-model.md`](../../../docs/security/threat-model.md)。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Sandbox Adapter Host | 沙箱适配器主机
+
+cyrene-sandboxd 是 Platform Core 的特权服务，实现 Linux 原生 cgroup v2 SandboxBackend。它为提高安全性与故障隔离能力而运行于进程外，但不是可独立采用其他许可证的第三方 plugin：它拥有 enforcement、process lifecycle 和 cleanup authority。
+
+## 当前 backend
+
+随仓库交付的 backend 是 native-cgroup-v2。它通过有版本的 cyrene.sandbox.v1 UDS protocol 接收 preflight、launch、stop、telemetry、recovery discovery 和 stale-process recovery request。
+
+Linux 实现提供 cgroup v2 limit；在可用时对 HARD binding 执行 device-BPF enforcement、使用 pidfd 跟踪、执行 parent-death cleanup、有界 process-tree cleanup，并提供 OOM telemetry。Launch gate 会先 fork child，再将其 attach 到 cgroup；只有 attach 成功后才允许 child 执行 exec，从而关闭旧的先 spawn 再 attach、期间可能运行用户代码的窗口。
+
+## 边界
+
+Kernel 拥有 launch authorization、Lease、fencing、lifecycle decision 和通用 sandbox client。sandboxd 拥有委派给它的 cgroup subtree、process operation、device enforcement 和 cleanup evidence。每个 Worker 的 cgroup 与 lifecycle tree 只能由一个 backend 拥有。
+
+SandboxBackend port 是 Core host port，不是 public plugin ABI。Docker/OCI 是未来受支持的 adapter boundary：未来 backend 可以由 Docker 或其他 OCI runtime 拥有 container lifecycle，但必须投影稳定的 runtime handle、stop/reap evidence、telemetry 和 recovery semantics。当前仓库没有提供生产级 Docker sandbox backend。
+
+## Security boundary
+
+这是一个有界的 cgroup lifecycle sandbox，不是恶意任意代码 containment。当前实现不声称提供 user/mount/network/PID namespace isolation、seccomp、capability dropping、完整 host-filesystem isolation 或 syscall containment。所需 BPF capability 不可用时，HARD device enforcement 会 fail closed。
+
+## 状态
+
+| 范围 | 状态 | 证据 / 边界 |
+|---|---|---|
+| Native cgroup lifecycle | COMPLETE | CgroupV2Runtime 与 sandbox protocol 实现。 |
+| Launch 到 cgroup 的 enforcement | COMPLETE | gated fork/attach/exec 路径。 |
+| 恶意代码 containment | NOT_COMPLETE | 尚无 namespace、seccomp、capability、filesystem 和 syscall control。 |
+| Docker/OCI backend | DEFERRED | 已记录 boundary；backend 与真实验收套件尚不存在。 |
+| 生产 crash/restart 验收 | DEFERRED | 真实 systemd lifecycle validation 需要相应环境。 |
+
+规范边界见 docs/architecture/sandbox-adapter.md 和 docs/security/threat-model.md。

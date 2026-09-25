@@ -20,9 +20,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 /// Version of the generic Platform plugin contract.
+/// 通用 Platform plugin 契约的版本。
 pub const PLUGIN_CONTRACT_VERSION: &str = "cyrene.plugin.v1";
 
 /// Explicit failures returned by registry validation and resolution.
+/// 注册表校验和解析过程返回的明确失败类型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityResolutionError {
     InvalidManifest(String),
@@ -135,6 +137,9 @@ impl std::error::Error for CapabilityResolutionError {}
 /// stable when the worker process or runtime generation is replaced. Runtime
 /// activation settings are supplied by the execution service separately so
 /// this identity remains independent from process and executable details.
+/// 一个已配置 capability 实例的稳定身份。
+///
+/// binding 指向不可变的 plugin release；即使 worker 进程或 runtime generation 被替换，其 id 仍保持稳定。runtime activation 设置由 execution service 单独提供，因此此身份与进程及可执行文件细节无关。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {
     pub id: String,
@@ -162,6 +167,7 @@ impl CapabilityBinding {
 
 /// A resolved capability together with the stable configured identity, when
 /// resolution selected one.
+/// 解析得到的 capability，以及在解析时选中的稳定配置身份（如果有）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCapabilityTarget {
     pub capability: ResolvedCapability,
@@ -169,6 +175,7 @@ pub struct ResolvedCapabilityTarget {
 }
 
 /// In-memory/reference registry for manifests known to the current process.
+/// 当前进程已知 manifest 的内存参考注册表。
 #[derive(Debug, Clone, Default)]
 pub struct CapabilityRegistry {
     manifests: BTreeMap<(String, String), PluginManifest>,
@@ -182,6 +189,7 @@ impl CapabilityRegistry {
 
     /// Register one manifest. Identity and release version form the unique
     /// key; replacing an existing manifest is intentionally not implicit.
+    /// 注册一个 manifest。身份和 release 版本共同构成唯一键；不会隐式替换已有 manifest。
     pub fn register(&mut self, manifest: PluginManifest) -> Result<(), CapabilityResolutionError> {
         let plugin = PluginIdentity::new(manifest.plugin.id.clone())
             .map_err(CapabilityResolutionError::InvalidManifest)?;
@@ -214,6 +222,7 @@ impl CapabilityRegistry {
     /// Register one configured capability binding against an already-known
     /// plugin release. The registry remains the single authority for both
     /// manifest and configured-instance lookup.
+    /// 为一个已知 plugin release 注册 capability binding。注册表仍是 manifest 和配置实例查询的唯一权威来源。
     pub fn register_binding(
         &mut self,
         binding: CapabilityBinding,
@@ -244,6 +253,7 @@ impl CapabilityRegistry {
     }
 
     /// Return one exact configured binding by its stable identity.
+    /// 按稳定身份返回一个完全匹配的已配置 binding。
     pub fn binding(&self, binding_id: &str) -> Option<&CapabilityBinding> {
         self.bindings.get(binding_id)
     }
@@ -253,6 +263,7 @@ impl CapabilityRegistry {
     }
 
     /// Return matching manifests in deterministic identity/version order.
+    /// 按确定性的身份和版本顺序返回匹配的 manifest。
     pub fn providers(&self, capability: &CapabilityId) -> Vec<PluginManifest> {
         self.manifests
             .values()
@@ -271,6 +282,9 @@ impl CapabilityRegistry {
     /// Resolution remains the only selection authority; this lookup is used
     /// only after a resolved provider has been selected so the execution
     /// service can pass the same canonical manifest to the worker activator.
+    /// 按不可变 Provider 身份返回一个完全匹配的已注册 manifest。
+    ///
+    /// 解析仍是唯一的选择权威。只有在 Provider 已选定之后才使用此查询，以便 execution service 将同一份规范 manifest 传给 worker activator。
     pub fn manifest_for(&self, plugin_id: &str, plugin_version: &str) -> Option<PluginManifest> {
         self.manifests
             .get(&(plugin_id.to_string(), plugin_version.to_string()))
@@ -279,6 +293,7 @@ impl CapabilityRegistry {
 
     /// Validate a manifest against an exact capability interface and its
     /// execution constraints without selecting a provider.
+    /// 根据精确的 capability 接口及其执行约束校验 manifest，但不选择 Provider。
     pub fn validate_interface(
         &self,
         manifest: &PluginManifest,
@@ -343,6 +358,7 @@ impl CapabilityRegistry {
 }
 
 /// Deterministic resolver over a reference registry.
+/// 基于参考注册表的确定性解析器。
 pub struct CapabilityResolver<'a> {
     registry: &'a CapabilityRegistry,
 }
@@ -358,8 +374,8 @@ impl<'a> CapabilityResolver<'a> {
     //   Resolves one typed capability requirement against the registered
     //   manifests and returns a deterministic compatibility result.
     //
-    //   将一个强类型能力需求与已注册 Manifest 进行匹配，返回确定性的兼容结果。
-    //   具体匹配由硬件、精度、量化、流式能力和接口约束共同决定。
+    // 将一个强类型能力需求与已注册 Manifest 进行匹配，返回确定性的兼容结果。
+    // 具体匹配由硬件、精度、量化、流式能力和接口约束共同决定。
     // ════════════════════════════════════════════════════════════════════════
     pub fn resolve(
         &self,
@@ -372,6 +388,7 @@ impl<'a> CapabilityResolver<'a> {
     /// configured bindings are considered only when they expose the requested
     /// capability/interface/mode: one match is selected, multiple matches are
     /// rejected, and zero matches retain the legacy provider resolution path.
+    /// 按请求解析完全匹配的已配置 binding。未指定目标时，仅考虑暴露所请求 capability/interface/mode 的 binding：唯一匹配项会被选中，多项匹配会被拒绝；无匹配时沿用旧的 Provider 解析路径。
     pub fn resolve_target(
         &self,
         requirement: &PluginRequirement,

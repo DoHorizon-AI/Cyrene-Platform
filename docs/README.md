@@ -59,3 +59,51 @@ non-guarantees; it is not a second semantic authority.
 规范契约、ADR 与发布门禁以英文为 canonical source。核心入门、架构、运维和
 安全路径的中文镜像位于 [`zh-CN/`](zh-CN/README.md)。每个中文页面都会链接
 回英文源文档，并保持相同的状态标签与非保证声明；中文文档不是第二套语义权威。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# CYRENE Platform 文档
+
+本目录是 CYRENE Platform Core 的双语学习地图，说明仓库边界、契约、runtime 分层，以及从协议定义到可执行 adapter 的推荐路径。
+
+## 从这里开始
+
+1. 阅读 start-here/00-what-is-cyrene.md，了解 Platform 目的与词汇。
+2. 阅读 start-here/02-repository-map.md，了解仓库所有权与边界。
+3. 阅读 architecture/overview.md，查看端到端组件地图与数据流。
+4. 阅读 architecture/system-adapter.md，了解系统事实与目标平台专属 host adapter。
+5. 阅读 architecture/sandbox-adapter.md，了解 sandbox 端口、native backend 与 Docker 边界。
+6. 阅读 contracts/kernel-semantic-contract-v1.md，查看规范语义权威。
+7. 阅读 flows/plugin-resolution-and-invocation.md，跟踪具体执行路径。
+
+## 文档地图
+
+| 目录 | 职责 |
+| --- | --- |
+| adr/ | 架构决策与不可妥协的边界。 |
+| api/ | Capability 与公开 API 索引。 |
+| architecture/ | 分层、权威归属与数据流说明。 |
+| contracts/ | 规范语义契约与 wire 契约。 |
+| development/ | 分支、依赖与本地开发指南。 |
+| flows/ | 按时序说明 runtime 流程。 |
+| governance/ | 所有权、CI 信任、仓库政策与 API 命名宪法。 |
+| operations/ | Runtime、Node Agent 与恢复操作。 |
+| release/ | 制品、版本和发布拓扑。 |
+| security/ | 信任、特权与 sandbox 非保证事项。 |
+| start-here/ | 引导入门与代码阅读顺序。 |
+
+## 重点参考
+
+- architecture/overview.md：Mermaid 组件地图与请求流程。
+- architecture/tool-system.md：Framework 扩展与 worker 边界。
+- architecture/mcp-integration.md：协议集成规则。
+- glossary.md：中英文术语。
+- faq.md：常见问题与排障。
+- logging-and-errors.md：跨仓日志、错误码与诊断规范（草案 v0.1）。
+
+仓库还包含历史报告与迁移记录，可帮助理解背景；规范契约与当前 ADR 优先级更高。
+
+## 文档语言政策
+
+规范契约、ADR 和 release gate 以英文作为 canonical text。核心入门、架构、运维与安全路径的维护版中文镜像位于 zh-CN/。中文页面链接回对应英文源文档，并保持相同的状态标签与非保证声明；中文页面不是第二个语义权威。

@@ -22,7 +22,10 @@ import yaml
 
 @dataclass(frozen=True)
 class PythonPackage:
-    """One policy-owned Python distribution and its source directory."""
+    """One policy-owned Python distribution and its source directory.
+
+    中文:由策略管理的一个 Python 发行包及其源码目录。
+    """
 
     name: str
     version: str
@@ -33,7 +36,10 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def load_packages(repo_path: Path) -> tuple[PythonPackage, ...]:
-    """Resolve the exact policy package set from direct SDK manifests."""
+    """Resolve the exact policy package set from direct SDK manifests.
+
+    中文:从各 SDK 的直接清单中解析策略指定的准确软件包集合。
+    """
 
     policy_path = repo_path / "repository-policy.yaml"
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
@@ -84,7 +90,10 @@ def build_packages(
     *,
     runner: Runner = subprocess.run,
 ) -> tuple[Path, ...]:
-    """Build wheel and sdist candidates, then verify their embedded metadata."""
+    """Build wheel and sdist candidates, then verify their embedded metadata.
+
+    中文:构建 wheel 和 sdist 候选包,然后验证其中嵌入的元数据。
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if any(output_dir.iterdir()):

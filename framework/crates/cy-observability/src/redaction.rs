@@ -9,18 +9,23 @@
 use std::borrow::Cow;
 
 /// Default maximum size in bytes for a single serialized record (32 KiB).
+/// 中文：单条序列化记录的默认最大大小（字节，32 KiB）。
 pub const DEFAULT_MAX_RECORD_BYTES: usize = 32 * 1024;
 
 /// Default maximum size in bytes for the human-readable message (4 KiB).
+/// 中文：面向用户可读消息的默认最大大小（字节，4 KiB）。
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// Default maximum depth of cause chains.
+/// 中文：cause 链的默认最大深度。
 pub const DEFAULT_MAX_CAUSE_DEPTH: usize = 8;
 
 /// Redacted placeholder text.
+/// 中文：用于代替敏感内容的脱敏占位文本。
 pub const REDACTED_MARKER: &str = "[REDACTED]";
 
 /// Truncated marker appended when string exceeds byte budget.
+/// 中文：字符串超过字节预算时追加的截断标记。
 pub const TRUNCATED_MARKER: &str = "... [TRUNCATED]";
 
 /// ════════════════════════════════════════════════════════════════════════
@@ -31,6 +36,7 @@ pub const TRUNCATED_MARKER: &str = "... [TRUNCATED]";
 pub fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     // Exclude usage metric counts like "tokens", "prompt_tokens", "completion_tokens", "total_tokens"
+    // 中文：排除 tokens、prompt_tokens、completion_tokens、total_tokens 等用量指标计数。
     if lower == "tokens" || lower.ends_with("_tokens") || lower == "token_count" {
         return false;
     }
@@ -77,6 +83,7 @@ pub fn sanitize_field<'a>(key: &str, value: &'a str) -> Cow<'a, str> {
         return Cow::Borrowed(REDACTED_MARKER);
     }
     // Pattern check: Bearer tokens, Cyrene keys (cyk_...), GitHub tokens (ghp_...)
+    // 中文：模式检查：Bearer token、Cyrene key（cyk_...）、GitHub token（ghp_...）。
     let trimmed = value.trim();
     if trimmed.starts_with("Bearer ")
         || trimmed.starts_with("bearer ")
@@ -152,6 +159,7 @@ mod tests {
         assert!(truncated.len() <= 25);
 
         // UTF-8 multibyte boundary check
+        // 中文：检查 UTF-8 多字节字符边界。
         let chinese = "你好世界，这是一段中文测试日志。";
         let (cut_cn, cut) = truncate_bounded(chinese, 20);
         assert!(cut);

@@ -29,3 +29,26 @@ for the Core ownership and Docker/OCI status.
 先读 [`sandboxd/README.md`](sandboxd/README.md)，再读
 [`docs/architecture/sandbox-adapter.md`](../../docs/architecture/sandbox-adapter.md)，
 了解 Core 职责归属与 Docker/OCI 状态。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# adapters/execution 目录指南
+
+## 目录职责
+
+本目录包含实现 Core `SandboxBackend` 边界的执行 Adapter Host。当前交付后端是原生 Linux cgroup v2；Docker/OCI 仍是已记录的未来边界。
+
+## 内容
+
+| 条目 | 职责 |
+|---|---|
+| `sandboxd/` | 特权原生 cgroup v2 Sandbox Adapter Host |
+
+## 推荐阅读与执行顺序
+
+先读本指南，再按依赖顺序阅读上方直接文件，最后阅读嵌套目录指南。
+
+## 推荐阅读
+
+先读 [`sandboxd/README.md`](sandboxd/README.md)，再读 [`docs/architecture/sandbox-adapter.md`](../../docs/architecture/sandbox-adapter.md)，了解 Core 职责归属及 Docker/OCI 状态。

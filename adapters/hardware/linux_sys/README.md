@@ -80,3 +80,46 @@ For the authoritative ownership and protocol description, read
 
 权威的职责与协议说明请阅读
 [`docs/architecture/system-adapter.md`](../../../docs/architecture/system-adapter.md)。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Linux System Adapter | Linux 系统适配器
+
+cyrene-linux-sys-adapter 是公共 SystemAdapter port 的 Linux 实现。它报告 host-system fact 和通用 CPU/RAM resource projection；它不是 Kernel authority，也不是 NVIDIA vendor adapter。
+
+## 职责
+
+- 通过 Provider 实现读取 Linux host fact，包括 /proc、Kernel release 和 NUMA 相关 host information。
+- 通过有版本的 cyrene.hardware.v1 framed UDS protocol 暴露 cpu-host 和 ram-host resource。
+- 创建 soft CPU/RAM binding，不注入 device node；Kernel cgroup policy 仍是 allocation/enforcement mechanism。
+- 报告 inventory generation、readiness fact 和 resource health。
+- 提供 UID/GID check 时，只接纳配置允许的本地 peer。
+
+## 文件
+
+| 路径 | 职责 |
+|---|---|
+| src/probe.rs | Linux fact parsing、inventory、binding 和 health。 |
+| src/lib.rs | 有版本的 request/response mapping。 |
+| src/main.rs | UDS adapter host process 与 peer admission。 |
+| src/peer.rs | Unix peer-credential check。 |
+| src/tests.rs | Provider 与 protocol test。 |
+
+## Build 与 runtime boundary
+
+公共 port 与 target 无关，但此实现仅适用于 Linux。非 Linux build 会以 unsupported 退出；其他 target 必须提供独立的 SystemAdapter implementation，并在该 target build 中选用。一个 node 同时只启用被选中的 system adapter。
+
+随仓库交付的 systemd unit 是 infrastructure/systemd/cyrene-linux-sys-adapter.service。其 endpoint 和 service identity 必须与 docs/operations/kernel-runtime.md 所述的 Kernel registration 一致。
+
+## 状态
+
+| 范围 | 状态 | 证据 / 边界 |
+|---|---|---|
+| Linux inventory | COMPLETE | LinuxSystemProvider 实现 HostInventoryProvider。 |
+| CPU/RAM binding | COMPLETE | ResourceProvider::create_binding 返回 soft host-resource binding。 |
+| Public port | COMPLETE | SystemAdapter 定义在 cy-kernel-contract 中。 |
+| 非 Linux implementation | DEFERRED | 尚未交付 Windows/macOS/其他 target Provider。 |
+| 生产 deployment 验收 | DEFERRED | 真实 systemd、root 和 second-user 验证仍需要相应环境。 |
+
+权威职责与 protocol 说明见 docs/architecture/system-adapter.md。

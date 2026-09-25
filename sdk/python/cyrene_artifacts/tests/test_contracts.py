@@ -2,6 +2,7 @@
 # ║ 📄 File: sdk/python/cyrene_artifacts/tests/test_contracts.py
 # ║ Module: CYRENE Platform
 # ║ Role: Provider-neutral Artifact identity tests.
+# ║ 中文:验证与提供方无关的 Artifact 身份规则。
 # ║
 # ║ 模块：CYRENE Platform
 # ║ 职责：验证与 Product 无关的 Artifact 身份契约。

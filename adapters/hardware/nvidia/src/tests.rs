@@ -13,6 +13,7 @@ fn client_peer_credential_policy_covers_all_expectation_shapes() {
     use crate::client_peer_credentials_allowed;
 
     // (expected_uid, expected_gid, actual_uid, actual_gid, accepted)
+    // 中文：（expected_uid、expected_gid、actual_uid、actual_gid、accepted）。
     let cases = [
         (Some(1000), Some(2000), 1000, 2000, true),
         (Some(1000), Some(2000), 1001, 2000, false),
@@ -44,6 +45,7 @@ fn client_peer_credential_policy_covers_all_expectation_shapes() {
 /// Real Unix-domain-socket coverage for the adapter-side client admission
 /// check (`--allowed-client-uid/gid`). Gated to Linux because SO_PEERCRED is
 /// the supported credential source; compiled out on other hosts.
+/// 中文：对适配器侧客户端准入检查（`--allowed-client-uid/gid`）进行真实 Unix 域套接字覆盖测试。该测试仅在 Linux 上启用，因为 SO_PEERCRED 是受支持的凭据来源；在其他主机上不会编译。
 #[cfg(target_os = "linux")]
 mod linux_uds {
     use std::{
@@ -58,6 +60,7 @@ mod linux_uds {
 
     /// SO_PEERCRED on a loopback socket pair reports this process, which is
     /// the ground truth the admission check compares against.
+    /// 中文：SO_PEERCRED 在 loopback 套接字对上会报告当前进程，这就是准入检查所比较的实际凭据。
     fn own_credentials() -> (u32, u32) {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let credentials =
@@ -115,6 +118,7 @@ mod linux_uds {
             let (stream, _) = listener.accept().unwrap();
             // Mirror the accept loop: a failed check closes the connection
             // before `read_frame` is ever called.
+            // 中文：与 accept 循环一致，检查失败时会先关闭连接，绝不会调用 `read_frame`。
             let verdict = verify_client_peer(&stream, Some(uid.wrapping_add(1)), Some(gid));
             assert_eq!(
                 verdict.as_ref().unwrap_err().kind(),
@@ -128,6 +132,7 @@ mod linux_uds {
             .unwrap();
         // The Kernel side learns about the rejection as a closed connection
         // when it waits for the response frame.
+        // 中文：Kernel 等待响应帧时，会通过连接已关闭得知请求被拒绝。
         let error = read_frame(&mut client).unwrap_err();
         assert!(
             error.kind() == std::io::ErrorKind::UnexpectedEof
@@ -144,9 +149,11 @@ mod linux_uds {
     /// because the client runs as `nobody`, SO_PEERCRED reports a uid that
     /// differs from the trusted (root) expectation, so admission must fail
     /// closed.
+    /// 中文：派生一个临时的 Kernel 侧客户端进程；它会切换到无特权的 `nobody` 账户，连接 `socket_path` 并发送一个原始帧。适配器服务器（即本测试的父进程）会核验连接对端。由于客户端以 `nobody` 身份运行，SO_PEERCRED 报告的 uid 与受信任的 root 预期不同，因此准入检查必须失败关闭。
     fn spawn_nobody_client(socket_path: &std::path::Path) -> nix::unistd::Pid {
         let path = socket_path.to_path_buf();
         // SAFETY: forking a throwaway single-threaded test process before dropping privileges
+        // 中文：安全性说明：在丢弃权限之前，派生一个临时的单线程测试进程。
         match unsafe { nix::unistd::fork() }.expect("fork") {
             nix::unistd::ForkResult::Child => {
                 let nobody = nix::unistd::User::from_name("nobody")
@@ -169,6 +176,7 @@ mod linux_uds {
     /// processed. Requires root and a `nobody` account; runs in the Linux
     /// acceptance environment via
     /// `cargo test -p cyrene-nvidia-adapter -- --ignored`.
+    /// 中文：端到端多账户拒绝测试（适配器／入站服务器方向）：NVIDIA 适配器配置为信任 Kernel 客户端自身的 root uid，而另一个本地账户（`nobody`）尝试连接套接字。服务器端的对端检查必须在处理任何帧之前拒绝该连接。该测试需要 root 权限和 `nobody` 账户；在 Linux 验收环境中通过 `cargo test -p cyrene-nvidia-adapter -- --ignored` 运行。
     #[test]
     #[ignore = "requires root and a second local account; run in the Linux acceptance environment"]
     fn peer_credentials_reject_a_different_local_account() {
@@ -180,6 +188,7 @@ mod linux_uds {
         let (stream, _) = listener.accept().unwrap();
         // The connecting peer is `nobody`; the trusted Kernel uid is our own
         // (root) identity, so the admission check must fail closed.
+        // 中文：连接对端是 `nobody`；受信任的 Kernel uid 是当前 root 身份，因此准入检查必须失败关闭。
         let verdict = verify_client_peer(&stream, Some(trusted_uid), None);
         assert!(verdict.is_err(), "a foreign local account must be rejected");
         assert_eq!(

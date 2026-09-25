@@ -8,3 +8,16 @@
 
 Product payload and lifecycle models are intentionally absent.
 Product 载荷与生命周期模型不在此目录中。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# cy-manifest 投影
+
+| 文件 | 职责 |
+|---|---|
+| `artifact.rs` | 与 Provider 无关的 Artifact identity 和 portable directory index。 |
+| `plugin.rs` | 通用 Plugin discovery、兼容性、启动和 lock record。 |
+| `mod.rs` | 公开 module 导出。 |
+
+这里有意不包含 Product payload 和生命周期模型。

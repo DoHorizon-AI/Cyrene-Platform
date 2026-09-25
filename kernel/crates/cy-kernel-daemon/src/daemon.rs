@@ -31,6 +31,7 @@ pub struct KernelDaemon {
     pub(crate) resource_provider: Arc<dyn ResourceProvider>,
     /// Configured hardware adapters remain separately observable for Provider
     /// lifecycle projection; allocation still consumes their aggregate view.
+    /// 已配置的硬件适配器仍可分别观测，以便投影 Provider 生命周期；分配仍使用它们的聚合视图。
     pub(crate) hardware_adapters: Option<Arc<UdsHardwareAdapterRegistry>>,
     /// 硬件资源租约管理器
     pub(crate) resources: Arc<dyn ResourceLeaseManager>,
@@ -91,6 +92,7 @@ impl KernelDaemon {
     /// Backward-compatible constructor for callers that only use hardware
     /// resource adapters. The registry also accepts the required system
     /// adapter endpoint used by the Linux composition root.
+    /// 向后兼容的构造函数，供只使用硬件资源适配器的调用方使用。注册表也会接收 Linux 组合根所需的系统适配器端点。
     pub fn with_hardware_adapters(
         endpoints: impl IntoIterator<Item = HardwareAdapterEndpoint>,
         resources: Arc<dyn ResourceLeaseManager>,
@@ -112,6 +114,7 @@ impl KernelDaemon {
     /// Runtime admission is independent from hardware fact availability so the
     /// Kernel can project an unavailable hardware Provider instead of hiding
     /// all of its other local authority state at process startup.
+    /// runtime 接入与硬件事实是否可用相互独立，因此 Kernel 可以投影不可用的硬件 Provider，而不会在进程启动时隐藏其余本地 authority 状态。
     pub fn sandbox_preflight_ready(&self) -> bool {
         self.sandbox.preflight().ready
     }
@@ -147,6 +150,7 @@ impl KernelDaemon {
     /// Refreshes only current external hardware facts. A successful probe is
     /// committed to the resource ledger; a failed or expired fact leaves the
     /// last allocation state untouched and lets the caller enter DEGRADED.
+    /// 仅刷新当前外部硬件事实。探测成功时会提交到资源 ledger；探测失败或事实过期时保留上次分配状态，并由调用方进入 DEGRADED。
     pub fn refresh_inventory_facts(&self) -> Result<InventorySnapshot, ProviderError> {
         let snapshot = self.inventory()?;
         self.resources.refresh_inventory(snapshot.clone())?;
@@ -159,8 +163,8 @@ impl KernelDaemon {
     //   Acquires from the last durable inventory ledger only after readiness
     //   has been established; it does not probe hardware inline.
     //
-    //   仅在确认资源就绪后从最近一次持久化清单账本中申请租约，不在申请路径内
-    //   临时探测硬件，避免事实刷新与分配发生竞态。
+    // 仅在确认资源就绪后从最近一次持久化清单账本中申请租约，不在申请路径内
+    // 临时探测硬件，避免事实刷新与分配发生竞态。
     // ════════════════════════════════════════════════════════════════════════
     /// 获取硬件资源租约
     ///
@@ -172,6 +176,7 @@ impl KernelDaemon {
         // must not probe and mutate facts inline, because that would race the
         // caller's snapshot generation between validation and acquisition.
         // The startup/monitor observation paths refresh this ledger separately.
+        // 分配使用最近一次已耐久观测到的 inventory ledger。不能在分配过程中同步探测并修改事实，否则验证和获取之间调用方看到的 snapshot generation 会发生竞态。启动和 monitor 观测路径会单独刷新此 ledger。
         let snapshot = self.resources.inventory();
         if !snapshot.capabilities.ready {
             return Err(ProviderError::new(
@@ -184,6 +189,7 @@ impl KernelDaemon {
     }
 
     /// Begins release authority while keeping the physical allocation held.
+    /// 开始释放 authority，同时继续占用物理分配资源。
     pub fn begin_release(
         &self,
         lease_name: &str,
@@ -193,6 +199,7 @@ impl KernelDaemon {
     }
 
     /// Confirms cleanup and makes a releasing allocation reusable.
+    /// 确认清理完成，并使正在释放的分配可重新使用。
     pub fn complete_release(
         &self,
         lease_name: &str,
@@ -202,6 +209,7 @@ impl KernelDaemon {
     }
 
     /// Keeps a failed cleanup allocation unavailable.
+    /// 清理失败时继续将该分配标记为不可用。
     pub fn fail_release(
         &self,
         lease_name: &str,
@@ -212,6 +220,7 @@ impl KernelDaemon {
 
     /// Revokes authority without pretending the holder performed a normal
     /// release. Physical resources stay held until `complete_revocation`.
+    /// 撤销 authority，但不会假装持有方完成了正常释放。只有 complete_revocation 完成后，物理资源才会解除占用。
     pub fn revoke(
         &self,
         lease_name: &str,
@@ -246,6 +255,7 @@ impl KernelDaemon {
     /// Extend a live lease while retaining its exact resource allocation and
     /// fencing authority. The ledger performs the active-state, fence, and
     /// expiry monotonicity checks atomically.
+    /// 延长有效租约，同时保留其精确资源分配和 fencing authority。ledger 会原子执行 active 状态、fence 和有效期单调性检查。
     pub fn renew_lease(
         &self,
         lease_name: &str,
@@ -277,6 +287,7 @@ impl KernelDaemon {
                 })?;
             bindings.push(
                 // Already-acquired lease bindings do not enforce volatile hardware inventory generation checks
+                // 已获取的租约 binding 不会强制执行易变的硬件 inventory generation 检查。
                 self.resource_provider
                     .create_binding_for_generation(resource, 0)?,
             );
@@ -308,6 +319,7 @@ impl KernelDaemon {
             capacity: None,
             // Deprecated compatibility projection. Kernel no longer decodes
             // vendor or accelerator-specific attributes.
+            // 已弃用的兼容性投影。Kernel 不再解码厂商或加速器专属属性。
             accelerators: Vec::new(),
             sandbox_backends: vec![self.sandbox.backend_id().to_string()],
             enforcement: runtime

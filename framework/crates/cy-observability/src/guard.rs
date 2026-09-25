@@ -15,6 +15,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 /// When dropped, ensures that pending log records in the non-blocking queue
 /// are flushed to stderr or file sink before the process exits.
 /// ════════════════════════════════════════════════════════════════════════
+/// 中文：`init_observability` 返回的 RAII guard。
+///
+/// 中文：guard 被丢弃时，会确保进程退出前将非阻塞队列中的待处理日志记录刷新到 stderr 或文件 sink。
 #[derive(Debug)]
 pub struct ObservabilityGuard {
     _guards: Vec<WorkerGuard>,
@@ -30,12 +33,15 @@ impl ObservabilityGuard {
     }
 
     /// Explicitly completes bounded shutdown with a specified timeout.
+    /// 中文：使用指定的超时时间显式完成有界关闭。
     pub fn shutdown_with_timeout(self, _timeout: Duration) {
         // Dropping the inner WorkerGuards initiates the flush of tracing-appender's queue
+        // 中文：丢弃内部 WorkerGuards 会启动 tracing-appender 队列的刷新。
         drop(self);
     }
 
     /// Configured flush timeout.
+    /// 中文：配置的刷新超时时间。
     pub fn flush_timeout(&self) -> Duration {
         self.flush_timeout
     }

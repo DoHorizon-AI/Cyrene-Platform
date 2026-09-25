@@ -20,6 +20,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 /// Child process supervision failure.
+/// Child process supervision 失败。
 #[derive(Debug, Error)]
 pub enum ChildSupervisorError {
     #[error("child process is already running")]
@@ -33,6 +34,7 @@ pub enum ChildSupervisorError {
 }
 
 /// Observed terminal child fact.
+/// 已观测到的 child 终态事实。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildExit {
     pub code: Option<i32>,
@@ -40,6 +42,7 @@ pub struct ChildExit {
 }
 
 /// Whether graceful termination completed before forced escalation.
+/// 是否在强制升级处理前完成 graceful termination。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopOutcome {
     pub exit: ChildExit,
@@ -47,6 +50,7 @@ pub struct StopOutcome {
 }
 
 /// Child output channel consumed by the Runtime Agent event forwarder.
+/// 由 Runtime Agent event forwarder 消费的 child output channel。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkloadOutputStream {
     Stdout,
@@ -54,6 +58,7 @@ pub enum WorkloadOutputStream {
 }
 
 /// One complete UTF-8-lossy workload output line.
+/// 一条完整的 workload output line，使用有损 UTF-8 解码。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadOutput {
     pub stream: WorkloadOutputStream,
@@ -61,6 +66,7 @@ pub struct WorkloadOutput {
 }
 
 /// Single-child process-group supervisor used inside an ordinary container.
+/// 在普通 container 中使用的单 child process-group supervisor。
 pub struct ChildSupervisor {
     command: Vec<String>,
     child: Option<Child>,
@@ -81,6 +87,7 @@ impl ChildSupervisor {
     }
 
     /// Spawn the fixed launch-time command in its own process group.
+    /// 在独立 process group 中启动固定的 launch-time command。
     pub async fn start(
         &mut self,
         working_directory: Option<PathBuf>,
@@ -92,6 +99,7 @@ impl ChildSupervisor {
         let mut command = Command::new(&self.command[0]);
         // Pass only the explicit workload environment. The Runtime Agent's
         // credentials and control-plane settings must stay outside the workload.
+        // 只传入显式指定的 workload environment。Runtime Agent 的 credential 和 control-plane setting 必须留在 workload 之外。
         command.env_clear();
         command.args(&self.command[1..]);
         command.envs(additions);
@@ -120,6 +128,7 @@ impl ChildSupervisor {
     }
 
     /// Drain up to `limit` captured lines without blocking process supervision.
+    /// 最多读取 limit 条已捕获的 line，不阻塞 process supervision。
     pub fn drain_output(&mut self, limit: usize) -> Vec<WorkloadOutput> {
         let mut output = Vec::new();
         let Some(receiver) = self.output.as_mut() else {
@@ -149,6 +158,7 @@ impl ChildSupervisor {
     }
 
     /// Send SIGTERM to the process group, then SIGKILL only after the deadline.
+    /// 向 process group 发送 SIGTERM；只有 deadline 到达后才发送 SIGKILL。
     pub async fn stop(
         &mut self,
         grace_period: Duration,
