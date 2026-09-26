@@ -55,6 +55,7 @@ struct FixtureState {
     disconnected_generations: BTreeSet<u64>,
     stop_sent_generations: BTreeSet<u64>,
     leases: BTreeMap<u64, LeaseRecord>,
+    assignments: BTreeMap<u64, RuntimeAssignment>,
     nodes: BTreeMap<String, NodeLifecycleProjection>,
     artifact: ArtifactFixture,
     artifact_ticket_authority: DevelopmentTransferTicketAuthority,
@@ -203,10 +204,22 @@ impl NodeControlService for Fixture {
                     runtime.generation, runtime.generation
                 ),
             );
+            // Replay the original admission exactly. Lease renewal travels in its
+            // own result frame; reconnect must not mint new ticket/identity times.
+            // 重连只重放原始派发；Lease 续期通过独立结果帧传递。
+            let assignment = if let Some(original) = state.assignments.get(&runtime.generation) {
+                original.clone()
+            } else {
+                let assignment = make_assignment(&state, &runtime, lease);
+                state
+                    .assignments
+                    .insert(runtime.generation, assignment.clone());
+                assignment
+            };
             (
                 session_id,
                 resume_token,
-                make_assignment(&state, &runtime, lease),
+                assignment,
                 disconnect,
                 state.wait_for_assignment_trigger.then(|| {
                     state
@@ -780,6 +793,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         disconnected_generations: BTreeSet::new(),
         stop_sent_generations: BTreeSet::new(),
         leases: BTreeMap::new(),
+        assignments: BTreeMap::new(),
         nodes: BTreeMap::new(),
         artifact,
         artifact_ticket_authority,

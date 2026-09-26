@@ -202,6 +202,7 @@ wait_for 'workload progress' "grep -q 'PROGRESS generation=2 completed=1 total=1
 wait_for 'forced control disconnect' "grep -q 'CONTROL_CHANNEL_FORCED_DISCONNECT generation=2' '${proof_root}/control.trace'" FORCED_CONTROL_DISCONNECT
 wait_for 'authenticated reconnect' "test \$(grep -c 'ENROLLED runtime=runtime-fixture generation=2' '${proof_root}/control.trace') -ge 2" CONTROL_CHANNEL_RECONNECT
 wait_for 'persistent Node reconnect' "grep -q 'PERSISTENT_NODE_RECONNECTED node=node-persistent-1 state=ONLINE' '${proof_root}/control.trace'" PERSISTENT_NODE_RECONNECT
+wait_for 'original assignment replay acknowledgment' "grep -q 'ASSIGNMENT_ACK generation=2 disposition=2' '${proof_root}/control.trace'" ORIGINAL_ASSIGNMENT_REPLAY
 wait_for 'Lease renewal' "grep -q 'LEASE_RENEWED generation=2' '${proof_root}/control.trace'" LEASE_RENEWAL
 touch "${proof_root}/commands/stop-2"
 wait_for 'StopAck' "grep -q 'STOP_ACK generation=2' '${proof_root}/control.trace'" STOP_ACK
