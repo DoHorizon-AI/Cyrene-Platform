@@ -14,7 +14,8 @@ use reqwest::{Client, Method, StatusCode, Url};
 
 use crate::{
     product_projection::validate_product_response, ProductInvocationError,
-    ProductInvocationRequest, ProductInvocationResponse, PRODUCT_JSON_BODY_MAX_BYTES,
+    ProductInvocationRequest, ProductInvocationResponse, WorkspaceCallerContext,
+    PRODUCT_JSON_BODY_MAX_BYTES,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -22,6 +23,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_IDEMPOTENCY_KEY_CHARS: usize = 200;
 const MAX_PATH_SEGMENT_BYTES: usize = 512;
 const MAX_SERVICE_CREDENTIAL_BYTES: usize = 4096;
+const MAX_SCOPE_ID_BYTES: usize = 512;
 const JSON_ACCEPT: &str = "application/json, application/problem+json";
 
 /// HTTP verb selected by an internal Product operation mapping.
@@ -195,29 +197,37 @@ impl fmt::Debug for ProductHttpTarget {
     }
 }
 
-/// Private endpoint input supplied by server startup configuration.
+/// Private endpoint input supplied by server startup configuration for one
+/// owner, organization, and Workspace scope.
 ///
 /// The credential is consumed into a sensitive header during resolver setup;
 /// it is not serializable and its Debug output is redacted.
 pub struct ProductEndpointConfig {
     owner: WorkspaceProductApiOwner,
+    organization_id: String,
+    workspace_id: String,
     base_url: String,
     service_credential: String,
 }
 
 impl ProductEndpointConfig {
-    /// Creates a private server-side Product endpoint configuration.
+    /// Creates a private server-side Product endpoint configuration for one
+    /// organization and Workspace.
     ///
     /// Configure the URL to an HTTPS hosting gateway that validates this
     /// service credential. Current Product OpenAPI and server routes do not
     /// establish bearer verification or Workspace-user attribution themselves.
     pub fn new(
         owner: WorkspaceProductApiOwner,
+        organization_id: impl Into<String>,
+        workspace_id: impl Into<String>,
         base_url: impl Into<String>,
         service_credential: impl Into<String>,
     ) -> Self {
         Self {
             owner,
+            organization_id: organization_id.into(),
+            workspace_id: workspace_id.into(),
             base_url: base_url.into(),
             service_credential: service_credential.into(),
         }
@@ -229,6 +239,8 @@ impl fmt::Debug for ProductEndpointConfig {
         formatter
             .debug_struct("ProductEndpointConfig")
             .field("owner", &self.owner)
+            .field("organization_id", &"<redacted>")
+            .field("workspace_id", &"<redacted>")
             .field("base_url", &"<redacted>")
             .field("service_credential", &"<redacted>")
             .finish()
@@ -242,7 +254,7 @@ pub(super) struct ProductEndpoint {
 }
 
 impl ProductEndpoint {
-    fn from_config(config: ProductEndpointConfig) -> Result<Self, ProductInvocationError> {
+    fn from_config(config: &ProductEndpointConfig) -> Result<Self, ProductInvocationError> {
         let base_url =
             Url::parse(&config.base_url).map_err(|_| ProductInvocationError::Unavailable)?;
         if base_url.scheme() != "https"
@@ -286,12 +298,20 @@ impl fmt::Debug for ProductEndpoint {
 pub(super) trait ProductEndpointResolver: Send + Sync + 'static {
     async fn resolve(
         &self,
+        caller: &WorkspaceCallerContext,
         owner: WorkspaceProductApiOwner,
     ) -> Result<ProductEndpoint, ProductInvocationError>;
 }
 
+struct ScopedProductEndpoint {
+    owner: WorkspaceProductApiOwner,
+    organization_id: String,
+    workspace_id: String,
+    endpoint: ProductEndpoint,
+}
+
 pub(super) struct ConfiguredProductEndpointResolver {
-    endpoints: Vec<(WorkspaceProductApiOwner, ProductEndpoint)>,
+    endpoints: Vec<ScopedProductEndpoint>,
 }
 
 impl ConfiguredProductEndpointResolver {
@@ -299,12 +319,23 @@ impl ConfiguredProductEndpointResolver {
         let mut endpoints = Vec::with_capacity(configs.len());
         for config in configs {
             if !allowlisted_owner(config.owner)
-                || endpoints.iter().any(|(owner, _)| *owner == config.owner)
+                || !valid_scope_id(&config.organization_id)
+                || !valid_scope_id(&config.workspace_id)
+                || endpoints.iter().any(|configured: &ScopedProductEndpoint| {
+                    configured.owner == config.owner
+                        && configured.organization_id == config.organization_id
+                        && configured.workspace_id == config.workspace_id
+                })
             {
                 return Err(ProductInvocationError::Unavailable);
             }
-            let owner = config.owner;
-            endpoints.push((owner, ProductEndpoint::from_config(config)?));
+            let endpoint = ProductEndpoint::from_config(&config)?;
+            endpoints.push(ScopedProductEndpoint {
+                owner: config.owner,
+                organization_id: config.organization_id,
+                workspace_id: config.workspace_id,
+                endpoint,
+            });
         }
         Ok(Self { endpoints })
     }
@@ -314,14 +345,26 @@ impl ConfiguredProductEndpointResolver {
 impl ProductEndpointResolver for ConfiguredProductEndpointResolver {
     async fn resolve(
         &self,
+        caller: &WorkspaceCallerContext,
         owner: WorkspaceProductApiOwner,
     ) -> Result<ProductEndpoint, ProductInvocationError> {
         self.endpoints
             .iter()
-            .find(|(configured_owner, _)| *configured_owner == owner)
-            .map(|(_, endpoint)| endpoint.clone())
+            .find(|configured| {
+                configured.owner == owner
+                    && configured.organization_id == caller.organization_id()
+                    && configured.workspace_id == caller.workspace_id()
+            })
+            .map(|configured| configured.endpoint.clone())
             .ok_or(ProductInvocationError::Unavailable)
     }
+}
+
+fn valid_scope_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= MAX_SCOPE_ID_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 /// Fully assembled HTTP request passed to the injected transport.
@@ -520,11 +563,12 @@ impl ProductHttpClient {
     /// Dispatches one mapped Product request through its fixed owner endpoint.
     pub(super) async fn send(
         &self,
+        caller: &WorkspaceCallerContext,
         target: ProductHttpTarget,
         request: &ProductInvocationRequest,
     ) -> Result<ProductInvocationResponse, ProductInvocationError> {
         validate_request(&target, request)?;
-        let endpoint = self.resolver.resolve(target.owner).await?;
+        let endpoint = self.resolver.resolve(caller, target.owner).await?;
         let url = target.build_url(&endpoint.base_url)?;
         let idempotency_key = request
             .idempotency_key
@@ -673,6 +717,8 @@ mod tests {
     ) -> (ProductHttpClient, Arc<RecordingTransport>) {
         let resolver = ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
             owner,
+            "organization-1",
+            "workspace-1",
             "https://product.example.test/",
             "test-service-credential",
         )])
@@ -741,6 +787,7 @@ mod tests {
 
         let response = client
             .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
                 datasets_target(WorkspaceProductApiOwner::Catalyst, ProductHttpMethod::Post),
                 &request,
             )
@@ -792,7 +839,14 @@ mod tests {
             None,
         );
 
-        let response = client.send(target, &request).await.unwrap();
+        let response = client
+            .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
+                target,
+                &request,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status_code, 200);
         assert_eq!(
@@ -819,6 +873,8 @@ mod tests {
         assert!(
             ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
                 WorkspaceProductApiOwner::Catalyst,
+                "organization-1",
+                "workspace-1",
                 "http://product.example.test/",
                 "test-secret",
             )])
@@ -827,6 +883,8 @@ mod tests {
         assert!(
             ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
                 WorkspaceProductApiOwner::Catalyst,
+                "organization-1",
+                "workspace-1",
                 "https://user:password@product.example.test/",
                 "test-secret",
             )])
@@ -855,7 +913,14 @@ mod tests {
         );
         let target = datasets_target(WorkspaceProductApiOwner::Catalyst, ProductHttpMethod::Post);
         assert_eq!(
-            client.send(target, &request).await.unwrap_err(),
+            client
+                .send(
+                    &crate::product_adapters::test_member_caller("organization-1", "workspace-1",),
+                    target,
+                    &request,
+                )
+                .await
+                .unwrap_err(),
             ProductInvocationError::InvalidRequest
         );
         assert!(transport.requests.lock().unwrap().is_empty());
@@ -879,7 +944,8 @@ mod tests {
         assert_eq!(
             client
                 .send(
-                    datasets_target(WorkspaceProductApiOwner::Catalyst, ProductHttpMethod::Get),
+                    &crate::product_adapters::test_member_caller("organization-1", "workspace-1",),
+                    datasets_target(WorkspaceProductApiOwner::Catalyst, ProductHttpMethod::Get,),
                     &request,
                 )
                 .await
@@ -892,9 +958,127 @@ mod tests {
     fn private_endpoint_debug_never_contains_service_credential() {
         let config = ProductEndpointConfig::new(
             WorkspaceProductApiOwner::Echo,
+            "organization-1",
+            "workspace-1",
             "https://echo.example.test/",
             "distinctive-secret-value",
         );
         assert!(!format!("{config:?}").contains("distinctive-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn endpoint_resolution_requires_exact_owner_organization_and_workspace() {
+        let resolver = ConfiguredProductEndpointResolver::new(vec![
+            ProductEndpointConfig::new(
+                WorkspaceProductApiOwner::Catalyst,
+                "organization-1",
+                "workspace-1",
+                "https://workspace-one.example.test/",
+                "workspace-one-secret",
+            ),
+            ProductEndpointConfig::new(
+                WorkspaceProductApiOwner::Catalyst,
+                "organization-1",
+                "workspace-2",
+                "https://workspace-two.example.test/",
+                "workspace-two-secret",
+            ),
+            ProductEndpointConfig::new(
+                WorkspaceProductApiOwner::Catalyst,
+                "organization-2",
+                "workspace-1",
+                "https://organization-two.example.test/",
+                "organization-two-secret",
+            ),
+        ])
+        .unwrap();
+
+        let workspace_one =
+            crate::product_adapters::test_member_caller("organization-1", "workspace-1");
+        let workspace_two =
+            crate::product_adapters::test_member_caller("organization-1", "workspace-2");
+        let other_organization =
+            crate::product_adapters::test_member_caller("organization-2", "workspace-1");
+        let wrong_workspace =
+            crate::product_adapters::test_member_caller("organization-1", "workspace-3");
+        let wrong_organization =
+            crate::product_adapters::test_member_caller("organization-3", "workspace-1");
+
+        assert_eq!(
+            resolver
+                .resolve(&workspace_one, WorkspaceProductApiOwner::Catalyst)
+                .await
+                .unwrap()
+                .base_url
+                .as_str(),
+            "https://workspace-one.example.test/"
+        );
+        assert_eq!(
+            resolver
+                .resolve(&workspace_two, WorkspaceProductApiOwner::Catalyst)
+                .await
+                .unwrap()
+                .base_url
+                .as_str(),
+            "https://workspace-two.example.test/"
+        );
+        assert_eq!(
+            resolver
+                .resolve(&other_organization, WorkspaceProductApiOwner::Catalyst)
+                .await
+                .unwrap()
+                .base_url
+                .as_str(),
+            "https://organization-two.example.test/"
+        );
+        for caller in [&wrong_workspace, &wrong_organization] {
+            assert_eq!(
+                resolver
+                    .resolve(caller, WorkspaceProductApiOwner::Catalyst)
+                    .await
+                    .unwrap_err(),
+                ProductInvocationError::Unavailable
+            );
+        }
+        assert_eq!(
+            resolver
+                .resolve(&workspace_one, WorkspaceProductApiOwner::Echo)
+                .await
+                .unwrap_err(),
+            ProductInvocationError::Unavailable
+        );
+    }
+
+    #[test]
+    fn endpoint_config_rejects_duplicate_or_invalid_scope_keys() {
+        let endpoint = || {
+            ProductEndpointConfig::new(
+                WorkspaceProductApiOwner::Catalyst,
+                "organization-1",
+                "workspace-1",
+                "https://product.example.test/",
+                "test-secret",
+            )
+        };
+        assert!(ConfiguredProductEndpointResolver::new(vec![endpoint(), endpoint()]).is_err());
+
+        let oversized = "w".repeat(MAX_SCOPE_ID_BYTES + 1);
+        for (organization_id, workspace_id) in [
+            ("", "workspace-1"),
+            ("organization-1 ", "workspace-1"),
+            ("organization-1", "workspace\n1"),
+            ("organization-1", oversized.as_str()),
+        ] {
+            assert!(
+                ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
+                    WorkspaceProductApiOwner::Catalyst,
+                    organization_id,
+                    workspace_id,
+                    "https://product.example.test/",
+                    "test-secret",
+                )])
+                .is_err()
+            );
+        }
     }
 }

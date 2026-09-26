@@ -119,6 +119,8 @@ mod tests {
     ) -> (ProductHttpClient, Arc<Mutex<Vec<ProductHttpRequest>>>) {
         let resolver = ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
             Owner::Exchange,
+            "organization-1",
+            "workspace-1",
             "https://exchange.test/",
             "private-test-credential",
         )])
@@ -164,7 +166,11 @@ mod tests {
             None,
         );
         let response = client
-            .send(target(&request).unwrap(), &request)
+            .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
+                target(&request).unwrap(),
+                &request,
+            )
             .await
             .unwrap();
 
@@ -195,7 +201,11 @@ mod tests {
         );
 
         let response = client
-            .send(target(&request).unwrap(), &request)
+            .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
+                target(&request).unwrap(),
+                &request,
+            )
             .await
             .unwrap();
 

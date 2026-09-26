@@ -154,6 +154,8 @@ mod tests {
         let owner = Owner::Yield;
         let resolver = ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
             owner,
+            "organization-1",
+            "workspace-1",
             "https://yield.test/",
             "private-yield-bearer",
         )])
@@ -197,7 +199,11 @@ mod tests {
         );
 
         let response = client
-            .send(target(&request).expect("mapped target"), &request)
+            .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
+                target(&request).expect("mapped target"),
+                &request,
+            )
             .await
             .expect("mock Product response");
 
@@ -233,7 +239,11 @@ mod tests {
         );
 
         let response = client
-            .send(target(&request).expect("mapped target"), &request)
+            .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
+                target(&request).expect("mapped target"),
+                &request,
+            )
             .await
             .expect("mock Product response");
 

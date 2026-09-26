@@ -214,6 +214,8 @@ mod tests {
     ) -> (ProductHttpClient, Arc<Mutex<Vec<ProductHttpRequest>>>) {
         let resolver = ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
             Owner::Navigator,
+            "organization-1",
+            "workspace-1",
             "https://navigator.test/",
             "private-test-credential",
         )])
@@ -263,7 +265,7 @@ mod tests {
         );
 
         let response = client
-            .send(target(&caller, &request).unwrap(), &request)
+            .send(&caller, target(&caller, &request).unwrap(), &request)
             .await
             .unwrap();
 
@@ -316,7 +318,7 @@ mod tests {
         );
 
         let response = client
-            .send(target(&caller, &request).unwrap(), &request)
+            .send(&caller, target(&caller, &request).unwrap(), &request)
             .await
             .unwrap();
 

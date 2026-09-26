@@ -21,6 +21,27 @@ use crate::{
 
 pub use http::{ProductEndpointConfig, ProductHttpClient};
 
+#[cfg(test)]
+pub(crate) fn test_member_caller(
+    organization_id: &str,
+    workspace_id: &str,
+) -> WorkspaceCallerContext {
+    use std::collections::BTreeSet;
+
+    use cy_proto::workspace_v1::UserIdentityRef;
+
+    WorkspaceCallerContext::user_member(
+        UserIdentityRef {
+            issuer: "https://identity.test".to_string(),
+            subject: "user-1".to_string(),
+        },
+        organization_id,
+        workspace_id,
+        BTreeSet::new(),
+    )
+    .unwrap()
+}
+
 /// HTTP invocation port for the six fixed Product operation mappings.
 pub struct ProductHttpApiAdapter {
     client: ProductHttpClient,
@@ -54,7 +75,7 @@ impl ProductInvocationPort for ProductHttpApiAdapter {
             WorkspaceProductApiOwner::Navigator => navigator::target(caller, &request)?,
             _ => return Err(ProductInvocationError::InvalidRequest),
         };
-        self.client.send(target, &request).await
+        self.client.send(caller, target, &request).await
     }
 }
 
@@ -109,12 +130,48 @@ mod tests {
 
     fn adapter(calls: Arc<AtomicUsize>) -> ProductHttpApiAdapter {
         let resolver = ConfiguredProductEndpointResolver::new(vec![
-            ProductEndpointConfig::new(Owner::Catalyst, "https://catalyst.test/", "secret-1"),
-            ProductEndpointConfig::new(Owner::Yield, "https://yield.test/", "secret-2"),
-            ProductEndpointConfig::new(Owner::Reactor, "https://reactor.test/", "secret-3"),
-            ProductEndpointConfig::new(Owner::Exchange, "https://exchange.test/", "secret-4"),
-            ProductEndpointConfig::new(Owner::Echo, "https://echo.test/", "secret-5"),
-            ProductEndpointConfig::new(Owner::Navigator, "https://navigator.test/", "secret-6"),
+            ProductEndpointConfig::new(
+                Owner::Catalyst,
+                "organization-1",
+                "workspace-1",
+                "https://catalyst.test/",
+                "secret-1",
+            ),
+            ProductEndpointConfig::new(
+                Owner::Yield,
+                "organization-1",
+                "workspace-1",
+                "https://yield.test/",
+                "secret-2",
+            ),
+            ProductEndpointConfig::new(
+                Owner::Reactor,
+                "organization-1",
+                "workspace-1",
+                "https://reactor.test/",
+                "secret-3",
+            ),
+            ProductEndpointConfig::new(
+                Owner::Exchange,
+                "organization-1",
+                "workspace-1",
+                "https://exchange.test/",
+                "secret-4",
+            ),
+            ProductEndpointConfig::new(
+                Owner::Echo,
+                "organization-1",
+                "workspace-1",
+                "https://echo.test/",
+                "secret-5",
+            ),
+            ProductEndpointConfig::new(
+                Owner::Navigator,
+                "organization-1",
+                "workspace-1",
+                "https://navigator.test/",
+                "secret-6",
+            ),
         ])
         .unwrap();
         let client = ProductHttpClient::with_transport(
@@ -274,5 +331,98 @@ mod tests {
             ProductInvocationError::PermissionDenied
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn org_or_workspace_scope_mismatch_fails_closed_for_all_six_owners() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let adapter = adapter(calls.clone());
+        let requests = [
+            ProductInvocationRequest {
+                owner: Owner::Catalyst,
+                operation: Operation::WorkspaceProductApiOperation01,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Yield,
+                operation: Operation::WorkspaceProductApiOperation03,
+                kind: Kind::Read,
+                resource_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Reactor,
+                operation: Operation::WorkspaceProductApiOperation05,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Exchange,
+                operation: Operation::WorkspaceProductApiOperation07,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Echo,
+                operation: Operation::WorkspaceProductApiOperation09,
+                kind: Kind::Read,
+                resource_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Navigator,
+                operation: Operation::WorkspaceProductApiOperation12,
+                kind: Kind::Read,
+                resource_id: Some("session-1".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+        ];
+        let wrong_scopes = [
+            crate::product_adapters::test_member_caller("organization-1", "workspace-2"),
+            crate::product_adapters::test_member_caller("organization-2", "workspace-1"),
+        ];
+
+        for caller in &wrong_scopes {
+            for request in requests.iter().cloned() {
+                assert_eq!(
+                    adapter.invoke(caller, request).await.unwrap_err(),
+                    ProductInvocationError::Unavailable
+                );
+            }
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_private_endpoint_configuration_fails_closed() {
+        let client = ProductHttpClient::from_private_config(Vec::new()).unwrap();
+        let adapter = ProductHttpApiAdapter::new(client);
+
+        let result = adapter
+            .invoke(
+                &member_caller(),
+                ProductInvocationRequest {
+                    owner: Owner::Catalyst,
+                    operation: Operation::WorkspaceProductApiOperation01,
+                    kind: Kind::Read,
+                    resource_id: None,
+                    json_body: Vec::new(),
+                    idempotency_key: None,
+                },
+            )
+            .await;
+
+        assert_eq!(result.unwrap_err(), ProductInvocationError::Unavailable);
     }
 }
