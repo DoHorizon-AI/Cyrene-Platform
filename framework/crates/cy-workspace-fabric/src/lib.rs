@@ -21,6 +21,10 @@ mod durable_directory;
 mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
 pub mod device_authorization;
+// The Directory-bound consumer lands separately; keep this staged port
+// available without wiring a production signer that does not exist yet.
+#[allow(dead_code)]
+pub(crate) mod device_certificate_authority;
 mod product_adapters;
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
