@@ -28,7 +28,6 @@ use x509_parser::parse_x509_certificate;
 
 const PRIVATE_ROOT: &str = "/run/cyrene/workspace-connector";
 const PRIVATE_SECRET_ROOT: &str = "/run/cyrene/workspace-connector/secrets";
-const CONNECTOR_MANIFEST: &str = "/run/cyrene/workspace-connector/connector.json";
 const PRODUCT_ENDPOINT_MANIFEST: &str = "/run/cyrene/workspace-connector/product-endpoints.json";
 const RELAY_CA_FILE: &str = "relay-server-ca.pem";
 const DEVICE_CERTIFICATE_FILE: &str = "device-enrollment-cert.pem";

@@ -109,6 +109,9 @@ configuration, the active certificate's approved fingerprint/scope, private
 reachability to every configured Product owner, and the Product owners'
 credential validation. This template does not claim those live facts.
 
+The build-only image workflow and review-only ACA packaging gates are in
+[`workspace-connector.md`](../../../infrastructure/azure/container-apps/workspace-connector.md).
+
 ## Workspace Connector Host 中文说明
 
 `cy-workspace-connector-host` 是单个 Workspace Connector 身份的进程入口。它通过
@@ -158,3 +161,6 @@ Relay 拒绝或 session 中断时，进程以 1 至 30 秒有界退避重连。�
 生产流量前，部署评审必须验证私有 Relay 路由、精确 Relay server CA/name、Relay 的设备 CA 与持久
 注册表配置、当前证书对应的批准 fingerprint/scope、至各 Product owner 的私网可达性，以及 Product
 owner 的 credential 校验。模板不声称这些线上事实已通过。
+
+仅构建镜像的 workflow 与 ACA 评审模板 gate 见
+[`workspace-connector.md`](../../../infrastructure/azure/container-apps/workspace-connector.md)。

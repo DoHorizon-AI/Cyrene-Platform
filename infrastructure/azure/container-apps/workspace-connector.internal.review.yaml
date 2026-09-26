@@ -1,0 +1,93 @@
+# Review-only template for an outbound-only Workspace Connector.
+# Do not apply: image publication, Relay registry acceptance, Product private
+# reachability, and live certificate/CA facts are not deployment evidence.
+location: eastasia
+name: cyrene-workspace-connector
+identity:
+  type: SystemAssigned
+properties:
+  managedEnvironmentId: REPLACE_WITH_REVIEWED_PRIVATE_CAE_RESOURCE_ID
+  configuration:
+    activeRevisionsMode: Multiple
+    # Provision these Key Vault values and grant this app identity read access.
+    # The ACA Secret volume may expose symlinks/broad modes; the image entrypoint
+    # copies fixed input names into a service-owned 0700/0600 runtime tree.
+    secrets:
+      - name: workspace-connector-manifest
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-connector-manifest
+        identity: system
+      - name: workspace-product-endpoint-manifest
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-product-endpoint-manifest
+        identity: system
+      - name: workspace-relay-server-ca
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-relay-server-ca
+        identity: system
+      - name: workspace-device-enrollment-certificate
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-device-enrollment-certificate
+        identity: system
+      - name: workspace-device-enrollment-private-key
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-device-enrollment-private-key
+        identity: system
+      - name: workspace-product-catalyst-token
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-product-catalyst-token
+        identity: system
+      - name: workspace-product-yield-token
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-product-yield-token
+        identity: system
+      - name: workspace-product-reactor-token
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-product-reactor-token
+        identity: system
+      - name: workspace-product-exchange-token
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-product-exchange-token
+        identity: system
+      - name: workspace-product-echo-token
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/workspace-product-echo-token
+        identity: system
+      - name: ghcr-pull-password
+        keyVaultUrl: https://REPLACE_WITH_KEY_VAULT.vault.azure.net/secrets/ghcr-pull-password
+        identity: system
+    registries:
+      - server: ghcr.io
+        username: REPLACE_WITH_GHCR_PULL_USERNAME
+        passwordSecretRef: ghcr-pull-password
+    # No ingress block: the Connector only establishes outbound Relay sessions.
+  template:
+    containers:
+      - name: workspace-connector
+        image: ghcr.io/dohorizon-ai/cyrene-workspace-connector@sha256:REPLACE_WITH_PUBLISHED_DIGEST
+        volumeMounts:
+          - volumeName: workspace-connector-source
+            mountPath: /mnt/cyrene-input
+            readOnly: true
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+    scale:
+      minReplicas: 1
+      maxReplicas: 1
+    terminationGracePeriodSeconds: 30
+    volumes:
+      - name: workspace-connector-source
+        storageType: Secret
+        secrets:
+          - secretRef: workspace-connector-manifest
+            path: connector.json
+          - secretRef: workspace-product-endpoint-manifest
+            path: product-endpoints.json
+          - secretRef: workspace-relay-server-ca
+            path: relay-server-ca.pem
+          - secretRef: workspace-device-enrollment-certificate
+            path: device-enrollment-cert.pem
+          - secretRef: workspace-device-enrollment-private-key
+            path: device-enrollment-key.pem
+          - secretRef: workspace-product-catalyst-token
+            path: catalyst-token
+          - secretRef: workspace-product-yield-token
+            path: yield-token
+          - secretRef: workspace-product-reactor-token
+            path: reactor-token
+          - secretRef: workspace-product-exchange-token
+            path: exchange-token
+          - secretRef: workspace-product-echo-token
+            path: echo-token
+type: Microsoft.App/containerApps
