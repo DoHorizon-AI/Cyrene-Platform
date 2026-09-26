@@ -5,14 +5,17 @@ contract. It covers verified Azure AD access-token claims and scope, the
 server-side identity-to-organization mapping, member-scoped discovery, closed
 Product operation resolution, owner HTTP-method/path/body mapping, command
 CSRF, W3C trace propagation, bounded JSON/errors, safe resource references, and
-fail-closed deployment behavior. Product invocation uses a POST envelope for
-both READ and COMMAND kinds; kind and upstream method come from the closed
-projection manifest and owner OpenAPI document.
+fail-closed deployment behavior. It also covers the signed Web-to-Relay
+Frontend handoff and the separate BFF workload mTLS identity. Product
+invocation uses a POST envelope for both READ and COMMAND kinds; kind and
+upstream method come from the closed projection manifest and owner OpenAPI
+document.
 
 `scenarios.tsv` 是 Web BFF 契约的跨语言验收矩阵，覆盖已验证的 Azure AD access token claim/scope、服务端 identity-to-organization
 映射、member-scoped discovery、封闭 Product routing、
 CSRF（包括同一 session 并发刷新稳定性）、W3C trace 传播、有界 JSON/error、安全资源引用以及 fail-closed 部署行为。Product invocation 对 READ 和 COMMAND 类型
-统一使用 POST envelope；类型和上游 method 来自 closed projection manifest 与 owner OpenAPI 文档。
+统一使用 POST envelope；类型和上游 method 来自 closed projection manifest 与 owner OpenAPI 文档。矩阵还覆盖签名 Web→Relay Frontend handoff
+及单独的 BFF workload mTLS identity。
 
 The `operation_enum_parity` scenario reads the canonical
 `WorkspaceProductApiOperation` enum and

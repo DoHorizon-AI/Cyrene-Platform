@@ -64,3 +64,18 @@ resource_ref_absolute	resource reference contains href, scheme, authority, raw P
 resource_ref_schema_missing	allowlisted operation has no accepted owner response schema identifying resource-reference fields	PROBLEM_502_NO_BODY_FORWARD
 product_domain_authority	Product read or command is proxied	PRODUCT_REMAINS_STATE_AUTHORITY
 runtime_absent	real OIDC/BFF/Workspace integration is not deployed	FAIL_CLOSED_NOT_IMPLEMENTED
+relay_handoff_config_missing	BFF signing seed or Relay expected issuer/audience/public key is missing	FAIL_CLOSED_NO_FRONTEND_SESSION_VERIFIER
+relay_handoff_source_unverified	issuer is asked to mint from request-provided identity or organization instead of VerifiedWebPrincipal	DO_NOT_ISSUE
+relay_handoff_format	valid handoff credential	EXACT_V1_BASE64URL_CLAIMS_AND_ED25519_SIGNATURE
+relay_handoff_claims_closed	credential contains role, Workspace ID, device, endpoint URL, resource path, or unknown claim	REJECT_INVALID_CREDENTIAL
+relay_handoff_ttl	credential lifetime exceeds 60 seconds or source principal expiry	REJECT_INVALID_CREDENTIAL
+relay_handoff_expired	credential exp_ms is not in the future	REJECT_EXPIRED
+relay_handoff_wrong_issuer_audience	credential iss or aud differs from fixed Relay configuration	REJECT_INVALID_CREDENTIAL
+relay_handoff_bad_signature	credential payload or signature is modified	REJECT_INVALID_CREDENTIAL
+relay_handoff_hello_identity	RelayHello user or organization differs from signed sub_iss/sub/org	REJECT_PRINCIPAL_MISMATCH
+relay_handoff_hello_scope	RelayHello is not Frontend, has a Workspace ID, or carries a device identity	REJECT_PRINCIPAL_MISMATCH
+relay_handoff_credentials_private	BFF-to-Relay handoff credential appears in browser response, log, or trace	REJECT_LEAK
+relay_handoff_transport_identity	BFF connects to Relay	REQUIRE_SEPARATE_TRUSTED_WORKLOAD_MTLS_CERTIFICATE
+relay_handoff_no_device_reuse	BFF uses user bearer or device-registry certificate as its workload identity	REJECT_TRANSPORT_IDENTITY
+relay_handoff_replay_window	valid signed credential is replayed before its exp_ms over an authorized BFF mTLS path	BEARER_REMAINS_VALID_UNTIL_EXPIRY_NO_HOLDER_BINDING
+relay_payload_transport	Relay/control plane reads authenticated projected payload during first rollout phase	REQUIRE_TLS_MTLS_AUTHENTICATION_AND_AUDIT_NO_E2E_GATE

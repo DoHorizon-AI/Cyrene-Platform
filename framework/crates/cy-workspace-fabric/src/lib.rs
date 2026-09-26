@@ -35,6 +35,7 @@ mod sidecar;
 mod transport;
 mod user_code_secret;
 mod web_identity;
+mod web_relay_session;
 
 pub use aca_forwarded_certificate::{
     AcaForwardedCertificateAdapter, AcaForwardedCertificateConfigError,
@@ -97,6 +98,10 @@ pub use user_code_secret::{
 pub use web_identity::{
     AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, VerifiedWebPrincipal,
     WebIdentityDirectory, WebIdentityDirectoryError, WebIdentityError, WebPrincipalVerifier,
+};
+pub use web_relay_session::{
+    WebRelaySessionCredentialIssuer, WebRelaySessionError, WebRelaySessionIssuer,
+    WebRelaySessionVerifier,
 };
 
 pub use cy_proto::workspace_v1;

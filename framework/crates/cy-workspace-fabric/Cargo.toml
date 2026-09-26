@@ -9,6 +9,7 @@ repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 [dependencies]
 base64 = "0.22"
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+ed25519-dalek = "2.2"
 hmac = "0.12"
 futures-util = "0.3"
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto", "use_pem"] }

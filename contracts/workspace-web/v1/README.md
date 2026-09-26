@@ -265,6 +265,72 @@ BFF 自身错误使用 `application/problem+json`（RFC 9457），`status` 必�
 Product 错误保留 owner 的 status 和 JSON response body。错误详情不得泄漏 access token 或 claim、签名密钥、device credential、
 relay routing 数据、内部 service 地址或上游 URL。
 
+## Web-to-Relay Frontend session handoff
+
+After Azure AD token and Directory verification, the BFF may issue a separate
+Relay handoff credential from `VerifiedWebPrincipal`. It is not the AAD access
+token. The compact credential is exactly
+`v1.<base64url-no-pad JSON claims>.<base64url-no-pad Ed25519 signature>`;
+the signature covers the encoded claims with the fixed domain
+`cyrene.workspace.web-relay-session.v1\0`. The closed JSON claim set is
+`iss`, `aud`, `sub_iss`, `sub`, `org`, `iat_ms`, and `exp_ms`. The configured
+handoff issuer and Relay audience are exact-match startup settings; an absent
+issuer, audience, signing seed, or verifying key fails closed. Only the BFF
+holds the 32-byte signing seed. Relay receives the corresponding public key.
+
+The handoff lifetime is at most 60 seconds and never exceeds the verified AAD
+principal expiry. Relay accepts it only for `RelayHello.role=Frontend`, with
+`RelayHello.user` equal to the signed `(sub_iss, sub)`, `organization_id` equal
+to signed `org`, empty `workspace_id`, and no device identity. Authenticated
+claims are constructed only from the signature-verified credential. Roles,
+Workspace IDs, device identity, service URLs, resource paths, and Product
+routing are not handoff claims; Workspace membership and roles remain resolved
+by the authoritative Platform Directory after the handshake.
+
+The handoff is a bearer credential for the handshake and remains replayable
+until its short expiry; v1 has no one-time-use store or holder binding. Keep it
+inside the private BFF-to-Relay path, transmit only over TLS with mutual TLS,
+and never return it to the browser or write it to logs/traces. The BFF's mTLS
+client certificate is a separate workload identity trusted by Relay for the
+Frontend service path. It is not the user's AAD bearer and is not a Workspace
+device certificate. Relay must authenticate and audit this workload identity
+separately from signed user authentication, while connector certificates
+continue through the device registry. The verifier module does not establish
+this transport trust path or claim replay prevention.
+
+The first production stage permits the Relay/control plane to read projected
+payloads after authentication. TLS/mTLS transport protection, service and user
+authentication, and auditable identity decisions are required; end-to-end
+payload encryption is not a prerequisite for this stage.
+
+Azure AD access-token `iss`/`aud`/signature/scope and the server-side Directory
+mapping are verified before the handoff is minted. Neither `RelayHello` fields
+nor request-provided roles, organization, URL, or Workspace selection can
+replace those checks.
+
+Azure AD access token 与 Directory 映射验证通过后，BFF 才能从 `VerifiedWebPrincipal` 签发单独的 Relay handoff credential；该
+credential 不是 AAD access token。紧凑格式固定为
+`v1.<base64url-no-pad JSON claims>.<base64url-no-pad Ed25519 signature>`，签名覆盖编码后的 claims 及固定域
+`cyrene.workspace.web-relay-session.v1\0`。封闭 JSON 字段仅为 `iss`、`aud`、`sub_iss`、`sub`、`org`、`iat_ms`、`exp_ms`。
+handoff issuer 与 Relay audience 必须来自精确匹配的启动配置；issuer、audience、签名 seed 或验证公钥缺失时 fail closed。
+只有 BFF 持有 32 字节签名 seed，Relay 只接收对应公钥。
+
+handoff 最长有效 60 秒，且不得超过已验证 AAD principal 的过期时间。Relay 只接受 `RelayHello.role=Frontend`，并要求
+`RelayHello.user` 与签名 `(sub_iss, sub)` 相等，`organization_id` 与签名 `org` 相等，`workspace_id` 为空且没有 device identity。
+认证 claims 只能从签名凭证构造。角色、Workspace ID、device identity、service URL、resource path 与 Product routing 均不是 handoff claims；
+握手之后的 Workspace membership 和角色仍由权威 Platform Directory 解析。
+
+handoff 是握手用 bearer credential，在短时过期前可重放；v1 不提供一次性使用存储或 holder binding。它必须留在私有 BFF→Relay 通路，
+仅通过 TLS 与 mutual TLS 传输，绝不能返回浏览器或写入日志/trace。BFF mTLS client certificate 是 Relay 为 Frontend 服务路径单独信任的
+workload identity，不是用户 AAD bearer，也不是 Workspace device certificate。Relay 必须将该 workload identity 与签名用户身份分开验证和审计；
+connector certificate 继续通过 device registry。此 verifier 模块不建立该传输信任链，也不声称能阻止凭证重放。
+
+第一阶段允许 Relay/control plane 在认证后读取投影 payload。此阶段要求 TLS/mTLS 传输保护、服务与用户认证以及可审计的身份决策；端到端
+payload encryption 不是第一阶段接线前提。
+
+签发 handoff 前必须验证 Azure AD access token 的 `iss`、`aud`、签名、scope 以及服务端 Directory 映射。`RelayHello` 字段以及请求提供的角色、
+组织、URL 或 Workspace 选择都不能替代上述校验。
+
 ## Deployment status
 
 The current Client deployment is a static Nginx site. Its Nginx configuration

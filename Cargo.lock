@@ -726,6 +726,7 @@ dependencies = [
  "base64 0.22.1",
  "cy-observability",
  "cy-proto",
+ "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.17",
  "hmac",
