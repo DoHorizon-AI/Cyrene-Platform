@@ -1,0 +1,47 @@
+scenario	input	endpoint_or_boundary	expected
+server_generated_device_id	new scope+valid CSR+SPKI digest	POST /v1/device-authorizations	stable Directory device_id distinct from authorization_id
+registration_key_not_credential	registration_key without device_code	poll	REJECTED; registration_key never authenticates
+start_retry_same_registration_key	lost start response; same key+scope+CSR+SPKI	POST /v1/device-authorizations	same device_id; higher generation; new authorization_id/codes; prior attempt invalidated
+start_retry_stale_response	response generation lower than client’s newest	start response	client discards stale codes and authorization
+registration_key_binding_conflict	same key with changed scope or CSR digest	POST /v1/device-authorizations	CONFLICT; no rebinding
+registration_key_terminal_conflict	same key after denial or delivery ACK	POST /v1/device-authorizations	CONFLICT; no reopening completed or denied intent
+superseded_device_code	poll with code from lower authorization_generation	poll	invalid_grant; only latest committed attempt remains active
+identifier_separation	device_id+authorization_id+authorization_generation+approval_id+device_code	start response	IDs/generation are non-secret; device_code is 256-bit bearer
+csr_digest_recomputed	CSR with matching declared SPKI digest	start authorization	persist recomputed CSR and SPKI digests
+csr_digest_mismatch	CSR+different declared SPKI digest	start authorization	REJECTED before persistence
+scope_binding	org+workspace+CSR+device_code	all transitions	exact scope retained
+user_code_not_credential	user_code without trusted user session	approval challenge	REJECTED
+user_code_rate_limit	repeated invalid user_code	approval challenge	RATE_LIMITED
+device_id_not_poll_credential	device_id without device_code	poll	REJECTED
+authorization_id_not_poll_credential	authorization_id without device_code	poll	REJECTED
+trusted_user_from_session	body includes forged approver fields	approval challenge	identity derived only from authenticated session
+membership_scope_recheck	trusted user loses membership before finish	approval finish	REJECTED; challenge consumed or invalidated
+webauthn_start_bound_state	verifier options+opaque server state	approval challenge	state binds user+approval+scope+CSR/SPKI and stays server-side
+webauthn_finish_one_time	valid assertion+approval_id	approval finish	atomic one-time completion
+webauthn_replay	assertion reused after finish	approval finish	REJECTED
+denial_trusted_member	trusted workspace member+user_code	denial	DENIED; outstanding challenge invalidated
+poll_pending	pending or WebAuthn challenge active	poll	authorization_pending+current interval
+poll_issuing_recovery	durable ISSUING+ambiguous CA outcome	poll and signer recovery	PENDING; same authorization_id request returns same certificate
+poll_slow_down	poll before current interval	poll	slow_down+interval increased by 5 seconds up to 60 seconds
+poll_denied	denied authorization	poll	access_denied; no certificate
+poll_expired	expired authorization	poll	expired_token; codes and challenges invalid
+poll_approved	certificate durable and delivery pending	poll	approved+certificate+delivery_id+deadline
+delivery_retry_before_ack	approved but unacknowledged authorization	repeated poll	byte-identical certificate+same delivery_id before deadline
+ack_binding_mismatch	wrong authorization or delivery ID or cert fingerprint or CSR or SPKI digest	ACK	REJECTED; remains delivery pending
+ack_idempotent	exact ACK repeated	ACK	SAME receipt result
+ack_replay_after_deadline	identical receipt committed before deadline; retry after deadline	ACK	SAME receipt result; does not reopen delivery
+ack_first_after_deadline	no prior receipt; first ACK at or after deadline	ACK	REJECTED; recovery/revocation outcome remains explicit
+poll_after_ack	ACK committed	poll	DELIVERY_CONSUMED; certificate never resent
+delivery_deadline_recovery	ACK absent at deadline	delivery worker	certificate revoked/retired before DELIVERY_EXPIRED; poll reports delivery_expired
+delivery_revoke_pending	CA revocation outcome pending	deadline recovery and poll	DELIVERY_RECOVERY_BLOCKED+REVOCATION_PENDING; never mark delivered
+delivery_revoke_unknown	CA revocation outcome ambiguous	deadline recovery and poll	DELIVERY_RECOVERY_BLOCKED+RECOVERY_BLOCKED; never mark delivered
+rotation_same_device	old mTLS cert+new valid CSR	rotation start	same device_id+new authorization_id+approval flow
+rotation_before_ack	new certificate not yet ACKed	certificate metadata	old certificate remains ACTIVE
+rotation_ack	new certificate ACKed	rotation completion	new serial active; old serial retired/revoked
+rotation_expired	new delivery deadline passed	rotation recovery	old certificate remains ACTIVE; new cert revoked or explicit blocker
+certificate_metadata	serial+fingerprint+issuer+validity+scope+authorization_id+CSR digests	certificate list	metadata present; no private key
+revocation_scope	revoker outside exact scope	certificate revocation	REJECTED
+revocation_idempotent	same serial and reason repeated	revocation endpoint	SAME revocation metadata
+identity_roles_separate	UserIdentityRef+WorkspaceDevice+Workload	certificate issue	no identity substitution; no Workload identity minted
+no_provider_token_to_device	approved enrollment	poll response	Cyrene WorkspaceDevice certificate only; no Microsoft/OAuth token
+secret_redaction	device_code+user_code+assertion+CA key	logs and responses	secrets redacted; CA key absent

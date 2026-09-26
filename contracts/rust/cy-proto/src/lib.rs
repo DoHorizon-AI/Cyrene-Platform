@@ -76,6 +76,14 @@ pub mod cyrene {
             tonic::include_proto!("cyrene.workspace.v1");
         }
     }
+
+    /// Versioned WorkspaceDevice enrollment and certificate metadata protocol.
+    /// 中文：版本化 WorkspaceDevice 注册与证书元数据协议。
+    pub mod device {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.device.v1");
+        }
+    }
 }
 
 /// 简写别名：便于外部代码直接引用 `cy_proto::core_v1::*`。
@@ -83,6 +91,9 @@ pub use cyrene::core::v1 as core_v1;
 /// Core v2 authority projection with explicit namespace scope.
 /// 中文：显式限定命名空间范围的 Core v2 权限投影。
 pub use cyrene::core::v2 as core_v2;
+/// Cyrene-owned device enrollment, approval, delivery, rotation, and revocation contract.
+/// 中文：Cyrene 自有的设备注册、审批、交付、轮换与撤销契约。
+pub use cyrene::device::v1 as device_v1;
 /// Versioned local protocol between the Kernel and external hardware adapters.
 /// 中文：Kernel 与外部硬件适配器之间的带版本本地协议。
 pub use cyrene::hardware::v1 as hardware_v1;

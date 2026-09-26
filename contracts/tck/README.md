@@ -20,6 +20,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `distributed-execution-fabric/` | Execution attachment, Runtime Agent, and Artifact transfer scenarios. | Execution attachment、Runtime Agent 与 Artifact transfer 场景。 |
+| `device-enrollment/` | WorkspaceDevice authorization, certificate delivery, rotation, and revocation scenarios. | WorkspaceDevice 授权、证书交付、轮换与撤销场景。 |
 | `distributed-workspace-fabric/` | Identity discovery and relay connectivity scenarios. | 身份发现与 Relay 连接场景。 |
 | `workspace-web/` | Browser BFF identity, membership, Product projection, CSRF, and fail-closed scenarios. | 浏览器 BFF 身份、membership、Product projection、CSRF 与 fail-closed 场景。 |
 | `kernel-semantic/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
@@ -51,6 +52,7 @@ This snapshot is intentionally limited to direct entries; nested directories own
 | 条目 | 职责 |
 | --- | --- |
 | `distributed-execution-fabric/` | Execution attachment、Runtime Agent 与 Artifact transfer 场景。 |
+| `device-enrollment/` | WorkspaceDevice 授权、证书交付、轮换与撤销场景。 |
 | `distributed-workspace-fabric/` | 身份发现与 Relay 连接场景。 |
 | `workspace-web/` | 浏览器 BFF 身份、membership、Product projection、CSRF 与 fail-closed 场景。 |
 | `kernel-semantic/` | 嵌套源码或契约边界，下一步阅读其 README。 |

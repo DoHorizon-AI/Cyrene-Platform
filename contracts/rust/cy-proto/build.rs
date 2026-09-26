@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_fabric_proto = proto_dir.join("cyrene/workspace/v1/workspace_fabric.proto");
     let workspace_sidecar_proto =
         proto_dir.join("cyrene/workspace/local/v1/workspace_sidecar.proto");
+    let device_enrollment_proto = proto_dir.join("cyrene/device/v1/device_enrollment.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
     println!("cargo:rerun-if-changed={}", authority_proto.display());
@@ -44,6 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "cargo:rerun-if-changed={}",
         workspace_sidecar_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        device_enrollment_proto.display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -77,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sandbox_adapter_proto,
                 semantic_contract_proto,
                 provider_proto,
+                device_enrollment_proto,
             ],
             &[proto_dir],
         )?;

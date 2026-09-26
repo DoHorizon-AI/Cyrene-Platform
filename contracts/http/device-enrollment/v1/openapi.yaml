@@ -1,0 +1,1092 @@
+# OpenAPI contract for Cyrene-owned RFC 8628-style WorkspaceDevice enrollment.
+# Cyrene 自有 RFC 8628 风格 WorkspaceDevice 注册 OpenAPI 契约。
+openapi: 3.1.0
+info:
+  title: Cyrene Device Enrollment API
+  version: 1.0.0
+  description: >-
+    Cyrene device authorization creates a WorkspaceDevice client certificate.
+    It does not issue an OAuth, Microsoft, or workload token to the device.
+    Protobuf message definitions are mirrored from
+    contracts/proto/cyrene/device/v1/device_enrollment.proto. This is the target
+    v1 contract only: the current manager foundation consumes a certificate
+    before returning it and has no Directory device mapping or delivery ACK
+    store. ACK-backed retries and stable device identity require runtime work.
+x-cyrene-runtime-status: contract-only
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: api.cyrene.invalid
+tags:
+  - name: Device authorization
+  - name: Workspace device certificates
+paths:
+  /v1/device-authorizations:
+    post:
+      tags: [Device authorization]
+      operationId: startDeviceAuthorization
+      summary: Start a WorkspaceDevice enrollment
+      description: >-
+        The server generates device_id and authorization_id. device_code is a
+        256-bit bearer secret returned once; user_code is only a rate-limited
+        human lookup value. Neither ID can poll. Directory resolves a repeated
+        registration_key and exact organization/workspace, CSR digest, and SPKI
+        digest tuple to the same stable device_id.
+        Each accepted retry creates a higher authorization_generation with a
+        fresh authorization_id and codes, and atomically invalidates the prior
+        attempt. Clients discard responses with a lower generation. Reusing the
+        key with a different scope or CSR digest, or after denial or delivery
+        ACK, is a conflict. Expired pending attempts may be retried with the
+        same key. Active devices must use the mTLS rotation route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartDeviceAuthorizationRequest'
+      responses:
+        '201':
+          description: Authorization created; display and retain the codes securely.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartDeviceAuthorizationResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/device-authorizations/approval-challenges:
+    post:
+      tags: [Device authorization]
+      operationId: createDeviceApprovalChallenge
+      summary: Resolve a user code for an authenticated human
+      description: >-
+        The trusted UserIdentityRef is derived from the validated interactive
+        session, never from the request body. Membership and exact organization
+        and workspace scope are checked before a one-time WebAuthn challenge is
+        created. user_code is not sufficient to approve or poll.
+      security:
+        - CyreneInteractiveUserSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDeviceApprovalChallengeRequest'
+      responses:
+        '200':
+          description: One-time approval challenge bound to this user and authorization.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateDeviceApprovalChallengeResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/device-authorizations/approval-challenges/{approval_id}/complete:
+    post:
+      tags: [Device authorization]
+      operationId: completeDeviceApproval
+      summary: Complete approval with the one-time WebAuthn assertion
+      description: >-
+        The first completion requires the assertion for this approval_id. After
+        ISSUING is durably committed, a retry in the same trusted user session
+        may omit the already-consumed assertion to resume the same idempotent
+        issuance request.
+      security:
+        - CyreneInteractiveUserSession: []
+      parameters:
+        - $ref: '#/components/parameters/ApprovalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteDeviceApprovalRequest'
+      responses:
+        '202':
+          description: Approval is durable and certificate issuance is in progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompleteDeviceApprovalResponse'
+        '200':
+          description: The existing approval or issuance result was recovered idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompleteDeviceApprovalResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+
+  /v1/device-authorizations/denials:
+    post:
+      tags: [Device authorization]
+      operationId: denyDeviceAuthorization
+      summary: Deny an enrollment as a trusted workspace member
+      description: >-
+        The server derives the UserIdentityRef from the authenticated user
+        session and checks membership in the exact target scope. Denial does
+        not issue a certificate. No caller-supplied approver identity is used.
+      security:
+        - CyreneInteractiveUserSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DenyDeviceAuthorizationRequest'
+      responses:
+        '200':
+          description: Enrollment denied; any active approval challenge is invalidated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DenyDeviceAuthorizationResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/device-authorizations/poll:
+    post:
+      tags: [Device authorization]
+      operationId: pollDeviceAuthorization
+      summary: Poll using the one-time device bearer code
+      description: >-
+        Only device_code is accepted as the pre-certificate poll credential.
+        RFC 8628-style nonterminal and terminal outcomes use the error values
+        authorization_pending, slow_down, access_denied, and expired_token.
+        Target v1 delivery semantics repeat the same certificate bytes and
+        delivery_id until ACK or the bounded deadline. The current manager does
+        not implement this receipt protocol; its first approved poll is
+        at-most-once. After the ACK deadline, delivery_expired means the
+        certificate was confirmed revoked or retired. A
+        delivery_recovery_blocked result explicitly reports pending or
+        unresolved CA recovery and never claims delivery success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PollDeviceAuthorizationRequest'
+      responses:
+        '200':
+          description: Approved certificate delivery; ACK is required before the deadline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovedPollResponse'
+        '400':
+          description: RFC-style pending, slow_down, denied, expired, or consumed outcome.
+          headers:
+            Retry-After:
+              description: Seconds before the next permitted poll for slow_down.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PendingPollResponse'
+                  - $ref: '#/components/schemas/SlowDownPollResponse'
+                  - $ref: '#/components/schemas/DeniedPollResponse'
+                  - $ref: '#/components/schemas/ExpiredPollResponse'
+                  - $ref: '#/components/schemas/ConsumedPollResponse'
+                  - $ref: '#/components/schemas/DeliveryExpiredPollResponse'
+                  - $ref: '#/components/schemas/DeliveryRecoveryBlockedPollResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/device-authorizations/delivery-acknowledgements:
+    post:
+      tags: [Device authorization]
+      operationId: acknowledgeDeviceCertificateDelivery
+      summary: Acknowledge receipt of the exact issued certificate
+      description: >-
+        Target v1 ACK authenticates possession of device_code and binds the receipt to
+        authorization_id, delivery_id, certificate_sha256, csr_sha256, and
+        csr_spki_sha256.
+        Repeating the same ACK is idempotent, including after the deadline if
+        that exact receipt was committed before it. A first ACK at or after the
+        deadline fails; the undelivered certificate must be revoked or remain
+        an explicit recovery failure, never treated as delivered automatically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgeDeviceCertificateDeliveryRequest'
+      responses:
+        '200':
+          description: Receipt committed, or the same receipt was recovered idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcknowledgeDeviceCertificateDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '410':
+          description: Delivery deadline passed; certificate is revoked or recovery is blocked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryExpiredError'
+
+  /v1/workspace-devices/{device_id}/certificate-rotations:
+    post:
+      tags: [Workspace device certificates]
+      operationId: beginDeviceCertificateRotation
+      summary: Start a CSR-bound rotation for the same WorkspaceDevice identity
+      description: >-
+        Requires mTLS with the currently valid WorkspaceDevice certificate.
+        The new CSR must match the existing device scope. A new
+        authorization_id, higher authorization_generation, and device_code are
+        issued while device_id remains stable. The replacement follows the
+        normal trusted-user approval flow.
+        The old certificate remains active until replacement delivery is ACKed.
+      security:
+        - WorkspaceDeviceCertificate: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeginDeviceCertificateRotationRequest'
+      responses:
+        '201':
+          description: Rotation authorization created for the same device_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeginDeviceCertificateRotationResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/workspace-devices/{device_id}/certificates:
+    get:
+      tags: [Workspace device certificates]
+      operationId: listWorkspaceDeviceCertificates
+      summary: Read certificate and rotation metadata
+      description: >-
+        Requires either a trusted user session authorized for the exact device
+        scope or a current WorkspaceDevice certificate bound to this device_id.
+      security:
+        - CyreneInteractiveUserSession: []
+        - WorkspaceDeviceCertificate: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '200':
+          description: Public certificate metadata and rotation lineage, never CA key material.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWorkspaceDeviceCertificatesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/workspace-devices/{device_id}/certificates/{serial_number}/revocation:
+    post:
+      tags: [Workspace device certificates]
+      operationId: revokeWorkspaceDeviceCertificate
+      summary: Revoke one certificate serial for a WorkspaceDevice
+      description: >-
+        Requires a trusted user session with the configured revocation
+        permission in the exact device scope. Repeating a revocation request is
+        idempotent and preserves the original revocation metadata.
+      security:
+        - CyreneInteractiveUserSession: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+        - name: serial_number
+          in: path
+          required: true
+          description: Certificate serial as lowercase hexadecimal text.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeWorkspaceDeviceCertificateRequest'
+      responses:
+        '200':
+          description: Revocation metadata, returned idempotently for repeated requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeWorkspaceDeviceCertificateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Device or certificate was not found in the authorized scope.
+
+components:
+  securitySchemes:
+    CyreneInteractiveUserSession:
+      type: http
+      scheme: bearer
+      bearerFormat: Cyrene interactive session
+      description: >-
+        Trusted browser/user session. Provider credentials, including any
+        Microsoft token, remain on the interactive identity boundary and are
+        never delivered to the WorkspaceDevice.
+    WorkspaceDeviceCertificate:
+      type: mutualTLS
+      description: Current Cyrene WorkspaceDevice client certificate.
+  parameters:
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+    DeviceId:
+      name: device_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+  responses:
+    InvalidRequest:
+      description: Invalid scope, CSR, digest, code shape, or state transition.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Unauthorized:
+      description: Missing or invalid user session or WorkspaceDevice certificate.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Forbidden:
+      description: Authenticated principal is not authorized for the exact scope.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    RateLimited:
+      description: Retry limit reached; retry only after the returned interval.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ServiceUnavailable:
+      description: Required storage, identity, CSR, WebAuthn, or CA port is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    StateConflict:
+      description: Concurrent, stale, mismatched, or already-final transition.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+  schemas:
+    DeviceScope:
+      type: object
+      additionalProperties: false
+      required: [organizationId, workspaceId]
+      properties:
+        organizationId:
+          type: string
+          minLength: 1
+        workspaceId:
+          type: string
+          minLength: 1
+    DeviceAuthorizationRef:
+      type: object
+      additionalProperties: false
+      required: [authorizationId, deviceId, scope, csrSpkiSha256, csrSha256, expiresAt, authorizationGeneration]
+      properties:
+        authorizationId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          description: Non-secret ID for one authorization attempt.
+        deviceId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          description: Stable non-secret WorkspaceDevice identity across rotation.
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+        csrSpkiSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        expiresAt:
+          type: string
+          format: date-time
+        authorizationGeneration:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonic per-device attempt number; clients ignore stale responses.
+    StartDeviceAuthorizationRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, csrDer, csrSpkiSha256, registrationKey]
+      properties:
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+        csrDer:
+          type: string
+          format: byte
+          minLength: 1
+          maxLength: 21848
+          description: >-
+            Base64 DER-encoded PKCS#10 CSR; no private key material. The server
+            recomputes both the exact CSR digest and SPKI digest.
+        csrSpkiSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        registrationKey:
+          type: string
+          format: byte
+          minLength: 24
+          maxLength: 24
+          description: >-
+            Client-generated 128-bit correlation value, not a credential. Retain
+            it while this WorkspaceDevice enrollment is pending and reuse only
+            with the exact same scope and CSR.
+    DeviceAuthorizationCodes:
+      type: object
+      additionalProperties: false
+      required: [deviceCode, userCode, verificationUri, intervalSeconds, expiresAt]
+      properties:
+        deviceCode:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: >-
+            256-bit bearer secret, returned once. Store only its digest; never
+            log it. It is the sole pre-certificate poll credential.
+        userCode:
+          type: string
+          pattern: '^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){2}$'
+          description: Human lookup code; case-insensitive and rate-limited.
+        verificationUri:
+          type: string
+          format: uri
+        verificationUriComplete:
+          type: string
+          format: uri
+          description: May include userCode; treat and redact as sensitive.
+        intervalSeconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+        expiresAt:
+          type: string
+          format: date-time
+    StartDeviceAuthorizationResponse:
+      type: object
+      additionalProperties: false
+      required: [authorization, codes]
+      properties:
+        authorization:
+          $ref: '#/components/schemas/DeviceAuthorizationRef'
+        codes:
+          $ref: '#/components/schemas/DeviceAuthorizationCodes'
+    CreateDeviceApprovalChallengeRequest:
+      type: object
+      additionalProperties: false
+      required: [userCode, scope]
+      properties:
+        userCode:
+          type: string
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+    CreateDeviceApprovalChallengeResponse:
+      type: object
+      additionalProperties: false
+      required: [authorization, approvalId, webauthnOptions, challengeExpiresAt]
+      properties:
+        authorization:
+          $ref: '#/components/schemas/DeviceAuthorizationRef'
+        approvalId:
+          type: string
+          minLength: 16
+          maxLength: 128
+        webauthnOptions:
+          $ref: '#/components/schemas/WebAuthnPublicKeyCredentialRequestOptions'
+        challengeExpiresAt:
+          type: string
+          format: date-time
+    CompleteDeviceApprovalRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        webauthnAssertion:
+          $ref: '#/components/schemas/WebAuthnAssertion'
+          writeOnly: true
+          description: >-
+            Standard browser PublicKeyCredential assertion. The HTTP adapter
+            serializes this object as UTF-8 JSON for the verifier. Required on
+            first completion; omit only to resume an already durable ISSUING
+            state. Never log or persist the raw assertion.
+    CompleteDeviceApprovalResponse:
+      type: object
+      additionalProperties: false
+      required: [authorization, state, approvedBy, approvedAt]
+      properties:
+        authorization:
+          $ref: '#/components/schemas/DeviceAuthorizationRef'
+        state:
+          type: string
+          enum: [DEVICE_AUTHORIZATION_LIFECYCLE_STATE_ISSUING, DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_PENDING, DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERED]
+        approvedBy:
+          $ref: '#/components/schemas/UserIdentityRef'
+        approvedAt:
+          type: string
+          format: date-time
+    DenyDeviceAuthorizationRequest:
+      type: object
+      additionalProperties: false
+      required: [userCode, scope]
+      properties:
+        userCode:
+          type: string
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+    DenyDeviceAuthorizationResponse:
+      type: object
+      additionalProperties: false
+      required: [authorization, deniedBy, deniedAt]
+      properties:
+        authorization:
+          $ref: '#/components/schemas/DeviceAuthorizationRef'
+        deniedBy:
+          $ref: '#/components/schemas/UserIdentityRef'
+        deniedAt:
+          type: string
+          format: date-time
+    PollDeviceAuthorizationRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceCode]
+      properties:
+        deviceCode:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          writeOnly: true
+          description: High-entropy bearer secret; never log it.
+    PollAuthorizationRef:
+      type: object
+      additionalProperties: false
+      required: [authorizationId, deviceId, scope, csrSpkiSha256, csrSha256, expiresAt, authorizationGeneration]
+      properties:
+        authorizationId:
+          type: string
+        deviceId:
+          type: string
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+        csrSpkiSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        expiresAt:
+          type: string
+          format: date-time
+        authorizationGeneration:
+          type: integer
+          format: int64
+          minimum: 1
+    PendingPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization, intervalSeconds, nextPollAt]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_PENDING
+        error:
+          const: authorization_pending
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+        intervalSeconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+        nextPollAt:
+          type: string
+          format: date-time
+    SlowDownPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization, intervalSeconds, retryAfterSeconds, nextPollAt]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_SLOW_DOWN
+        error:
+          const: slow_down
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+        intervalSeconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+        retryAfterSeconds:
+          type: integer
+          minimum: 1
+        nextPollAt:
+          type: string
+          format: date-time
+    DeniedPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization, decidedAt]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_DENIED
+        error:
+          const: access_denied
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+        decidedAt:
+          type: string
+          format: date-time
+    ExpiredPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_EXPIRED
+        error:
+          const: expired_token
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+    ApprovedPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, authorization, delivery]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_APPROVED
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+        delivery:
+          $ref: '#/components/schemas/DeviceCertificateDelivery'
+    ConsumedPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_DELIVERY_CONSUMED
+        error:
+          const: invalid_grant
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+    DeliveryExpiredPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization, recoveryStatus]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_DELIVERY_EXPIRED
+        error:
+          const: delivery_expired
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+        recoveryStatus:
+          enum:
+            - DEVICE_DELIVERY_RECOVERY_STATUS_CERTIFICATE_REVOKED
+            - DEVICE_DELIVERY_RECOVERY_STATUS_CERTIFICATE_RETIRED
+    DeliveryRecoveryBlockedPollResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, authorization, recoveryStatus]
+      properties:
+        status:
+          const: DEVICE_AUTHORIZATION_POLL_STATUS_DELIVERY_RECOVERY_BLOCKED
+        error:
+          const: delivery_recovery_blocked
+        authorization:
+          $ref: '#/components/schemas/PollAuthorizationRef'
+        recoveryStatus:
+          enum:
+            - DEVICE_DELIVERY_RECOVERY_STATUS_REVOCATION_PENDING
+            - DEVICE_DELIVERY_RECOVERY_STATUS_RECOVERY_BLOCKED
+    DeviceCertificateDelivery:
+      type: object
+      additionalProperties: false
+      required: [deliveryId, certificateDer, caChainDer, certificate, acknowledgementDeadline]
+      properties:
+        deliveryId:
+          type: string
+          minLength: 16
+          maxLength: 128
+        certificateDer:
+          type: string
+          format: byte
+          minLength: 1
+          maxLength: 21848
+        caChainDer:
+          type: array
+          items:
+            type: string
+            format: byte
+        certificate:
+          $ref: '#/components/schemas/WorkspaceDeviceCertificateMetadata'
+        acknowledgementDeadline:
+          type: string
+          format: date-time
+          description: At most five minutes after certificate readiness.
+    AcknowledgeDeviceCertificateDeliveryRequest:
+      type: object
+      additionalProperties: false
+      required: [authorizationId, deviceCode, deliveryId, certificateSha256, csrSpkiSha256, csrSha256]
+      properties:
+        authorizationId:
+          type: string
+        deviceCode:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          writeOnly: true
+          description: High-entropy bearer secret; never log it.
+        deliveryId:
+          type: string
+        certificateSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSpkiSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+    AcknowledgeDeviceCertificateDeliveryResponse:
+      type: object
+      additionalProperties: false
+      required: [authorization, deliveryId, certificateSha256, acknowledgedAt, state]
+      properties:
+        authorization:
+          $ref: '#/components/schemas/DeviceAuthorizationRef'
+        deliveryId:
+          type: string
+        certificateSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        acknowledgedAt:
+          type: string
+          format: date-time
+        state:
+          const: DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERED
+    BeginDeviceCertificateRotationRequest:
+      type: object
+      additionalProperties: false
+      required: [csrDer, csrSpkiSha256, csrSha256]
+      properties:
+        csrDer:
+          type: string
+          format: byte
+          minLength: 1
+          maxLength: 21848
+        csrSpkiSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+    DeviceCertificateRotationMetadata:
+      type: object
+      additionalProperties: false
+      required: [rotationId, deviceId, authorizationId, state, startedAt]
+      properties:
+        rotationId:
+          type: string
+        deviceId:
+          type: string
+        authorizationId:
+          type: string
+        previousSerialNumber:
+          type: string
+        replacementSerialNumber:
+          type: string
+        state:
+          type: string
+          enum:
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_PENDING
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_AWAITING_APPROVAL
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_ISSUING
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_PENDING
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERED
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DENIED
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_EXPIRED
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_EXPIRED
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REVOKED
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_RECOVERY_BLOCKED
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+    BeginDeviceCertificateRotationResponse:
+      type: object
+      additionalProperties: false
+      required: [authorization, codes, rotation]
+      properties:
+        authorization:
+          $ref: '#/components/schemas/DeviceAuthorizationRef'
+        codes:
+          $ref: '#/components/schemas/DeviceAuthorizationCodes'
+        rotation:
+          $ref: '#/components/schemas/DeviceCertificateRotationMetadata'
+    WorkspaceDeviceCertificateMetadata:
+      type: object
+      additionalProperties: false
+      required: [deviceId, authorizationId, scope, serialNumber, certificateSha256, csrSpkiSha256, csrSha256, issuerId, notBefore, notAfter, status, purpose]
+      properties:
+        deviceId:
+          type: string
+        authorizationId:
+          type: string
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+        serialNumber:
+          type: string
+        certificateSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSpkiSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        csrSha256:
+          $ref: '#/components/schemas/Sha256Bytes'
+        issuerId:
+          type: string
+        notBefore:
+          type: string
+          format: date-time
+        notAfter:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_DELIVERY_PENDING
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_ACTIVE
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_ROTATION_PENDING
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_RETIRED
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_REVOKED
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_EXPIRED
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_REVOCATION_PENDING
+            - WORKSPACE_DEVICE_CERTIFICATE_STATUS_RECOVERY_BLOCKED
+        purpose:
+          const: WORKSPACE_DEVICE_CERTIFICATE_PURPOSE_CONTROL_CLIENT_AUTH
+        revocationId:
+          type: string
+        revokedAt:
+          type: string
+          format: date-time
+        revocationReason:
+          type: string
+          enum:
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_DEVICE_LOST
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_KEY_COMPROMISE
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_ADMINISTRATIVE
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_REPLACED
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_DELIVERY_UNACKNOWLEDGED
+    ListWorkspaceDeviceCertificatesResponse:
+      type: object
+      additionalProperties: false
+      required: [deviceId, scope, certificates, rotations]
+      properties:
+        deviceId:
+          type: string
+        scope:
+          $ref: '#/components/schemas/DeviceScope'
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkspaceDeviceCertificateMetadata'
+        rotations:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceCertificateRotationMetadata'
+    RevokeWorkspaceDeviceCertificateRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum:
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_DEVICE_LOST
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_KEY_COMPROMISE
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_ADMINISTRATIVE
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_REPLACED
+            - WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_DELIVERY_UNACKNOWLEDGED
+    RevokeWorkspaceDeviceCertificateResponse:
+      type: object
+      additionalProperties: false
+      required: [certificate, revokedBy, revokedAt]
+      properties:
+        certificate:
+          $ref: '#/components/schemas/WorkspaceDeviceCertificateMetadata'
+        revokedBy:
+          $ref: '#/components/schemas/UserIdentityRef'
+        revokedAt:
+          type: string
+          format: date-time
+    UserIdentityRef:
+      type: object
+      additionalProperties: false
+      required: [issuer, subject]
+      properties:
+        issuer:
+          type: string
+        subject:
+          type: string
+    Sha256Bytes:
+      type: string
+      format: byte
+      minLength: 44
+      maxLength: 44
+      description: Base64-encoded 32-byte SHA-256 value.
+    WebAuthnPublicKeyCredentialRequestOptions:
+      type: object
+      additionalProperties: false
+      required: [challenge]
+      properties:
+        challenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Base64url-encoded challenge supplied by the configured verifier.
+        rpId:
+          type: string
+          minLength: 1
+        timeout:
+          type: integer
+          minimum: 1
+        allowCredentials:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [type, id]
+            properties:
+              type:
+                const: public-key
+              id:
+                type: string
+                pattern: '^[A-Za-z0-9_-]+$'
+                description: Base64url-encoded WebAuthn credential ID.
+              transports:
+                type: array
+                items:
+                  type: string
+                  enum: [usb, nfc, ble, internal, hybrid, smart-card]
+        userVerification:
+          type: string
+          enum: [required, preferred, discouraged]
+        hints:
+          type: array
+          items:
+            type: string
+            enum: [security-key, client-device, hybrid]
+        extensions:
+          type: object
+          description: Verifier-generated WebAuthn extension inputs, when configured.
+    WebAuthnAssertion:
+      type: object
+      additionalProperties: false
+      required: [id, rawId, type, response]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        rawId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Base64url-encoded credential identifier.
+        type:
+          const: public-key
+        authenticatorAttachment:
+          oneOf:
+            - type: string
+              enum: [platform, cross-platform]
+            - type: 'null'
+        response:
+          type: object
+          additionalProperties: false
+          required: [clientDataJSON, authenticatorData, signature]
+          properties:
+            clientDataJSON:
+              type: string
+              pattern: '^[A-Za-z0-9_-]+$'
+            authenticatorData:
+              type: string
+              pattern: '^[A-Za-z0-9_-]+$'
+            signature:
+              type: string
+              pattern: '^[A-Za-z0-9_-]+$'
+            userHandle:
+              oneOf:
+                - type: string
+                  pattern: '^[A-Za-z0-9_-]+$'
+                - type: 'null'
+        clientExtensionResults:
+          type: object
+    DeliveryExpiredError:
+      type: object
+      additionalProperties: false
+      required: [error, authorizationId, recoveryState]
+      properties:
+        error:
+          const: delivery_expired
+        authorizationId:
+          type: string
+        recoveryState:
+          type: string
+          enum: [CERTIFICATE_REVOKED, CERTIFICATE_RETIRED, REVOCATION_PENDING, RECOVERY_BLOCKED]
+    ApiError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+        requestId:
+          type: string

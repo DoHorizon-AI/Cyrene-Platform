@@ -21,6 +21,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | --- | --- | --- |
 | `capability/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `core/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `device/` | Cyrene-owned WorkspaceDevice enrollment and certificate wire contract. | Cyrene 自有 WorkspaceDevice 注册与证书线协议。 |
 | `hardware/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `message/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `provider/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
@@ -55,6 +56,7 @@ This snapshot is intentionally limited to direct entries; nested directories own
 | --- | --- |
 | `capability/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `core/` | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `device/` | Cyrene 自有 WorkspaceDevice 注册与证书线协议。 |
 | `hardware/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `message/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `provider/` | 嵌套源码或契约边界，下一步阅读其 README。 |
