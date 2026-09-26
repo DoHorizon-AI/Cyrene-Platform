@@ -92,23 +92,23 @@ impl DeviceAuthorizationRegistrationBinding {
         }
     }
 
-    fn binding_id(&self) -> &[u8; 16] {
+    pub(crate) fn binding_id(&self) -> &[u8; 16] {
         &self.binding_id
     }
 
-    fn key(&self) -> &DeviceAuthorizationDeviceKey {
+    pub(crate) fn key(&self) -> &DeviceAuthorizationDeviceKey {
         &self.key
     }
 
-    fn authorization_generation(&self) -> u64 {
+    pub(crate) fn authorization_generation(&self) -> u64 {
         self.authorization_generation
     }
 
-    fn csr_sha256(&self) -> &[u8; 32] {
+    pub(crate) fn csr_sha256(&self) -> &[u8; 32] {
         &self.csr_sha256
     }
 
-    fn spki_sha256(&self) -> &[u8; 32] {
+    pub(crate) fn spki_sha256(&self) -> &[u8; 32] {
         &self.spki_sha256
     }
 
