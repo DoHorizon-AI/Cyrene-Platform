@@ -63,7 +63,7 @@ pub enum WebAuthnAuditFailure {
 }
 
 impl WebAuthnAuditFailure {
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             Self::StateOrOwnerMismatch => "STATE_OR_OWNER_MISMATCH",
             Self::CeremonyExpired => "CEREMONY_EXPIRED",
@@ -90,7 +90,7 @@ pub enum WebAuthnAuditAction {
 }
 
 impl WebAuthnAuditAction {
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             Self::AuthenticationChallengeIssued => "AUTHENTICATION_CHALLENGE_ISSUED",
             Self::CredentialRegistrationStarted => "CREDENTIAL_REGISTRATION_STARTED",
@@ -101,7 +101,7 @@ impl WebAuthnAuditAction {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "AUTHENTICATION_CHALLENGE_ISSUED" => Some(Self::AuthenticationChallengeIssued),
             "CREDENTIAL_REGISTRATION_STARTED" => Some(Self::CredentialRegistrationStarted),
@@ -124,7 +124,7 @@ pub enum WebAuthnCredentialRevocationReason {
 }
 
 impl WebAuthnCredentialRevocationReason {
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             Self::UserRequest => "USER_REQUEST",
             Self::SuspectedCloning => "SUSPECTED_CLONING",
@@ -296,8 +296,9 @@ pub struct WebAuthnAuditEvent {
 
 /// SQLite-backed credentials, ceremony states, replay records and audit for
 /// local or single-instance use. This is not suitable for ephemeral ACA
-/// storage or replicas; production deployment remains blocked until a shared
-/// transactional store adapter is selected and wired.
+/// storage or replicas; [`crate::PostgresWebAuthnCredentialStore`] provides
+/// shared production persistence after operators provision its database role
+/// and schema and the service injects trusted RP and enrollment policy.
 pub struct SqliteWebAuthnCredentialStore {
     connection: Mutex<Connection>,
 }
@@ -2032,7 +2033,7 @@ fn insert_audit(
     Ok(())
 }
 
-fn validate_context(
+pub(crate) fn validate_context(
     context: &WebAuthnAuthenticationContext,
 ) -> Result<(), WebAuthnCredentialStoreError> {
     validate_owner(&context.approver)?;
@@ -2049,7 +2050,7 @@ fn validate_context(
     Ok(())
 }
 
-fn validate_owner(owner: &UserIdentityRef) -> Result<(), WebAuthnCredentialStoreError> {
+pub(crate) fn validate_owner(owner: &UserIdentityRef) -> Result<(), WebAuthnCredentialStoreError> {
     for value in [&owner.issuer, &owner.subject] {
         if value.trim().is_empty()
             || value.len() > MAX_IDENTITY_FIELD_BYTES
@@ -2061,11 +2062,11 @@ fn validate_owner(owner: &UserIdentityRef) -> Result<(), WebAuthnCredentialStore
     Ok(())
 }
 
-fn valid_user_handle(user_handle: &[u8]) -> bool {
+pub(crate) fn valid_user_handle(user_handle: &[u8]) -> bool {
     (MIN_USER_HANDLE_BYTES..=MAX_USER_HANDLE_BYTES).contains(&user_handle.len())
 }
 
-fn same_owner(left: &UserIdentityRef, right: &UserIdentityRef) -> bool {
+pub(crate) fn same_owner(left: &UserIdentityRef, right: &UserIdentityRef) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
 }
 
@@ -2073,7 +2074,7 @@ fn ceremony_user_handle(ceremony: &PersistedWebAuthnCeremony) -> Vec<u8> {
     ceremony.user_handle.clone()
 }
 
-fn context_digest(context: &WebAuthnAuthenticationContext) -> [u8; 32] {
+pub(crate) fn context_digest(context: &WebAuthnAuthenticationContext) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"cyrene.workspace.webauthn.context.v1\0");
     digest.update(context.approval_id);
@@ -2088,7 +2089,7 @@ fn context_digest(context: &WebAuthnAuthenticationContext) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn credential_set_digest(credentials: &[StoredWebAuthnCredential]) -> [u8; 32] {
+pub(crate) fn credential_set_digest(credentials: &[StoredWebAuthnCredential]) -> [u8; 32] {
     let mut credentials = credentials.iter().collect::<Vec<_>>();
     credentials.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));
     let mut digest = Sha256::new();

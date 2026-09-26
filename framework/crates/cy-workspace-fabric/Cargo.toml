@@ -43,7 +43,7 @@ sqlx = {
 }
 
 [dev-dependencies]
-base64 = "0.21"
+base64 = "0.22"
 tempfile = "3.8"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 webauthn-authenticator-rs = { version = "0.5.5", features = ["softpasskey"] }

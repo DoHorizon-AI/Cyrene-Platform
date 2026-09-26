@@ -42,6 +42,7 @@ mod web_relay_session;
 #[allow(dead_code)]
 pub(crate) mod device_authorization_sweeper;
 pub mod webauthn_credential_store;
+mod webauthn_postgres_store;
 pub mod webauthn_verifier;
 
 pub use aca_forwarded_certificate::{
@@ -115,6 +116,7 @@ pub use web_relay_session::{
     WebRelaySessionVerifier,
 };
 pub use webauthn_credential_store::{WebAuthnCredentialStore, WebAuthnCredentialStoreError};
+pub use webauthn_postgres_store::{PostgresWebAuthnCredentialStore, WebAuthnPostgresStoreError};
 pub use webauthn_verifier::{
     SqliteWebAuthnCredentialStore, VerifiedWebAuthnPasskey, WebAuthnAuditAction,
     WebAuthnAuditEvent, WebAuthnAuditFailure, WebAuthnAuthenticationVerifier,

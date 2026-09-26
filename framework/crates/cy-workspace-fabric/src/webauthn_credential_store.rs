@@ -2,9 +2,9 @@
 //!
 //! Implementations must persist credential ownership, ceremony state, replay
 //! records and audit events. Successful assertion consumption and signature
-//! counter advancement must be atomic. This crate currently provides only the
-//! SQLite adapter, which is limited to local and single-instance deployments.
-//! Production multi-replica deployments need a shared transactional adapter.
+//! counter advancement must be atomic. SQLite is limited to local and
+//! single-instance deployments; the PostgreSQL adapter is the shared
+//! transactional option for production multi-replica deployments.
 
 use cy_proto::workspace_v1::UserIdentityRef;
 use webauthn_rs::prelude::Passkey;
