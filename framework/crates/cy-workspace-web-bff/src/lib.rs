@@ -10,12 +10,17 @@
 #![forbid(unsafe_code)]
 
 mod csrf;
+mod fabric_gateway;
 mod http;
 mod manifest;
 mod problem;
 mod product;
 
 pub use csrf::{csrf_cookie_name, csrf_cookie_path};
+pub use fabric_gateway::{
+    FabricWorkspaceProductGateway, WorkspaceApiBinding, WorkspaceApiResolutionError,
+    WorkspaceApiResolver,
+};
 pub use http::{router, WebBffConfig, WebBffState, MAX_JSON_BODY_BYTES};
 pub use manifest::{
     product_projection_manifest, ProductProjectionEntry, ProductProjectionManifestError,

@@ -20,11 +20,21 @@ WebBffState::new requires all providers and a canonical operation catalog:
   principal from X-MS-CLIENT-PRINCIPAL or another unsigned identity header.
 - WorkspaceDirectory supplies current member-scoped Workspace descriptors.
   The router projects only workspaceId, organizationId, and displayName.
-- WorkspaceProductGateway receives a verified principal plus typed
-  WorkspaceApiRequest. Its runtime adapter must call the authenticated
-  Workspace API path and establish Workspace caller context after membership
-  verification. The legacy unauthenticated WorkspaceApi::handle is not an
-  acceptable adapter.
+- `FabricWorkspaceProductGateway` receives a verified principal plus typed
+  `WorkspaceApiRequest`. It re-discovers descriptors for the principal's
+  verified organization, rejects malformed, cross-organization, or duplicate
+  Workspace descriptors, and selects only the exact requested Workspace ID.
+  It then rechecks membership and Directory roles through
+  `WorkspaceCallerContext::from_verified_web_member` before dispatching to
+  `WorkspaceApi::handle_authenticated`. Actor, organization, Workspace scope,
+  and roles are never accepted from the HTTP request. The legacy unauthenticated
+  `WorkspaceApi::handle` is not an acceptable adapter.
+- `WorkspaceApiResolver` is a required composition port. It receives only the
+  selected Directory descriptor and must return a `WorkspaceApiBinding` for one
+  of that descriptor's connection candidates. The binding is checked against
+  the selected Workspace and candidate before dispatch. This crate does not
+  provide a production endpoint-to-authority resolver or a listener; absent a
+  real authenticated resolver, the application cannot be composed for service.
 - ProductOperationCatalog must contain exactly one matching owner OpenAPI
   operation for each canonical projection row. Its operation key, owner,
   Product operationId, and semantic kind must match the TCK. The BFF does not
@@ -45,9 +55,14 @@ WebBffState::new 必须接收全部 provider 与 canonical operation catalog：
   构造 principal。
 - WorkspaceDirectory 提供当前 member-scoped Workspace descriptor；router 只投影
   workspaceId、organizationId 和 displayName。
-- WorkspaceProductGateway 接收 verified principal 与 typed WorkspaceApiRequest。其 runtime adapter 必须调用
-  authenticated Workspace API path，并在 membership 检查后建立 Workspace caller context。legacy 未认证的
-  WorkspaceApi::handle 不能作为 adapter。
+- `FabricWorkspaceProductGateway` 接收 verified principal 与 typed `WorkspaceApiRequest`。它按 principal 的已验证
+  organization 重新发现 descriptors，拒绝格式错误、跨组织或重复的 Workspace descriptor，并且只选择与请求 Workspace ID
+  完全相同的项。之后它通过 `WorkspaceCallerContext::from_verified_web_member` 重新查询 membership 和 Directory roles，才调用
+  `WorkspaceApi::handle_authenticated`。HTTP request 不能提供 actor、organization、Workspace scope 或 roles。legacy 未认证的
+  `WorkspaceApi::handle` 不能作为 adapter。
+- `WorkspaceApiResolver` 是必需的 composition port。它只接收选中的 Directory descriptor，并必须返回绑定到该 descriptor
+  某个 connection candidate 的 `WorkspaceApiBinding`。dispatch 前会再次校验绑定与选中 Workspace/candidate 相符。本 crate
+  尚未提供生产 endpoint-to-authority resolver 或 listener；缺少真实 authenticated resolver 时，应用不能组合为可服务状态。
 - ProductOperationCatalog 对 canonical projection row 的每个 operation 必须恰有一个匹配的 owner OpenAPI operation。
   operation key、owner、Product operationId 和语义类型必须与 TCK 一致。BFF 不维护第二份 owner 或 permission table。
 
