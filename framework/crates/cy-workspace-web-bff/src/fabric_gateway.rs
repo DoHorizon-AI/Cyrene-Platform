@@ -32,9 +32,16 @@ use crate::WorkspaceGatewayError;
 /// 实现必须将返回句柄绑定到本次 descriptor 中的 candidate；resolver 不接收 request URL、authority 或其他 Workspace ID。
 #[async_trait]
 pub trait WorkspaceApiResolver: Send + Sync + 'static {
-    /// Resolve an API handle for a trusted, currently valid descriptor.
+    /// Resolve a fresh API handle for this verified user and valid descriptor.
+    ///
+    /// Implementations must bind the returned transport to this principal. Do not cache or
+    /// reuse a Frontend Relay session across distinct principals, even when they select the
+    /// same Workspace descriptor.
+    ///
+    /// 为当前已验证用户和 descriptor 创建专属 API handle。不得在不同 principal 间缓存或复用 Frontend Relay session。
     async fn resolve(
         &self,
+        principal: &VerifiedWebPrincipal,
         descriptor: &WorkspaceConnectionDescriptor,
     ) -> Result<WorkspaceApiBinding, WorkspaceApiResolutionError>;
 }
@@ -48,19 +55,24 @@ pub struct WorkspaceApiBinding {
     workspace_id: String,
     organization_id: String,
     candidate: WorkspaceConnectionCandidate,
+    principal: VerifiedPrincipalBinding,
     api: Arc<dyn WorkspaceApi>,
 }
 
 impl WorkspaceApiBinding {
-    /// Bind an authenticated API transport to an exact Directory candidate.
+    /// Bind a principal-scoped API transport to an exact Directory candidate.
+    ///
+    /// 将 principal 作用域内的 API transport 绑定到 Directory 中精确的 candidate。
     pub fn for_candidate(
+        principal: &VerifiedWebPrincipal,
         descriptor: &WorkspaceConnectionDescriptor,
         candidate: &WorkspaceConnectionCandidate,
         api: Arc<dyn WorkspaceApi>,
     ) -> Result<Self, WorkspaceApiResolutionError> {
         if descriptor.workspace_id.trim().is_empty()
             || descriptor.organization_id.trim().is_empty()
-            || !descriptor.candidates.contains(candidate)
+            || descriptor.organization_id != principal.organization_id()
+            || !descriptor_has_candidate(descriptor, candidate)
         {
             return Err(WorkspaceApiResolutionError::InvalidBinding);
         }
@@ -69,15 +81,82 @@ impl WorkspaceApiBinding {
             workspace_id: descriptor.workspace_id.clone(),
             organization_id: descriptor.organization_id.clone(),
             candidate: candidate.clone(),
+            principal: VerifiedPrincipalBinding::from_principal(principal)?,
             api,
         })
     }
 
-    fn belongs_to(&self, descriptor: &WorkspaceConnectionDescriptor) -> bool {
+    fn belongs_to(
+        &self,
+        principal: &VerifiedWebPrincipal,
+        descriptor: &WorkspaceConnectionDescriptor,
+    ) -> bool {
         self.descriptor_version == descriptor.descriptor_version
             && self.workspace_id == descriptor.workspace_id
             && self.organization_id == descriptor.organization_id
-            && descriptor.candidates.contains(&self.candidate)
+            && descriptor_has_candidate(descriptor, &self.candidate)
+            && self.principal.matches(principal)
+    }
+}
+
+fn descriptor_has_candidate(
+    descriptor: &WorkspaceConnectionDescriptor,
+    candidate: &WorkspaceConnectionCandidate,
+) -> bool {
+    descriptor.candidates.contains(candidate)
+}
+
+/// Non-secret identity fields that scope one resolved API handle to one verified principal.
+///
+/// 用于限制 API handle 的非敏感已验证主体字段。
+#[derive(Clone, PartialEq, Eq)]
+struct VerifiedPrincipalBinding {
+    issuer: String,
+    subject: String,
+    organization_id: String,
+    expires_at_unix_ms: i64,
+}
+
+impl VerifiedPrincipalBinding {
+    fn from_principal(
+        principal: &VerifiedWebPrincipal,
+    ) -> Result<Self, WorkspaceApiResolutionError> {
+        let identity = principal.identity();
+        if identity.issuer.trim().is_empty()
+            || identity.subject.trim().is_empty()
+            || principal.organization_id().trim().is_empty()
+            || principal.expires_at_unix_ms() <= 0
+        {
+            return Err(WorkspaceApiResolutionError::InvalidBinding);
+        }
+        Ok(Self {
+            issuer: identity.issuer.clone(),
+            subject: identity.subject.clone(),
+            organization_id: principal.organization_id().to_string(),
+            expires_at_unix_ms: principal.expires_at_unix_ms(),
+        })
+    }
+
+    fn matches(&self, principal: &VerifiedWebPrincipal) -> bool {
+        self.matches_fields(
+            &principal.identity().issuer,
+            &principal.identity().subject,
+            principal.organization_id(),
+            principal.expires_at_unix_ms(),
+        )
+    }
+
+    fn matches_fields(
+        &self,
+        issuer: &str,
+        subject: &str,
+        organization_id: &str,
+        expires_at_unix_ms: i64,
+    ) -> bool {
+        self.issuer == issuer
+            && self.subject == subject
+            && self.organization_id == organization_id
+            && self.expires_at_unix_ms == expires_at_unix_ms
     }
 }
 
@@ -89,6 +168,7 @@ impl std::fmt::Debug for WorkspaceApiBinding {
             .field("workspace_id", &self.workspace_id)
             .field("organization_id", &self.organization_id)
             .field("candidate_configured", &true)
+            .field("principal_bound", &true)
             .field("api_configured", &true)
             .finish()
     }
@@ -157,10 +237,10 @@ impl crate::WorkspaceProductGateway for FabricWorkspaceProductGateway {
         .map_err(|error| map_caller_context_status(error.http_status()))?;
         let binding = self
             .resolver
-            .resolve(&descriptor)
+            .resolve(principal, &descriptor)
             .await
             .map_err(map_resolution_error)?;
-        if !binding.belongs_to(&descriptor) {
+        if !binding.belongs_to(principal, &descriptor) {
             return Err(WorkspaceGatewayError::InvalidResponse);
         }
 
@@ -454,21 +534,49 @@ mod tests {
     #[test]
     fn resolver_binding_must_use_a_candidate_from_the_selected_descriptor() {
         let first = descriptor("workspace-a", "org-1");
-        let second = descriptor("workspace-b", "org-1");
-        let api: Arc<dyn WorkspaceApi> = Arc::new(EmptyApi);
-        let binding =
-            WorkspaceApiBinding::for_candidate(&first, &first.candidates[0], Arc::clone(&api))
-                .expect("trusted candidate can bind an API");
-
-        assert!(binding.belongs_to(&first));
-        assert!(!binding.belongs_to(&second));
+        let mut second = descriptor("workspace-b", "org-1");
+        second.candidates[0].provider_id = "other-relay-provider".to_string();
         let mut unlisted_candidate = second.candidates[0].clone();
         unlisted_candidate.provider_id = "unlisted-provider".to_string();
-        assert_eq!(
-            WorkspaceApiBinding::for_candidate(&first, &unlisted_candidate, api)
-                .expect_err("candidate absent from the selected descriptor must be rejected"),
-            WorkspaceApiResolutionError::InvalidBinding
-        );
+
+        assert!(descriptor_has_candidate(&first, &first.candidates[0]));
+        assert!(!descriptor_has_candidate(&first, &second.candidates[0]));
+        assert!(!descriptor_has_candidate(&first, &unlisted_candidate));
+    }
+
+    #[test]
+    fn principal_binding_rejects_cross_user_org_and_expiry_mismatch() {
+        let binding = VerifiedPrincipalBinding {
+            issuer: "https://issuer.example/tenant/v2.0".to_string(),
+            subject: "user-a".to_string(),
+            organization_id: "org-a".to_string(),
+            expires_at_unix_ms: 1_900_000_000_000,
+        };
+
+        assert!(binding.matches_fields(
+            "https://issuer.example/tenant/v2.0",
+            "user-a",
+            "org-a",
+            1_900_000_000_000,
+        ));
+        assert!(!binding.matches_fields(
+            "https://issuer.example/tenant/v2.0",
+            "user-b",
+            "org-a",
+            1_900_000_000_000,
+        ));
+        assert!(!binding.matches_fields(
+            "https://issuer.example/tenant/v2.0",
+            "user-a",
+            "org-b",
+            1_900_000_000_000,
+        ));
+        assert!(!binding.matches_fields(
+            "https://issuer.example/tenant/v2.0",
+            "user-a",
+            "org-a",
+            1_900_000_000_001,
+        ));
     }
 
     #[test]
@@ -494,9 +602,4 @@ mod tests {
             Err(WorkspaceGatewayError::InvalidResponse)
         );
     }
-
-    struct EmptyApi;
-
-    #[async_trait]
-    impl WorkspaceApi for EmptyApi {}
 }
