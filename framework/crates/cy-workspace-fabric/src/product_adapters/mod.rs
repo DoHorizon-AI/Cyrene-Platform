@@ -5,7 +5,11 @@
 
 mod catalyst;
 mod echo;
+mod exchange;
 mod http;
+mod navigator;
+mod reactor;
+mod yield_api;
 
 use cy_proto::workspace_v1::WorkspaceProductApiOwner;
 
@@ -17,20 +21,24 @@ use crate::{
 
 pub use http::{ProductEndpointConfig, ProductHttpClient};
 
-/// HTTP invocation port for the Catalyst and Echo Product operation mappings.
-pub struct CatalystEchoProductApiAdapter {
+/// HTTP invocation port for the six fixed Product operation mappings.
+pub struct ProductHttpApiAdapter {
     client: ProductHttpClient,
 }
 
-impl CatalystEchoProductApiAdapter {
+impl ProductHttpApiAdapter {
     /// Creates an adapter over an injected, privately configured HTTP client.
     pub fn new(client: ProductHttpClient) -> Self {
         Self { client }
     }
 }
 
+/// Compatibility name retained for callers that originally composed only
+/// Catalyst and Echo mappings.
+pub type CatalystEchoProductApiAdapter = ProductHttpApiAdapter;
+
 #[tonic::async_trait]
-impl ProductInvocationPort for CatalystEchoProductApiAdapter {
+impl ProductInvocationPort for ProductHttpApiAdapter {
     async fn invoke(
         &self,
         caller: &WorkspaceCallerContext,
@@ -39,7 +47,11 @@ impl ProductInvocationPort for CatalystEchoProductApiAdapter {
         authorize_product_invocation(caller, caller.workspace_id(), &request)?;
         let target = match request.owner {
             WorkspaceProductApiOwner::Catalyst => catalyst::target(&request)?,
+            WorkspaceProductApiOwner::Yield => yield_api::target(&request)?,
+            WorkspaceProductApiOwner::Reactor => reactor::target(&request)?,
+            WorkspaceProductApiOwner::Exchange => exchange::target(&request)?,
             WorkspaceProductApiOwner::Echo => echo::target(&request)?,
+            WorkspaceProductApiOwner::Navigator => navigator::target(caller, &request)?,
             _ => return Err(ProductInvocationError::InvalidRequest),
         };
         self.client.send(target, &request).await
@@ -95,17 +107,21 @@ mod tests {
         .unwrap()
     }
 
-    fn adapter(calls: Arc<AtomicUsize>) -> CatalystEchoProductApiAdapter {
+    fn adapter(calls: Arc<AtomicUsize>) -> ProductHttpApiAdapter {
         let resolver = ConfiguredProductEndpointResolver::new(vec![
             ProductEndpointConfig::new(Owner::Catalyst, "https://catalyst.test/", "secret-1"),
-            ProductEndpointConfig::new(Owner::Echo, "https://echo.test/", "secret-2"),
+            ProductEndpointConfig::new(Owner::Yield, "https://yield.test/", "secret-2"),
+            ProductEndpointConfig::new(Owner::Reactor, "https://reactor.test/", "secret-3"),
+            ProductEndpointConfig::new(Owner::Exchange, "https://exchange.test/", "secret-4"),
+            ProductEndpointConfig::new(Owner::Echo, "https://echo.test/", "secret-5"),
+            ProductEndpointConfig::new(Owner::Navigator, "https://navigator.test/", "secret-6"),
         ])
         .unwrap();
         let client = ProductHttpClient::with_transport(
             Arc::new(resolver),
             Arc::new(CountingTransport { calls }),
         );
-        CatalystEchoProductApiAdapter::new(client)
+        ProductHttpApiAdapter::new(client)
     }
 
     #[tokio::test]
@@ -165,6 +181,98 @@ mod tests {
             assert_eq!(result.unwrap_err(), ProductInvocationError::PermissionDenied);
         }
 
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn product_reads_route_through_the_combined_owner_adapter() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let adapter = adapter(calls.clone());
+        let navigator_snapshot = br#"{"workspaceId":"workspace-1","reads":[{"product":"CATALYST","path":"/api/v1/datasets"}]}"#;
+        let requests = [
+            ProductInvocationRequest {
+                owner: Owner::Yield,
+                operation: Operation::WorkspaceProductApiOperation03,
+                kind: Kind::Read,
+                resource_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Reactor,
+                operation: Operation::WorkspaceProductApiOperation05,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Exchange,
+                operation: Operation::WorkspaceProductApiOperation07,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Echo,
+                operation: Operation::WorkspaceProductApiOperation09,
+                kind: Kind::Read,
+                resource_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Navigator,
+                operation: Operation::WorkspaceProductApiOperation11,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: navigator_snapshot.to_vec(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Navigator,
+                operation: Operation::WorkspaceProductApiOperation12,
+                kind: Kind::Read,
+                resource_id: Some("session-1".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+        ];
+
+        for request in requests {
+            let response = adapter
+                .invoke(&member_caller(), request)
+                .await
+                .expect("member Product read should use the fixed owner router");
+            assert_eq!(response.status_code, 200);
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    async fn navigator_append_remains_denied_by_the_combined_owner_adapter() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let adapter = adapter(calls.clone());
+        let result = adapter
+            .invoke(
+                &member_caller(),
+                ProductInvocationRequest {
+                    owner: Owner::Navigator,
+                    operation: Operation::WorkspaceProductApiOperation13,
+                    kind: Kind::Command,
+                    resource_id: Some("session-1".to_string()),
+                    json_body: br#"{"events":[]}"#.to_vec(),
+                    idempotency_key: Some("append-1".to_string()),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            ProductInvocationError::PermissionDenied
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

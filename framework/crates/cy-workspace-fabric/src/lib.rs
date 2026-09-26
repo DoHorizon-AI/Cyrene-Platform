@@ -19,9 +19,9 @@ mod directory;
 mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
 pub mod device_authorization;
+mod product_adapters;
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
-mod product_adapters;
 mod product_projection;
 mod relay;
 mod sidecar;
@@ -57,7 +57,7 @@ pub use directory::{
 };
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_adapters::{
-    CatalystEchoProductApiAdapter, ProductEndpointConfig, ProductHttpClient,
+    CatalystEchoProductApiAdapter, ProductEndpointConfig, ProductHttpApiAdapter, ProductHttpClient,
 };
 pub use product_projection::{
     ProductInvocationError, ProductInvocationPort, ProductInvocationRequest,
