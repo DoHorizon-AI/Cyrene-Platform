@@ -17,12 +17,14 @@ use cy_proto::workspace_v1::UserIdentityRef;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::{UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest};
+
 /// Opaque server-generated identifier for one authorization attempt.
 ///
 /// This is the wire `authorization_id`; it is not a stable WorkspaceDevice ID.
 pub type DeviceAuthorizationId = [u8; 16];
 
-/// Opaque digest stored in place of a one-time device or user code.
+/// Opaque digest stored in place of the high-entropy one-time device code.
 pub type DeviceAuthorizationCodeHash = [u8; 32];
 
 /// Exact organization and workspace scope authorized for an enrolled device.
@@ -138,11 +140,12 @@ pub enum DeviceAuthorizationState {
 }
 
 /// Persistable authorization record. It contains code digests, never raw codes.
+/// The user-code digest includes the HMAC key version used for this record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceAuthorizationRecord {
     pub id: DeviceAuthorizationId,
     pub device_code_hash: DeviceAuthorizationCodeHash,
-    pub user_code_hash: DeviceAuthorizationCodeHash,
+    pub user_code_digest: VersionedUserCodeDigest,
     pub scope: DeviceAuthorizationScope,
     pub csr_der: Vec<u8>,
     pub csr_sha256: [u8; 32],
@@ -221,10 +224,15 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         &self,
         code_hash: &DeviceAuthorizationCodeHash,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError>;
-    fn by_user_code_hash(
+    fn by_user_code_candidates(
         &self,
-        code_hash: &DeviceAuthorizationCodeHash,
+        candidates: &[VersionedUserCodeDigest],
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError>;
+    /// Returns every key version still referenced by a stored record.
+    ///
+    /// Startup must pass these versions to [`UserCodeKeyRing::require_versions`]
+    /// before serving user-code lookups.
+    fn user_code_key_versions(&self) -> Result<Vec<u32>, DeviceAuthorizationStoreError>;
     /// Resolves the same ID while it is awaiting assertion, issuing, or
     /// approved so an interrupted issuer operation can be resumed safely.
     fn by_approval_id(
@@ -266,7 +274,7 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
             .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
         if records.values().any(|existing| {
             existing.device_code_hash == record.device_code_hash
-                || existing.user_code_hash == record.user_code_hash
+                || existing.user_code_digest == record.user_code_digest
                 || existing.id == record.id
         }) {
             return Err(DeviceAuthorizationStoreError::CodeCollision);
@@ -282,11 +290,25 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         self.find(|record| &record.device_code_hash == code_hash)
     }
 
-    fn by_user_code_hash(
+    fn by_user_code_candidates(
         &self,
-        code_hash: &DeviceAuthorizationCodeHash,
+        candidates: &[VersionedUserCodeDigest],
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
-        self.find(|record| &record.user_code_hash == code_hash)
+        self.find(|record| candidates.contains(&record.user_code_digest))
+    }
+
+    fn user_code_key_versions(&self) -> Result<Vec<u32>, DeviceAuthorizationStoreError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let versions = records
+            .values()
+            .map(|record| record.user_code_digest.key_version())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(versions)
     }
 
     fn by_approval_id(
@@ -332,7 +354,7 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         if current.revision != expected_revision
             || replacement.revision != next_revision
             || current.device_code_hash != replacement.device_code_hash
-            || current.user_code_hash != replacement.user_code_hash
+            || current.user_code_digest != replacement.user_code_digest
             || current.scope != replacement.scope
             || current.csr_der != replacement.csr_der
             || current.csr_sha256 != replacement.csr_sha256
@@ -564,6 +586,8 @@ pub enum DeviceAuthorizationError {
     RandomUnavailable,
     #[error("trusted clock unavailable")]
     ClockUnavailable,
+    #[error("user-code key ring is unavailable or missing a required version")]
+    UserCodeKeysUnavailable,
     #[error("device authorization storage unavailable")]
     StorageUnavailable,
     #[error("device authorization changed concurrently")]
@@ -622,6 +646,7 @@ pub enum DeviceAuthorizationError {
 pub struct DeviceAuthorizationManager<S, L> {
     store: S,
     limiter: L,
+    user_code_keys: UserCodeKeyRing,
     policy: DeviceAuthorizationPolicy,
 }
 
@@ -630,18 +655,27 @@ where
     S: DeviceAuthorizationStore,
     L: UserCodeAttemptLimiter,
 {
-    /// Creates a state machine with validated local timing and rate limits.
+    /// Creates a state machine with validated timing, rate limits, and keys.
+    ///
+    /// The injected key ring must contain every key version referenced by the
+    /// store before the manager can serve user-code lookups.
     pub fn new(
         store: S,
         limiter: L,
+        user_code_keys: UserCodeKeyRing,
         policy: DeviceAuthorizationPolicy,
     ) -> Result<Self, DeviceAuthorizationError> {
         if !policy.is_valid() {
             return Err(DeviceAuthorizationError::InvalidPolicy);
         }
+        let required_versions = store.user_code_key_versions().map_err(map_store_error)?;
+        user_code_keys
+            .require_versions(required_versions)
+            .map_err(|_| DeviceAuthorizationError::UserCodeKeysUnavailable)?;
         Ok(Self {
             store,
             limiter,
+            user_code_keys,
             policy,
         })
     }
@@ -685,7 +719,10 @@ where
             let record = DeviceAuthorizationRecord {
                 id: enrollment_id,
                 device_code_hash: hash_code(b"device", device_code.as_bytes()),
-                user_code_hash: hash_code(b"user", normalize_user_code(&user_code).as_bytes()),
+                user_code_digest: self
+                    .user_code_keys
+                    .digest_for_storage(&normalize_user_code(&user_code))
+                    .map_err(map_user_code_secret_error)?,
                 scope: request.scope.clone(),
                 csr_der: request.csr_der.clone(),
                 csr_sha256,
@@ -731,12 +768,7 @@ where
         if !is_valid_user_code(&user_code) {
             return Err(DeviceAuthorizationError::InvalidCode);
         }
-        let code_hash = hash_code(b"user", user_code.as_bytes());
-        let mut record = self
-            .store
-            .by_user_code_hash(&code_hash)
-            .map_err(map_store_error)?
-            .ok_or(DeviceAuthorizationError::InvalidCode)?;
+        let mut record = self.lookup_by_user_code(&user_code)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
         if record.scope != *scope {
             return Err(DeviceAuthorizationError::ScopeMismatch);
@@ -817,10 +849,13 @@ where
                 }
                 Err(DeviceAuthorizationError::ConcurrentTransition) => {
                     record = self
-                        .store
-                        .by_user_code_hash(&code_hash)
-                        .map_err(map_store_error)?
-                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                        .lookup_by_user_code(&user_code)
+                        .map_err(|error| match error {
+                            DeviceAuthorizationError::InvalidCode => {
+                                DeviceAuthorizationError::ConcurrentTransition
+                            }
+                            other => other,
+                        })?;
                     match &record.state {
                         DeviceAuthorizationState::Pending => {}
                         DeviceAuthorizationState::AwaitingWebAuthn {
@@ -1221,12 +1256,7 @@ where
         if !is_valid_user_code(&user_code) {
             return Err(DeviceAuthorizationError::InvalidCode);
         }
-        let code_hash = hash_code(b"user", user_code.as_bytes());
-        let mut record = self
-            .store
-            .by_user_code_hash(&code_hash)
-            .map_err(map_store_error)?
-            .ok_or(DeviceAuthorizationError::InvalidCode)?;
+        let mut record = self.lookup_by_user_code(&user_code)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
         if record.scope != *scope {
             return Err(DeviceAuthorizationError::ScopeMismatch);
@@ -1345,6 +1375,29 @@ where
             Ok(true) => Ok(()),
             Ok(false) => Err(DeviceAuthorizationError::TooManyAttempts),
             Err(_) => Err(DeviceAuthorizationError::AttemptLimiterUnavailable),
+        }
+    }
+
+    fn lookup_by_user_code(
+        &self,
+        normalized_code: &str,
+    ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
+        let candidates = self
+            .user_code_keys
+            .lookup_candidates(normalized_code)
+            .map_err(map_user_code_secret_error)?;
+        let record = self
+            .store
+            .by_user_code_candidates(&candidates)
+            .map_err(map_store_error)?
+            .ok_or(DeviceAuthorizationError::InvalidCode)?;
+        match self
+            .user_code_keys
+            .verify(normalized_code, &record.user_code_digest)
+            .map_err(map_user_code_secret_error)?
+        {
+            true => Ok(record),
+            false => Err(DeviceAuthorizationError::InvalidCode),
         }
     }
 
@@ -1502,9 +1555,8 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn hash_code(kind: &[u8], code: &[u8]) -> DeviceAuthorizationCodeHash {
-    // This unkeyed digest prevents raw-code storage but does not prevent an
-    // offline search of user codes after a database leak. Production storage
-    // needs a server-keyed HMAC port; no key is available at this layer.
+    // This digest is used only for 256-bit random device bearer codes.
+    // Human-entered user codes use the injected, versioned HMAC key ring.
     let mut hasher = Sha256::new();
     hasher.update(b"cyrene-device-authorization-v1\0");
     hasher.update(kind);
@@ -1541,6 +1593,13 @@ fn map_store_error(error: DeviceAuthorizationStoreError) -> DeviceAuthorizationE
         DeviceAuthorizationStoreError::CodeCollision => DeviceAuthorizationError::CodeCollision,
         DeviceAuthorizationStoreError::Conflict => DeviceAuthorizationError::ConcurrentTransition,
         DeviceAuthorizationStoreError::Unavailable => DeviceAuthorizationError::StorageUnavailable,
+    }
+}
+
+fn map_user_code_secret_error(error: UserCodeSecretError) -> DeviceAuthorizationError {
+    match error {
+        UserCodeSecretError::InvalidUserCode => DeviceAuthorizationError::InvalidCode,
+        _ => DeviceAuthorizationError::UserCodeKeysUnavailable,
     }
 }
 
@@ -2067,16 +2126,26 @@ mod tests {
         DeviceAuthorizationManager::new(
             store,
             InMemoryUserCodeAttemptLimiter::default(),
-            DeviceAuthorizationPolicy {
-                authorization_ttl_ms: 60_000,
-                initial_poll_interval_ms: 1_000,
-                maximum_poll_interval_ms: 5_000,
-                slow_down_increment_ms: 1_000,
-                user_code_attempt_window_ms: 60_000,
-                maximum_user_code_attempts: 3,
-            },
+            test_user_code_key_ring(),
+            test_policy(),
         )
         .expect("valid test policy")
+    }
+
+    fn test_policy() -> DeviceAuthorizationPolicy {
+        DeviceAuthorizationPolicy {
+            authorization_ttl_ms: 60_000,
+            initial_poll_interval_ms: 1_000,
+            maximum_poll_interval_ms: 5_000,
+            slow_down_increment_ms: 1_000,
+            user_code_attempt_window_ms: 60_000,
+            maximum_user_code_attempts: 3,
+        }
+    }
+
+    fn test_user_code_key_ring() -> UserCodeKeyRing {
+        UserCodeKeyRing::new(1, BTreeMap::from([(1, [0x5a; 32])]))
+            .expect("valid test user-code key ring")
     }
 
     fn scope() -> DeviceAuthorizationScope {
@@ -2126,9 +2195,12 @@ mod tests {
             )
             .expect("challenge");
 
-        let code_hash = hash_code(b"user", normalize_user_code(&start.user_code).as_bytes());
+        let user_code_digest = manager
+            .user_code_keys
+            .digest_for_storage(&normalize_user_code(&start.user_code))
+            .expect("digest user code");
         let record = store
-            .by_user_code_hash(&code_hash)
+            .by_user_code_candidates(&[user_code_digest])
             .expect("read record")
             .expect("authorization record");
         let (approval_id, options, opaque_state) = match &record.state {
@@ -2166,6 +2238,67 @@ mod tests {
             )
             .expect("retry returns the same persisted ceremony");
         assert_eq!(retry, challenge);
+    }
+
+    #[test]
+    fn hmac_key_rotation_reads_old_user_codes_and_fails_on_missing_versions() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let old_ring =
+            UserCodeKeyRing::new(1, BTreeMap::from([(1, [0x11; 32])])).expect("old key ring");
+        let old_manager = DeviceAuthorizationManager::new(
+            store.clone(),
+            InMemoryUserCodeAttemptLimiter::default(),
+            old_ring,
+            test_policy(),
+        )
+        .expect("manager with old version");
+        let old_authorization = start(&old_manager);
+
+        let rotated_ring =
+            UserCodeKeyRing::new(2, BTreeMap::from([(1, [0x11; 32]), (2, [0x22; 32])]))
+                .expect("rotated key ring retains old key");
+        let rotated_manager = DeviceAuthorizationManager::new(
+            store.clone(),
+            InMemoryUserCodeAttemptLimiter::default(),
+            rotated_ring,
+            test_policy(),
+        )
+        .expect("manager accepts all stored versions");
+        rotated_manager
+            .begin_approval(
+                &old_authorization.user_code,
+                &scope(),
+                &user(),
+                &[16; 32],
+                200,
+                &TestApprovalPorts,
+            )
+            .expect("old user code remains readable during rotation");
+
+        let new_authorization = start(&rotated_manager);
+        let record = store
+            .by_device_code_hash(&hash_code(
+                b"device",
+                new_authorization
+                    .device_code
+                    .to_ascii_lowercase()
+                    .as_bytes(),
+            ))
+            .expect("read new record")
+            .expect("authorization");
+        assert_eq!(record.user_code_digest.key_version(), 2);
+
+        let missing_old_key =
+            UserCodeKeyRing::new(2, BTreeMap::from([(2, [0x22; 32])])).expect("new-only key ring");
+        assert!(matches!(
+            DeviceAuthorizationManager::new(
+                store,
+                InMemoryUserCodeAttemptLimiter::default(),
+                missing_old_key,
+                test_policy(),
+            ),
+            Err(DeviceAuthorizationError::UserCodeKeysUnavailable)
+        ));
     }
 
     #[test]
@@ -2238,9 +2371,12 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("signer was entered after Issuing was committed");
 
-        let code_hash = hash_code(b"user", normalize_user_code(&start.user_code).as_bytes());
+        let user_code_digest = manager
+            .user_code_keys
+            .digest_for_storage(&normalize_user_code(&start.user_code))
+            .expect("digest user code");
         let reserved = store
-            .by_user_code_hash(&code_hash)
+            .by_user_code_candidates(&[user_code_digest])
             .expect("read record")
             .expect("authorization");
         assert!(matches!(
@@ -2261,7 +2397,7 @@ mod tests {
         );
         assert!(matches!(
             store
-                .by_user_code_hash(&code_hash)
+                .by_user_code_candidates(&[user_code_digest])
                 .expect("read after denial")
                 .expect("authorization")
                 .state,
