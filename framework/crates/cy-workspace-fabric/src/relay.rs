@@ -25,9 +25,10 @@ use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::{
-    AcaForwardedCertificateAdapter, RegistryWorkspaceDeviceVerifier, RelayAuthenticator,
-    RelaySessionClaims, SessionPrincipal, VerifiedClientCertificate, WorkspaceCallerContext,
-    WorkspaceDeviceAuthenticationError, WorkspaceDeviceRegistry, WorkspaceDirectory,
+    AcaForwardedBffWorkloadCertificateAdapter, AcaForwardedCertificateAdapter,
+    RegistryWorkspaceDeviceVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
+    VerifiedClientCertificate, WorkspaceCallerContext, WorkspaceDeviceAuthenticationError,
+    WorkspaceDeviceRegistry, WorkspaceDirectory,
 };
 
 type RelayStream = Pin<Box<dyn Stream<Item = Result<RelayFrame, Status>> + Send + 'static>>;
@@ -62,6 +63,8 @@ struct RelayState {
     authenticator: Arc<dyn RelayAuthenticator>,
     workspace_device_verifier: Option<Arc<RegistryWorkspaceDeviceVerifier>>,
     aca_forwarded_certificate_adapter: Option<AcaForwardedCertificateAdapter>,
+    aca_forwarded_bff_workload_certificate_adapter:
+        Option<AcaForwardedBffWorkloadCertificateAdapter>,
     connections: Mutex<Connections>,
     next_session: AtomicU64,
 }
@@ -78,7 +81,7 @@ impl WorkspaceRelay {
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,
     ) -> Self {
-        Self::build(directory, authenticator, None, None)
+        Self::build(directory, authenticator, None, None, None)
     }
 
     /// Construct a Relay whose Workspace connectors authenticate with the
@@ -95,6 +98,7 @@ impl WorkspaceRelay {
             directory,
             authenticator,
             Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+            None,
             None,
         )
     }
@@ -115,6 +119,30 @@ impl WorkspaceRelay {
             authenticator,
             Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
             Some(adapter),
+            None,
+        )
+    }
+
+    /// Construct an ACA Relay that applies separate Frontend workload and device trust.
+    ///
+    /// The Frontend branch validates the dedicated BFF service CA and exact certificate pin
+    /// from this RPC's ACA-overwritten XFCC before validating the signed user handoff. The
+    /// WorkspaceConnector branch continues to use only the Workspace device registry.
+    ///
+    /// 为 ACA Relay 配置独立 Frontend workload 与 Connector device trust；先校验同一 RPC 的 BFF XFCC，再验证 handoff。
+    pub fn with_aca_forwarded_certificate_adapters(
+        directory: Arc<dyn WorkspaceDirectory>,
+        authenticator: Arc<dyn RelayAuthenticator>,
+        registry: Arc<dyn WorkspaceDeviceRegistry>,
+        device_adapter: AcaForwardedCertificateAdapter,
+        frontend_workload_adapter: AcaForwardedBffWorkloadCertificateAdapter,
+    ) -> Self {
+        Self::build(
+            directory,
+            authenticator,
+            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+            Some(device_adapter),
+            Some(frontend_workload_adapter),
         )
     }
 
@@ -123,6 +151,9 @@ impl WorkspaceRelay {
         authenticator: Arc<dyn RelayAuthenticator>,
         workspace_device_verifier: Option<Arc<RegistryWorkspaceDeviceVerifier>>,
         aca_forwarded_certificate_adapter: Option<AcaForwardedCertificateAdapter>,
+        aca_forwarded_bff_workload_certificate_adapter: Option<
+            AcaForwardedBffWorkloadCertificateAdapter,
+        >,
     ) -> Self {
         Self {
             state: Arc::new(RelayState {
@@ -130,6 +161,7 @@ impl WorkspaceRelay {
                 authenticator,
                 workspace_device_verifier,
                 aca_forwarded_certificate_adapter,
+                aca_forwarded_bff_workload_certificate_adapter,
                 connections: Mutex::new(Connections::default()),
                 next_session: AtomicU64::new(1),
             }),
@@ -146,11 +178,52 @@ impl WorkspaceRelay {
         now_unix_ms: u64,
     ) -> Result<RelaySessionClaims, Box<Status>> {
         match role {
-            RelayParticipantRole::Frontend => self
-                .state
-                .authenticator
-                .authenticate(hello, now_unix_ms)
-                .map_err(|error| Box::new(Status::unauthenticated(error.to_string()))),
+            RelayParticipantRole::Frontend => {
+                let workload_identity = if let Some(adapter) = self
+                    .state
+                    .aca_forwarded_bff_workload_certificate_adapter
+                    .as_ref()
+                {
+                    let request = aca_request.ok_or_else(|| {
+                        Box::new(Status::unauthenticated(
+                            "BFF_WORKLOAD_TLS_CERTIFICATE_REQUIRED",
+                        ))
+                    })?;
+                    Some(
+                        adapter
+                            .authenticate_request(request, hello, now_unix_ms)
+                            .map_err(|_| {
+                                Box::new(Status::unauthenticated(
+                                    "BFF_WORKLOAD_CERTIFICATE_INVALID",
+                                ))
+                            })?,
+                    )
+                } else if self.state.aca_forwarded_certificate_adapter.is_some() {
+                    return Err(Box::new(Status::unauthenticated(
+                        "BFF_WORKLOAD_CERTIFICATE_AUTHENTICATION_NOT_CONFIGURED",
+                    )));
+                } else {
+                    None
+                };
+                let claims = self
+                    .state
+                    .authenticator
+                    .authenticate(hello, now_unix_ms)
+                    .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
+                if let (Some(workload_identity), SessionPrincipal::User(user)) =
+                    (workload_identity, &claims.principal)
+                {
+                    tracing::info!(
+                        event.name = "platform.relay.frontend_authentication_succeeded",
+                        workload_certificate_sha256 = %workload_identity.fingerprint_sha256(),
+                        principal_issuer = %user.issuer,
+                        principal_subject = %user.subject,
+                        organization_id = %claims.organization_id,
+                        message = "Relay authenticated the BFF workload and signed Frontend principal",
+                    );
+                }
+                Ok(claims)
+            }
             RelayParticipantRole::WorkspaceConnector => {
                 let result = if let Some(adapter) = &self.state.aca_forwarded_certificate_adapter {
                     let verifier =
@@ -272,15 +345,17 @@ impl WorkspaceRelayService for WorkspaceRelay {
         request: Request<Streaming<RelayFrame>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
         let peer_certificate = VerifiedClientCertificate::from_tonic_request(&request);
-        let aca_request = self
-            .state
-            .aca_forwarded_certificate_adapter
-            .as_ref()
-            .map(|_| {
-                let mut metadata_request = Request::new(());
-                *metadata_request.metadata_mut() = request.metadata().clone();
-                metadata_request
-            });
+        let has_aca_forwarded_certificate_adapter =
+            self.state.aca_forwarded_certificate_adapter.is_some()
+                || self
+                    .state
+                    .aca_forwarded_bff_workload_certificate_adapter
+                    .is_some();
+        let aca_request = has_aca_forwarded_certificate_adapter.then(|| {
+            let mut metadata_request = Request::new(());
+            *metadata_request.metadata_mut() = request.metadata().clone();
+            metadata_request
+        });
         let mut inbound = request.into_inner();
         let first = tokio::time::timeout(Duration::from_secs(5), inbound.message())
             .await
@@ -920,6 +995,99 @@ mod tests {
 
         assert_eq!(error.code(), tonic::Code::Unauthenticated);
         assert_eq!(error.message(), "WORKSPACE_DEVICE_TLS_CERTIFICATE_REQUIRED");
+    }
+
+    #[test]
+    fn aca_frontend_requires_the_bff_certificate_adapter_before_handoff_verification() {
+        let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let root = CertifiedIssuer::self_signed(root_params, KeyPair::generate().unwrap()).unwrap();
+        let device_adapter = AcaForwardedCertificateAdapter::new(root.pem().as_bytes()).unwrap();
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(
+            FileWorkspaceDirectory::open(temporary_directory.path().join("relay-state")).unwrap(),
+        );
+        let relay = WorkspaceRelay::with_aca_forwarded_certificate_adapter(
+            directory.clone(),
+            Arc::new(DevelopmentSessionVerifier::default()),
+            directory,
+            device_adapter,
+        );
+        let hello = RelayHello {
+            role: RelayParticipantRole::Frontend as i32,
+            session_credential: "invalid-handoff".into(),
+            user: None,
+            organization_id: String::new(),
+            workspace_id: String::new(),
+            device: None,
+        };
+
+        let error = relay
+            .authenticate_participant(
+                RelayParticipantRole::Frontend,
+                &hello,
+                Err(WorkspaceDeviceAuthenticationError::MissingClientCertificate),
+                None,
+                now_unix_ms(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+        assert_eq!(
+            error.message(),
+            "BFF_WORKLOAD_CERTIFICATE_AUTHENTICATION_NOT_CONFIGURED"
+        );
+    }
+
+    #[test]
+    fn aca_frontend_checks_same_request_xfcc_before_signed_handoff() {
+        let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let root = CertifiedIssuer::self_signed(root_params, KeyPair::generate().unwrap()).unwrap();
+        let device_adapter = AcaForwardedCertificateAdapter::new(root.pem().as_bytes()).unwrap();
+        let frontend_adapter = AcaForwardedBffWorkloadCertificateAdapter::new(
+            root.pem().as_bytes(),
+            [crate::BffWorkloadCertificatePin::new(
+                "11".repeat(32),
+                "CN=Cyrene Web BFF Workload",
+                false,
+            )],
+        )
+        .unwrap();
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(
+            FileWorkspaceDirectory::open(temporary_directory.path().join("relay-state")).unwrap(),
+        );
+        let relay = WorkspaceRelay::with_aca_forwarded_certificate_adapters(
+            directory.clone(),
+            Arc::new(DevelopmentSessionVerifier::default()),
+            directory,
+            device_adapter,
+            frontend_adapter,
+        );
+        let hello = RelayHello {
+            role: RelayParticipantRole::Frontend as i32,
+            session_credential: "invalid-handoff".into(),
+            user: None,
+            organization_id: String::new(),
+            workspace_id: String::new(),
+            device: None,
+        };
+
+        let error = relay
+            .authenticate_participant(
+                RelayParticipantRole::Frontend,
+                &hello,
+                Err(WorkspaceDeviceAuthenticationError::MissingClientCertificate),
+                Some(&Request::new(())),
+                now_unix_ms(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+        assert_eq!(error.message(), "BFF_WORKLOAD_CERTIFICATE_INVALID");
     }
 
     #[test]

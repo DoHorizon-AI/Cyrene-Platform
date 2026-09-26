@@ -19,10 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use cy_observability::{init_observability, ObservabilityConfig};
 use cy_workspace_fabric::{
-    bounded_workspace_relay_server, AcaForwardedCertificateAdapter, FileWorkspaceDirectory,
-    RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims, WorkspaceRelay,
+    bounded_workspace_relay_server, AcaForwardedBffWorkloadCertificateAdapter,
+    AcaForwardedCertificateAdapter, BffWorkloadCertificatePin, FileWorkspaceDirectory,
+    RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims, WebRelaySessionVerifier,
+    WorkspaceRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,19 +37,34 @@ const DEFAULT_RELAY_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_HEALTH_BIND: &str = "127.0.0.1:8081";
 const ACA_INGRESS_ASSERTION: &str = "client-certificate-required";
 const ACA_CLIENT_CA_BUNDLE_ENV: &str = "CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE";
+const BFF_CLIENT_CA_BUNDLE_ENV: &str = "CYRENE_WORKSPACE_RELAY_BFF_CLIENT_CA_BUNDLE";
+const BFF_CERTIFICATE_ALLOWLIST_ENV: &str = "CYRENE_WORKSPACE_RELAY_BFF_CERT_ALLOWLIST";
+const WEB_HANDOFF_ISSUER_ENV: &str = "CYRENE_WORKSPACE_RELAY_WEB_HANDOFF_ISSUER";
+const WEB_HANDOFF_AUDIENCE_ENV: &str = "CYRENE_WORKSPACE_RELAY_WEB_HANDOFF_AUDIENCE";
+const WEB_HANDOFF_PUBLIC_KEY_ENV: &str = "CYRENE_WORKSPACE_RELAY_WEB_HANDOFF_PUBLIC_KEY_BASE64URL";
 const HEALTH_BIND_ASSERTION: &str = "probe-only-not-ingress";
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_HEALTH_REQUEST_BYTES: usize = 2048;
 const MAX_HEALTH_CONNECTIONS: usize = 32;
 const MAX_ACA_CLIENT_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
-const NOT_READY_BODY: &str = r#"{"status":"not_ready","reason":"frontend_identity_directory_admin_ca_webauthn_and_product_dependencies_unavailable"}"#;
+const MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES: u64 = 64 * 1024;
+const NOT_READY_BODY: &str = r#"{"status":"not_ready","reason":"production_directory_membership_admin_webauthn_and_product_dependencies_unavailable"}"#;
+
+struct FrontendWorkloadConfig {
+    client_ca_bundle: PathBuf,
+    certificate_allowlist: PathBuf,
+    handoff_issuer: String,
+    handoff_audience: String,
+    handoff_public_key: [u8; 32],
+}
 
 struct HostConfig {
     relay_bind: SocketAddr,
     health_bind: SocketAddr,
     directory: PathBuf,
     aca_client_ca_bundle: Option<PathBuf>,
+    frontend_workload: Option<FrontendWorkloadConfig>,
 }
 
 impl HostConfig {
@@ -70,6 +88,7 @@ impl HostConfig {
             ingress_assertion.as_deref(),
             configured_ca_bundle,
         )?;
+        let frontend_workload = frontend_workload_config(aca_client_ca_bundle.is_some())?;
         if health_assertion
             .as_deref()
             .is_some_and(|assertion| assertion != HEALTH_BIND_ASSERTION)
@@ -97,8 +116,101 @@ impl HostConfig {
             health_bind,
             directory,
             aca_client_ca_bundle,
+            frontend_workload,
         })
     }
+}
+
+fn frontend_workload_config(
+    aca_ingress_enabled: bool,
+) -> Result<Option<FrontendWorkloadConfig>, Box<dyn Error>> {
+    parse_frontend_workload_config(
+        aca_ingress_enabled,
+        env::var_os(BFF_CLIENT_CA_BUNDLE_ENV).map(PathBuf::from),
+        env::var_os(BFF_CERTIFICATE_ALLOWLIST_ENV).map(PathBuf::from),
+        optional_nonempty_env(WEB_HANDOFF_ISSUER_ENV)?,
+        optional_nonempty_env(WEB_HANDOFF_AUDIENCE_ENV)?,
+        optional_nonempty_env(WEB_HANDOFF_PUBLIC_KEY_ENV)?,
+    )
+}
+
+fn parse_frontend_workload_config(
+    aca_ingress_enabled: bool,
+    client_ca_bundle: Option<PathBuf>,
+    certificate_allowlist: Option<PathBuf>,
+    handoff_issuer: Option<String>,
+    handoff_audience: Option<String>,
+    handoff_public_key: Option<String>,
+) -> Result<Option<FrontendWorkloadConfig>, Box<dyn Error>> {
+    let values_present = [
+        client_ca_bundle.is_some(),
+        certificate_allowlist.is_some(),
+        handoff_issuer.is_some(),
+        handoff_audience.is_some(),
+        handoff_public_key.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+
+    if values_present == 0 {
+        return Ok(None);
+    }
+    if values_present != 5 {
+        return Err(format!(
+            "BFF Frontend authentication requires all of {BFF_CLIENT_CA_BUNDLE_ENV}, {BFF_CERTIFICATE_ALLOWLIST_ENV}, {WEB_HANDOFF_ISSUER_ENV}, {WEB_HANDOFF_AUDIENCE_ENV}, and {WEB_HANDOFF_PUBLIC_KEY_ENV}"
+        )
+        .into());
+    }
+    if !aca_ingress_enabled {
+        return Err(format!(
+            "BFF Frontend authentication requires {ACA_CLIENT_CA_BUNDLE_ENV} and the explicit ACA ingress assertion"
+        )
+        .into());
+    }
+    if client_ca_bundle
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+        || certificate_allowlist
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err("BFF certificate configuration paths must not be empty".into());
+    }
+
+    let encoded_key = handoff_public_key.ok_or("BFF handoff public key is required")?;
+    let decoded_key = URL_SAFE_NO_PAD.decode(encoded_key.as_bytes())?;
+    if URL_SAFE_NO_PAD.encode(&decoded_key) != encoded_key {
+        return Err(format!(
+            "{WEB_HANDOFF_PUBLIC_KEY_ENV} must use canonical base64url without padding"
+        )
+        .into());
+    }
+    let handoff_public_key: [u8; 32] = decoded_key
+        .try_into()
+        .map_err(|_| format!("{WEB_HANDOFF_PUBLIC_KEY_ENV} must decode to exactly 32 bytes"))?;
+
+    Ok(Some(FrontendWorkloadConfig {
+        client_ca_bundle: client_ca_bundle.ok_or("BFF client CA bundle is required")?,
+        certificate_allowlist: certificate_allowlist
+            .ok_or("BFF certificate allowlist is required")?,
+        handoff_issuer: handoff_issuer.ok_or("BFF handoff issuer is required")?,
+        handoff_audience: handoff_audience.ok_or("BFF handoff audience is required")?,
+        handoff_public_key,
+    }))
+}
+
+fn optional_nonempty_env(name: &str) -> Result<Option<String>, Box<dyn Error>> {
+    let Some(value) = env::var_os(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| format!("{name} must be valid UTF-8"))?;
+    if value.trim().is_empty() {
+        return Err(format!("{name} must not be empty").into());
+    }
+    Ok(Some(value))
 }
 
 fn validate_aca_ingress_config(
@@ -144,12 +256,16 @@ fn validate_aca_ingress_config(
 }
 
 fn read_aca_client_ca_bundle(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+    read_client_ca_bundle(path, "ACA")
+}
+
+fn read_client_ca_bundle(path: &Path, trust_name: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ACA_CLIENT_CA_BUNDLE_BYTES
     {
         return Err(format!(
-            "ACA client CA bundle must be a regular file no larger than {MAX_ACA_CLIENT_CA_BUNDLE_BYTES} bytes"
+            "{trust_name} client CA bundle must be a regular file no larger than {MAX_ACA_CLIENT_CA_BUNDLE_BYTES} bytes"
         )
         .into());
     }
@@ -159,11 +275,38 @@ fn read_aca_client_ca_bundle(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
         .read_to_end(&mut contents)?;
     if contents.is_empty() || contents.len() as u64 > MAX_ACA_CLIENT_CA_BUNDLE_BYTES {
         return Err(format!(
-            "ACA client CA bundle must not exceed {MAX_ACA_CLIENT_CA_BUNDLE_BYTES} bytes"
+            "{trust_name} client CA bundle must not exceed {MAX_ACA_CLIENT_CA_BUNDLE_BYTES} bytes"
         )
         .into());
     }
     Ok(contents)
+}
+
+fn read_bff_certificate_allowlist(
+    path: &Path,
+) -> Result<Vec<BffWorkloadCertificatePin>, Box<dyn Error>> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES
+    {
+        return Err(format!(
+            "BFF certificate allowlist must be a regular file no larger than {MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES} bytes"
+        )
+        .into());
+    }
+
+    let mut contents = Vec::with_capacity(usize::try_from(metadata.len())?);
+    file.take(MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES + 1)
+        .read_to_end(&mut contents)?;
+    if contents.is_empty() || contents.len() as u64 > MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES {
+        return Err(format!(
+            "BFF certificate allowlist must not exceed {MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES} bytes"
+        )
+        .into());
+    }
+    Ok(serde_json::from_slice(&contents)?)
 }
 
 fn socket_addr_from_env(name: &str, default: &str) -> Result<SocketAddr, Box<dyn Error>> {
@@ -226,16 +369,39 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
     let config = HostConfig::from_env()?;
     let directory = Arc::new(FileWorkspaceDirectory::open(&config.directory)?);
     let aca_ingress_enabled = config.aca_client_ca_bundle.is_some();
-    let authenticator = Arc::new(UnavailableFrontendIdentity);
+    let authenticator: Arc<dyn RelayAuthenticator> = match &config.frontend_workload {
+        Some(frontend_config) => Arc::new(WebRelaySessionVerifier::new(
+            frontend_config.handoff_issuer.clone(),
+            frontend_config.handoff_audience.clone(),
+            frontend_config.handoff_public_key,
+        )?),
+        None => Arc::new(UnavailableFrontendIdentity),
+    };
     let relay = if let Some(bundle_path) = &config.aca_client_ca_bundle {
         let ca_bundle = read_aca_client_ca_bundle(bundle_path)?;
-        let adapter = AcaForwardedCertificateAdapter::new(&ca_bundle)?;
-        WorkspaceRelay::with_aca_forwarded_certificate_adapter(
-            directory.clone(),
-            authenticator,
-            directory.clone(),
-            adapter,
-        )
+        let device_adapter = AcaForwardedCertificateAdapter::new(&ca_bundle)?;
+        if let Some(frontend_config) = &config.frontend_workload {
+            let bff_ca_bundle =
+                read_client_ca_bundle(&frontend_config.client_ca_bundle, "BFF workload")?;
+            let certificate_pins =
+                read_bff_certificate_allowlist(&frontend_config.certificate_allowlist)?;
+            let frontend_adapter =
+                AcaForwardedBffWorkloadCertificateAdapter::new(&bff_ca_bundle, certificate_pins)?;
+            WorkspaceRelay::with_aca_forwarded_certificate_adapters(
+                directory.clone(),
+                authenticator,
+                directory.clone(),
+                device_adapter,
+                frontend_adapter,
+            )
+        } else {
+            WorkspaceRelay::with_aca_forwarded_certificate_adapter(
+                directory.clone(),
+                authenticator,
+                directory.clone(),
+                device_adapter,
+            )
+        }
     } else {
         WorkspaceRelay::new(directory, authenticator)
     };
@@ -257,7 +423,11 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
         event.name = "platform.workspace_relay.host_started",
         relay_bind = %config.relay_bind,
         health_bind = %config.health_bind,
-        frontend_authentication = "deny_all_until_production_user_identity",
+        frontend_authentication = if config.frontend_workload.is_some() {
+            "bff_workload_certificate_and_signed_handoff"
+        } else {
+            "deny_all_without_bff_workload_and_handoff_config"
+        },
         workspace_device_authentication = if aca_ingress_enabled { "aca_xfcc_with_file_registry" } else { "disabled" },
         ready = false,
         message = "Workspace Relay host is listening with fail-closed authentication",
@@ -265,7 +435,7 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
     tracing::warn!(
         event.name = "platform.workspace_relay.production_gate",
         error.code = "RELAY_PRODUCTION_ACCESS_CONTROL_UNAVAILABLE",
-        message = "Frontend identity, Directory administration, DeviceAuthorization, CA issuance, WebAuthn and Product private access are not connected; /readyz remains unavailable",
+        message = "Durable Directory membership and administration, DeviceAuthorization, CA issuance, WebAuthn and Product private access are not connected; /readyz remains unavailable",
     );
 
     enum HostExit {
@@ -442,6 +612,20 @@ async fn read_health_request(stream: &mut TcpStream) -> io::Result<String> {
 mod tests {
     use super::*;
 
+    fn frontend_workload_values(
+        aca_ingress_enabled: bool,
+        public_key: String,
+    ) -> Result<Option<FrontendWorkloadConfig>, Box<dyn Error>> {
+        parse_frontend_workload_config(
+            aca_ingress_enabled,
+            Some(PathBuf::from("/etc/cyrene/bff-ca/roots.pem")),
+            Some(PathBuf::from("/etc/cyrene/bff-ca/allowlist.json")),
+            Some("https://workspace-web-bff.internal".to_string()),
+            Some("cyrene-workspace-relay".to_string()),
+            Some(public_key),
+        )
+    }
+
     fn loopback_bind() -> SocketAddr {
         "127.0.0.1:8080".parse().unwrap()
     }
@@ -514,5 +698,36 @@ mod tests {
         let oversized = vec![0_u8; usize::try_from(MAX_ACA_CLIENT_CA_BUNDLE_BYTES + 1).unwrap()];
         std::fs::write(&bundle_path, oversized).unwrap();
         assert!(read_aca_client_ca_bundle(&bundle_path).is_err());
+    }
+
+    #[test]
+    fn frontend_workload_configuration_is_all_or_nothing_and_requires_aca() {
+        assert!(
+            parse_frontend_workload_config(false, None, None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_frontend_workload_config(
+            true,
+            None,
+            None,
+            Some("issuer".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+
+        let key = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        assert!(frontend_workload_values(false, key.clone()).is_err());
+        assert!(frontend_workload_values(true, key).unwrap().is_some());
+    }
+
+    #[test]
+    fn frontend_handoff_public_key_must_be_canonical_ed25519_bytes() {
+        assert!(frontend_workload_values(true, URL_SAFE_NO_PAD.encode([1_u8; 31])).is_err());
+        assert!(
+            frontend_workload_values(true, format!("{}=", URL_SAFE_NO_PAD.encode([1_u8; 32])))
+                .is_err()
+        );
     }
 }

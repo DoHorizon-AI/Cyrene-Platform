@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod aca_forwarded_certificate;
+mod aca_forwarded_bff_workload;
 mod api;
 mod auth;
 mod caller;
@@ -47,6 +48,10 @@ pub mod webauthn_verifier;
 
 pub use aca_forwarded_certificate::{
     AcaForwardedCertificateAdapter, AcaForwardedCertificateConfigError,
+};
+pub use aca_forwarded_bff_workload::{
+    AcaForwardedBffWorkloadCertificateAdapter, BffWorkloadCertificateError,
+    BffWorkloadCertificatePin, VerifiedBffWorkloadIdentity,
 };
 pub use api::{
     bounded_workspace_direct_server, bounded_workspace_relay_server, LocalWorkspaceClient,

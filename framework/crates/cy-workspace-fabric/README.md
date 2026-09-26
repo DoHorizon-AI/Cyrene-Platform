@@ -143,12 +143,19 @@ itself run a Directory service.
 ## Relay host security state
 
 `cy-workspace-relay-host` is a runnable, non-fixture process shell around
-`WorkspaceRelay`. Frontend user identity remains unavailable, so those
-sessions are rejected and `/readyz` stays HTTP 503. Workspace connector
+`WorkspaceRelay`. Frontend sessions are denied unless the optional BFF workload
+certificate trust and signed handoff verifier are fully configured. The Relay
+checks the same RPC's ACA XFCC certificate under a BFF-only CA and exact
+subject/fingerprint allowlist before validating the short-lived signed handoff;
+the browser's AAD access token is not the Relay credential. Workspace connector
 certificate validation is disabled unless the explicit ACA mode is configured;
-then the host validates XFCC against the mounted private CA bundle and the
-file-backed device registry. `/healthz` reports only process liveness. This is
-a fail-closed host scaffold, not a production Relay deployment.
+then the host validates XFCC against the separate device CA and file-backed
+device registry. `/healthz` reports only process liveness and `/readyz` stays
+HTTP 503 while production Directory membership/admin, WebAuthn, authorization,
+and Product access dependencies remain unavailable. This is a fail-closed host
+scaffold, not a production Relay deployment. See `src/bin/README.md` for the
+five-variable Frontend configuration, allowlist format, and ACA ingress trust
+boundary.
 
 Run the host locally with an owner-only state directory:
 
@@ -171,7 +178,8 @@ settings are operator assertions, not proof of live ACA configuration. ACA
 must bind both listeners to the container interface (for example
 `0.0.0.0:8080` and `0.0.0.0:8081`), explicitly set ingress `targetPort: 8080`
 and `transport: http2`, set `allowInsecure: false`, require client
-certificates with `clientCertificateMode: require`, and leave `8081` out of
+certificates with `clientCertificateMode: require`, set private ingress
+(`external: false`), block direct target-port access, and leave `8081` out of
 `additionalPortMappings`. Configure startup/liveness probes at `8081/healthz`
 and readiness at `8081/readyz`. ACA's default probes target the ingress port,
 so explicit probe configuration is required with both listeners. The current
@@ -327,9 +335,12 @@ RPC 附加 `authorization: Bearer <local-token>` metadata。
 ## Relay host 安全状态
 
 `cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的可运行非 fixture 进程入口。Frontend 用户身份
-仍不可用，因此这些 session 会被拒绝，`/readyz` 保持 HTTP 503。Workspace Connector 证书校验默认关闭；
-显式配置 ACA 模式后，host 才会使用挂载的私有 CA bundle 校验 XFCC，并查询文件式设备注册表。
-`/healthz` 只表示进程存活。这是 fail-closed host 脚手架，不是生产 Relay 部署。
+默认拒绝，除非完整配置可选 BFF workload 证书信任和签名 handoff verifier。Relay 会先对同一 RPC 的 ACA XFCC
+证书使用 BFF 专用 CA 和精确 subject/指纹 allowlist 进行校验，再验证短时签名 handoff；浏览器 AAD access token
+不是 Relay credential。Workspace Connector 证书校验默认关闭；显式配置 ACA 模式后，host 才会使用独立设备 CA
+校验 XFCC 并查询文件式设备注册表。`/healthz` 只表示进程存活；生产 Directory membership/admin、WebAuthn、授权和
+Product 访问依赖未接通时 `/readyz` 保持 HTTP 503。这是 fail-closed host 脚手架，不是生产 Relay 部署。
+Frontend 五项配置变量、allowlist 格式和 ACA ingress 信任边界见 `src/bin/README.md`。
 
 使用仅限服务所有者访问的状态目录，可在本地启动 host：
 
@@ -350,7 +361,8 @@ bind 必须启用此显式 ACA 模式。该设置只是运维声明，不能证�
 TLS、强制客户端证书；两个 listener 绑定容器网卡（例如 `0.0.0.0:8080` 与
 `0.0.0.0:8081`），显式将 ingress `targetPort: 8080`、`transport: http2`、
 `allowInsecure: false`，并设置 `clientCertificateMode: require`。`8081` 不得放入
-`additionalPortMappings`。启动/存活 probe 配为 `8081/healthz`，就绪 probe 配为
+`additionalPortMappings`；还必须使用私有 ingress（`external: false`）并阻止直连 target port。
+启动/存活 probe 配为 `8081/healthz`，就绪 probe 配为
 `8081/readyz`。两个 listener 并存时，ACA 默认 probe 会检查 ingress port，因此必须显式配置 probe。
 当前 `/readyz` 按设计返回 503，使 revision 保持未就绪并且不接收 ingress 流量。挂载私有持久目录，
 并保证同一时间只有一个 owner 持有目录锁。ACA 模式会校验转发的 XFCC 证书链，再按已批准设备注册表
