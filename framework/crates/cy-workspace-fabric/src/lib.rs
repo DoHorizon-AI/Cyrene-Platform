@@ -10,6 +10,7 @@
 
 mod api;
 mod auth;
+mod direct;
 mod directory;
 mod relay;
 mod transport;
@@ -18,12 +19,14 @@ pub use api::{LocalWorkspaceClient, WorkspaceApi};
 pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
 };
+pub use direct::DirectWorkspaceServer;
 pub use directory::{
     validate_descriptor, InMemoryWorkspaceDirectory, WorkspaceDirectory, WorkspaceMembership,
 };
 pub use relay::WorkspaceRelay;
 pub use transport::{
-    connect_relay_session, run_workspace_connector_session, RelayClientConfig, RelaySession,
+    connect_discovered_workspace, connect_relay_session, run_workspace_connector_session,
+    RelayClientConfig, RelaySession, WorkspaceConnection,
 };
 
 pub use cy_proto::workspace_v1;

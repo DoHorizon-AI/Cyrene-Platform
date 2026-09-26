@@ -32,19 +32,21 @@ use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::semantic_v1::Identity as OperationIdentity;
 use cy_proto::workspace_v1::workspace_api_request;
 use cy_proto::workspace_v1::workspace_api_response;
+use cy_proto::workspace_v1::workspace_direct_service_server::WorkspaceDirectServiceServer;
 use cy_proto::workspace_v1::workspace_relay_service_server::WorkspaceRelayServiceServer;
 use cy_proto::workspace_v1::{
     DeviceEnrollmentRef, GetWorkspaceOperationRequest, RelayHello, RelayParticipantRole,
     StartWorkspaceOperationRequest, UserIdentityRef, WorkspaceApiRequest, WorkspaceApiResponse,
-    WorkspaceConnectionCandidate, WorkspaceConnectionDescriptor, WorkspaceOperationState,
-    WorkspaceOperationView,
+    WorkspaceConnectionCandidate, WorkspaceConnectionDescriptor, WorkspaceDirectRequest,
+    WorkspaceOperationState, WorkspaceOperationView,
 };
 use cy_workspace_fabric::{
-    connect_relay_session, DevelopmentSessionVerifier, InMemoryWorkspaceDirectory,
-    RelayClientConfig, RelaySessionClaims, SessionPrincipal, WorkspaceApi, WorkspaceMembership,
-    WorkspaceRelay,
+    connect_discovered_workspace, connect_relay_session, DevelopmentSessionVerifier,
+    DirectWorkspaceServer, InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims,
+    SessionPrincipal, WorkspaceApi, WorkspaceConnection, WorkspaceMembership, WorkspaceRelay,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::Code;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("connector") => run_connector().await,
         Some("frontend-start") => run_frontend(true).await,
         Some("frontend-observe") => run_frontend(false).await,
-        _ => Err("expected role: relay | connector | frontend-start | frontend-observe".into()),
+        Some("frontend-direct") => run_frontend_direct().await,
+        Some("frontend-fallback") => run_frontend_fallback().await,
+        _ => Err("expected role: relay | connector | frontend-start | frontend-observe | frontend-direct | frontend-fallback".into()),
     }
 }
 
@@ -75,6 +79,14 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
                 connection_uri: "https://workspace.local".to_string(),
                 server_name: "workspace.local".to_string(),
                 priority: 10,
+                routing_hint: Vec::new(),
+            },
+            WorkspaceConnectionCandidate {
+                mode: ConnectivityMode::LanDirect as i32,
+                provider_id: "cyrene.direct.fixture.v1".to_string(),
+                connection_uri: required("CYRENE_WORKSPACE_DESCRIPTOR_DIRECT_URI")?,
+                server_name: required("CYRENE_WORKSPACE_DIRECT_SERVER_NAME")?,
+                priority: 15,
                 routing_hint: Vec::new(),
             },
             WorkspaceConnectionCandidate {
@@ -166,30 +178,210 @@ async fn run_connector() -> Result<(), Box<dyn std::error::Error>> {
             enrollment_state: "approved".to_string(),
         }),
     };
-    loop {
-        match connect_relay_session(&config, hello.clone()).await {
-            Ok(session) => {
-                trace(
-                    &trace_path,
-                    &format!(
-                        "WORKSPACE_RELAY_CONNECTED session={}",
-                        session.relay_session_id()
-                    ),
-                );
-                if let Err(error) = session.serve_workspace(api.clone()).await {
-                    trace(
+    let direct_server = run_direct_server(api.clone(), trace_path.clone());
+    tokio::select! {
+        result = direct_server => result,
+        _ = async {
+            loop {
+                match connect_relay_session(&config, hello.clone()).await {
+                    Ok(session) => {
+                        trace(
+                            &trace_path,
+                            &format!("WORKSPACE_RELAY_CONNECTED session={}", session.relay_session_id()),
+                        );
+                        if let Err(error) = session.serve_workspace(api.clone()).await {
+                            trace(&trace_path, &format!("WORKSPACE_RELAY_DISCONNECTED reason={error}"));
+                        }
+                    }
+                    Err(error) => trace(
                         &trace_path,
-                        &format!("WORKSPACE_RELAY_DISCONNECTED reason={error}"),
-                    );
+                        &format!("WORKSPACE_RELAY_CONNECT_RETRY reason={error}"),
+                    ),
                 }
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            Err(error) => trace(
-                &trace_path,
-                &format!("WORKSPACE_RELAY_CONNECT_RETRY reason={error}"),
-            ),
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        } => Ok(()),
     }
+}
+
+async fn run_direct_server(
+    api: Arc<dyn WorkspaceApi>,
+    trace_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bind: SocketAddr = required("CYRENE_WORKSPACE_DIRECT_BIND")?.parse()?;
+    let workspace_id = required("CYRENE_WORKSPACE_ID")?;
+    let organization_id = required("CYRENE_ORGANIZATION_ID")?;
+    let user = fixture_user();
+    let directory = Arc::new(InMemoryWorkspaceDirectory::new(
+        vec![WorkspaceMembership {
+            user: user.clone(),
+            organization_id: organization_id.clone(),
+            workspace_id: workspace_id.clone(),
+            roles: BTreeSet::from(["workspace.member".to_string()]),
+        }],
+        Vec::new(),
+    )?);
+    let authenticator = Arc::new(DevelopmentSessionVerifier::new([(
+        required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
+        RelaySessionClaims {
+            principal: SessionPrincipal::User(user),
+            organization_id,
+            workspace_id: String::new(),
+            expires_at_unix_ms: now_unix_ms().saturating_add(10 * 60 * 1000),
+        },
+    )]));
+    let tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(
+            fs::read(required("CYRENE_WORKSPACE_DIRECT_SERVER_CERT")?)?,
+            fs::read(required("CYRENE_WORKSPACE_DIRECT_SERVER_KEY")?)?,
+        ))
+        .client_ca_root(Certificate::from_pem(fs::read(required(
+            "CYRENE_WORKSPACE_DIRECT_CLIENT_CA",
+        )?)?));
+    let direct = DirectWorkspaceServer::new(workspace_id, directory, authenticator, api);
+    trace(
+        &trace_path,
+        &format!("WORKSPACE_DIRECT_STARTED bind={bind}"),
+    );
+    Server::builder()
+        .tls_config(tls)?
+        .add_service(WorkspaceDirectServiceServer::new(direct))
+        .serve(bind)
+        .await?;
+    Ok(())
+}
+
+async fn run_frontend_direct() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace_id = required("CYRENE_WORKSPACE_ID")?;
+    let user = fixture_user();
+    let hello = RelayHello {
+        role: RelayParticipantRole::Frontend as i32,
+        session_credential: required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
+        user: Some(user.clone()),
+        organization_id: required("CYRENE_ORGANIZATION_ID")?,
+        workspace_id: String::new(),
+        device: None,
+    };
+    let config = relay_client_config()?;
+    let mut relay = connect_relay_session(&config, hello.clone()).await?;
+    let descriptor = relay
+        .discover("discover-direct", user, hello.organization_id.clone())
+        .await?
+        .into_iter()
+        .find(|descriptor| descriptor.workspace_id == workspace_id)
+        .ok_or("Workspace was not discovered by identity")?;
+    let barrier = PathBuf::from(required("CYRENE_WORKSPACE_DIRECT_BARRIER")?);
+    fs::write(&barrier, b"DIRECT_DISCOVERED")?;
+    let release = barrier.with_extension("go");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !release.exists() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("timed out waiting for Relay shutdown".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut connection = connect_discovered_workspace(&descriptor, hello, &config, relay).await?;
+    if connection.mode() != ConnectivityMode::LanDirect {
+        return Err("LAN_DIRECT was not selected after Relay shutdown".into());
+    }
+    let response = connection
+        .execute(WorkspaceApiRequest {
+            request_id: "direct-get-operation-1".to_string(),
+            workspace_id,
+            request: Some(workspace_api_request::Request::GetOperation(
+                GetWorkspaceOperationRequest {
+                    operation: Some(OperationIdentity {
+                        id: "operation-1".to_string(),
+                        generation: 1,
+                    }),
+                },
+            )),
+        })
+        .await?;
+    let view = operation_view(response)?;
+    if view.authority_instance_id != required("CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID")? {
+        return Err("direct route changed Workspace authority".into());
+    }
+    let WorkspaceConnection::Direct { client, hello, .. } = &mut connection else {
+        return Err("direct connection changed mode".into());
+    };
+    let mut invalid_hello = hello.clone();
+    invalid_hello.session_credential = "invalid-session".to_string();
+    let denied = client
+        .execute(WorkspaceDirectRequest {
+            frontend: Some(invalid_hello),
+            request: Some(WorkspaceApiRequest {
+                request_id: "direct-denied-operation-1".to_string(),
+                workspace_id: required("CYRENE_WORKSPACE_ID")?,
+                request: Some(workspace_api_request::Request::GetOperation(
+                    GetWorkspaceOperationRequest {
+                        operation: Some(OperationIdentity {
+                            id: "operation-1".to_string(),
+                            generation: 1,
+                        }),
+                    },
+                )),
+            }),
+        })
+        .await;
+    if !matches!(denied, Err(ref error) if error.code() == Code::Unauthenticated) {
+        return Err("direct endpoint accepted an invalid session".into());
+    }
+    println!("LAN_DIRECT_NO_RELAY=PASS");
+    println!("LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS");
+    println!("WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS");
+    Ok(())
+}
+
+async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace_id = required("CYRENE_WORKSPACE_ID")?;
+    let user = fixture_user();
+    let hello = RelayHello {
+        role: RelayParticipantRole::Frontend as i32,
+        session_credential: required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
+        user: Some(user.clone()),
+        organization_id: required("CYRENE_ORGANIZATION_ID")?,
+        workspace_id: String::new(),
+        device: None,
+    };
+    let config = relay_client_config()?;
+    let mut relay = connect_relay_session(&config, hello.clone()).await?;
+    let mut descriptor = relay
+        .discover("discover-fallback", user, hello.organization_id.clone())
+        .await?
+        .into_iter()
+        .find(|descriptor| descriptor.workspace_id == workspace_id)
+        .ok_or("Workspace was not discovered by identity")?;
+    let direct = descriptor
+        .candidates
+        .iter_mut()
+        .find(|candidate| candidate.mode == ConnectivityMode::LanDirect as i32)
+        .ok_or("LAN_DIRECT candidate is missing")?;
+    direct.connection_uri = "https://127.0.0.1:9".to_string();
+    let mut connection = connect_discovered_workspace(&descriptor, hello, &config, relay).await?;
+    if connection.mode() != ConnectivityMode::Relay {
+        return Err("unreachable direct candidate did not fall back to Relay".into());
+    }
+    let response = connection
+        .execute(WorkspaceApiRequest {
+            request_id: "fallback-get-operation-1".to_string(),
+            workspace_id,
+            request: Some(workspace_api_request::Request::GetOperation(
+                GetWorkspaceOperationRequest {
+                    operation: Some(OperationIdentity {
+                        id: "operation-1".to_string(),
+                        generation: 1,
+                    }),
+                },
+            )),
+        })
+        .await?;
+    let view = operation_view(response)?;
+    if view.authority_instance_id != required("CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID")? {
+        return Err("fallback route changed Workspace authority".into());
+    }
+    println!("LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS");
+    Ok(())
 }
 
 async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {

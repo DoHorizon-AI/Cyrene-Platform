@@ -50,6 +50,7 @@ CYRENE_FIXTURE_CLIENT_CA=/certs/ca.crt \
 CYRENE_FIXTURE_ARTIFACT_TICKET_KEY=/certs/artifact-ticket.key \
 CYRENE_FIXTURE_TICKET_SIGNATURE=/commands/artifact-ticket.signature \
 CYRENE_FIXTURE_DISCONNECT_GENERATION=1 \
+CYRENE_FIXTURE_INITIAL_LEASE_MS=60000 \
 CYRENE_FIXTURE_WAIT_FOR_START=1 \
 /runtime/cy-runtime-control-fixture &
 control_pid=$!
@@ -67,11 +68,28 @@ CYRENE_WORKSPACE_RELAY_SERVER_NAME=cyrene-relay.test \
 CYRENE_WORKSPACE_RELAY_CA=/certs/ca.crt \
 CYRENE_WORKSPACE_RELAY_CLIENT_CERT=/certs/workspace.crt \
 CYRENE_WORKSPACE_RELAY_CLIENT_KEY=/certs/workspace.key \
+CYRENE_WORKSPACE_DIRECT_BIND="0.0.0.0:${CYRENE_WORKSPACE_DIRECT_PORT}" \
+CYRENE_WORKSPACE_DIRECT_SERVER_CERT=/certs/server.crt \
+CYRENE_WORKSPACE_DIRECT_SERVER_KEY=/certs/server.key \
+CYRENE_WORKSPACE_DIRECT_CLIENT_CA=/certs/ca.crt \
 CYRENE_WORKSPACE_CONNECTOR_TRACE=/state/workspace-connector.trace \
 CYRENE_WORKSPACE_ASSIGNMENT_TRIGGER=/commands/start-1 \
 CYRENE_RUNTIME_CONTROL_TRACE=/state/runtime-control.trace \
 /runtime/cy-workspace-fabric-fixture connector &
 connector_pid=$!
+
+# Start the Runtime Agent after Workspace routing is ready. The control
+# fixture issues a short lease when the Agent enrolls; Relay discovery must
+# not consume that lease while the container waits for its private address.
+# 在 Workspace 路由就绪后启动 Runtime Agent，避免等待发现私网地址时耗尽短租约。
+for _ in $(seq 1 450); do
+  if [[ -f /state/workspace-connector.trace ]] &&
+     grep -q WORKSPACE_RELAY_CONNECTED /state/workspace-connector.trace; then
+    break
+  fi
+  sleep 0.1
+done
+grep -q WORKSPACE_RELAY_CONNECTED /state/workspace-connector.trace
 
 # The Runtime Agent receives only its Node/workload enrollment scope. It does
 # not inherit the frontend or Workspace relay session credentials.

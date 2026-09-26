@@ -13,6 +13,7 @@ proof_root=$(mktemp -d /tmp/cyrene-dwf-v1.XXXXXX)
 container_name="cyrene-dwf-v1-$$"
 relay_pid=""
 artifact_pid=""
+frontend_pid=""
 base_image=${CYRENE_ACCEPTANCE_BASE_IMAGE:-ubuntu:24.04}
 
 allocate_port() {
@@ -25,6 +26,7 @@ while [[ "${artifact_port}" = "${relay_port}" ]]; do
   artifact_port=$(allocate_port)
 done
 runtime_control_port=19443
+direct_port=18444
 
 cleanup() {
   local exit_code=$?
@@ -43,6 +45,7 @@ cleanup() {
   docker rm -f "${container_name}" >/dev/null 2>&1 || true
   if [[ -n "${relay_pid}" ]]; then kill "${relay_pid}" >/dev/null 2>&1 || true; fi
   if [[ -n "${artifact_pid}" ]]; then kill "${artifact_pid}" >/dev/null 2>&1 || true; fi
+  if [[ -n "${frontend_pid}" ]]; then kill "${frontend_pid}" >/dev/null 2>&1 || true; fi
   if [[ "${proof_root}" = /tmp/cyrene-dwf-v1.* ]]; then rm -rf "${proof_root}"; fi
 }
 trap cleanup EXIT
@@ -64,7 +67,7 @@ published_path="${proof_root}/artifacts/${source_digest}"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=Cyrene Workspace Fixture CA' -keyout "${proof_root}/certs/ca.key" -out "${proof_root}/certs/ca.crt" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes -subj '/CN=cyrene-relay.test' -keyout "${proof_root}/certs/server.key" -out "${proof_root}/certs/server.csr" >/dev/null 2>&1
-printf '%s\n' 'subjectAltName=DNS:cyrene-relay.test,DNS:cyrene-control.test,DNS:cyrene-artifact.test' 'extendedKeyUsage=serverAuth' > "${proof_root}/certs/server.ext"
+printf '%s\n' 'subjectAltName=DNS:cyrene-relay.test,DNS:cyrene-control.test,DNS:cyrene-artifact.test,DNS:cyrene-workspace.test' 'extendedKeyUsage=serverAuth' > "${proof_root}/certs/server.ext"
 openssl x509 -req -days 1 -in "${proof_root}/certs/server.csr" -CA "${proof_root}/certs/ca.crt" -CAkey "${proof_root}/certs/ca.key" -CAcreateserial -extfile "${proof_root}/certs/server.ext" -out "${proof_root}/certs/server.crt" >/dev/null 2>&1
 
 issue_client_certificate() {
@@ -100,6 +103,8 @@ artifact_pid=$!
 
 start_relay() {
   CYRENE_WORKSPACE_RELAY_BIND="0.0.0.0:${relay_port}" \
+  CYRENE_WORKSPACE_DESCRIPTOR_DIRECT_URI="https://${workspace_private_ip}:${direct_port}" \
+  CYRENE_WORKSPACE_DIRECT_SERVER_NAME=cyrene-workspace.test \
   CYRENE_WORKSPACE_DESCRIPTOR_RELAY_URI="https://127.0.0.1:${relay_port}" \
   CYRENE_WORKSPACE_RELAY_SERVER_NAME=cyrene-relay.test \
   CYRENE_WORKSPACE_RELAY_TRACE="${proof_root}/relay.trace" \
@@ -143,11 +148,9 @@ run_frontend() {
   CYRENE_ORGANIZATION_ID=organization-fixture \
   CYRENE_WORKSPACE_ARTIFACT_URI="${artifact_uri}" \
   CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID=workspace-authority-fixture-1 \
+  CYRENE_WORKSPACE_DIRECT_BARRIER="${proof_root}/state/direct-discovered" \
   target/release/cy-workspace-fabric-fixture "${role}"
 }
-
-start_relay
-wait_for 'relay startup' "kill -0 '${relay_pid}' && grep -q RELAY_STARTED '${proof_root}/relay.trace'"
 
 docker run -d --name "${container_name}" \
   --user "$(id -u):$(id -g)" \
@@ -157,6 +160,8 @@ docker run -d --name "${container_name}" \
   -e "CYRENE_RELAY_PORT=${relay_port}" \
   -e "CYRENE_ARTIFACT_PORT=${artifact_port}" \
   -e "CYRENE_RUNTIME_CONTROL_PORT=${runtime_control_port}" \
+  -e "CYRENE_WORKSPACE_DIRECT_PORT=${direct_port}" \
+  -e CYRENE_FRONTEND_SESSION_CREDENTIAL=development-frontend-session \
   -e CYRENE_WORKSPACE_SESSION_CREDENTIAL=development-workspace-session \
   -e CYRENE_WORKSPACE_DEVICE_ID=device-fixture \
   -e CYRENE_WORKSPACE_ID=workspace-fixture \
@@ -176,6 +181,11 @@ docker run -d --name "${container_name}" \
   --entrypoint /bin/bash \
   "${base_image}" /fixture/workspace-entrypoint.sh >/dev/null
 
+workspace_private_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}")
+test -n "${workspace_private_ip}"
+start_relay
+wait_for 'relay startup' "kill -0 '${relay_pid}' && grep -q RELAY_STARTED '${proof_root}/relay.trace'"
+wait_for 'private Workspace endpoint' "test -f '${proof_root}/state/workspace-connector.trace' && grep -q WORKSPACE_DIRECT_STARTED '${proof_root}/state/workspace-connector.trace'"
 wait_for 'outbound Workspace relay registration' "grep -q WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace'"
 run_frontend frontend-start > "${proof_root}/frontend-start.out"
 grep -q WORKSPACE_DISCOVERED_BY_IDENTITY=PASS "${proof_root}/frontend-start.out"
@@ -199,6 +209,22 @@ grep -q RELAY_DISCONNECT_RECONNECT=PASS "${proof_root}/frontend-observe.out"
 grep -q WORKSPACE_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-observe.out"
 grep -q REMOTE_FRONTEND_ARTIFACT="${artifact_uri}" "${proof_root}/frontend-observe.out"
 
+run_frontend frontend-fallback > "${proof_root}/frontend-fallback.out"
+grep -q LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS "${proof_root}/frontend-fallback.out"
+
+run_frontend frontend-direct > "${proof_root}/frontend-direct.out" &
+frontend_pid=$!
+wait_for 'direct frontend discovery' "test -f '${proof_root}/state/direct-discovered'"
+kill "${relay_pid}"
+wait "${relay_pid}" 2>/dev/null || true
+relay_pid=""
+touch "${proof_root}/state/direct-discovered.go"
+wait "${frontend_pid}"
+frontend_pid=""
+grep -q LAN_DIRECT_NO_RELAY=PASS "${proof_root}/frontend-direct.out"
+grep -q LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS "${proof_root}/frontend-direct.out"
+grep -q WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-direct.out"
+
 test "$(sha256sum "${published_path}" | cut -d ' ' -f 1)" = "${source_digest}"
 test "$(docker inspect -f '{{.HostConfig.Privileged}}' "${container_name}")" = false
 test "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "${container_name}")" = 0
@@ -208,6 +234,9 @@ printf '%s\n' \
   'WORKSPACE_CONNECTION_DESCRIPTOR=PASS' \
   'LOCAL_CONNECTIVITY=PASS' \
   'RELAY_CONNECTIVITY=PASS' \
+  'LAN_DIRECT_NO_RELAY=PASS' \
+  'LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS' \
+  'LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS' \
   'MANUAL_IP_REQUIRED=NO' \
   'WORKSPACE_INBOUND_PORT_REQUIRED=NO' \
   'REMOTE_FRONTEND_E2E=PASS' \
