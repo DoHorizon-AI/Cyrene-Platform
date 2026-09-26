@@ -12,6 +12,7 @@ mod api;
 mod auth;
 mod direct;
 mod directory;
+mod persistent_directory;
 mod relay;
 mod transport;
 
@@ -21,8 +22,10 @@ pub use auth::{
 };
 pub use direct::DirectWorkspaceServer;
 pub use directory::{
-    validate_descriptor, InMemoryWorkspaceDirectory, WorkspaceDirectory, WorkspaceMembership,
+    validate_descriptor, InMemoryWorkspaceDirectory, WorkspaceDirectory, WorkspaceDirectoryError,
+    WorkspaceMembership,
 };
+pub use persistent_directory::FileWorkspaceDirectory;
 pub use relay::WorkspaceRelay;
 pub use transport::{
     connect_discovered_workspace, connect_relay_session, run_workspace_connector_session,
