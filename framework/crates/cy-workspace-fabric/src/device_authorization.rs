@@ -80,7 +80,15 @@ pub enum DeviceAuthorizationState {
         approver: UserIdentityRef,
         challenge: [u8; 32],
     },
+    /// Durable reservation written before the certificate issuer is called.
+    /// Retries must use the enrollment ID as an issuer idempotency key.
+    Issuing {
+        approval_id: DeviceAuthorizationId,
+        approver: UserIdentityRef,
+        issued_at_unix_ms: u64,
+    },
     Approved {
+        approval_id: DeviceAuthorizationId,
         approver: UserIdentityRef,
         decided_at_unix_ms: u64,
         certificate: IssuedDeviceCertificate,
@@ -184,6 +192,8 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         &self,
         code_hash: &DeviceAuthorizationCodeHash,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError>;
+    /// Resolves the same ID while it is awaiting assertion, issuing, or
+    /// approved so an interrupted issuer operation can be resumed safely.
     fn by_approval_id(
         &self,
         approval_id: &DeviceAuthorizationId,
@@ -250,12 +260,20 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         &self,
         approval_id: &DeviceAuthorizationId,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
-        self.find(|record| {
-            matches!(
-                record.state,
-                DeviceAuthorizationState::AwaitingWebAuthn { approval_id: current, .. }
-                    if &current == approval_id
-            )
+        self.find(|record| match &record.state {
+            DeviceAuthorizationState::AwaitingWebAuthn {
+                approval_id: current,
+                ..
+            }
+            | DeviceAuthorizationState::Issuing {
+                approval_id: current,
+                ..
+            }
+            | DeviceAuthorizationState::Approved {
+                approval_id: current,
+                ..
+            } => current == approval_id,
+            _ => false,
         })
     }
 
@@ -424,9 +442,14 @@ pub trait WebAuthnAssertionVerifier: Send + Sync {
     ) -> Result<(), DeviceAuthorizationPortError>;
 }
 
-/// External CA boundary. Implementations must be idempotent by enrollment ID,
-/// honor the exact organization/workspace scope, and bind the issued
-/// certificate to the supplied SPKI digest.
+/// External CA boundary. Implementations must durably and concurrently
+/// deduplicate by enrollment ID, returning the same certificate for every
+/// retry of the same request, including after a signer restart. They must
+/// honor the exact organization/workspace scope and bind the issued
+/// certificate to the supplied SPKI digest. The authorization record is
+/// durably reserved as `Issuing` before this port is called, so an error may
+/// have an unknown outcome and the manager will retry with the same ID and
+/// request parameters.
 pub trait DeviceCertificateIssuer: Send + Sync {
     fn issue_device_certificate(
         &self,
@@ -514,6 +537,8 @@ pub enum DeviceAuthorizationError {
     WebAuthnUnavailable,
     #[error("certificate signer unavailable or rejected the request")]
     CertificateSigningFailed,
+    #[error("certificate issuance outcome is unknown; retry the same approval to recover")]
+    CertificateIssuanceInProgress,
     #[error("issued certificate binding does not match the authorization")]
     CertificateBindingMismatch,
     #[error("polling occurred before the required interval")]
@@ -679,15 +704,28 @@ where
         now_unix_ms: u64,
         ports: &impl DeviceApprovalPorts,
     ) -> Result<(), DeviceAuthorizationError> {
-        if assertion.is_empty() || assertion.len() > 16 * 1024 {
-            return Err(DeviceAuthorizationError::InvalidWebAuthnAssertion);
-        }
         let mut record = self
             .store
             .by_approval_id(approval_id)
             .map_err(map_store_error)?
             .ok_or(DeviceAuthorizationError::InvalidCode)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
+
+        // An Issuing record proves that membership, CSR binding, and the
+        // WebAuthn assertion were already checked before the durable CAS.
+        // Resume using the persisted request parameters and enrollment ID;
+        // re-verifying a one-time assertion here could prevent recovery.
+        match &record.state {
+            DeviceAuthorizationState::Issuing { .. } => {
+                return self.issue_reserved_approval(record, ports)
+            }
+            DeviceAuthorizationState::Approved { .. } => return Ok(()),
+            DeviceAuthorizationState::AwaitingWebAuthn { .. } => {}
+            state => return Err(state_error(state)),
+        }
+        if assertion.is_empty() || assertion.len() > 16 * 1024 {
+            return Err(DeviceAuthorizationError::InvalidWebAuthnAssertion);
+        }
         let (approver, challenge) = match &record.state {
             DeviceAuthorizationState::AwaitingWebAuthn {
                 approval_id: current,
@@ -737,35 +775,124 @@ where
             }
         }
 
+        // Reserve the transition before the external CA side effect. If
+        // denial wins this CAS, no certificate can be issued. Once Issuing is
+        // durable, denial and expiry cannot cancel an ambiguous signer call.
+        let issued_at_unix_ms = now_unix_ms;
+        record.state = DeviceAuthorizationState::Issuing {
+            approval_id: *approval_id,
+            approver,
+            issued_at_unix_ms,
+        };
+        let next_revision = record
+            .revision
+            .checked_add(1)
+            .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+        self.replace(record.clone())?;
+        record.revision = next_revision;
+        self.issue_reserved_approval(record, ports)
+    }
+
+    fn issue_reserved_approval(
+        &self,
+        mut record: DeviceAuthorizationRecord,
+        ports: &impl DeviceApprovalPorts,
+    ) -> Result<(), DeviceAuthorizationError> {
+        let (approval_id, approver, issued_at_unix_ms) = match &record.state {
+            DeviceAuthorizationState::Issuing {
+                approval_id,
+                approver,
+                issued_at_unix_ms,
+            } => (*approval_id, approver.clone(), *issued_at_unix_ms),
+            state => return Err(state_error(state)),
+        };
         let certificate = match ports.issue_device_certificate(
             &record.id,
             &record.scope,
             &record.csr_der,
             &record.spki_sha256,
-            now_unix_ms,
+            issued_at_unix_ms,
         ) {
             Ok(certificate) => certificate,
             Err(_) => {
-                self.release_approval(record, approval_id)?;
-                return Err(DeviceAuthorizationError::CertificateSigningFailed);
+                // A signer error does not prove that the CA did not commit.
+                // Keep Issuing and let a retry query/replay the same durable
+                // idempotency key. A concurrent retry may already have
+                // completed the state transition successfully.
+                if self.approval_is_durably_approved(&approval_id)? {
+                    return Ok(());
+                }
+                return Err(DeviceAuthorizationError::CertificateIssuanceInProgress);
             }
         };
         if certificate.certificate_der.is_empty()
             || certificate.serial_number.is_empty()
             || certificate.scope != record.scope
             || certificate.spki_sha256 != record.spki_sha256
-            || certificate.not_after_unix_ms <= now_unix_ms
+            || certificate.not_after_unix_ms <= issued_at_unix_ms
         {
-            self.deny_reserved_approval(record, approval_id, &approver, now_unix_ms)?;
             return Err(DeviceAuthorizationError::CertificateBindingMismatch);
         }
 
-        record.state = DeviceAuthorizationState::Approved {
-            approver,
-            decided_at_unix_ms: now_unix_ms,
-            certificate,
-        };
-        self.replace(record)
+        // Polling and concurrent idempotent retries can advance unrelated CAS
+        // revisions while the CA call is running. Re-read and retry the final
+        // transition only while the same issuance reservation remains active.
+        for _ in 0..5 {
+            match &record.state {
+                DeviceAuthorizationState::Issuing {
+                    approval_id: current_id,
+                    approver: current_approver,
+                    issued_at_unix_ms: current_issued_at,
+                } if current_id == &approval_id
+                    && current_approver == &approver
+                    && *current_issued_at == issued_at_unix_ms => {}
+                DeviceAuthorizationState::Approved {
+                    approval_id: current_id,
+                    certificate: current_certificate,
+                    ..
+                } if current_id == &approval_id && current_certificate == &certificate => {
+                    return Ok(())
+                }
+                state => return Err(state_error(state)),
+            }
+
+            let mut replacement = record.clone();
+            replacement.state = DeviceAuthorizationState::Approved {
+                approval_id,
+                approver: approver.clone(),
+                decided_at_unix_ms: issued_at_unix_ms,
+                certificate: certificate.clone(),
+            };
+            match self.replace(replacement) {
+                Ok(()) => return Ok(()),
+                Err(DeviceAuthorizationError::ConcurrentTransition) => {
+                    record = self
+                        .store
+                        .by_approval_id(&approval_id)
+                        .map_err(map_store_error)?
+                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(DeviceAuthorizationError::ConcurrentTransition)
+    }
+
+    fn approval_is_durably_approved(
+        &self,
+        approval_id: &DeviceAuthorizationId,
+    ) -> Result<bool, DeviceAuthorizationError> {
+        let record = self
+            .store
+            .by_approval_id(approval_id)
+            .map_err(map_store_error)?;
+        Ok(matches!(
+            record.map(|record| record.state),
+            Some(DeviceAuthorizationState::Approved {
+                approval_id: current,
+                ..
+            }) if current == *approval_id
+        ))
     }
 
     /// Denies a pending enrollment once. A denial also invalidates any active
@@ -818,8 +945,10 @@ where
         self.replace(record)
     }
 
-    /// Polls with the device code. Successful certificate delivery atomically
-    /// consumes the enrollment, so replay cannot receive it a second time.
+    /// Polls with the device code and consumes an approved enrollment before
+    /// returning its certificate. This provides at-most-once delivery: if the
+    /// response is lost after the CAS, the device cannot fetch it again. A
+    /// retryable delivery guarantee needs a durable acknowledgment protocol.
     pub fn poll(
         &self,
         device_code: &str,
@@ -863,7 +992,8 @@ where
         record.last_poll_at_unix_ms = Some(now_unix_ms);
         match record.state.clone() {
             DeviceAuthorizationState::Pending
-            | DeviceAuthorizationState::AwaitingWebAuthn { .. } => {
+            | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+            | DeviceAuthorizationState::Issuing { .. } => {
                 let interval_ms = record.poll_interval_ms;
                 self.replace(record)?;
                 Ok(DeviceAuthorizationPoll::Pending { interval_ms })
@@ -872,6 +1002,7 @@ where
                 approver,
                 decided_at_unix_ms,
                 certificate,
+                ..
             } => {
                 record.state = DeviceAuthorizationState::Consumed {
                     approver,
@@ -911,6 +1042,11 @@ where
         record: &mut DeviceAuthorizationRecord,
         now_unix_ms: u64,
     ) -> Result<(), DeviceAuthorizationError> {
+        // Issuance may already have succeeded at the CA. Keep its reservation
+        // recoverable even after the original user-code TTL has elapsed.
+        if matches!(record.state, DeviceAuthorizationState::Issuing { .. }) {
+            return Ok(());
+        }
         if now_unix_ms < record.expires_at_unix_ms {
             return Ok(());
         }
@@ -927,6 +1063,7 @@ where
                     .ok_or(DeviceAuthorizationError::InvalidCode)?;
                 Err(DeviceAuthorizationError::Expired)
             }
+            DeviceAuthorizationState::Issuing { .. } => Ok(()),
             DeviceAuthorizationState::Expired => Err(DeviceAuthorizationError::Expired),
             DeviceAuthorizationState::Denied { .. } => Err(DeviceAuthorizationError::Denied),
             DeviceAuthorizationState::Consumed { .. } => {
@@ -1051,6 +1188,9 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn hash_code(kind: &[u8], code: &[u8]) -> DeviceAuthorizationCodeHash {
+    // This unkeyed digest prevents raw-code storage but does not prevent an
+    // offline search of user codes after a database leak. Production storage
+    // needs a server-keyed HMAC port; no key is available at this layer.
     let mut hasher = Sha256::new();
     hasher.update(b"cyrene-device-authorization-v1\0");
     hasher.update(kind);
@@ -1069,6 +1209,7 @@ fn state_error(state: &DeviceAuthorizationState) -> DeviceAuthorizationError {
     match state {
         DeviceAuthorizationState::Pending => DeviceAuthorizationError::Pending,
         DeviceAuthorizationState::AwaitingWebAuthn { .. }
+        | DeviceAuthorizationState::Issuing { .. }
         | DeviceAuthorizationState::Approved { .. } => DeviceAuthorizationError::AlreadyFinal,
         DeviceAuthorizationState::Denied { .. } => DeviceAuthorizationError::Denied,
         DeviceAuthorizationState::Consumed { .. } => DeviceAuthorizationError::AlreadyConsumed,
@@ -1087,6 +1228,8 @@ fn map_store_error(error: DeviceAuthorizationStoreError) -> DeviceAuthorizationE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Condvar};
+    use std::thread;
 
     struct TestCsrValidator;
 
@@ -1167,11 +1310,214 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct BlockingIssuerState {
+        in_flight: bool,
+        released: bool,
+        duplicate_waiters: usize,
+        side_effect_count: usize,
+        certificate: Option<IssuedDeviceCertificate>,
+    }
+
+    struct BlockingApprovalPorts {
+        state: Mutex<BlockingIssuerState>,
+        changed: Condvar,
+        entered: mpsc::Sender<()>,
+    }
+
+    impl BlockingApprovalPorts {
+        fn new() -> (Self, mpsc::Receiver<()>) {
+            let (entered, entered_rx) = mpsc::channel();
+            (
+                Self {
+                    state: Mutex::new(BlockingIssuerState::default()),
+                    changed: Condvar::new(),
+                    entered,
+                },
+                entered_rx,
+            )
+        }
+
+        fn release_signer(&self) {
+            let mut state = self.state.lock().expect("signer state");
+            state.released = true;
+            self.changed.notify_all();
+        }
+
+        fn wait_for_duplicate_retry(&self) {
+            let mut state = self.state.lock().expect("signer state");
+            while state.duplicate_waiters == 0 {
+                state = self.changed.wait(state).expect("signer state");
+            }
+        }
+
+        fn side_effect_count(&self) -> usize {
+            self.state.lock().expect("signer state").side_effect_count
+        }
+    }
+
+    impl DeviceCsrValidator for BlockingApprovalPorts {
+        fn validate_and_hash_spki(
+            &self,
+            _csr_der: &[u8],
+        ) -> Result<[u8; 32], DeviceAuthorizationPortError> {
+            Ok([7; 32])
+        }
+    }
+
+    impl WorkspaceMembershipPort for BlockingApprovalPorts {
+        fn is_member(
+            &self,
+            _approver: &UserIdentityRef,
+            _scope: &DeviceAuthorizationScope,
+        ) -> Result<bool, DeviceAuthorizationPortError> {
+            Ok(true)
+        }
+    }
+
+    impl WebAuthnAssertionVerifier for BlockingApprovalPorts {
+        fn verify_approval_assertion(
+            &self,
+            _approver: &UserIdentityRef,
+            _challenge: &[u8; 32],
+            assertion: &[u8],
+            _now_unix_ms: u64,
+        ) -> Result<(), DeviceAuthorizationPortError> {
+            if assertion == b"test-only-valid-assertion" {
+                Ok(())
+            } else {
+                Err(DeviceAuthorizationPortError::Rejected)
+            }
+        }
+    }
+
+    impl DeviceCertificateIssuer for BlockingApprovalPorts {
+        fn issue_device_certificate(
+            &self,
+            _enrollment_id: &DeviceAuthorizationId,
+            scope: &DeviceAuthorizationScope,
+            _csr_der: &[u8],
+            expected_spki_sha256: &[u8; 32],
+            issued_at_unix_ms: u64,
+        ) -> Result<IssuedDeviceCertificate, DeviceAuthorizationPortError> {
+            let mut state = self.state.lock().expect("signer state");
+            if let Some(certificate) = &state.certificate {
+                return Ok(certificate.clone());
+            }
+            if state.in_flight {
+                state.duplicate_waiters += 1;
+                self.changed.notify_all();
+                while state.certificate.is_none() {
+                    state = self.changed.wait(state).expect("signer state");
+                }
+                return Ok(state.certificate.clone().expect("issued certificate"));
+            }
+
+            state.in_flight = true;
+            state.side_effect_count += 1;
+            let _ = self.entered.send(());
+            while !state.released {
+                state = self.changed.wait(state).expect("signer state");
+            }
+            let certificate = IssuedDeviceCertificate {
+                certificate_der: b"test-only-idempotent-certificate".to_vec(),
+                serial_number: vec![1],
+                scope: scope.clone(),
+                spki_sha256: *expected_spki_sha256,
+                not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
+            };
+            state.certificate = Some(certificate.clone());
+            state.in_flight = false;
+            self.changed.notify_all();
+            Ok(certificate)
+        }
+    }
+
+    #[derive(Default)]
+    struct UncertainOnceApprovalPorts {
+        state: Mutex<Option<(DeviceAuthorizationId, IssuedDeviceCertificate)>>,
+        calls: Mutex<usize>,
+    }
+
+    impl DeviceCsrValidator for UncertainOnceApprovalPorts {
+        fn validate_and_hash_spki(
+            &self,
+            _csr_der: &[u8],
+        ) -> Result<[u8; 32], DeviceAuthorizationPortError> {
+            Ok([7; 32])
+        }
+    }
+
+    impl WorkspaceMembershipPort for UncertainOnceApprovalPorts {
+        fn is_member(
+            &self,
+            _approver: &UserIdentityRef,
+            _scope: &DeviceAuthorizationScope,
+        ) -> Result<bool, DeviceAuthorizationPortError> {
+            Ok(true)
+        }
+    }
+
+    impl WebAuthnAssertionVerifier for UncertainOnceApprovalPorts {
+        fn verify_approval_assertion(
+            &self,
+            _approver: &UserIdentityRef,
+            _challenge: &[u8; 32],
+            assertion: &[u8],
+            _now_unix_ms: u64,
+        ) -> Result<(), DeviceAuthorizationPortError> {
+            if assertion == b"test-only-valid-assertion" {
+                Ok(())
+            } else {
+                Err(DeviceAuthorizationPortError::Rejected)
+            }
+        }
+    }
+
+    impl DeviceCertificateIssuer for UncertainOnceApprovalPorts {
+        fn issue_device_certificate(
+            &self,
+            enrollment_id: &DeviceAuthorizationId,
+            scope: &DeviceAuthorizationScope,
+            _csr_der: &[u8],
+            expected_spki_sha256: &[u8; 32],
+            issued_at_unix_ms: u64,
+        ) -> Result<IssuedDeviceCertificate, DeviceAuthorizationPortError> {
+            let mut calls = self.calls.lock().expect("signer call count");
+            *calls += 1;
+            let mut state = self.state.lock().expect("signer state");
+            if let Some((existing_id, certificate)) = &*state {
+                return if existing_id == enrollment_id {
+                    Ok(certificate.clone())
+                } else {
+                    Err(DeviceAuthorizationPortError::Rejected)
+                };
+            }
+            let certificate = IssuedDeviceCertificate {
+                certificate_der: b"test-only-committed-before-timeout".to_vec(),
+                serial_number: vec![2],
+                scope: scope.clone(),
+                spki_sha256: *expected_spki_sha256,
+                not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
+            };
+            *state = Some((*enrollment_id, certificate));
+            // Model a lost response after the CA committed the certificate.
+            Err(DeviceAuthorizationPortError::Unavailable)
+        }
+    }
+
     fn manager(
     ) -> DeviceAuthorizationManager<InMemoryDeviceAuthorizationStore, InMemoryUserCodeAttemptLimiter>
     {
+        manager_with_store(InMemoryDeviceAuthorizationStore::default())
+    }
+
+    fn manager_with_store(
+        store: InMemoryDeviceAuthorizationStore,
+    ) -> DeviceAuthorizationManager<InMemoryDeviceAuthorizationStore, InMemoryUserCodeAttemptLimiter>
+    {
         DeviceAuthorizationManager::new(
-            InMemoryDeviceAuthorizationStore::default(),
+            store,
             InMemoryUserCodeAttemptLimiter::default(),
             DeviceAuthorizationPolicy {
                 authorization_ttl_ms: 60_000,
@@ -1251,6 +1597,186 @@ mod tests {
             manager.poll(&start.device_code, 2_200),
             Err(DeviceAuthorizationError::AlreadyConsumed)
         );
+    }
+
+    #[test]
+    fn denial_cannot_win_after_the_issuer_reservation_is_durable() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = Arc::new(manager_with_store(store.clone()));
+        let start = start(manager.as_ref());
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[4; 32],
+                200,
+                &TestMembership(true),
+            )
+            .expect("challenge");
+        let (ports, entered_rx) = BlockingApprovalPorts::new();
+        let ports = Arc::new(ports);
+
+        let approval_manager = Arc::clone(&manager);
+        let approval_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let approval = thread::spawn(move || {
+            approval_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                approval_ports.as_ref(),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("signer was entered after Issuing was committed");
+
+        let code_hash = hash_code(b"user", normalize_user_code(&start.user_code).as_bytes());
+        let reserved = store
+            .by_user_code_hash(&code_hash)
+            .expect("read record")
+            .expect("authorization");
+        assert!(matches!(
+            reserved.state,
+            DeviceAuthorizationState::Issuing { .. }
+        ));
+        assert_eq!(reserved.revision, 2);
+        assert_eq!(
+            manager.deny(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[5; 32],
+                301,
+                &TestMembership(true),
+            ),
+            Err(DeviceAuthorizationError::AlreadyFinal)
+        );
+        assert!(matches!(
+            store
+                .by_user_code_hash(&code_hash)
+                .expect("read after denial")
+                .expect("authorization")
+                .state,
+            DeviceAuthorizationState::Issuing { .. }
+        ));
+
+        ports.release_signer();
+        assert_eq!(approval.join().expect("approval thread"), Ok(()));
+        let approved = store
+            .by_approval_id(&challenge.approval_id)
+            .expect("read approved record")
+            .expect("approval remains addressable");
+        assert!(matches!(
+            approved.state,
+            DeviceAuthorizationState::Approved { .. }
+        ));
+        assert_eq!(ports.side_effect_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_and_repeated_approval_attempts_share_one_issuer_result() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = Arc::new(manager_with_store(store));
+        let start = start(manager.as_ref());
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[4; 32],
+                200,
+                &TestMembership(true),
+            )
+            .expect("challenge");
+        let (ports, entered_rx) = BlockingApprovalPorts::new();
+        let ports = Arc::new(ports);
+
+        let first_manager = Arc::clone(&manager);
+        let first_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let first = thread::spawn(move || {
+            first_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                first_ports.as_ref(),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("first signer call entered");
+
+        let retry_manager = Arc::clone(&manager);
+        let retry_ports = Arc::clone(&ports);
+        let retry_id = challenge.approval_id;
+        let retry = thread::spawn(move || {
+            retry_manager.complete_approval(&retry_id, &[], 301, retry_ports.as_ref())
+        });
+        ports.wait_for_duplicate_retry();
+        assert_eq!(ports.side_effect_count(), 1);
+
+        ports.release_signer();
+        assert_eq!(first.join().expect("first approval"), Ok(()));
+        assert_eq!(retry.join().expect("repeated approval"), Ok(()));
+        assert_eq!(
+            manager.complete_approval(&challenge.approval_id, &[], 302, ports.as_ref()),
+            Ok(())
+        );
+        assert_eq!(ports.side_effect_count(), 1);
+    }
+
+    #[test]
+    fn an_uncertain_ca_response_recovers_from_the_persisted_issuing_state() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let start = start(&manager);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[4; 32],
+                200,
+                &TestMembership(true),
+            )
+            .expect("challenge");
+        let ports = UncertainOnceApprovalPorts::default();
+
+        assert_eq!(
+            manager.complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                300,
+                &ports,
+            ),
+            Err(DeviceAuthorizationError::CertificateIssuanceInProgress)
+        );
+        let issuing = store
+            .by_approval_id(&challenge.approval_id)
+            .expect("read reservation")
+            .expect("issuance remains recoverable");
+        assert!(matches!(
+            issuing.state,
+            DeviceAuthorizationState::Issuing { .. }
+        ));
+
+        // A new manager models process recovery over the same durable store.
+        let restarted_manager = manager_with_store(store.clone());
+        assert_eq!(
+            restarted_manager.complete_approval(&challenge.approval_id, &[], 400, &ports),
+            Ok(())
+        );
+        let approved = store
+            .by_approval_id(&challenge.approval_id)
+            .expect("read recovered state")
+            .expect("approved record");
+        assert!(matches!(
+            approved.state,
+            DeviceAuthorizationState::Approved { .. }
+        ));
+        assert_eq!(*ports.calls.lock().expect("signer call count"), 2);
     }
 
     #[test]
