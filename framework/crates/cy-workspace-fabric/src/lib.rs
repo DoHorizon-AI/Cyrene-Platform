@@ -49,6 +49,7 @@ mod web_relay_session;
 pub(crate) mod device_authorization_sweeper;
 pub mod webauthn_credential_store;
 pub mod webauthn_http;
+mod webauthn_http_binding_postgres;
 mod webauthn_postgres_store;
 pub mod webauthn_verifier;
 
@@ -140,6 +141,9 @@ pub use webauthn_http::{
     WebAuthnHttpSessionBindingError, WebAuthnHttpSessionBindingStore, WebAuthnHttpState,
     WebAuthnSessionBindingDigest, WebAuthnSessionCeremonyBinding, WebAuthnSessionContextError,
     WebAuthnSessionFinishReservation,
+};
+pub use webauthn_http_binding_postgres::{
+    PostgresWebAuthnHttpSessionBindingStore, WebAuthnHttpSessionBindingPostgresError,
 };
 pub use webauthn_postgres_store::{PostgresWebAuthnCredentialStore, WebAuthnPostgresStoreError};
 pub use webauthn_verifier::{
