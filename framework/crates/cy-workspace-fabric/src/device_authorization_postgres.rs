@@ -21,11 +21,12 @@ use sqlx::{PgPool, Postgres, Row};
 use thiserror::Error;
 
 use crate::device_authorization::{
-    DeviceAuthorizationCodeHash, DeviceAuthorizationId, DeviceAuthorizationRecord,
-    DeviceAuthorizationScope, DeviceAuthorizationState, DeviceAuthorizationStore,
-    DeviceAuthorizationStoreError, DeviceCertificateDeliveryReceipt,
-    DeviceCertificateIssuanceFailure, DeviceCertificateRetirementError,
-    DeviceCertificateRetirementReason, IssuedDeviceCertificate,
+    DeviceAuthorizationCodeHash, DeviceAuthorizationDeviceKey, DeviceAuthorizationId,
+    DeviceAuthorizationRecord, DeviceAuthorizationRegistrationBinding, DeviceAuthorizationScope,
+    DeviceAuthorizationState, DeviceAuthorizationStore, DeviceAuthorizationStoreError,
+    DeviceCertificateDeliveryReceipt, DeviceCertificateIssuanceFailure,
+    DeviceCertificateRetirementError, DeviceCertificateRetirementReason, IssuedDeviceCertificate,
+    VerifiedDirectoryRegistrationBinding,
 };
 use crate::VersionedUserCodeDigest;
 
@@ -53,6 +54,7 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations/device_authorization");
 
 const SELECT_COLUMNS: &str =
     "id, device_code_hash, user_code_key_version, user_code_mac, organization_id, workspace_id, \
+     registration_binding_id, device_id, authorization_generation, \
      csr_der, csr_sha256, spki_sha256, created_at_unix_ms, expires_at_unix_ms, \
      poll_interval_ms, last_poll_at_unix_ms, revision, state_kind, approval_id, \
      state_deadline_unix_ms, state_payload";
@@ -457,7 +459,8 @@ async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> Sto
     let encoded = EncodedRecord::new(record)?;
     let result = sqlx::query(&format!(
         "INSERT INTO {TABLE} ({SELECT_COLUMNS}) VALUES \
-         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"
+         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+          $18, $19, $20, $21)"
     ))
     .bind(encoded.id)
     .bind(encoded.device_code_hash)
@@ -465,6 +468,9 @@ async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> Sto
     .bind(encoded.user_code_mac)
     .bind(encoded.organization_id)
     .bind(encoded.workspace_id)
+    .bind(encoded.registration_binding_id)
+    .bind(encoded.device_id)
+    .bind(encoded.authorization_generation)
     .bind(encoded.csr_der)
     .bind(encoded.csr_sha256)
     .bind(encoded.spki_sha256)
@@ -740,6 +746,9 @@ fn valid_delivery_ack_transition(
                 && current_certificate_sha256 == &receipt.certificate_sha256
                 && receipt.csr_sha256 == current.csr_sha256
                 && receipt.csr_spki_sha256 == current.spki_sha256
+                && receipt.device_id == current.registration_binding.key().device_id
+                && receipt.authorization_generation
+                    == current.registration_binding.authorization_generation()
                 && receipt.acknowledged_at_unix_ms < *delivery_deadline_unix_ms
                 && to_i64(receipt.acknowledged_at_unix_ms).is_ok()
         }
@@ -758,6 +767,7 @@ fn same_immutable_fields(
         && current.csr_der == replacement.csr_der
         && current.csr_sha256 == replacement.csr_sha256
         && current.spki_sha256 == replacement.spki_sha256
+        && current.registration_binding == replacement.registration_binding
         && current.created_at_unix_ms == replacement.created_at_unix_ms
         && current.expires_at_unix_ms == replacement.expires_at_unix_ms
 }
@@ -788,6 +798,9 @@ struct EncodedRecord {
     user_code_mac: Vec<u8>,
     organization_id: String,
     workspace_id: String,
+    registration_binding_id: Vec<u8>,
+    device_id: String,
+    authorization_generation: i64,
     csr_der: Vec<u8>,
     csr_sha256: Vec<u8>,
     spki_sha256: Vec<u8>,
@@ -804,6 +817,9 @@ struct EncodedRecord {
 
 impl EncodedRecord {
     fn new(record: &DeviceAuthorizationRecord) -> StoreResult<Self> {
+        if !registration_binding_matches_record(record) {
+            return Err(DeviceAuthorizationStoreError::Unavailable);
+        }
         if record.csr_der.is_empty()
             || record.csr_der.len() > MAX_CSR_BYTES
             || sha256(&record.csr_der) != record.csr_sha256
@@ -819,7 +835,8 @@ impl EncodedRecord {
             &record.spki_sha256,
             &record.id,
             &record.csr_sha256,
-        ) {
+        ) || !stored_state.matches_registration(&record.registration_binding)
+        {
             return Err(DeviceAuthorizationStoreError::Unavailable);
         }
         let state_kind = stored_state.kind();
@@ -842,6 +859,11 @@ impl EncodedRecord {
             user_code_mac: mac.to_vec(),
             organization_id: record.scope.organization_id.clone(),
             workspace_id: record.scope.workspace_id.clone(),
+            registration_binding_id: record.registration_binding.binding_id().to_vec(),
+            device_id: record.registration_binding.key().device_id.clone(),
+            authorization_generation: to_i64(
+                record.registration_binding.authorization_generation(),
+            )?,
             csr_der: record.csr_der.clone(),
             csr_sha256: record.csr_sha256.to_vec(),
             spki_sha256: record.spki_sha256.to_vec(),
@@ -881,6 +903,19 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
         organization_id: get!("organization_id", String),
         workspace_id: get!("workspace_id", String),
     };
+    let registration_binding = PersistedDirectoryBinding {
+        binding_id: fixed::<16>(get!("registration_binding_id", Vec<u8>))?,
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        device_id: get!("device_id", String),
+        authorization_generation: from_i64(get!("authorization_generation", i64))?,
+        csr_sha256: fixed::<32>(get!("csr_sha256", Vec<u8>))?,
+        spki_sha256: fixed::<32>(get!("spki_sha256", Vec<u8>))?,
+    };
+    let registration_binding =
+        DeviceAuthorizationRegistrationBinding::from_verified_directory_binding(
+            &registration_binding,
+        );
     let csr_der: Vec<u8> = get!("csr_der", Vec<u8>);
     let csr_sha256 = fixed::<32>(get!("csr_sha256", Vec<u8>))?;
     let spki_sha256 = fixed::<32>(get!("spki_sha256", Vec<u8>))?;
@@ -920,12 +955,14 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
         || !wrapper
             .state
             .is_valid(&scope, &spki_sha256, &id, &csr_sha256)
+        || !wrapper.state.matches_registration(&registration_binding)
     {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
 
     Ok(DeviceAuthorizationRecord {
         id,
+        registration_binding,
         device_code_hash,
         user_code_digest,
         scope,
@@ -939,6 +976,59 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
         revision,
         state: wrapper.state.into_domain()?,
     })
+}
+
+/// Rehydrates the immutable binding snapshot retained with an authorization row.
+/// Database reads remain untrusted until a registered operation validates them
+/// against the current Directory rows under lock.
+struct PersistedDirectoryBinding {
+    binding_id: [u8; 16],
+    organization_id: String,
+    workspace_id: String,
+    device_id: String,
+    authorization_generation: u64,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+}
+
+impl VerifiedDirectoryRegistrationBinding for PersistedDirectoryBinding {
+    fn binding_id(&self) -> &[u8; 16] {
+        &self.binding_id
+    }
+
+    fn organization_id(&self) -> &str {
+        &self.organization_id
+    }
+
+    fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    fn authorization_generation(&self) -> u64 {
+        self.authorization_generation
+    }
+
+    fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+}
+
+fn registration_binding_matches_record(record: &DeviceAuthorizationRecord) -> bool {
+    let binding = &record.registration_binding;
+    binding.authorization_generation() > 0
+        && !binding.key().device_id.trim().is_empty()
+        && binding.key().organization_id == record.scope.organization_id
+        && binding.key().workspace_id == record.scope.workspace_id
+        && binding.csr_sha256() == &record.csr_sha256
+        && binding.spki_sha256() == &record.spki_sha256
 }
 
 fn fixed<const N: usize>(bytes: Vec<u8>) -> StoreResult<[u8; N]> {
@@ -1037,6 +1127,8 @@ enum StoredAuthorizationState {
 struct StoredDeliveryReceipt {
     authorization_id: DeviceAuthorizationId,
     delivery_id: DeviceAuthorizationId,
+    device_id: String,
+    authorization_generation: u64,
     certificate_sha256: [u8; 32],
     csr_sha256: [u8; 32],
     csr_spki_sha256: [u8; 32],
@@ -1048,6 +1140,8 @@ impl From<&DeviceCertificateDeliveryReceipt> for StoredDeliveryReceipt {
         Self {
             authorization_id: receipt.authorization_id,
             delivery_id: receipt.delivery_id,
+            device_id: receipt.device_id.clone(),
+            authorization_generation: receipt.authorization_generation,
             certificate_sha256: receipt.certificate_sha256,
             csr_sha256: receipt.csr_sha256,
             csr_spki_sha256: receipt.csr_spki_sha256,
@@ -1061,6 +1155,8 @@ impl From<StoredDeliveryReceipt> for DeviceCertificateDeliveryReceipt {
         Self {
             authorization_id: receipt.authorization_id,
             delivery_id: receipt.delivery_id,
+            device_id: receipt.device_id,
+            authorization_generation: receipt.authorization_generation,
             certificate_sha256: receipt.certificate_sha256,
             csr_sha256: receipt.csr_sha256,
             csr_spki_sha256: receipt.csr_spki_sha256,
@@ -1232,6 +1328,9 @@ struct StoredCertificate {
     certificate_der: Vec<u8>,
     ca_chain_der: Vec<Vec<u8>>,
     serial_number: Vec<u8>,
+    registration_binding_id: [u8; 16],
+    device_id: String,
+    authorization_generation: u64,
     scope: StoredScope,
     spki_sha256: [u8; 32],
     not_after_unix_ms: u64,
@@ -1243,6 +1342,9 @@ impl StoredCertificate {
             certificate_der: certificate.certificate_der.clone(),
             ca_chain_der: certificate.ca_chain_der.clone(),
             serial_number: certificate.serial_number.clone(),
+            registration_binding_id: certificate.registration_binding_id,
+            device_id: certificate.device_key.device_id.clone(),
+            authorization_generation: certificate.authorization_generation,
             scope: (&certificate.scope).into(),
             spki_sha256: certificate.spki_sha256,
             not_after_unix_ms: certificate.not_after_unix_ms,
@@ -1250,11 +1352,19 @@ impl StoredCertificate {
     }
 
     fn into_domain(self) -> IssuedDeviceCertificate {
+        let scope = self.scope.into_domain();
         IssuedDeviceCertificate {
             certificate_der: self.certificate_der,
             ca_chain_der: self.ca_chain_der,
             serial_number: self.serial_number,
-            scope: self.scope.into_domain(),
+            registration_binding_id: self.registration_binding_id,
+            device_key: DeviceAuthorizationDeviceKey {
+                organization_id: scope.organization_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                device_id: self.device_id,
+            },
+            authorization_generation: self.authorization_generation,
+            scope,
             spki_sha256: self.spki_sha256,
             not_after_unix_ms: self.not_after_unix_ms,
         }
@@ -1276,9 +1386,20 @@ impl StoredCertificate {
             && chain_bytes.is_some_and(|total| total <= MAX_CERTIFICATE_BUNDLE_BYTES)
             && !self.serial_number.is_empty()
             && self.serial_number.len() <= MAX_SERIAL_NUMBER_BYTES
+            && !self.device_id.trim().is_empty()
+            && self.authorization_generation > 0
             && self.scope.organization_id == scope.organization_id
             && self.scope.workspace_id == scope.workspace_id
             && &self.spki_sha256 == spki_sha256
+    }
+
+    fn matches_registration(&self, binding: &DeviceAuthorizationRegistrationBinding) -> bool {
+        self.registration_binding_id == *binding.binding_id()
+            && self.device_id == binding.key().device_id
+            && self.authorization_generation == binding.authorization_generation()
+            && self.scope.organization_id == binding.key().organization_id
+            && self.scope.workspace_id == binding.key().workspace_id
+            && self.spki_sha256 == *binding.spki_sha256()
     }
 }
 
@@ -1464,6 +1585,28 @@ impl StoredAuthorizationState {
         }
     }
 
+    fn matches_registration(&self, binding: &DeviceAuthorizationRegistrationBinding) -> bool {
+        match self {
+            Self::DeliveryPending { certificate, .. }
+            | Self::RetirementPending { certificate, .. } => {
+                certificate.matches_registration(binding)
+            }
+            Self::Delivered { receipt, .. } => {
+                receipt.device_id == binding.key().device_id
+                    && receipt.authorization_generation == binding.authorization_generation()
+            }
+            Self::Pending
+            | Self::AwaitingWebauthn { .. }
+            | Self::VerifyingWebauthn { .. }
+            | Self::Issuing { .. }
+            | Self::DeliveryExpired { .. }
+            | Self::IssuanceFailed { .. }
+            | Self::Denied { .. }
+            | Self::Consumed { .. }
+            | Self::Expired => true,
+        }
+    }
+
     fn is_valid(
         &self,
         scope: &DeviceAuthorizationScope,
@@ -1523,6 +1666,8 @@ impl StoredAuthorizationState {
             }
             Self::Delivered { receipt, .. } => {
                 receipt.authorization_id == *authorization_id
+                    && !receipt.device_id.trim().is_empty()
+                    && receipt.authorization_generation > 0
                     && receipt.csr_sha256 == *csr_sha256
                     && receipt.csr_spki_sha256 == *spki_sha256
                     && to_i64(receipt.acknowledged_at_unix_ms).is_ok()
@@ -1724,11 +1869,42 @@ mod tests {
         }
     }
 
+    fn registration_binding(
+        binding_id: [u8; 16],
+        device_id: String,
+        authorization_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+    ) -> DeviceAuthorizationRegistrationBinding {
+        DeviceAuthorizationRegistrationBinding::test_fixture(
+            binding_id,
+            DeviceAuthorizationDeviceKey {
+                organization_id: scope().organization_id,
+                workspace_id: scope().workspace_id,
+                device_id,
+            },
+            authorization_generation,
+            csr_sha256,
+            spki_sha256,
+        )
+    }
+
+    fn device_id_for(id: &DeviceAuthorizationId) -> String {
+        id.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     fn certificate() -> IssuedDeviceCertificate {
         IssuedDeviceCertificate {
             certificate_der: vec![0x30, 0x03, 0x01, 0x02, 0x03],
             ca_chain_der: vec![vec![0x30, 0x01, 0x00]],
             serial_number: vec![1, 2, 3],
+            registration_binding_id: [15; 16],
+            device_key: DeviceAuthorizationDeviceKey {
+                organization_id: scope().organization_id,
+                workspace_id: scope().workspace_id,
+                device_id: "device-test".to_owned(),
+            },
+            authorization_generation: 1,
             scope: scope(),
             spki_sha256: [4; 32],
             not_after_unix_ms: 9_000,
@@ -1759,10 +1935,17 @@ mod tests {
         delivery_deadline_unix_ms: u64,
     ) -> DeviceAuthorizationRecord {
         let csr_der = vec![1, 2, 3, 4];
+        let csr_sha256 = sha256(&csr_der);
+        let device_id = device_id_for(&id);
+        let registration_binding =
+            registration_binding(id, device_id.clone(), 1, csr_sha256, [4; 32]);
         let certificate = IssuedDeviceCertificate {
             certificate_der: vec![0x30, 0x03, 0x05, id[0], id[1]],
             ca_chain_der: vec![vec![0x30, 0x01, 0x00]],
             serial_number: vec![id[0], id[1]],
+            registration_binding_id: id,
+            device_key: registration_binding.key().clone(),
+            authorization_generation: 1,
             scope: scope(),
             spki_sha256: [4; 32],
             not_after_unix_ms: delivery_deadline_unix_ms.saturating_add(1_000),
@@ -1771,11 +1954,12 @@ mod tests {
         let now = current_unix_ms();
         DeviceAuthorizationRecord {
             id,
+            registration_binding,
             device_code_hash: sha256(&id),
             user_code_digest: VersionedUserCodeDigest::from_storage_parts(1, user_code_mac)
                 .expect("versioned digest"),
             scope: scope(),
-            csr_sha256: sha256(&csr_der),
+            csr_sha256,
             csr_der,
             spki_sha256: [4; 32],
             created_at_unix_ms: now.saturating_sub(10_000),
@@ -1859,6 +2043,8 @@ mod tests {
                 receipt: DeviceCertificateDeliveryReceipt {
                     authorization_id,
                     delivery_id: [8; 16],
+                    device_id: "device-test".to_owned(),
+                    authorization_generation: 1,
                     certificate_sha256,
                     csr_sha256,
                     csr_spki_sha256: [4; 32],
@@ -2002,6 +2188,13 @@ mod tests {
     fn delivery_ack_requires_matching_receipt_and_open_deadline() {
         let current = DeviceAuthorizationRecord {
             id: [9; 16],
+            registration_binding: registration_binding(
+                [15; 16],
+                "device-test".to_owned(),
+                1,
+                [6; 32],
+                [4; 32],
+            ),
             device_code_hash: [2; 32],
             user_code_digest: VersionedUserCodeDigest::from_storage_parts(1, [3; 32])
                 .expect("versioned digest"),
@@ -2031,6 +2224,8 @@ mod tests {
             receipt: DeviceCertificateDeliveryReceipt {
                 authorization_id: current.id,
                 delivery_id: [8; 16],
+                device_id: "device-test".to_owned(),
+                authorization_generation: 1,
                 certificate_sha256: sha256(&certificate().certificate_der),
                 csr_sha256: current.csr_sha256,
                 csr_spki_sha256: current.spki_sha256,
@@ -2132,6 +2327,10 @@ mod tests {
             receipt: DeviceCertificateDeliveryReceipt {
                 authorization_id: open_record.id,
                 delivery_id: open_delivery_id,
+                device_id: open_record.registration_binding.key().device_id.clone(),
+                authorization_generation: open_record
+                    .registration_binding
+                    .authorization_generation(),
                 certificate_sha256: open_certificate_sha256,
                 csr_sha256: open_record.csr_sha256,
                 csr_spki_sha256: open_record.spki_sha256,
@@ -2177,6 +2376,10 @@ mod tests {
             receipt: DeviceCertificateDeliveryReceipt {
                 authorization_id: expired_record.id,
                 delivery_id: *delivery_id,
+                device_id: expired_record.registration_binding.key().device_id.clone(),
+                authorization_generation: expired_record
+                    .registration_binding
+                    .authorization_generation(),
                 certificate_sha256: *certificate_sha256,
                 csr_sha256: expired_record.csr_sha256,
                 csr_spki_sha256: expired_record.spki_sha256,
