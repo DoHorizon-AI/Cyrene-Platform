@@ -248,6 +248,13 @@ impl ProductOperationCatalog {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Returns whether the catalog contains no Product operations.
+    ///
+    /// 返回目录是否不包含任何 Product 操作。
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 fn is_supported_method(method: &Method) -> bool {
