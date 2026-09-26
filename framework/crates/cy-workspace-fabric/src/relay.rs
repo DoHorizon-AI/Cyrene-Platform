@@ -146,6 +146,27 @@ impl WorkspaceRelay {
         )
     }
 
+    /// Construct an ACA Relay with Frontend workload trust while denying Connectors.
+    ///
+    /// Use this until the durable Workspace device registry and certificate
+    /// authorization adapter are composed. It validates BFF XFCC before the
+    /// signed Frontend handoff but does not accept a WorkspaceConnector.
+    ///
+    /// 配置 ACA Frontend workload 信任，同时拒绝 Connector；持久设备注册表接通前使用。
+    pub fn with_aca_forwarded_frontend_certificate_adapter(
+        directory: Arc<dyn WorkspaceDirectory>,
+        authenticator: Arc<dyn RelayAuthenticator>,
+        frontend_workload_adapter: AcaForwardedBffWorkloadCertificateAdapter,
+    ) -> Self {
+        Self::build(
+            directory,
+            authenticator,
+            None,
+            None,
+            Some(frontend_workload_adapter),
+        )
+    }
+
     fn build(
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,

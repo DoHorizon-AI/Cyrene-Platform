@@ -142,61 +142,63 @@ itself run a Directory service.
 
 ## Relay host security state
 
-`cy-workspace-relay-host` is a runnable, non-fixture process shell around
-`WorkspaceRelay`. Frontend sessions are denied unless the optional BFF workload
-certificate trust and signed handoff verifier are fully configured. The Relay
-checks the same RPC's ACA XFCC certificate under a BFF-only CA and exact
-subject/fingerprint allowlist before validating the short-lived signed handoff;
-the browser's AAD access token is not the Relay credential. Workspace connector
-certificate validation is disabled unless the explicit ACA mode is configured;
-then the host validates XFCC against the separate device CA and file-backed
-device registry. `/healthz` reports only process liveness and `/readyz` stays
-HTTP 503 while production Directory membership/admin, WebAuthn, authorization,
-and Product access dependencies remain unavailable. This is a fail-closed host
-scaffold, not a production Relay deployment. See `src/bin/README.md` for the
-five-variable Frontend configuration, allowlist format, and ACA ingress trust
-boundary.
+`cy-workspace-relay-host` is the non-fixture process entrypoint around
+`WorkspaceRelay`. Startup requires `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`
+and connects to the read-only PostgreSQL Directory; it has no file-backed
+fallback. PostgreSQL TLS uses certificate and hostname verification. Configure
+`sslrootcert` for a private database CA. Missing or unavailable database
+configuration fails startup, and database errors are mapped to fixed safe
+errors.
 
-Run the host locally with an owner-only state directory:
+Frontend authentication is deny-all unless all five BFF trust settings are
+configured. When configured, the Relay checks the same RPC's ACA-overwritten
+XFCC against a dedicated BFF CA, exact subject, and active fingerprint pin
+before verifying the short-lived signed handoff. The browser's AAD access token
+is not the Relay credential. WorkspaceConnector authentication remains
+disabled: this host does not load a device CA or accept Connector sessions
+until the durable device registry adapter is composed. Directory
+administration, DeviceAuthorization, certificate issuance, WebAuthn, and
+Product private access are not composed.
+
+`GET /healthz` reports process liveness. `GET /readyz` performs a bounded,
+read-only PostgreSQL Directory probe and returns fixed dependency booleans; it
+remains HTTP 503 until every required service and the deployment topology are
+verified. The host cannot infer live ACA ingress configuration or private
+network reachability from configuration values. This is a fail-closed
+composition stage, not a production Relay deployment. See
+`src/bin/README.md` for exact runtime settings and health behavior.
+
+Run locally with the trusted database URL in the environment:
 
 ```bash
-CYRENE_WORKSPACE_RELAY_DIRECTORY=/path/to/private/workspace-relay-state \
-  cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
+export CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL='postgresql://<reader>@<host>/<database>?sslmode=verify-full&sslrootcert=/path/to/postgres-roots.pem'
+cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
 ```
 
 The default listeners are `127.0.0.1:8080` for gRPC and `127.0.0.1:8081` for
-health probes. `GET /healthz` returns HTTP 200; `GET /readyz` returns HTTP 503
-until production identity and directory administration exist.
+health probes. A non-loopback Relay bind requires
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`. A
+configured Frontend requires the same explicit assertion even with loopback
+binding. A non-loopback health bind requires
+`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`. These
+settings are operator assertions, not proof of live ACA configuration.
 
-The host defaults to loopback. Enabling ACA device identity requires both
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`
-and `CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE` pointing to a mounted,
-operator-managed client CA bundle. A non-loopback Relay bind requires this
-explicit ACA mode. A non-loopback health bind also requires
-`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`. Both
-settings are operator assertions, not proof of live ACA configuration. ACA
-must bind both listeners to the container interface (for example
-`0.0.0.0:8080` and `0.0.0.0:8081`), explicitly set ingress `targetPort: 8080`
-and `transport: http2`, set `allowInsecure: false`, require client
-certificates with `clientCertificateMode: require`, set private ingress
-(`external: false`), block direct target-port access, and leave `8081` out of
-`additionalPortMappings`. Configure startup/liveness probes at `8081/healthz`
-and readiness at `8081/readyz`. ACA's default probes target the ingress port,
-so explicit probe configuration is required with both listeners. The current
-`/readyz` response is 503 by design, which keeps the revision unready and
-prevents it receiving ingress traffic. Mount a private persistent directory
-and maintain a single active owner for its lock. In ACA mode, the host validates
-the forwarded XFCC certificate chain and then checks its fingerprint against
-the approved device registry. This depends on live ACA ingress requiring client
-certificates and overwriting caller-supplied XFCC; the environment assertion is
-not deployment evidence. Durable device authorization, CA issuance, WebAuthn,
-user identity, Product private credentials, and verified ingress configuration
-must be connected before readiness can be enabled. Do not deploy fixture
-credentials or `DevelopmentSessionVerifier` as production identity.
+ACA must use private HTTP/2 ingress on port 8080 with
+`clientCertificateMode: require`, `allowInsecure: false`, and no direct path
+around Envoy. Health probes use port 8081, which must not be exposed as ingress;
+`/healthz` is liveness and `/readyz` is readiness. ACA ingress requires a client
+certificate before the participant role is known, after which the Relay picks
+the role-specific BFF path. It trusts XFCC only when ACA overwrites incoming
+values and direct bypass is prevented. The review-only ACA template remains
+unapplied. Product APIs currently use internal East Asia ACA endpoints while
+the East Asia environment has no VNet; the separate West US 2 VNet environment
+is not connected, and no PostgreSQL Flexible Server is provisioned. A reviewed
+private network topology that reaches both Directory and the owning Product
+services is a production prerequisite.
 
-The Relay host transports Workspace requests only. Product, Kernel/Lease,
-Runtime, and Artifact authorities remain in their owning components; the host
-does not load fixture handlers or acquire their state.
+The Relay transports Workspace requests only. Product, Kernel/Lease, Runtime,
+and Artifact authorities stay in their owning components; this host does not
+load fixture handlers or acquire their state.
 
 ## PostgreSQL authority (async Directory port)
 
@@ -210,9 +212,10 @@ validate OIDC tokens or create memberships from identity claims. It implements
 the object-safe async `WorkspaceDirectory` port, and Relay and Direct await each
 read while preserving storage errors separately from non-membership. The
 adapter can be injected into those services without `block_on` or synchronous
-database calls. The local Relay host still uses its explicitly configured file
-store; production database selection, credentials, and deployment are not
-configured here. There is no fallback from PostgreSQL errors to a snapshot.
+database calls. The Relay host uses this async port and requires
+`CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`; there is no file-backed fallback.
+The database server, credentials, TLS trust, network path, and deployment are
+not provisioned by this crate or the current ACA template.
 
 The migrations create `memberships`, `roles`, `descriptors`, append-only
 `audit_events`, and stable device-registration binding tables. Operator grant/revoke operations write their changes and
@@ -334,48 +337,34 @@ RPC 附加 `authorization: Bearer <local-token>` metadata。
 
 ## Relay host 安全状态
 
-`cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的可运行非 fixture 进程入口。Frontend 用户身份
-默认拒绝，除非完整配置可选 BFF workload 证书信任和签名 handoff verifier。Relay 会先对同一 RPC 的 ACA XFCC
-证书使用 BFF 专用 CA 和精确 subject/指纹 allowlist 进行校验，再验证短时签名 handoff；浏览器 AAD access token
-不是 Relay credential。Workspace Connector 证书校验默认关闭；显式配置 ACA 模式后，host 才会使用独立设备 CA
-校验 XFCC 并查询文件式设备注册表。`/healthz` 只表示进程存活；生产 Directory membership/admin、WebAuthn、授权和
-Product 访问依赖未接通时 `/readyz` 保持 HTTP 503。这是 fail-closed host 脚手架，不是生产 Relay 部署。
-Frontend 五项配置变量、allowlist 格式和 ACA ingress 信任边界见 `src/bin/README.md`。
+`cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的非 fixture 进程入口。启动必须设置
+`CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL` 并连接只读 PostgreSQL Directory；host 不再回退到文件存储。
+PostgreSQL TLS 会校验证书和主机名；私有数据库 CA 需要通过 `sslrootcert` 配置。数据库配置缺失或不可用时启动失败，并将数据库错误转换为固定安全错误。
 
-使用仅限服务所有者访问的状态目录，可在本地启动 host：
+未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发、WebAuthn 和 Product 私有访问仍未组合。
+
+`GET /healthz` 表示进程存活。`GET /readyz` 会在有界时间内执行只读 PostgreSQL Directory 探测，并返回固定依赖布尔值；全部必需服务和部署拓扑验证完成前，保持 HTTP 503。host 无法从配置值推断 ACA 实际 ingress 设置或私网连通性。这是 fail-closed 的分阶段组合，不是生产 Relay 部署。准确运行配置和探针行为见 `src/bin/README.md`。
+
+本地运行时，在环境变量中提供可信数据库 URL：
 
 ```bash
-CYRENE_WORKSPACE_RELAY_DIRECTORY=/path/to/private/workspace-relay-state \
-  cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
+export CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL='postgresql://<reader>@<host>/<database>?sslmode=verify-full&sslrootcert=/path/to/postgres-roots.pem'
+cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
 ```
 
 默认 gRPC listener 为 `127.0.0.1:8080`，健康探针 listener 为
-`127.0.0.1:8081`。`GET /healthz` 返回 HTTP 200；在生产身份和目录管理接通前，
-`GET /readyz` 返回 HTTP 503。
+`127.0.0.1:8081`。Relay 使用非 loopback bind 时必须设置
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`；配置 Frontend 时，即使 loopback bind 也需要该显式声明。健康 listener 使用非 loopback bind 时必须设置
+`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`。这些配置只是运维声明，不能证明 ACA 实际设置。
 
-host 默认绑定 loopback。启用 ACA 设备身份必须同时设置
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required` 和
-`CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE`，后者指向运维挂载的客户端 CA bundle。非 loopback Relay
-bind 必须启用此显式 ACA 模式。该设置只是运维声明，不能证明 ACA 的实时配置。健康 listener 使用非 loopback bind 时，也必须设置
-`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`。ACA 必须在 Envoy 终止客户端
-TLS、强制客户端证书；两个 listener 绑定容器网卡（例如 `0.0.0.0:8080` 与
-`0.0.0.0:8081`），显式将 ingress `targetPort: 8080`、`transport: http2`、
-`allowInsecure: false`，并设置 `clientCertificateMode: require`。`8081` 不得放入
-`additionalPortMappings`；还必须使用私有 ingress（`external: false`）并阻止直连 target port。
-启动/存活 probe 配为 `8081/healthz`，就绪 probe 配为
-`8081/readyz`。两个 listener 并存时，ACA 默认 probe 会检查 ingress port，因此必须显式配置 probe。
-当前 `/readyz` 按设计返回 503，使 revision 保持未就绪并且不接收 ingress 流量。挂载私有持久目录，
-并保证同一时间只有一个 owner 持有目录锁。ACA 模式会校验转发的 XFCC 证书链，再按已批准设备注册表
-检查指纹。该路径依赖真实 ACA ingress 强制客户端证书并覆盖客户端提交的 XFCC；环境声明不是部署证据。
-生产就绪前仍须接通持久设备授权、CA 签发、WebAuthn、用户身份、Product 私有凭据并验证 ingress 配置。
-不得将 fixture credential 或 `DevelopmentSessionVerifier` 用作生产身份。
+ACA 必须使用 8080 私有 HTTP/2 ingress，设置 `clientCertificateMode: require`、
+`allowInsecure: false`，并阻止绕过 Envoy 的直连。健康 probe 使用 8081，该端口不得暴露为 ingress；`/healthz` 用于存活，`/readyz` 用于就绪。ACA 会在 Relay 确认参与者角色前要求客户端证书，之后 Relay 才按角色选择 BFF 路径。只有 ACA 覆盖输入的 XFCC 并阻止直连绕过时，转发证书才可信。ACA review template 尚未应用。当前 Product API 位于 East Asia internal ACA，而 East Asia 环境没有 VNet；West US 2 的 VNet 属于另一个未连接环境，且 Azure 尚未配置 PostgreSQL Flexible Server。生产前必须评审能够同时访问 Directory 和各 Product owner 服务的私网拓扑。
 
-Relay host 只传输 Workspace request。Product、Kernel/Lease、Runtime 与 Artifact authority 仍属于
-各自的组件；host 不加载 fixture handler，也不获得 fixture 状态。
+Relay 只传输 Workspace request。Product、Kernel/Lease、Runtime 和 Artifact authority 仍属于各自组件；host 不加载 fixture handler，也不取得 fixture 状态。
 
 ## PostgreSQL 权威存储（独立异步接口）
 
-`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organizations_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject 并返回候选 organization；无候选或多个候选由调用方拒绝。严格便利方法 `organization_for_verified_identity` 在无映射或多 organization 时返回错误。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它实现 object-safe async `WorkspaceDirectory` port；Relay 和 Direct await 目录读取，并区分存储错误与非成员。适配器可注入这些服务，不使用 `block_on` 或同步数据库调用。本地 Relay host 仍使用显式配置的文件存储；生产数据库选择、凭据和部署尚未配置。PostgreSQL 查询失败时不会回退到快照。
+`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organizations_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject 并返回候选 organization；无候选或多个候选由调用方拒绝。严格便利方法 `organization_for_verified_identity` 在无映射或多 organization 时返回错误。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它实现 object-safe async `WorkspaceDirectory` port；Relay 和 Direct await 目录读取，并区分存储错误与非成员。适配器可注入这些服务，不使用 `block_on` 或同步数据库调用。Relay host 使用此异步 port，并要求 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`；没有文件存储回退。数据库服务、凭据、TLS 信任、网络路径和部署不会由本 crate 或当前 ACA 模板创建。
 
 迁移创建 `memberships`、`roles`、`descriptors` 和只追加的 `audit_events` 表。Operator 授权/撤销与审计行在同一数据库事务中提交；撤销成员时级联删除其角色，并在同一事务记录被移除角色。仅允许分配当前五种 Product 用户命令角色；成员标记和 workload 角色由其他 authority 管理。审计表拒绝 UPDATE/DELETE，reader 角色仅有 SELECT 权限。
 
