@@ -37,6 +37,10 @@ mod transport;
 mod user_code_secret;
 mod web_identity;
 mod web_relay_session;
+// The owner adapter and Relay host callsite are integrated separately; until
+// then this reusable sweep service is deliberately not started by any host.
+#[allow(dead_code)]
+pub(crate) mod device_authorization_sweeper;
 
 pub use aca_forwarded_certificate::{
     AcaForwardedCertificateAdapter, AcaForwardedCertificateConfigError,
