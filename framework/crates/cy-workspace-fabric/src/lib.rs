@@ -28,6 +28,10 @@ mod device_authorization_postgres;
 // available without wiring a production signer that does not exist yet.
 #[allow(dead_code)]
 pub(crate) mod device_certificate_authority;
+// This verifier also remains disconnected until a CA, trust roots, and a
+// current revocation-status provider are configured.
+#[allow(dead_code)]
+pub(crate) mod device_certificate_validation;
 mod product_adapters;
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
