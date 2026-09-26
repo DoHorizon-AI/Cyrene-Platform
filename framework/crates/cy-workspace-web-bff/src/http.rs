@@ -78,6 +78,9 @@ impl WebBffConfig {
         {
             return Err(WebBffStartupError::Origin);
         }
+        if csrf_mac_key.iter().all(|byte| *byte == 0) {
+            return Err(WebBffStartupError::CsrfSecret);
+        }
         Ok(Self {
             client_origin,
             csrf_signer: CsrfSigner::new(csrf_mac_key),
@@ -103,6 +106,9 @@ pub enum WebBffStartupError {
     /// The public Client origin is missing, malformed, or not an HTTPS origin.
     #[error("Client origin must be one exact HTTPS origin")]
     Origin,
+    /// The injected CSRF signing key is absent or the all-zero placeholder.
+    #[error("CSRF signing secret is not configured")]
+    CsrfSecret,
     /// The canonical TCK does not match the compiled Workspace operation enum.
     #[error("Product operation manifest is inconsistent")]
     Manifest,
@@ -1339,6 +1345,14 @@ mod tests {
         assert!(parse_resource_id(&duplicate).is_err());
         let unknown: Uri = "/route?owner=exchange".parse().expect("valid uri");
         assert!(parse_resource_id(&unknown).is_err());
+    }
+
+    #[test]
+    fn all_zero_csrf_secret_cannot_construct_router_configuration() {
+        assert_eq!(
+            WebBffConfig::new("https://client.example", [0; 32]).err(),
+            Some(WebBffStartupError::CsrfSecret)
+        );
     }
 
     #[tokio::test]

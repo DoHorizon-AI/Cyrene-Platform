@@ -63,7 +63,7 @@ impl CsrfSigner {
     /// Create a signer from a runtime-injected 256-bit secret.
     ///
     /// 使用 runtime 注入的 256-bit secret 创建 signer。
-    pub fn new(key: [u8; 32]) -> Self {
+    pub(crate) fn new(key: [u8; 32]) -> Self {
         Self { key }
     }
 

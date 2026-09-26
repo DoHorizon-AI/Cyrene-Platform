@@ -15,7 +15,7 @@ mod manifest;
 mod problem;
 mod product;
 
-pub use csrf::{csrf_cookie_name, csrf_cookie_path, CsrfSigner};
+pub use csrf::{csrf_cookie_name, csrf_cookie_path};
 pub use http::{router, WebBffConfig, WebBffState, MAX_JSON_BODY_BYTES};
 pub use manifest::{
     product_projection_manifest, ProductProjectionEntry, ProductProjectionManifestError,
