@@ -374,6 +374,34 @@ impl DeviceAuthorizationStore for PostgresDeviceAuthorizationStore {
     }
 }
 
+impl crate::device_authorization_sweeper::DeviceCertificateRetirementSweepSource
+    for PostgresDeviceAuthorizationStore
+{
+    fn database_time_unix_ms(&self) -> StoreResult<u64> {
+        PostgresDeviceAuthorizationStore::database_time_unix_ms(self)
+    }
+
+    fn due_certificate_delivery_ids(
+        &self,
+        database_now_unix_ms: u64,
+        limit: usize,
+    ) -> StoreResult<Vec<DeviceAuthorizationId>> {
+        Ok(self
+            .due_certificate_deliveries(database_now_unix_ms, limit)?
+            .into_iter()
+            .map(|record| record.id)
+            .collect())
+    }
+
+    fn recoverable_retirement_ids(&self, limit: usize) -> StoreResult<Vec<DeviceAuthorizationId>> {
+        Ok(self
+            .recoverable_retirements(limit)?
+            .into_iter()
+            .map(|record| record.id)
+            .collect())
+    }
+}
+
 enum Command {
     Insert(DeviceAuthorizationRecord, StoreReply<()>),
     InsertRegistered(DeviceAuthorizationRecord, StoreReply<()>),
@@ -2981,7 +3009,8 @@ mod tests {
             .expect("connect with the restricted runtime role");
 
         let now = current_unix_ms();
-        assert!(store.database_time_unix_ms().expect("database time") > 0);
+        assert!(crate::device_authorization_sweeper::DeviceCertificateRetirementSweepSource::database_time_unix_ms(&store)
+            .expect("database time") > 0);
 
         let registered_record = pending_record(
             random_bytes(),
@@ -3161,6 +3190,9 @@ mod tests {
             .due_certificate_deliveries(now, 10)
             .expect("scan expired delivery deadlines")
             .contains(&expired_record));
+        assert!(crate::device_authorization_sweeper::DeviceCertificateRetirementSweepSource::due_certificate_delivery_ids(&store, now, 10)
+            .expect("scan due delivery IDs")
+            .contains(&expired_record.id));
         let DeviceAuthorizationState::DeliveryPending {
             approval_id,
             approver,
@@ -3234,6 +3266,9 @@ mod tests {
             .recoverable_retirements(10)
             .expect("scan retirement recovery")
             .contains(&retirement_record));
+        assert!(crate::device_authorization_sweeper::DeviceCertificateRetirementSweepSource::recoverable_retirement_ids(&store, 10)
+            .expect("scan retirement IDs")
+            .contains(&retirement_record.id));
         drop(store);
         set_application_role_login(&migration_url, false);
     }
