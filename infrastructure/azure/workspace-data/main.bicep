@@ -39,7 +39,7 @@ param postgresAdministratorPassword string
 @description('PostgreSQL Flexible Server vCore SKU. The default is a 2-vCore General Purpose Intel v5 size listed in East Asia.')
 param postgresSkuName string = 'Standard_D2ds_v5'
 
-@description('Database shared by Directory and Device Authorization schemas so future generation fencing can use one PostgreSQL transaction.')
+@description('Database shared by Directory, Device Authorization, registration, and WebAuthn schemas so generation fencing can use one PostgreSQL transaction.')
 param postgresDatabaseName string = 'cyrene_workspace'
 
 @description('Enable zone-redundant capacity for the staged Container Apps environment only after verifying East Asia support and quota.')
@@ -62,14 +62,32 @@ param postgresBackupRetentionDays int = 14
 @description('Initial PostgreSQL Premium storage allocation in GB. Storage auto-grow is enabled.')
 param postgresStorageSizeGB int = 64
 
+@minValue(30)
+@maxValue(730)
+@description('Log Analytics retention in days. Confirm privacy policy and ingestion budget before deployment.')
+param logAnalyticsRetentionDays int = 90
+
 var normalizedPrefix = toLower(resourcePrefix)
 var uniqueSuffix = uniqueString(resourceGroup().id, normalizedPrefix)
 var postgresServerName = '${normalizedPrefix}-pg-${uniqueSuffix}'
 var containerAppsEnvironmentName = '${normalizedPrefix}-data-cae'
+var logAnalyticsWorkspaceName = '${normalizedPrefix}-data-law-${uniqueSuffix}'
 var tags = {
   component: 'workspace-data'
   managedBy: 'bicep'
   lifecycle: 'review-only-template'
+}
+
+resource workspaceLogAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
+  name: logAnalyticsWorkspaceName
+  location: location
+  tags: tags
+  properties: {
+    retentionInDays: logAnalyticsRetentionDays
+    sku: {
+      name: 'PerGB2018'
+    }
+  }
 }
 
 resource workspaceVnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
@@ -226,7 +244,7 @@ resource stagedContainerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-
   tags: tags
   properties: {
     appLogsConfiguration: {
-      destination: 'none'
+      destination: 'azure-monitor'
     }
     vnetConfiguration: {
       infrastructureSubnetId: containerAppsSubnet.id
@@ -239,6 +257,30 @@ resource stagedContainerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-
       }
     ]
     zoneRedundant: containerAppsZoneRedundant
+  }
+}
+
+resource containerAppsDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: '${normalizedPrefix}-workspace-data-aca-logs'
+  scope: stagedContainerAppsEnvironment
+  properties: {
+    workspaceId: workspaceLogAnalytics.id
+    logs: [
+      {
+        category: 'ContainerAppConsoleLogs'
+        enabled: true
+      }
+      {
+        category: 'ContainerAppSystemLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 
@@ -304,6 +346,46 @@ resource postgresRequireSecureTransport 'Microsoft.DBforPostgreSQL/flexibleServe
   }
 }
 
+resource postgresDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: '${normalizedPrefix}-workspace-data-postgres-logs'
+  scope: postgresServer
+  properties: {
+    workspaceId: workspaceLogAnalytics.id
+    logs: [
+      {
+        category: 'PostgreSQLLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource keyVaultDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: '${normalizedPrefix}-workspace-data-key-vault-logs'
+  scope: keyVault
+  properties: {
+    workspaceId: workspaceLogAnalytics.id
+    logs: [
+      {
+        category: 'AuditEvent'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+}
+
 resource workspaceDirectoryReaderIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${normalizedPrefix}-directory-reader-${uniqueSuffix}'
   location: location
@@ -328,6 +410,12 @@ resource workspaceDeviceAuthorizationIdentity 'Microsoft.ManagedIdentity/userAss
   tags: tags
 }
 
+resource workspaceWebAuthnIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${normalizedPrefix}-webauthn-runtime-${uniqueSuffix}'
+  location: location
+  tags: tags
+}
+
 resource workspaceMigrationIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${normalizedPrefix}-db-migration-${uniqueSuffix}'
   location: location
@@ -340,6 +428,9 @@ output postgresServerFqdn string = '${postgresServer.name}.postgres.database.azu
 output postgresDatabaseName string = workspaceDatabase.name
 output postgresServerSubnetId string = postgresSubnet.id
 output postgresPrivateDnsZoneId string = postgresPrivateDnsZone.id
+output logAnalyticsWorkspaceId string = workspaceLogAnalytics.id
+output logAnalyticsWorkspaceName string = workspaceLogAnalytics.name
+output logAnalyticsRetentionDays int = workspaceLogAnalytics.properties.retentionInDays
 output keyVaultId string = keyVault.id
 output keyVaultUri string = 'https://${keyVault.name}.${environment().suffixes.keyvaultDns}/'
 output keyVaultPrivateEndpointId string = keyVaultPrivateEndpoint.id
@@ -350,6 +441,7 @@ output managedIdentityIds object = {
   workspaceDirectoryOperator: workspaceDirectoryOperatorIdentity.id
   workspaceDeviceRegistrar: workspaceDeviceRegistrarIdentity.id
   workspaceDeviceAuthorization: workspaceDeviceAuthorizationIdentity.id
+  workspaceWebAuthn: workspaceWebAuthnIdentity.id
   workspaceMigrationRunner: workspaceMigrationIdentity.id
 }
 output managedIdentityPrincipalIds object = {
@@ -357,5 +449,6 @@ output managedIdentityPrincipalIds object = {
   workspaceDirectoryOperator: workspaceDirectoryOperatorIdentity.properties.principalId
   workspaceDeviceRegistrar: workspaceDeviceRegistrarIdentity.properties.principalId
   workspaceDeviceAuthorization: workspaceDeviceAuthorizationIdentity.properties.principalId
+  workspaceWebAuthn: workspaceWebAuthnIdentity.properties.principalId
   workspaceMigrationRunner: workspaceMigrationIdentity.properties.principalId
 }
