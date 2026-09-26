@@ -45,6 +45,13 @@ paths:
         it must never create a second authorization or certificate. Clients discard
         start responses with a lower device_code_generation. Active devices must
         use the mTLS rotation route.
+        The HTTP adapter binds the start body to the exact committed Directory
+        binding, authorization row revision, current code digest, and code
+        generation returned by the atomic transaction. Poll responses are bound
+        to the same authorization snapshot and presented code digest after the
+        manager's final revision re-read. A mismatch or unavailable composite
+        store fails closed with 503; no stale code or mixed-revision response is
+        returned.
       requestBody:
         required: true
         content:
@@ -456,9 +463,10 @@ components:
       properties:
         authorizationId:
           type: string
-          minLength: 16
-          maxLength: 128
-          description: Non-secret ID for one authorization attempt.
+          pattern: '^[A-Za-z0-9_-]{22}$'
+          description: >-
+            Canonical unpadded base64url encoding of the server-generated
+            128-bit non-secret ID for one authorization attempt.
         deviceId:
           type: string
           minLength: 16
@@ -639,6 +647,7 @@ components:
       properties:
         authorizationId:
           type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
         deviceId:
           type: string
         scope:
@@ -802,6 +811,7 @@ components:
       properties:
         authorizationId:
           type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
         deviceCode:
           type: string
           pattern: '^[0-9a-fA-F]{64}$'
@@ -856,6 +866,7 @@ components:
           type: string
         authorizationId:
           type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
         previousSerialNumber:
           type: string
         replacementSerialNumber:
@@ -899,6 +910,7 @@ components:
           type: string
         authorizationId:
           type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
         scope:
           $ref: '#/components/schemas/DeviceScope'
         serialNumber:
@@ -1093,6 +1105,7 @@ components:
           const: delivery_expired
         authorizationId:
           type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
         recoveryState:
           type: string
           enum: [CERTIFICATE_REVOKED, CERTIFICATE_RETIRED, REVOCATION_PENDING, RECOVERY_BLOCKED]

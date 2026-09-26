@@ -24,6 +24,8 @@ must never be accepted as authentication. `registration_key` is a separate
 256-bit recovery credential; it is not accepted for poll, approval, or ACK. The
 server stores only its domain-separated digest and never logs or returns its
 raw value.
+On HTTP, `authorization_id` is the canonical unpadded base64url encoding of
+the server-generated 128-bit value; reject any other encoding.
 `device_code` is never echoed by a poll response. The server binds its current
 digest to the exact `authorization_id`, `device_id`, organization, workspace,
 CSR DER digest, SPKI digest, and expiry. It recomputes and returns both CSR
@@ -99,6 +101,24 @@ The canonical endpoint and schema mapping is
    Replaying that same committed receipt remains idempotent after the deadline;
    a new receipt at or after the deadline fails. After ACK, polling never returns
    the certificate again.
+
+## Same-snapshot response fence
+
+The HTTP adapter derives the start response and its internal validation
+projection from one committed Directory binding and authorization snapshot.
+Before returning start codes, it checks the binding, scope, digests, stable
+device ID, authorization ID and generation, code digest and generation, and row
+revision against that projection. A projection mismatch or unavailable atomic
+registration store returns 503 without returning codes.
+
+Poll uses the durable manager's final revision re-read. Before returning any
+poll outcome or certificate delivery, HTTP checks that the committed snapshot
+still has the digest of the presented device code and matches the response's
+authorization reference, binding, scope, CSR/SPKI digests, and authorization
+generation. If registration-key recovery committed first, an old-code poll
+fails closed even if it began before the code-rotation CAS. Mixed-revision
+responses are never returned. Production composite transaction and persistent
+poll-snapshot adapters are still required.
 
 ## Issuance and delivery recovery
 
@@ -184,6 +204,7 @@ bash tooling/ci/check-public-proto-sync.sh
 | Workload identity | 独立的运行时身份与凭证 authority。 | 本协议不签发 |
 
 `device_id`、`authorization_id` 和 `approval_id` 是不透明标识符，不能作为认证凭证。`registration_key` 是独立的 256-bit 恢复凭证，只用于取回丢失的 start response，不能用于 poll、approval 或 ACK。服务端只保存其 domain-separated digest，不记录或回显原值。轮询响应不回显 `device_code`。服务端将当前 device-code digest 与确切的 `authorization_id`、`device_id`、organization、workspace、CSR DER digest、SPKI digest 和 expiry 绑定。服务端重算并返回 CSR SHA-256 与 SPKI SHA-256。Directory/identity adapter 必须分配并保存稳定 `device_id`；authorization state machine 的记录 ID 不能替代该 authority。
+HTTP 上的 `authorization_id` 是服务端生成的 128-bit 值的规范无填充 base64url 编码；非规范编码必须拒绝。
 
 ## HTTP 流程
 
@@ -197,13 +218,19 @@ bash tooling/ci/check-public-proto-sync.sh
 6. Approved 响应包含公开设备证书、公开 CA chain、稳定设备和 scope 元数据、精确 CSR 与 CSR SPKI digest、证书 fingerprint、serial、issuer ID、有效期、`delivery_id` 与不超过证书就绪后 5 分钟的 ACK deadline。响应不包含 CA signing key、OAuth access token 或 Microsoft token。
 7. 在 deadline 之前，每次重试都返回字节完全相同的证书与同一 `delivery_id`。设备 ACK 绑定 authorization ID、`device_code` 持有证明、delivery ID、证书 SHA-256、精确 CSR SHA-256 和 CSR SPKI digest。首次 ACK 必须在 deadline 前提交；此前已提交 receipt 的完全相同重试在 deadline 后仍幂等；deadline 后首次 ACK 会失败。ACK 后轮询永不再次返回证书。
 
+## 同一快照响应校验
+
+HTTP adapter 必须从同一个已提交的 Directory binding 与 authorization 快照生成 start 响应及其内部校验投影。返回 start codes 前，要核对 binding、scope、digests、稳定 device ID、authorization ID 与 generation、code digest 与 generation 及行 revision。投影不匹配或缺少原子注册存储时返回 503，且不返回 codes。
+
+Poll 必须使用 durable manager 的最终 revision 重读。在返回任何 poll 结果或证书 delivery 前，HTTP 要确认已提交快照仍含本次 device code 的 digest，并与响应中的 authorization reference、binding、scope、CSR/SPKI digests 和 authorization generation 一致。如果 registration-key recovery 先提交，旧 code 的 poll 即使在 code-rotation CAS 前启动也必须 fail closed；绝不能返回混合 revision 的响应。生产复合事务及持久化 poll snapshot adapter 接入前，这些路径保持不可用。
+
 ## 签发与交付恢复
 
 批准完成前先提交持久化 `ISSUING` intent。Certificate issuer 以 `authorization_id` 及不可变的 scope、CSR、SPKI digest 和 issue timestamp 元组为幂等键。如果 CA 已接受请求但响应丢失，恢复逻辑查询或重放同一 issuer 请求并取回同一证书；不得重新打开 approval 或签发第二张证书。签发状态未确定时，设备轮询保持 `authorization_pending`。
 
 CA 返回证书后，必须先持久化证书与 `delivery_id` 再响应。直到收到精确 ACK，交付仍为 pending。若 acknowledgement deadline 到期，服务必须先撤销或退役未交付证书，再将交付标记为 expired。如果撤销结果无法确认，轮询必须返回明确的 `delivery_recovery_blocked`，并说明 `REVOCATION_PENDING` 或 `RECOVERY_BLOCKED`，不能报告交付成功。确认撤销或退役后才返回 `delivery_expired`。响应丢失绝不等于 ACK。交付过期后，设备必须走新的授权注册或轮换流程。
 
-Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。HTTP route layer 现在可通过显式注入的 ports 运行并在缺少适配器时 fail closed。生产 Directory identity mapping 与同授权 recovery-key code rotation 原子事务、跨进程存储、CA、registry activation 及 host composition 仍未完成；端到端入网依然依赖这些 adapter。
+Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。HTTP route layer 要求 start/poll adapter 提供与响应绑定的已提交快照，并在快照不匹配或缺少端口时 fail closed。生产 Directory identity mapping 与同授权 recovery-key code rotation 原子事务、跨进程存储、CA、registry activation 及 host composition 仍未全部完成；端到端入网依然依赖这些 adapter。
 
 ## 轮换与撤销
 

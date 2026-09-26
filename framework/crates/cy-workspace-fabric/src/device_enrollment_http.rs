@@ -14,7 +14,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Json, Router};
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use cy_proto::workspace_v1::UserIdentityRef;
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,10 @@ use thiserror::Error;
 use zeroize::Zeroize;
 
 use crate::device_authorization::{
+    device_code_hash, DeviceAuthorizationCommittedSnapshot, DeviceAuthorizationPollSnapshot,
     DeviceAuthorizationPortError, DeviceAuthorizationRegistrationRequest, DeviceAuthorizationScope,
-    DeviceCsrValidator, DeviceRegistrationKeyDigest,
+    DeviceAuthorizationStartDisposition, DeviceAuthorizationState, DeviceCsrValidator,
+    DeviceRegistrationKeyDigest,
 };
 
 const MAX_CSR_DER_BYTES: usize = 16 * 1024;
@@ -53,6 +55,131 @@ pub struct DirectoryRegistrationBinding {
     pub spki_sha256: [u8; 32],
 }
 
+/// Redacted, non-serializable projection of one committed authorization view.
+/// The device-code hash remains private and only fences the response to the
+/// exact bearer code that produced this database snapshot.
+pub struct DeviceEnrollmentAuthorizationSnapshot {
+    authorization_id: String,
+    binding_id: [u8; 16],
+    device_id: String,
+    scope: DeviceAuthorizationScope,
+    authorization_generation: u64,
+    device_code_generation: u64,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+    revision: u64,
+    expires_at_unix_ms: u64,
+    device_code_hash: [u8; 32],
+    start_disposition: Option<DeviceAuthorizationStartDisposition>,
+    poll_state: DeviceEnrollmentPollState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceEnrollmentPollState {
+    Pending,
+    DeliveryPending,
+    Delivered,
+    RetirementPending,
+    DeliveryExpired,
+    Denied,
+    Expired,
+    IssuanceFailed,
+}
+
+impl DeviceEnrollmentAuthorizationSnapshot {
+    /// Projects a successful start or recovery without exposing the full
+    /// record, user-code MAC, CSR bytes, or opaque WebAuthn state.
+    pub fn from_start_snapshot(
+        snapshot: &DeviceAuthorizationCommittedSnapshot,
+    ) -> Result<Self, DeviceEnrollmentHttpError> {
+        if snapshot.record.registration_key_digest.is_none() {
+            return Err(DeviceEnrollmentHttpError::Unavailable);
+        }
+        let mut projection = Self::from_record(&snapshot.record)?;
+        projection.start_disposition = Some(snapshot.disposition);
+        Ok(projection)
+    }
+
+    /// Projects the manager's final poll revision fence. Legacy records remain
+    /// pollable but cannot be recovered by registration key.
+    pub fn from_poll_snapshot(
+        snapshot: &DeviceAuthorizationPollSnapshot,
+    ) -> Result<Self, DeviceEnrollmentHttpError> {
+        Self::from_record(&snapshot.record)
+    }
+
+    fn from_record(
+        record: &crate::device_authorization::DeviceAuthorizationRecord,
+    ) -> Result<Self, DeviceEnrollmentHttpError> {
+        let binding = &record.registration_binding;
+        if record.device_code_generation == 0
+            || binding.authorization_generation() == 0
+            || binding.key().device_id.trim().is_empty()
+        {
+            return Err(DeviceEnrollmentHttpError::Unavailable);
+        }
+        Ok(Self {
+            authorization_id: URL_SAFE_NO_PAD.encode(record.id),
+            binding_id: *binding.binding_id(),
+            device_id: binding.key().device_id.clone(),
+            scope: record.scope.clone(),
+            authorization_generation: binding.authorization_generation(),
+            device_code_generation: record.device_code_generation,
+            csr_sha256: record.csr_sha256,
+            spki_sha256: record.spki_sha256,
+            revision: record.revision,
+            expires_at_unix_ms: record.expires_at_unix_ms,
+            device_code_hash: record.device_code_hash,
+            start_disposition: None,
+            poll_state: enrollment_poll_state(&record.state),
+        })
+    }
+
+    fn matches_device_code(&self, device_code: &str) -> bool {
+        device_code_hash(device_code).is_ok_and(|hash| hash == self.device_code_hash)
+    }
+
+    #[cfg(test)]
+    fn test_fixture(
+        authorization_id: String,
+        binding_id: [u8; 16],
+        device_id: String,
+        scope: DeviceAuthorizationScope,
+        authorization_generation: u64,
+        device_code_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+        revision: u64,
+        expires_at_unix_ms: u64,
+        device_code: &str,
+        poll_state: DeviceEnrollmentPollState,
+    ) -> Self {
+        Self {
+            authorization_id,
+            binding_id,
+            device_id,
+            scope,
+            authorization_generation,
+            device_code_generation,
+            csr_sha256,
+            spki_sha256,
+            revision,
+            expires_at_unix_ms,
+            device_code_hash: device_code_hash(device_code).expect("valid test device code"),
+            start_disposition: None,
+            poll_state,
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn expires_at_unix_ms(&self) -> u64 {
+        self.expires_at_unix_ms
+    }
+}
+
 /// Complete result of one atomic Directory binding and authorization start or
 /// same-authorization recovery.
 pub struct DeviceEnrollmentStartResult {
@@ -60,6 +187,8 @@ pub struct DeviceEnrollmentStartResult {
     pub binding: DirectoryRegistrationBinding,
     /// Current codes and authorization reference to return to the device.
     pub response: StartDeviceAuthorizationResponse,
+    /// Exact committed state snapshot from which this response was projected.
+    pub committed_snapshot: DeviceEnrollmentAuthorizationSnapshot,
 }
 
 /// Transaction boundary for Directory identity binding and authorization
@@ -257,6 +386,8 @@ pub struct PollHttpResponse {
     pub status: PollHttpStatus,
     /// Seconds for the HTTP `Retry-After` header on `slow_down` responses.
     pub retry_after_seconds: Option<u64>,
+    /// Exact current authorization projection used to produce `body`.
+    pub committed_snapshot: DeviceEnrollmentAuthorizationSnapshot,
 }
 
 /// HTTP outcome class for RFC 8628-style polling.
@@ -557,6 +688,7 @@ async fn start_device_authorization(
         .await?;
     validate_directory_binding(&start.binding, &scope, &csr_sha256, &actual_spki_sha256)?;
     validate_start_response(&start.response, &start.binding)?;
+    validate_start_commit(&start.committed_snapshot, &start.binding, &start.response)?;
     Ok((StatusCode::CREATED, Json(start.response)))
 }
 
@@ -652,7 +784,7 @@ async fn poll_device_authorization(
     validate_device_code(request.device_code.expose())?;
     let authorization = required_authorization(&state)?;
     let response = authorization.poll(request.device_code.expose()).await?;
-    validate_poll_response(&response)?;
+    validate_poll_response(&response, request.device_code.expose())?;
     ensure_no_secret_fields(&response.body, false)?;
     let status = match response.status {
         PollHttpStatus::Approved => StatusCode::OK,
@@ -677,8 +809,7 @@ async fn acknowledge_device_delivery(
     >,
 ) -> Result<(StatusCode, Json<Value>), HttpApiFailure> {
     let Json(request) = parse_json(payload)?;
-    if request.authorization_id.len() < 16
-        || request.authorization_id.len() > 128
+    if !is_canonical_authorization_id(&request.authorization_id)
         || request.delivery_id.len() < 16
         || request.delivery_id.len() > 128
     {
@@ -794,8 +925,7 @@ fn validate_start_response(
     binding: &DirectoryRegistrationBinding,
 ) -> Result<(), HttpApiFailure> {
     let authorization = &response.authorization;
-    if authorization.authorization_id.len() < 16
-        || authorization.authorization_id.len() > 128
+    if !is_canonical_authorization_id(&authorization.authorization_id)
         || authorization.authorization_id == binding.device_id
         || authorization.device_id != binding.device_id
         || authorization.authorization_generation != binding.authorization_generation
@@ -822,6 +952,48 @@ fn validate_start_response(
     Ok(())
 }
 
+fn is_canonical_authorization_id(value: &str) -> bool {
+    if value.len() != 22 {
+        return false;
+    }
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(value) else {
+        return false;
+    };
+    bytes.len() == 16 && URL_SAFE_NO_PAD.encode(bytes) == value
+}
+
+fn validate_start_commit(
+    committed: &DeviceEnrollmentAuthorizationSnapshot,
+    binding: &DirectoryRegistrationBinding,
+    response: &StartDeviceAuthorizationResponse,
+) -> Result<(), HttpApiFailure> {
+    let created = committed.start_disposition == Some(DeviceAuthorizationStartDisposition::Created);
+    let recovered =
+        committed.start_disposition == Some(DeviceAuthorizationStartDisposition::Recovered);
+    if committed.authorization_id != response.authorization.authorization_id
+        || committed.binding_id != binding.binding_id
+        || committed.device_id != binding.device_id
+        || committed.scope != binding.scope
+        || committed.scope.organization_id != response.authorization.scope.organization_id
+        || committed.scope.workspace_id != response.authorization.scope.workspace_id
+        || committed.authorization_generation != binding.authorization_generation
+        || committed.authorization_generation != response.authorization.authorization_generation
+        || committed.csr_sha256 != binding.csr_sha256
+        || committed.spki_sha256 != binding.spki_sha256
+        || decode_sha256(&response.authorization.csr_sha256)? != committed.csr_sha256
+        || decode_sha256(&response.authorization.csr_spki_sha256)? != committed.spki_sha256
+        || committed.device_code_generation != response.codes.device_code_generation
+        || !committed.matches_device_code(&response.codes.device_code)
+        || (created && (committed.revision != 0 || committed.device_code_generation != 1))
+        || (recovered && (committed.revision == 0 || committed.device_code_generation < 2))
+        || (!created && !recovered)
+        || committed.expires_at_unix_ms == 0
+    {
+        return Err(contract_violation());
+    }
+    Ok(())
+}
+
 fn validate_device_code(code: &str) -> Result<(), DeviceEnrollmentHttpError> {
     if code.len() != 64 || !code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(DeviceEnrollmentHttpError::InvalidRequest);
@@ -836,8 +1008,8 @@ fn validate_user_code(code: &str) -> Result<(), DeviceEnrollmentHttpError> {
         && parts.iter().all(|part| {
             part.len() == 4
                 && part.bytes().all(|byte| {
-                    (b'A'..=b'Z').contains(&byte) && byte != b'I' && byte != b'O'
-                        || (b'2'..=b'9').contains(&byte)
+                    byte.is_ascii_uppercase() && byte != b'I' && byte != b'O'
+                        || byte.is_ascii_digit() && byte >= b'2'
                 })
         });
     if !valid {
@@ -852,6 +1024,8 @@ struct AuthorizationWireSnapshot {
     scope: DeviceAuthorizationScope,
     csr_sha256: [u8; 32],
     spki_sha256: [u8; 32],
+    authorization_generation: u64,
+    expires_at: String,
 }
 
 fn response_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, HttpApiFailure> {
@@ -888,7 +1062,11 @@ fn response_scope(value: &Value, field: &str) -> Result<DeviceAuthorizationScope
 }
 
 fn authorization_wire_snapshot(value: &Value) -> Result<AuthorizationWireSnapshot, HttpApiFailure> {
-    let authorization_id = response_identifier(value, "authorizationId")?;
+    let authorization_id = response_string(value, "authorizationId")?;
+    if !is_canonical_authorization_id(authorization_id) {
+        return Err(contract_violation());
+    }
+    let authorization_id = authorization_id.to_owned();
     let device_id = response_identifier(value, "deviceId")?;
     if authorization_id == device_id {
         return Err(contract_violation());
@@ -896,19 +1074,20 @@ fn authorization_wire_snapshot(value: &Value) -> Result<AuthorizationWireSnapsho
     let scope = response_scope(value, "scope")?;
     let csr_sha256 = response_sha256(value, "csrSha256")?;
     let spki_sha256 = response_sha256(value, "csrSpkiSha256")?;
-    let expires_at = response_string(value, "expiresAt")?;
+    let expires_at = response_string(value, "expiresAt")?.to_owned();
     let generation = value
         .get("authorizationGeneration")
         .and_then(Value::as_u64)
         .filter(|generation| *generation > 0)
         .ok_or_else(contract_violation)?;
-    let _ = (expires_at, generation);
     Ok(AuthorizationWireSnapshot {
         authorization_id,
         device_id,
         scope,
         csr_sha256,
         spki_sha256,
+        authorization_generation: generation,
+        expires_at,
     })
 }
 
@@ -984,12 +1163,31 @@ fn validate_denial_response(
     Ok(())
 }
 
-fn validate_poll_response(response: &PollHttpResponse) -> Result<(), HttpApiFailure> {
+fn validate_poll_response(
+    response: &PollHttpResponse,
+    device_code: &str,
+) -> Result<(), HttpApiFailure> {
+    let authorization = required_authorization_snapshot(&response.body)?;
+    let committed = &response.committed_snapshot;
+    if !committed.matches_device_code(device_code)
+        || authorization.authorization_id != committed.authorization_id
+        || authorization.device_id != committed.device_id
+        || authorization.scope != committed.scope
+        || authorization.csr_sha256 != committed.csr_sha256
+        || authorization.spki_sha256 != committed.spki_sha256
+        || authorization.authorization_generation != committed.authorization_generation
+        || authorization.expires_at.trim().is_empty()
+    {
+        return Err(contract_violation());
+    }
     let error = response
         .body
         .get("error")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if !poll_outcome_matches_snapshot(committed.poll_state, response.status, error) {
+        return Err(contract_violation());
+    }
     let status = response_string(&response.body, "status")?;
     match (response.status, error) {
         (PollHttpStatus::ProtocolError, "authorization_pending") => {
@@ -1089,6 +1287,84 @@ fn validate_poll_response(response: &PollHttpResponse) -> Result<(), HttpApiFail
         _ => return Err(contract_violation()),
     }
     Ok(())
+}
+
+fn enrollment_poll_state(state: &DeviceAuthorizationState) -> DeviceEnrollmentPollState {
+    match state {
+        DeviceAuthorizationState::Pending
+        | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+        | DeviceAuthorizationState::VerifyingWebAuthn { .. }
+        | DeviceAuthorizationState::Issuing { .. } => DeviceEnrollmentPollState::Pending,
+        DeviceAuthorizationState::DeliveryPending { .. } => {
+            DeviceEnrollmentPollState::DeliveryPending
+        }
+        DeviceAuthorizationState::Delivered { .. } => DeviceEnrollmentPollState::Delivered,
+        DeviceAuthorizationState::RetirementPending { .. } => {
+            DeviceEnrollmentPollState::RetirementPending
+        }
+        DeviceAuthorizationState::DeliveryExpired { .. } => {
+            DeviceEnrollmentPollState::DeliveryExpired
+        }
+        DeviceAuthorizationState::Denied { .. } => DeviceEnrollmentPollState::Denied,
+        DeviceAuthorizationState::Expired => DeviceEnrollmentPollState::Expired,
+        DeviceAuthorizationState::IssuanceFailed { .. } => {
+            DeviceEnrollmentPollState::IssuanceFailed
+        }
+        DeviceAuthorizationState::Consumed { .. } => DeviceEnrollmentPollState::Delivered,
+    }
+}
+
+fn poll_outcome_matches_snapshot(
+    snapshot: DeviceEnrollmentPollState,
+    status: PollHttpStatus,
+    error: &str,
+) -> bool {
+    use DeviceEnrollmentPollState as State;
+
+    matches!(
+        (status, error, snapshot),
+        (
+            PollHttpStatus::ProtocolError,
+            "authorization_pending",
+            State::Pending
+        ) | (PollHttpStatus::ProtocolError, "slow_down", State::Pending)
+            | (
+                PollHttpStatus::ProtocolError,
+                "authorization_pending",
+                State::DeliveryPending
+            )
+            | (
+                PollHttpStatus::ProtocolError,
+                "slow_down",
+                State::DeliveryPending
+            )
+            | (
+                PollHttpStatus::ProtocolError,
+                "access_denied",
+                State::Denied
+            )
+            | (
+                PollHttpStatus::ProtocolError,
+                "expired_token",
+                State::Expired
+            )
+            | (
+                PollHttpStatus::ProtocolError,
+                "invalid_grant",
+                State::Delivered
+            )
+            | (
+                PollHttpStatus::ProtocolError,
+                "delivery_expired",
+                State::DeliveryExpired
+            )
+            | (
+                PollHttpStatus::ProtocolError,
+                "delivery_recovery_blocked",
+                State::RetirementPending
+            )
+            | (PollHttpStatus::Approved, "", State::DeliveryPending)
+    )
 }
 
 fn validate_approved_delivery(value: &Value) -> Result<(), HttpApiFailure> {
@@ -1271,9 +1547,11 @@ mod tests {
                 csr_sha256: *request.csr_sha256(),
                 spki_sha256: *request.spki_sha256(),
             };
+            let authorization_id = URL_SAFE_NO_PAD.encode([0x42; 16]);
+            let device_code = "a".repeat(64);
             let response = StartDeviceAuthorizationResponse {
                 authorization: DeviceAuthorizationReferenceWire {
-                    authorization_id: "authorization-0123456789".into(),
+                    authorization_id: authorization_id.clone(),
                     device_id: binding.device_id.clone(),
                     scope: DeviceScopeWire {
                         organization_id: binding.scope.organization_id.clone(),
@@ -1285,7 +1563,7 @@ mod tests {
                     authorization_generation: binding.authorization_generation,
                 },
                 codes: DeviceAuthorizationCodesWire {
-                    device_code: "a".repeat(64),
+                    device_code: device_code.clone(),
                     user_code: "ABCD-EFGH-JKLM".into(),
                     verification_uri: "https://example.invalid/verify".into(),
                     verification_uri_complete: None,
@@ -1294,7 +1572,25 @@ mod tests {
                     device_code_generation: 1,
                 },
             };
-            Ok(DeviceEnrollmentStartResult { binding, response })
+            let committed_snapshot = DeviceEnrollmentAuthorizationSnapshot::test_fixture(
+                authorization_id,
+                binding.binding_id,
+                binding.device_id.clone(),
+                binding.scope.clone(),
+                binding.authorization_generation,
+                1,
+                binding.csr_sha256,
+                binding.spki_sha256,
+                0,
+                1,
+                &device_code,
+                DeviceEnrollmentPollState::Pending,
+            );
+            Ok(DeviceEnrollmentStartResult {
+                binding,
+                response,
+                committed_snapshot,
+            })
         }
     }
 
@@ -1316,7 +1612,7 @@ mod tests {
 
     fn authorization_ref_json() -> Value {
         json!({
-            "authorizationId":"authorization-0123456789",
+            "authorizationId":URL_SAFE_NO_PAD.encode([0x42; 16]),
             "deviceId":"directory-device-0123456789",
             "scope":{"organizationId":"org-1","workspaceId":"workspace-1"},
             "csrSpkiSha256":STANDARD.encode([1u8; 32]),
@@ -1339,7 +1635,7 @@ mod tests {
                     "caChainDer":[],
                     "certificate":{
                         "deviceId":"directory-device-0123456789",
-                        "authorizationId":"authorization-0123456789",
+                        "authorizationId":URL_SAFE_NO_PAD.encode([0x42; 16]),
                         "scope":{"organizationId":"org-1","workspaceId":"workspace-1"},
                         "serialNumber":"01",
                         "certificateSha256":STANDARD.encode(certificate_sha256),
@@ -1356,6 +1652,23 @@ mod tests {
             }),
             status: PollHttpStatus::Approved,
             retry_after_seconds: None,
+            committed_snapshot: DeviceEnrollmentAuthorizationSnapshot::test_fixture(
+                URL_SAFE_NO_PAD.encode([0x42; 16]),
+                [4; 16],
+                "directory-device-0123456789".into(),
+                DeviceAuthorizationScope {
+                    organization_id: "org-1".into(),
+                    workspace_id: "workspace-1".into(),
+                },
+                1,
+                1,
+                [3; 32],
+                [1; 32],
+                1,
+                1,
+                &"a".repeat(64),
+                DeviceEnrollmentPollState::DeliveryPending,
+            ),
         }
     }
 
@@ -1408,7 +1721,7 @@ mod tests {
 
         async fn poll(
             &self,
-            _device_code: &str,
+            device_code: &str,
         ) -> Result<PollHttpResponse, DeviceEnrollmentHttpError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let error = if self.poll_retry_after.is_some() {
@@ -1438,6 +1751,23 @@ mod tests {
                 body,
                 status: PollHttpStatus::ProtocolError,
                 retry_after_seconds: self.poll_retry_after,
+                committed_snapshot: DeviceEnrollmentAuthorizationSnapshot::test_fixture(
+                    URL_SAFE_NO_PAD.encode([0x42; 16]),
+                    [4; 16],
+                    "directory-device-0123456789".into(),
+                    DeviceAuthorizationScope {
+                        organization_id: "org-1".into(),
+                        workspace_id: "workspace-1".into(),
+                    },
+                    1,
+                    1,
+                    [3; 32],
+                    [1; 32],
+                    1,
+                    1,
+                    device_code,
+                    DeviceEnrollmentPollState::Pending,
+                ),
             })
         }
 
@@ -1718,11 +2048,11 @@ mod tests {
     #[test]
     fn approved_poll_binds_directory_identity_and_certificate_to_csr() {
         let mut response = approved_poll_fixture();
-        assert!(validate_poll_response(&response).is_ok());
+        assert!(validate_poll_response(&response, &"a".repeat(64)).is_ok());
 
         response.body["delivery"]["certificate"]["csrSha256"] =
             Value::String(STANDARD.encode([9u8; 32]));
-        assert!(validate_poll_response(&response).is_err());
+        assert!(validate_poll_response(&response, &"a".repeat(64)).is_err());
     }
 
     #[test]
@@ -1736,14 +2066,14 @@ mod tests {
         });
         assert!(validate_acknowledgement_response(
             &body,
-            "authorization-0123456789",
+            &URL_SAFE_NO_PAD.encode([0x42; 16]),
             "delivery-0123456789",
             &[4; 32]
         )
         .is_ok());
         assert!(validate_acknowledgement_response(
             &body,
-            "authorization-0123456789",
+            &URL_SAFE_NO_PAD.encode([0x42; 16]),
             "other-delivery-0123456789",
             &[4; 32]
         )
@@ -1780,7 +2110,7 @@ mod tests {
             Method::POST,
             "/v1/device-authorizations/delivery-acknowledgements",
             json!({
-                "authorizationId":"authorization-0123456789",
+                "authorizationId":URL_SAFE_NO_PAD.encode([0x42; 16]),
                 "deviceCode":"a".repeat(64),
                 "deliveryId":"delivery-0123456789",
                 "certificateSha256":STANDARD.encode([1u8; 32]),

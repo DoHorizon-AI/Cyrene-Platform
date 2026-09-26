@@ -350,6 +350,14 @@ pub struct DeviceAuthorizationCommittedSnapshot {
     pub disposition: DeviceAuthorizationStartDisposition,
 }
 
+/// Returned to transaction adapters so the wire response can be checked
+/// against the same committed binding, record revision, and current codes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAuthorizationRegisteredStart {
+    pub start: DeviceAuthorizationStart,
+    pub committed_snapshot: DeviceAuthorizationCommittedSnapshot,
+}
+
 /// One committed poll view. `record` carries the current Directory binding,
 /// code generation, state, and row revision from the same database snapshot.
 #[derive(Debug, Clone, PartialEq)]
@@ -1672,6 +1680,18 @@ where
         now_unix_ms: u64,
         csr_validator: &impl DeviceCsrValidator,
     ) -> Result<DeviceAuthorizationStart, DeviceAuthorizationError> {
+        self.begin_or_recover_registered_with_snapshot(request, now_unix_ms, csr_validator)
+            .map(|result| result.start)
+    }
+
+    /// Same operation as [`Self::begin_or_recover_registered`], retaining the
+    /// exact committed snapshot for HTTP response binding.
+    pub fn begin_or_recover_registered_with_snapshot(
+        &self,
+        request: DeviceAuthorizationRegistrationRequest,
+        now_unix_ms: u64,
+        csr_validator: &impl DeviceCsrValidator,
+    ) -> Result<DeviceAuthorizationRegisteredStart, DeviceAuthorizationError> {
         validate_scope(&request.scope)?;
         if request.csr_der.is_empty() || request.csr_der.len() > 16 * 1024 {
             return Err(DeviceAuthorizationError::InvalidRequest);
@@ -1698,6 +1718,7 @@ where
         {
             return Err(DeviceAuthorizationError::InvalidRequest);
         }
+        let registration_key_digest_bytes = *request.registration_key_digest.as_bytes();
 
         for _ in 0..3 {
             let authorization_id_candidate = random_array::<16>()?;
@@ -1715,10 +1736,12 @@ where
                 csr_der: request.csr_der.clone(),
                 csr_sha256,
                 spki_sha256,
-                registration_key_digest: request.registration_key_digest.clone(),
+                registration_key_digest: DeviceRegistrationKeyDigest::from_stored_bytes(
+                    registration_key_digest_bytes,
+                ),
                 authorization_id_candidate,
                 device_code_hash_candidate,
-                user_code_digest_candidate: user_code_digest_candidate.clone(),
+                user_code_digest_candidate,
                 authorization_ttl_ms: self.policy.authorization_ttl_ms,
                 initial_poll_interval_ms: self.policy.initial_poll_interval_ms,
                 maximum_recovery_attempts: self.policy.maximum_recovery_attempts,
@@ -1727,7 +1750,7 @@ where
             };
             match self.store.start_or_recover_registered(candidate) {
                 Ok(snapshot) => {
-                    let record = snapshot.record;
+                    let record = &snapshot.record;
                     if record.registration_key_digest.as_ref()
                         != Some(&request.registration_key_digest)
                         || record.device_code_hash != device_code_hash_candidate
@@ -1751,7 +1774,7 @@ where
                     {
                         return Err(DeviceAuthorizationError::StorageUnavailable);
                     }
-                    return Ok(DeviceAuthorizationStart {
+                    let start = DeviceAuthorizationStart {
                         authorization_id: record.id,
                         device_id: record.registration_binding.key().device_id.clone(),
                         authorization_generation: record
@@ -1762,6 +1785,10 @@ where
                         user_code,
                         expires_at_unix_ms: record.expires_at_unix_ms,
                         poll_interval_ms: record.poll_interval_ms,
+                    };
+                    return Ok(DeviceAuthorizationRegisteredStart {
+                        start,
+                        committed_snapshot: snapshot,
                     });
                 }
                 Err(DeviceAuthorizationStoreError::CodeCollision) => continue,
@@ -3472,7 +3499,7 @@ fn hash_code(kind: &[u8], code: &[u8]) -> DeviceAuthorizationCodeHash {
     hasher.finalize().into()
 }
 
-fn device_code_hash(
+pub(crate) fn device_code_hash(
     device_code: &str,
 ) -> Result<DeviceAuthorizationCodeHash, DeviceAuthorizationError> {
     if device_code.len() != 64 || !device_code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
