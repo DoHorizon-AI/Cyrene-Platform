@@ -17,6 +17,7 @@ mod control_plane;
 mod device_auth;
 pub mod device_enrollment_http;
 mod device_registry;
+mod device_registry_postgres;
 mod direct;
 mod directory;
 mod durable_directory;
@@ -90,6 +91,10 @@ pub use device_enrollment_http::{
 pub use device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,
     WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
+};
+pub use device_registry_postgres::{
+    DeviceCertificateRegistryActivation, DeviceRegistryPostgresError,
+    PostgresWorkspaceDeviceRegistry,
 };
 pub use direct::DirectWorkspaceServer;
 pub use directory::{
