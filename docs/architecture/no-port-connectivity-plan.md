@@ -166,6 +166,9 @@ The projection today exposes only `StartWorkspaceOperation` and
 product surfaces is the largest single work item in this plan and is delivered
 incrementally, one minimal slice per service.
 
+The Web Client's final product path is the Workspace API for every projected
+surface. Direct service endpoints remain internal implementation paths.
+
 ---
 
 ## 4. Phases
@@ -272,16 +275,17 @@ Acceptance:
 
 ### Phase 5 — Hardening
 
-Relay HA and fleet topology, end-to-end encryption decision, relay observability,
+Relay HA and fleet topology, progressive end-to-end encryption, relay observability,
 rollback rehearsal, and load testing of direct and cloud-storage artifact transfer.
 
 ---
 
 ## 5. Decisions required
 
-1. **End-to-end encryption.** The typed projection means the control plane sees
-   payloads. Decide before Phase 1 whether to trust a self-hosted relay, add
-   end-to-end encryption, or encrypt only bulk artifact traffic.
+1. **End-to-end encryption. Resolved for the first release:** the self-hosted
+   Relay and control plane may read projected payloads. Use authenticated TLS
+   in transit and restrict access to authorized operators. Add end-to-end
+   encryption incrementally in a later hardening phase.
 2. **Cross-NAT bulk transfer gateway.** Resolved: Use user-provided Cloud Object Storage
    (Cloudflare R2, Azure Blob, AWS S3, Hugging Face) via temporary pre-signed URLs when `LAN_DIRECT`
    is unavailable, with strict fail-closed diagnostics if unconfigured.
@@ -289,8 +293,9 @@ rollback rehearsal, and load testing of direct and cloud-storage artifact transf
    out-of-band notification and WebAuthn/Passkey biometric approval on trusted client devices.
 4. **Cross-language service connectivity.** Resolved: Provide a lightweight local Rust sidecar
    proxy daemon listening on loopback `127.0.0.1` for Python services.
-5. **Projection granularity.** Which product operations are exposed through the
-   Workspace API versus kept internal. Decide per service in Phase 3.
+5. **Projection granularity. Resolved for the Client boundary:** the Web Client
+   reaches products only through the Workspace API. Select each service's
+   projected operations during Phase 3; other operations remain internal.
 
 ## 6. Risks
 
@@ -451,6 +456,8 @@ fabric 提供身份、可达性与授权；artifact 平面提供规划、续传�
 （`workspace_fabric.proto:95`）。扩展到六个产品面是本计划最大的单项工作，按每个
 服务一个最小切片增量交付。
 
+Web Client 最终仅通过 Workspace API 访问各产品投影；服务直连端点仍作为内部实现路径。
+
 ---
 
 ## 4. 阶段
@@ -554,19 +561,19 @@ fabric 提供身份、可达性与授权；artifact 平面提供规划、续传�
 
 ### Phase 5 —— 加固
 
-Relay HA 与集群拓扑、端到端加密决策、Relay 可观测性、回滚演练、直连与云存储 Artifact 传输的负载测试。
+Relay HA 与集群拓扑、逐步实施端到端加密、Relay 可观测性、回滚演练、直连与云存储 Artifact 传输的负载测试。
 
 ---
 
 ## 5. 需要决定的事项
 
-1. **端到端加密。** 强类型投影意味着控制面能看到载荷。在 Phase 1 之前决定：信任自建
-   Relay、加端到端加密，还是只对批量 Artifact 流量加密。
+1. **端到端加密。首版已决议：**允许自建 Relay 和控制面读取投影载荷；传输使用经身份验证的 TLS，
+   并限定授权运维人员访问。后续加固阶段逐步加入端到端加密。
 2. **跨 NAT 批量传输网关。** 【已决议】：在 `LAN_DIRECT` 不可用时，通过临时预签名 URL 使用用户自备的云对象存储（Cloudflare R2、Azure Blob、AWS S3、Hugging Face）；未配置时严格执行 Fail-closed 并输出诊断信息。
 3. **无头节点纳管审批。** 【已决议】：弃用静态 Bearer Token 复制；在受信任客户端设备上通过带外推送与 WebAuthn/Passkey 生物识别进行审批。
 4. **跨语言服务互联。** 【已决议】：在本地回环 `127.0.0.1` 上为 Python 服务提供轻量级 Rust Sidecar 代理守护进程。
-5. **投影粒度。** 哪些产品操作经 Workspace API 暴露、哪些保持内部。在 Phase 3
-   逐服务决定。
+5. **投影粒度。Client 边界已决议：**Web Client 仅通过 Workspace API 访问产品。
+   每个服务具体投影哪些操作，在 Phase 3 逐服务决定；其余操作保持内部使用。
 
 ## 6. 风险
 
