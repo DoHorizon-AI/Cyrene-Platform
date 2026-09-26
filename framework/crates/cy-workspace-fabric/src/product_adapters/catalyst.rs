@@ -33,7 +33,8 @@ pub(super) fn target(
                 Owner::Catalyst,
                 ProductHttpMethod::Get,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("datasets"),
                 ],
@@ -50,7 +51,8 @@ pub(super) fn target(
                 Owner::Catalyst,
                 ProductHttpMethod::Post,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("datasets"),
                 ],
@@ -104,7 +106,7 @@ mod tests {
                 .iter()
                 .map(ProductHttpPathSegment::test_value)
                 .collect::<Vec<_>>(),
-            ["api", "v1", "datasets"]
+            ["internal", "workspace", "v1", "datasets"]
         );
     }
 
@@ -127,7 +129,7 @@ mod tests {
                 .iter()
                 .map(ProductHttpPathSegment::test_value)
                 .collect::<Vec<_>>(),
-            ["api", "v1", "datasets"]
+            ["internal", "workspace", "v1", "datasets"]
         );
     }
 

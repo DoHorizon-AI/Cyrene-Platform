@@ -36,7 +36,8 @@ pub(super) fn target(
                 Owner::Echo,
                 ProductHttpMethod::Get,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("evaluation-suites"),
                     ProductHttpPathSegment::resource(&suite_id.to_string())?,
@@ -54,7 +55,8 @@ pub(super) fn target(
                 Owner::Echo,
                 ProductHttpMethod::Post,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("evaluation-suites"),
                 ],
@@ -109,7 +111,8 @@ mod tests {
                 .map(ProductHttpPathSegment::test_value)
                 .collect::<Vec<_>>(),
             [
-                "api",
+                "internal",
+                "workspace",
                 "v1",
                 "evaluation-suites",
                 "550e8400-e29b-41d4-a716-446655440000"
@@ -136,7 +139,7 @@ mod tests {
                 .iter()
                 .map(ProductHttpPathSegment::test_value)
                 .collect::<Vec<_>>(),
-            ["api", "v1", "evaluation-suites"]
+            ["internal", "workspace", "v1", "evaluation-suites"]
         );
     }
 

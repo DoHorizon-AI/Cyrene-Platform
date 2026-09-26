@@ -127,22 +127,33 @@ pub(super) struct ProductHttpTarget {
 }
 
 impl ProductHttpTarget {
-    /// Builds a route only from a fixed `/api/v1` Product path and safe segments.
+    /// Builds a route only from a fixed Product API prefix and safe segments.
     pub(super) fn new(
         owner: WorkspaceProductApiOwner,
         method: ProductHttpMethod,
         path_segments: Vec<ProductHttpPathSegment>,
     ) -> Result<Self, ProductInvocationError> {
+        let is_legacy_product_route = matches!(
+            path_segments.as_slice(),
+            [
+                ProductHttpPathSegment::Static("api"),
+                ProductHttpPathSegment::Static("v1"),
+                ..
+            ]
+        );
+        let is_private_workspace_route = matches!(
+            path_segments.as_slice(),
+            [
+                ProductHttpPathSegment::Static("internal"),
+                ProductHttpPathSegment::Static("workspace"),
+                ProductHttpPathSegment::Static("v1"),
+                ..
+            ]
+        );
         if !allowlisted_owner(owner)
-            || path_segments.len() < 3
-            || !matches!(
-                path_segments.first(),
-                Some(ProductHttpPathSegment::Static("api"))
-            )
-            || !matches!(
-                path_segments.get(1),
-                Some(ProductHttpPathSegment::Static("v1"))
-            )
+            || (!is_legacy_product_route && !is_private_workspace_route)
+            || (is_legacy_product_route && path_segments.len() < 3)
+            || (is_private_workspace_route && path_segments.len() < 4)
             || path_segments
                 .iter()
                 .any(|segment| !valid_segment(segment.value()))
@@ -214,9 +225,10 @@ impl ProductEndpointConfig {
     /// Creates a private server-side Product endpoint configuration for one
     /// organization and Workspace.
     ///
-    /// Configure the URL to an HTTPS hosting gateway that validates this
-    /// service credential. Current Product OpenAPI and server routes do not
-    /// establish bearer verification or Workspace-user attribution themselves.
+    /// Configure an HTTPS endpoint for the selected owner. The endpoint must
+    /// validate this service credential; private Workspace routes bind each
+    /// credential to one organization and Workspace. The resolver separately
+    /// checks that the trusted caller has that exact scope.
     pub fn new(
         owner: WorkspaceProductApiOwner,
         organization_id: impl Into<String>,
@@ -890,6 +902,40 @@ mod tests {
             )])
             .is_err()
         );
+    }
+
+    #[test]
+    fn private_workspace_routes_require_the_fixed_internal_prefix() {
+        let private = ProductHttpTarget::new(
+            WorkspaceProductApiOwner::Yield,
+            ProductHttpMethod::Get,
+            vec![
+                ProductHttpPathSegment::Static("internal"),
+                ProductHttpPathSegment::Static("workspace"),
+                ProductHttpPathSegment::Static("v1"),
+                ProductHttpPathSegment::Static("training-drafts"),
+            ],
+        )
+        .expect("private Workspace owner route should be allowed");
+        assert_eq!(
+            private
+                .path_segments()
+                .iter()
+                .map(ProductHttpPathSegment::test_value)
+                .collect::<Vec<_>>(),
+            ["internal", "workspace", "v1", "training-drafts"]
+        );
+
+        assert!(ProductHttpTarget::new(
+            WorkspaceProductApiOwner::Yield,
+            ProductHttpMethod::Get,
+            vec![
+                ProductHttpPathSegment::Static("internal"),
+                ProductHttpPathSegment::Static("v1"),
+                ProductHttpPathSegment::Static("training-drafts"),
+            ],
+        )
+        .is_err());
     }
 
     #[tokio::test]

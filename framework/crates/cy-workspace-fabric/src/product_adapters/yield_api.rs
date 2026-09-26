@@ -43,7 +43,8 @@ pub(super) fn target(
                 Owner::Yield,
                 ProductHttpMethod::Get,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("training-drafts"),
                     ProductHttpPathSegment::resource(&resource_id)?,
@@ -62,7 +63,8 @@ pub(super) fn target(
                 Owner::Yield,
                 ProductHttpMethod::Post,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("training-drafts"),
                     ProductHttpPathSegment::resource(&resource_id)?,
@@ -219,7 +221,7 @@ mod tests {
         assert_eq!(observed.method, ProductHttpMethod::Get);
         assert_eq!(
             observed.url,
-            "https://yield.test/api/v1/training-drafts/11111111-1111-4111-8111-111111111111"
+            "https://yield.test/internal/workspace/v1/training-drafts/11111111-1111-4111-8111-111111111111"
         );
         assert!(observed.body.is_empty());
         assert_eq!(observed.idempotency_key, None);
@@ -259,7 +261,7 @@ mod tests {
         assert_eq!(observed.method, ProductHttpMethod::Post);
         assert_eq!(
             observed.url,
-            "https://yield.test/api/v1/training-drafts/11111111-1111-4111-8111-111111111111/actions/start"
+            "https://yield.test/internal/workspace/v1/training-drafts/11111111-1111-4111-8111-111111111111/actions/start"
         );
         assert!(observed.body.is_empty());
         assert_eq!(observed.idempotency_key, None);
