@@ -37,6 +37,13 @@ CREATE INDEX authorizations_directory_generation_idx
     ON cyrene_workspace_device_authorization.authorizations
         (organization_id, workspace_id, device_id, authorization_generation, state_kind);
 
+CREATE INDEX authorizations_delivery_certificate_expiry_scan_idx
+    ON cyrene_workspace_device_authorization.authorizations (
+        ((convert_from(state_payload, 'UTF8')::jsonb #>>
+            '{state,certificate,not_after_unix_ms}')::NUMERIC), id
+    )
+    WHERE state_kind = 'delivery_pending';
+
 COMMENT ON COLUMN cyrene_workspace_device_authorization.authorizations.registration_binding_id IS
     'Opaque ID of the immutable Directory registration binding used for this authorization.';
 COMMENT ON COLUMN cyrene_workspace_device_authorization.authorizations.authorization_generation IS

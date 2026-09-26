@@ -10,6 +10,7 @@ END
 $migration$;
 
 DROP INDEX cyrene_workspace_device_authorization.authorizations_directory_generation_idx;
+DROP INDEX cyrene_workspace_device_authorization.authorizations_delivery_certificate_expiry_scan_idx;
 DROP INDEX cyrene_workspace_device_authorization.authorizations_registration_binding_unique;
 
 ALTER TABLE cyrene_workspace_device_authorization.authorizations
