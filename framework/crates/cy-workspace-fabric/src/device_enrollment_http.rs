@@ -24,8 +24,8 @@ use thiserror::Error;
 use zeroize::Zeroize;
 
 use crate::device_authorization::{
-    DeviceAuthorizationPortError, DeviceAuthorizationRequest, DeviceAuthorizationScope,
-    DeviceCsrValidator,
+    DeviceAuthorizationPortError, DeviceAuthorizationRegistrationRequest, DeviceAuthorizationScope,
+    DeviceCsrValidator, DeviceRegistrationKeyDigest,
 };
 
 const MAX_CSR_DER_BYTES: usize = 16 * 1024;
@@ -82,10 +82,7 @@ pub trait DeviceEnrollmentRegistrationTransactionPort: Send + Sync {
     /// recovers the matching authorization.
     async fn bind_and_start(
         &self,
-        request: DeviceAuthorizationRequest,
-        csr_sha256: [u8; 32],
-        spki_sha256: [u8; 32],
-        recovery_credential: RecoveryCredential,
+        request: DeviceAuthorizationRegistrationRequest,
     ) -> Result<DeviceEnrollmentStartResult, DeviceEnrollmentHttpError>;
 }
 
@@ -540,6 +537,9 @@ async fn start_device_authorization(
         }
     };
     let recovery_credential = RecoveryCredential(recovery_key);
+    let registration_key_digest =
+        DeviceRegistrationKeyDigest::from_secret(recovery_credential.bytes_for_digest());
+    drop(recovery_credential);
 
     let registration = state
         .dependencies
@@ -547,15 +547,13 @@ async fn start_device_authorization(
         .as_ref()
         .ok_or(DeviceEnrollmentHttpError::Unavailable)?;
     let start = registration
-        .bind_and_start(
-            DeviceAuthorizationRequest {
-                scope: scope.clone(),
-                csr_der,
-            },
+        .bind_and_start(DeviceAuthorizationRegistrationRequest::new(
+            scope.clone(),
+            csr_der,
             csr_sha256,
             actual_spki_sha256,
-            recovery_credential,
-        )
+            registration_key_digest,
+        ))
         .await?;
     validate_directory_binding(&start.binding, &scope, &csr_sha256, &actual_spki_sha256)?;
     validate_start_response(&start.response, &start.binding)?;
@@ -1262,19 +1260,16 @@ mod tests {
     impl DeviceEnrollmentRegistrationTransactionPort for TestRegistration {
         async fn bind_and_start(
             &self,
-            request: DeviceAuthorizationRequest,
-            csr_sha256: [u8; 32],
-            spki_sha256: [u8; 32],
-            _recovery_credential: RecoveryCredential,
+            request: DeviceAuthorizationRegistrationRequest,
         ) -> Result<DeviceEnrollmentStartResult, DeviceEnrollmentHttpError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let binding = DirectoryRegistrationBinding {
                 binding_id: [4; 16],
                 device_id: "directory-device-0123456789".into(),
-                scope: request.scope,
+                scope: request.scope().clone(),
                 authorization_generation: 1,
-                csr_sha256,
-                spki_sha256,
+                csr_sha256: *request.csr_sha256(),
+                spki_sha256: *request.spki_sha256(),
             };
             let response = StartDeviceAuthorizationResponse {
                 authorization: DeviceAuthorizationReferenceWire {
@@ -1285,7 +1280,7 @@ mod tests {
                         workspace_id: binding.scope.workspace_id.clone(),
                     },
                     csr_spki_sha256: STANDARD.encode(binding.spki_sha256),
-                    csr_sha256: STANDARD.encode(csr_sha256),
+                    csr_sha256: STANDARD.encode(binding.csr_sha256),
                     expires_at: "2026-09-26T12:10:00Z".into(),
                     authorization_generation: binding.authorization_generation,
                 },

@@ -11,6 +11,7 @@
 //! storage and every external trust-boundary port before enabling the flow.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use cy_proto::workspace_v1::UserIdentityRef;
@@ -29,6 +30,61 @@ pub const MAX_CERTIFICATE_DELIVERY_TTL_MS: u64 = 5 * 60 * 1_000;
 
 /// Opaque digest stored in place of the high-entropy one-time device code.
 pub type DeviceAuthorizationCodeHash = [u8; 32];
+
+const REGISTRATION_KEY_DOMAIN: &[u8] = b"cyrene-workspace-device-registration-key:v1\0";
+
+/// Domain-separated digest of the client-generated registration recovery key.
+/// The digest is safe to persist and never formats its bytes in diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceRegistrationKeyDigest([u8; 32]);
+
+impl DeviceRegistrationKeyDigest {
+    /// Derives the storage value from a validated, high-entropy recovery key.
+    pub(crate) fn from_secret(secret: &[u8; 32]) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(REGISTRATION_KEY_DOMAIN);
+        digest.update(secret);
+        Self(digest.finalize().into())
+    }
+
+    /// Reconstitutes a previously persisted digest without a raw credential.
+    #[allow(dead_code)] // Used by the PostgreSQL codec added on the adapter branch.
+    pub(crate) fn from_stored_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Exposes only the digest to the transactional storage adapter.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Opaque device identity evidence obtained only from the verified mTLS peer.
+/// It cannot be deserialized from an HTTP request or created by downstream
+/// callers. Directory rotation adapters use it to authorize identity reuse.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthenticatedDeviceRotation {
+    key: DeviceAuthorizationDeviceKey,
+}
+
+impl AuthenticatedDeviceRotation {
+    /// Trusted in-crate verifier seam; callers must pass the certificate's
+    /// already-verified WorkspaceDevice identity, never request JSON data.
+    #[allow(dead_code)] // Wired by the verified mTLS host adapter.
+    pub(crate) fn from_verified_mtls_peer(key: DeviceAuthorizationDeviceKey) -> Self {
+        Self { key }
+    }
+
+    pub fn key(&self) -> &DeviceAuthorizationDeviceKey {
+        &self.key
+    }
+}
+
+impl fmt::Debug for DeviceRegistrationKeyDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DeviceRegistrationKeyDigest([REDACTED])")
+    }
+}
 
 /// Exact organization and workspace scope authorized for an enrolled device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,9 +192,170 @@ pub struct DeviceAuthorizationRequest {
     pub scope: DeviceAuthorizationScope,
     /// DER-encoded PKCS#10 CSR. Private key material must never be sent here.
     pub csr_der: Vec<u8>,
+    /// Domain-separated digest of the 256-bit registration recovery key.
+    pub registration_key_digest: DeviceRegistrationKeyDigest,
     /// Trusted result returned by the Directory registration authority.
     /// Request adapters must never construct or deserialize this value.
     pub registration_binding: DeviceAuthorizationRegistrationBinding,
+}
+
+/// Request accepted by the single-transaction Directory/authorization store.
+/// The HTTP wire request cannot construct a Directory binding or rotation
+/// identity; those are resolved from trusted server state inside the adapter.
+pub struct DeviceAuthorizationRegistrationRequest {
+    pub(crate) scope: DeviceAuthorizationScope,
+    pub(crate) csr_der: Vec<u8>,
+    pub(crate) csr_sha256: [u8; 32],
+    pub(crate) spki_sha256: [u8; 32],
+    pub(crate) registration_key_digest: DeviceRegistrationKeyDigest,
+    pub(crate) authenticated_device: Option<AuthenticatedDeviceRotation>,
+}
+
+impl DeviceAuthorizationRegistrationRequest {
+    pub(crate) fn new(
+        scope: DeviceAuthorizationScope,
+        csr_der: Vec<u8>,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+        registration_key_digest: DeviceRegistrationKeyDigest,
+    ) -> Self {
+        Self {
+            scope,
+            csr_der,
+            csr_sha256,
+            spki_sha256,
+            registration_key_digest,
+            authenticated_device: None,
+        }
+    }
+
+    #[allow(dead_code)] // Only the trusted mTLS composition may attach this marker.
+    pub(crate) fn with_authenticated_device(
+        mut self,
+        authenticated_device: AuthenticatedDeviceRotation,
+    ) -> Self {
+        self.authenticated_device = Some(authenticated_device);
+        self
+    }
+
+    pub fn scope(&self) -> &DeviceAuthorizationScope {
+        &self.scope
+    }
+
+    pub fn csr_der(&self) -> &[u8] {
+        &self.csr_der
+    }
+
+    pub fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    pub fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    pub fn registration_key_digest(&self) -> &DeviceRegistrationKeyDigest {
+        &self.registration_key_digest
+    }
+}
+
+/// Candidate passed to a single database transaction that resolves Directory
+/// identity and starts or recovers the authorization. Candidate values are
+/// generated by the manager; callers cannot choose IDs or code digests.
+pub struct DeviceAuthorizationStartCandidate {
+    scope: DeviceAuthorizationScope,
+    csr_der: Vec<u8>,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+    registration_key_digest: DeviceRegistrationKeyDigest,
+    authorization_id_candidate: DeviceAuthorizationId,
+    device_code_hash_candidate: DeviceAuthorizationCodeHash,
+    user_code_digest_candidate: VersionedUserCodeDigest,
+    authorization_ttl_ms: u64,
+    initial_poll_interval_ms: u64,
+    maximum_recovery_attempts: u32,
+    observed_at_unix_ms: u64,
+    authenticated_device: Option<AuthenticatedDeviceRotation>,
+}
+
+impl DeviceAuthorizationStartCandidate {
+    pub fn scope(&self) -> &DeviceAuthorizationScope {
+        &self.scope
+    }
+
+    pub fn csr_der(&self) -> &[u8] {
+        &self.csr_der
+    }
+
+    pub fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    pub fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    pub fn registration_key_digest(&self) -> &DeviceRegistrationKeyDigest {
+        &self.registration_key_digest
+    }
+
+    pub fn authorization_id_candidate(&self) -> &DeviceAuthorizationId {
+        &self.authorization_id_candidate
+    }
+
+    pub fn device_code_hash_candidate(&self) -> &DeviceAuthorizationCodeHash {
+        &self.device_code_hash_candidate
+    }
+
+    pub fn user_code_digest_candidate(&self) -> &VersionedUserCodeDigest {
+        &self.user_code_digest_candidate
+    }
+
+    pub fn authorization_ttl_ms(&self) -> u64 {
+        self.authorization_ttl_ms
+    }
+
+    pub fn initial_poll_interval_ms(&self) -> u64 {
+        self.initial_poll_interval_ms
+    }
+
+    pub fn maximum_recovery_attempts(&self) -> u32 {
+        self.maximum_recovery_attempts
+    }
+
+    /// Advisory only. Durable adapters must use database time for TTL and
+    /// deadline decisions and return it in the committed snapshot.
+    pub fn observed_at_unix_ms(&self) -> u64 {
+        self.observed_at_unix_ms
+    }
+
+    pub fn authenticated_device(&self) -> Option<&AuthenticatedDeviceRotation> {
+        self.authenticated_device.as_ref()
+    }
+}
+
+/// Whether a composite registration transaction inserted a fresh authorization
+/// or rotated the codes on an existing authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAuthorizationStartDisposition {
+    Created,
+    Recovered,
+}
+
+/// One committed projection of Directory binding and authorization state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAuthorizationCommittedSnapshot {
+    pub record: DeviceAuthorizationRecord,
+    pub database_now_unix_ms: u64,
+    pub disposition: DeviceAuthorizationStartDisposition,
+}
+
+/// One committed poll view. `record` carries the current Directory binding,
+/// code generation, state, and row revision from the same database snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAuthorizationPollSnapshot {
+    pub record: DeviceAuthorizationRecord,
+    pub database_now_unix_ms: u64,
 }
 
 /// Codes and timing returned once to the device and its operator.
@@ -148,6 +365,8 @@ pub struct DeviceAuthorizationStart {
     pub authorization_id: DeviceAuthorizationId,
     pub device_id: String,
     pub authorization_generation: u64,
+    /// Revision for same-authorization recovery code rotation.
+    pub device_code_generation: u64,
     /// 256-bit, server-generated secret; callers must not log or persist it.
     pub device_code: String,
     /// Human-entered code. It is returned once and stored only as a digest.
@@ -363,6 +582,12 @@ pub struct DeviceAuthorizationRecord {
     pub id: DeviceAuthorizationId,
     /// Immutable Directory binding for this exact authorization generation.
     pub registration_binding: DeviceAuthorizationRegistrationBinding,
+    /// Domain-separated digest used for exact-tuple lost-start recovery.
+    /// `None` is reserved for rows created before v4; such records cannot be
+    /// recovered by registration key or used as a rotation authority.
+    pub registration_key_digest: Option<DeviceRegistrationKeyDigest>,
+    /// Monotonic code rotation revision, independent from device generation.
+    pub device_code_generation: u64,
     pub device_code_hash: DeviceAuthorizationCodeHash,
     pub user_code_digest: VersionedUserCodeDigest,
     pub scope: DeviceAuthorizationScope,
@@ -402,6 +627,15 @@ pub enum DeviceAuthorizationPoll {
     },
 }
 
+/// Poll outcome plus the exact committed authorization projection that backs
+/// the outcome. HTTP adapters use the projection to reject mismatched metadata
+/// and do not perform independent Directory or authorization reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAuthorizationPollResult {
+    pub response: DeviceAuthorizationPoll,
+    pub snapshot: DeviceAuthorizationPollSnapshot,
+}
+
 /// Tunable limits for short-lived device authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceAuthorizationPolicy {
@@ -411,6 +645,7 @@ pub struct DeviceAuthorizationPolicy {
     pub slow_down_increment_ms: u64,
     pub user_code_attempt_window_ms: u64,
     pub maximum_user_code_attempts: u32,
+    pub maximum_recovery_attempts: u32,
 }
 
 impl Default for DeviceAuthorizationPolicy {
@@ -422,6 +657,7 @@ impl Default for DeviceAuthorizationPolicy {
             slow_down_increment_ms: 5_000,
             user_code_attempt_window_ms: 15 * 60 * 1_000,
             maximum_user_code_attempts: 5,
+            maximum_recovery_attempts: 5,
         }
     }
 }
@@ -437,6 +673,8 @@ impl DeviceAuthorizationPolicy {
             && self.user_code_attempt_window_ms > 0
             && self.maximum_user_code_attempts > 0
             && self.maximum_user_code_attempts <= 10
+            && self.maximum_recovery_attempts > 0
+            && self.maximum_recovery_attempts <= 10
     }
 }
 
@@ -460,6 +698,19 @@ pub trait DeviceAuthorizationStore: Send + Sync {
     ) -> Result<(), DeviceAuthorizationStoreError> {
         Err(DeviceAuthorizationStoreError::Unavailable)
     }
+    /// Atomically resolves the registration-key digest and Directory identity,
+    /// then inserts or safely recovers the authorization and current codes.
+    /// The binding, state, revision, and code generation returned here must be
+    /// one committed database snapshot. Durable stores use database time, lock
+    /// the registration key/binding and authorization rows, preserve all CA
+    /// and delivery state on recovery, and reject tuple changes or terminal
+    /// states. The default keeps production start/recovery unavailable.
+    fn start_or_recover_registered(
+        &self,
+        _candidate: DeviceAuthorizationStartCandidate,
+    ) -> Result<DeviceAuthorizationCommittedSnapshot, DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     /// Verifies the record revision and Directory generation against one
     /// current snapshot. The default denies use by legacy stores.
     fn require_current_registered_record(
@@ -472,6 +723,20 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         &self,
         code_hash: &DeviceAuthorizationCodeHash,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError>;
+    /// Reads the current record and Directory binding for a current device
+    /// code in one snapshot. `expected_revision = None` performs the initial
+    /// lookup; `Some(revision)` is the final stale-code fence after a state CAS.
+    /// `observed_at_unix_ms` is only a local/test fallback; durable adapters
+    /// must supply database time. The default is unavailable so legacy
+    /// code-hash lookups cannot serve production polls.
+    fn current_poll_snapshot(
+        &self,
+        _code_hash: &DeviceAuthorizationCodeHash,
+        _expected_revision: Option<u64>,
+        _observed_at_unix_ms: u64,
+    ) -> Result<Option<DeviceAuthorizationPollSnapshot>, DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     fn by_user_code_candidates(
         &self,
         candidates: &[VersionedUserCodeDigest],
@@ -554,6 +819,8 @@ pub enum DeviceAuthorizationStoreError {
     CodeCollision,
     #[error("device authorization changed concurrently")]
     Conflict,
+    #[error("device authorization recovery attempts exceeded")]
+    RecoveryLimit,
     #[error("device authorization storage unavailable")]
     Unavailable,
 }
@@ -576,6 +843,8 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         if records.values().any(|existing| {
             existing.device_code_hash == record.device_code_hash
                 || existing.user_code_digest == record.user_code_digest
+                || (existing.registration_key_digest.is_some()
+                    && existing.registration_key_digest == record.registration_key_digest)
                 || existing.id == record.id
         }) {
             return Err(DeviceAuthorizationStoreError::CodeCollision);
@@ -620,6 +889,8 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         if records.values().any(|existing| {
             existing.device_code_hash == record.device_code_hash
                 || existing.user_code_digest == record.user_code_digest
+                || (existing.registration_key_digest.is_some()
+                    && existing.registration_key_digest == record.registration_key_digest)
                 || existing.id == record.id
                 || existing.registration_binding.binding_id()
                     == record.registration_binding.binding_id()
@@ -667,6 +938,31 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         code_hash: &DeviceAuthorizationCodeHash,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
         self.find(|record| &record.device_code_hash == code_hash)
+    }
+
+    fn current_poll_snapshot(
+        &self,
+        code_hash: &DeviceAuthorizationCodeHash,
+        expected_revision: Option<u64>,
+        observed_at_unix_ms: u64,
+    ) -> Result<Option<DeviceAuthorizationPollSnapshot>, DeviceAuthorizationStoreError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let Some(record) = records
+            .values()
+            .find(|record| &record.device_code_hash == code_hash)
+        else {
+            return Ok(None);
+        };
+        if expected_revision.is_some_and(|revision| record.revision != revision) {
+            return Ok(None);
+        }
+        Ok(Some(DeviceAuthorizationPollSnapshot {
+            record: record.clone(),
+            database_now_unix_ms: observed_at_unix_ms,
+        }))
     }
 
     fn by_user_code_candidates(
@@ -847,6 +1143,8 @@ impl InMemoryDeviceAuthorizationStore {
         };
         if current.revision != expected_revision
             || replacement.revision != next_revision
+            || current.registration_key_digest != replacement.registration_key_digest
+            || current.device_code_generation != replacement.device_code_generation
             || current.device_code_hash != replacement.device_code_hash
             || current.user_code_digest != replacement.user_code_digest
             || current.scope != replacement.scope
@@ -1324,6 +1622,8 @@ where
             let record = DeviceAuthorizationRecord {
                 id: enrollment_id,
                 registration_binding: request.registration_binding.clone(),
+                registration_key_digest: Some(request.registration_key_digest.clone()),
+                device_code_generation: 1,
                 device_code_hash: hash_code(b"device", device_code.as_bytes()),
                 user_code_digest: self
                     .user_code_keys
@@ -1348,11 +1648,121 @@ where
                         authorization_generation: request
                             .registration_binding
                             .authorization_generation(),
+                        device_code_generation: 1,
                         device_code,
                         user_code,
                         expires_at_unix_ms,
                         poll_interval_ms: self.policy.initial_poll_interval_ms,
                     })
+                }
+                Err(DeviceAuthorizationStoreError::CodeCollision) => continue,
+                Err(error) => return Err(map_store_error(error)),
+            }
+        }
+        Err(DeviceAuthorizationError::CodeCollision)
+    }
+
+    /// Creates or recovers a registration through one atomic Directory and
+    /// authorization store operation. The store returns the exact committed
+    /// binding, state, revision, and code generation. A missing composite
+    /// transaction is unavailable by default.
+    pub fn begin_or_recover_registered(
+        &self,
+        request: DeviceAuthorizationRegistrationRequest,
+        now_unix_ms: u64,
+        csr_validator: &impl DeviceCsrValidator,
+    ) -> Result<DeviceAuthorizationStart, DeviceAuthorizationError> {
+        validate_scope(&request.scope)?;
+        if request.csr_der.is_empty() || request.csr_der.len() > 16 * 1024 {
+            return Err(DeviceAuthorizationError::InvalidRequest);
+        }
+        let csr_sha256 = sha256(&request.csr_der);
+        if csr_sha256 != request.csr_sha256 {
+            return Err(DeviceAuthorizationError::InvalidRequest);
+        }
+        let spki_sha256 = match csr_validator.validate_and_hash_spki(&request.csr_der) {
+            Ok(hash) => hash,
+            Err(DeviceAuthorizationPortError::Rejected) => {
+                return Err(DeviceAuthorizationError::InvalidCsr)
+            }
+            Err(DeviceAuthorizationPortError::Unavailable) => {
+                return Err(DeviceAuthorizationError::CsrValidatorUnavailable)
+            }
+        };
+        if spki_sha256 != request.spki_sha256
+            || request
+                .registration_key_digest
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+        {
+            return Err(DeviceAuthorizationError::InvalidRequest);
+        }
+
+        for _ in 0..3 {
+            let authorization_id_candidate = random_array::<16>()?;
+            let device_code_bytes = random_array::<32>()?;
+            let user_code_entropy = random_array::<8>()?;
+            let device_code = encode_hex(&device_code_bytes);
+            let user_code = encode_user_code(&user_code_entropy);
+            let device_code_hash_candidate = hash_code(b"device", device_code.as_bytes());
+            let user_code_digest_candidate = self
+                .user_code_keys
+                .digest_for_storage(&normalize_user_code(&user_code))
+                .map_err(map_user_code_secret_error)?;
+            let candidate = DeviceAuthorizationStartCandidate {
+                scope: request.scope.clone(),
+                csr_der: request.csr_der.clone(),
+                csr_sha256,
+                spki_sha256,
+                registration_key_digest: request.registration_key_digest.clone(),
+                authorization_id_candidate,
+                device_code_hash_candidate,
+                user_code_digest_candidate: user_code_digest_candidate.clone(),
+                authorization_ttl_ms: self.policy.authorization_ttl_ms,
+                initial_poll_interval_ms: self.policy.initial_poll_interval_ms,
+                maximum_recovery_attempts: self.policy.maximum_recovery_attempts,
+                observed_at_unix_ms: now_unix_ms,
+                authenticated_device: request.authenticated_device.clone(),
+            };
+            match self.store.start_or_recover_registered(candidate) {
+                Ok(snapshot) => {
+                    let record = snapshot.record;
+                    if record.registration_key_digest.as_ref()
+                        != Some(&request.registration_key_digest)
+                        || record.device_code_hash != device_code_hash_candidate
+                        || record.user_code_digest != user_code_digest_candidate
+                        || !registration_binding_matches(
+                            &record.registration_binding,
+                            &request.scope,
+                            &csr_sha256,
+                            &spki_sha256,
+                        )
+                        || record.scope != request.scope
+                        || record.csr_der != request.csr_der
+                        || record.csr_sha256 != csr_sha256
+                        || record.spki_sha256 != spki_sha256
+                        || record.device_code_generation == 0
+                        || (snapshot.disposition == DeviceAuthorizationStartDisposition::Created
+                            && (record.id != authorization_id_candidate
+                                || record.device_code_generation != 1))
+                        || (snapshot.disposition == DeviceAuthorizationStartDisposition::Recovered
+                            && record.device_code_generation < 2)
+                    {
+                        return Err(DeviceAuthorizationError::StorageUnavailable);
+                    }
+                    return Ok(DeviceAuthorizationStart {
+                        authorization_id: record.id,
+                        device_id: record.registration_binding.key().device_id.clone(),
+                        authorization_generation: record
+                            .registration_binding
+                            .authorization_generation(),
+                        device_code_generation: record.device_code_generation,
+                        device_code,
+                        user_code,
+                        expires_at_unix_ms: record.expires_at_unix_ms,
+                        poll_interval_ms: record.poll_interval_ms,
+                    });
                 }
                 Err(DeviceAuthorizationStoreError::CodeCollision) => continue,
                 Err(error) => return Err(map_store_error(error)),
@@ -2407,7 +2817,31 @@ where
         now_unix_ms: u64,
         ports: &impl DeviceCertificateDeliveryPorts,
     ) -> Result<DeviceAuthorizationPoll, DeviceAuthorizationError> {
-        let mut record = self.lookup_by_device_code(device_code)?;
+        let result = self.poll_with_snapshot(device_code, now_unix_ms, ports)?;
+        match result.response {
+            DeviceAuthorizationPoll::SlowDown { retry_after_ms, .. } => {
+                Err(DeviceAuthorizationError::SlowDown { retry_after_ms })
+            }
+            response => Ok(response),
+        }
+    }
+
+    /// Polls and returns the committed binding/state snapshot that produced
+    /// the result. HTTP adapters must derive response metadata from this value.
+    pub fn poll_with_snapshot(
+        &self,
+        device_code: &str,
+        now_unix_ms: u64,
+        ports: &impl DeviceCertificateDeliveryPorts,
+    ) -> Result<DeviceAuthorizationPollResult, DeviceAuthorizationError> {
+        let code_hash = device_code_hash(device_code)?;
+        let snapshot = self
+            .store
+            .current_poll_snapshot(&code_hash, None, now_unix_ms)
+            .map_err(map_store_error)?
+            .ok_or(DeviceAuthorizationError::InvalidCode)?;
+        let mut record = snapshot.record;
+        let database_now_unix_ms = snapshot.database_now_unix_ms;
         match record.state {
             DeviceAuthorizationState::Consumed { .. } => {
                 return Err(DeviceAuthorizationError::AlreadyConsumed)
@@ -2418,45 +2852,51 @@ where
             DeviceAuthorizationState::Expired => return Err(DeviceAuthorizationError::Expired),
             _ => {}
         }
-        self.expire_if_due(&mut record, now_unix_ms)?;
-
-        let delivery_now_unix_ms = if matches!(
-            record.state,
-            DeviceAuthorizationState::DeliveryPending { .. }
-                | DeviceAuthorizationState::RetirementPending { .. }
-        ) {
-            Some(
-                ports
-                    .current_unix_ms()
-                    .map_err(|_| DeviceAuthorizationError::ClockUnavailable)?,
-            )
-        } else {
-            None
-        };
+        self.expire_if_due(&mut record, database_now_unix_ms)?;
 
         if let Some(last_poll_at_unix_ms) = record.last_poll_at_unix_ms {
             let next_allowed_at = last_poll_at_unix_ms.saturating_add(record.poll_interval_ms);
-            if now_unix_ms < next_allowed_at {
+            if database_now_unix_ms < next_allowed_at {
                 record.poll_interval_ms = record
                     .poll_interval_ms
                     .saturating_add(self.policy.slow_down_increment_ms)
                     .min(self.policy.maximum_poll_interval_ms);
                 let next_allowed_at = last_poll_at_unix_ms.saturating_add(record.poll_interval_ms);
-                let retry_after_ms = next_allowed_at.saturating_sub(now_unix_ms);
-                self.replace(record.clone())?;
-                return Err(DeviceAuthorizationError::SlowDown { retry_after_ms });
+                let retry_after_ms = next_allowed_at.saturating_sub(database_now_unix_ms);
+                let committed = self.replace_with_revision(record)?;
+                let current = self.require_current_poll_snapshot(
+                    &committed,
+                    &code_hash,
+                    database_now_unix_ms,
+                )?;
+                return Ok(DeviceAuthorizationPollResult {
+                    response: DeviceAuthorizationPoll::SlowDown {
+                        interval_ms: current.record.poll_interval_ms,
+                        retry_after_ms,
+                    },
+                    snapshot: current,
+                });
             }
         }
 
-        record.last_poll_at_unix_ms = Some(now_unix_ms);
+        record.last_poll_at_unix_ms = Some(database_now_unix_ms);
         match record.state.clone() {
             DeviceAuthorizationState::Pending
             | DeviceAuthorizationState::AwaitingWebAuthn { .. }
             | DeviceAuthorizationState::VerifyingWebAuthn { .. }
             | DeviceAuthorizationState::Issuing { .. } => {
-                let interval_ms = record.poll_interval_ms;
-                self.replace(record)?;
-                Ok(DeviceAuthorizationPoll::Pending { interval_ms })
+                let committed = self.replace_with_revision(record)?;
+                let current = self.require_current_poll_snapshot(
+                    &committed,
+                    &code_hash,
+                    database_now_unix_ms,
+                )?;
+                Ok(DeviceAuthorizationPollResult {
+                    response: DeviceAuthorizationPoll::Pending {
+                        interval_ms: current.record.poll_interval_ms,
+                    },
+                    snapshot: current,
+                })
             }
             DeviceAuthorizationState::DeliveryPending {
                 approval_id,
@@ -2467,10 +2907,8 @@ where
                 certificate_sha256,
                 delivery_deadline_unix_ms,
             } => {
-                let trusted_now =
-                    delivery_now_unix_ms.ok_or(DeviceAuthorizationError::ClockUnavailable)?;
-                if trusted_now >= delivery_deadline_unix_ms
-                    || trusted_now >= certificate.not_after_unix_ms
+                if database_now_unix_ms >= delivery_deadline_unix_ms
+                    || database_now_unix_ms >= certificate.not_after_unix_ms
                 {
                     let retirement = DeviceAuthorizationState::RetirementPending {
                         approval_id,
@@ -2479,7 +2917,7 @@ where
                         certificate_sha256,
                         delivery_id: Some(delivery_id),
                         reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
-                        entered_at_unix_ms: trusted_now,
+                        entered_at_unix_ms: database_now_unix_ms,
                         last_failure: None,
                     };
                     let record = self.reserve_retirement(record, retirement)?;
@@ -2491,7 +2929,15 @@ where
                     } else {
                         record
                     };
-                    poll_result_from_state(record.state)
+                    let current = self.require_current_poll_snapshot(
+                        &record,
+                        &code_hash,
+                        database_now_unix_ms,
+                    )?;
+                    Ok(DeviceAuthorizationPollResult {
+                        response: poll_result_from_state(current.record.state.clone())?,
+                        snapshot: current,
+                    })
                 } else {
                     let delivery = DeviceCertificateDelivery {
                         authorization_id: record.id,
@@ -2510,29 +2956,55 @@ where
                         csr_spki_sha256: record.spki_sha256,
                         acknowledgement_deadline_unix_ms: delivery_deadline_unix_ms,
                     };
-                    self.replace(record)?;
-                    Ok(DeviceAuthorizationPoll::CertificateReady(delivery))
+                    let committed = self.replace_with_revision(record)?;
+                    let current = self.require_current_poll_snapshot(
+                        &committed,
+                        &code_hash,
+                        database_now_unix_ms,
+                    )?;
+                    Ok(DeviceAuthorizationPollResult {
+                        response: DeviceAuthorizationPoll::CertificateReady(delivery),
+                        snapshot: current,
+                    })
                 }
             }
             DeviceAuthorizationState::RetirementPending { .. } => {
                 let record = self.replace_and_reload(record)?;
                 let record = self.try_retirement(record, ports)?;
-                poll_result_from_state(record.state)
+                let current =
+                    self.require_current_poll_snapshot(&record, &code_hash, database_now_unix_ms)?;
+                Ok(DeviceAuthorizationPollResult {
+                    response: poll_result_from_state(current.record.state.clone())?,
+                    snapshot: current,
+                })
             }
-            DeviceAuthorizationState::Delivered { receipt, .. } => {
-                self.replace(record)?;
-                Ok(DeviceAuthorizationPoll::Delivered(receipt))
+            DeviceAuthorizationState::Delivered { .. } => {
+                let committed = self.replace_with_revision(record)?;
+                let current = self.require_current_poll_snapshot(
+                    &committed,
+                    &code_hash,
+                    database_now_unix_ms,
+                )?;
+                Ok(DeviceAuthorizationPollResult {
+                    response: poll_result_from_state(current.record.state.clone())?,
+                    snapshot: current,
+                })
             }
-            DeviceAuthorizationState::DeliveryExpired {
-                delivery_id,
-                certificate_sha256,
-                ..
-            } => Ok(DeviceAuthorizationPoll::DeliveryExpired {
-                delivery_id,
-                certificate_sha256,
-            }),
-            DeviceAuthorizationState::IssuanceFailed { failure, .. } => {
-                Ok(DeviceAuthorizationPoll::IssuanceFailed { failure })
+            DeviceAuthorizationState::DeliveryExpired { .. } => {
+                let current =
+                    self.require_current_poll_snapshot(&record, &code_hash, database_now_unix_ms)?;
+                Ok(DeviceAuthorizationPollResult {
+                    response: poll_result_from_state(current.record.state.clone())?,
+                    snapshot: current,
+                })
+            }
+            DeviceAuthorizationState::IssuanceFailed { .. } => {
+                let current =
+                    self.require_current_poll_snapshot(&record, &code_hash, database_now_unix_ms)?;
+                Ok(DeviceAuthorizationPollResult {
+                    response: poll_result_from_state(current.record.state.clone())?,
+                    snapshot: current,
+                })
             }
             DeviceAuthorizationState::Denied { .. } => Err(DeviceAuthorizationError::Denied),
             DeviceAuthorizationState::Consumed { .. } => {
@@ -2693,14 +3165,33 @@ where
         &self,
         device_code: &str,
     ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
-        if device_code.len() != 64 || !device_code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(DeviceAuthorizationError::InvalidCode);
-        }
-        let code_hash = hash_code(b"device", device_code.to_ascii_lowercase().as_bytes());
+        let code_hash = device_code_hash(device_code)?;
         self.store
             .by_device_code_hash(&code_hash)
             .map_err(map_store_error)?
             .ok_or(DeviceAuthorizationError::InvalidCode)
+    }
+
+    fn require_current_poll_snapshot(
+        &self,
+        record: &DeviceAuthorizationRecord,
+        code_hash: &DeviceAuthorizationCodeHash,
+        observed_at_unix_ms: u64,
+    ) -> Result<DeviceAuthorizationPollSnapshot, DeviceAuthorizationError> {
+        let current = self
+            .store
+            .current_poll_snapshot(code_hash, Some(record.revision), observed_at_unix_ms)
+            .map_err(map_store_error)?
+            .ok_or(DeviceAuthorizationError::InvalidCode)?;
+        if current.record.id != record.id
+            || current.record.revision != record.revision
+            || current.record.device_code_hash != *code_hash
+            || current.record.device_code_generation != record.device_code_generation
+            || current.record.registration_binding != record.registration_binding
+        {
+            return Err(DeviceAuthorizationError::InvalidCode);
+        }
+        Ok(current)
     }
 
     fn replace_and_reload(
@@ -2854,15 +3345,23 @@ where
 
     fn replace(
         &self,
-        mut replacement: DeviceAuthorizationRecord,
+        replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationError> {
+        self.replace_with_revision(replacement).map(|_| ())
+    }
+
+    fn replace_with_revision(
+        &self,
+        mut replacement: DeviceAuthorizationRecord,
+    ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
         let expected_revision = replacement.revision;
         replacement.revision = expected_revision
             .checked_add(1)
             .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
         self.store
-            .compare_and_swap_registered(expected_revision, replacement)
-            .map_err(map_store_error)
+            .compare_and_swap_registered(expected_revision, replacement.clone())
+            .map_err(map_store_error)?;
+        Ok(replacement)
     }
 
     fn replace_retirement(
@@ -2971,6 +3470,18 @@ fn hash_code(kind: &[u8], code: &[u8]) -> DeviceAuthorizationCodeHash {
     hasher.update(b"\0");
     hasher.update(code);
     hasher.finalize().into()
+}
+
+fn device_code_hash(
+    device_code: &str,
+) -> Result<DeviceAuthorizationCodeHash, DeviceAuthorizationError> {
+    if device_code.len() != 64 || !device_code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(DeviceAuthorizationError::InvalidCode);
+    }
+    Ok(hash_code(
+        b"device",
+        device_code.to_ascii_lowercase().as_bytes(),
+    ))
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -3246,6 +3757,7 @@ fn map_store_error(error: DeviceAuthorizationStoreError) -> DeviceAuthorizationE
     match error {
         DeviceAuthorizationStoreError::CodeCollision => DeviceAuthorizationError::CodeCollision,
         DeviceAuthorizationStoreError::Conflict => DeviceAuthorizationError::ConcurrentTransition,
+        DeviceAuthorizationStoreError::RecoveryLimit => DeviceAuthorizationError::TooManyAttempts,
         DeviceAuthorizationStoreError::Unavailable => DeviceAuthorizationError::StorageUnavailable,
     }
 }
@@ -3884,6 +4396,7 @@ mod tests {
             slow_down_increment_ms: 1_000,
             user_code_attempt_window_ms: 60_000,
             maximum_user_code_attempts: 3,
+            maximum_recovery_attempts: 3,
         }
     }
 
@@ -3995,6 +4508,9 @@ mod tests {
         DeviceAuthorizationRequest {
             scope: request_scope.clone(),
             csr_der: csr_der.clone(),
+            registration_key_digest: DeviceRegistrationKeyDigest::from_secret(
+                &[u8::try_from(generation % 255 + 1).expect("bounded generation"); 32],
+            ),
             registration_binding: test_registration_binding(request_scope, &csr_der, generation),
         }
     }
@@ -4340,6 +4856,10 @@ mod tests {
                     &old_record.csr_der,
                     start.authorization_generation.saturating_add(1),
                 ),
+                registration_key_digest: Some(DeviceRegistrationKeyDigest::from_secret(
+                    &[0x99; 32],
+                )),
+                device_code_generation: 1,
                 device_code_hash: [0xaa; 32],
                 user_code_digest: manager
                     .user_code_keys
@@ -5024,6 +5544,7 @@ mod tests {
                 DeviceAuthorizationRequest {
                     scope: request_scope,
                     csr_der,
+                    registration_key_digest: DeviceRegistrationKeyDigest::from_secret(&[9; 32]),
                     registration_binding: binding,
                 },
                 100,
@@ -5052,6 +5573,7 @@ mod tests {
                 DeviceAuthorizationRequest {
                     scope: request_scope.clone(),
                     csr_der: csr_der.clone(),
+                    registration_key_digest: DeviceRegistrationKeyDigest::from_secret(&[10; 32]),
                     registration_binding: test_registration_binding(&request_scope, &csr_der, 901,),
                 },
                 100,
@@ -5060,6 +5582,69 @@ mod tests {
             Err(DeviceAuthorizationError::StorageUnavailable)
         );
         assert!(inner.records.lock().expect("store lock").is_empty());
+    }
+
+    #[test]
+    fn atomic_registration_recovery_store_defaults_fail_closed() {
+        let inner = InMemoryDeviceAuthorizationStore::default();
+        let manager = DeviceAuthorizationManager::new(
+            LegacyDeviceAuthorizationStore(inner.clone()),
+            InMemoryUserCodeAttemptLimiter::default(),
+            test_user_code_key_ring(),
+            test_policy(),
+        )
+        .expect("valid test policy");
+        let csr_der = b"test-only-csr".to_vec();
+        let recovery_secret = [0x31; 32];
+        let digest = DeviceRegistrationKeyDigest::from_secret(&recovery_secret);
+        assert!(format!("{digest:?}").contains("REDACTED"));
+        assert!(!format!("{digest:?}").contains("49"));
+
+        let request = DeviceAuthorizationRegistrationRequest::new(
+            scope(),
+            csr_der.clone(),
+            sha256(&csr_der),
+            [1; 32],
+            digest,
+        );
+        assert_eq!(
+            manager.begin_or_recover_registered(request, 100, &TestCsrValidator),
+            Err(DeviceAuthorizationError::StorageUnavailable)
+        );
+        assert!(inner.records.lock().expect("store lock").is_empty());
+    }
+
+    #[test]
+    fn poll_snapshot_is_fenced_by_current_code_and_revision() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let start = start(&manager);
+        let code_hash = device_code_hash(&start.device_code).expect("valid start code");
+        let initial = store
+            .current_poll_snapshot(&code_hash, None, 200)
+            .expect("poll snapshot")
+            .expect("current code");
+        assert_eq!(initial.record.id, start.authorization_id);
+        assert_eq!(
+            initial.record.device_code_generation,
+            start.device_code_generation
+        );
+        assert_eq!(initial.database_now_unix_ms, 200);
+        assert!(store
+            .current_poll_snapshot(&code_hash, Some(initial.record.revision + 1), 200,)
+            .expect("stale poll revision")
+            .is_none());
+
+        assert_eq!(
+            manager.poll(&start.device_code, 1_100, &TestApprovalPorts),
+            Ok(DeviceAuthorizationPoll::Pending { interval_ms: 1_000 })
+        );
+        let current = store
+            .current_poll_snapshot(&code_hash, Some(initial.record.revision + 1), 1_100)
+            .expect("committed poll revision")
+            .expect("current poll projection");
+        assert_eq!(current.record.device_code_generation, 1);
+        assert_eq!(current.record.last_poll_at_unix_ms, Some(1_100));
     }
 
     #[test]
