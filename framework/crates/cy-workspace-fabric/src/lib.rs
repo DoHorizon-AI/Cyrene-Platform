@@ -15,6 +15,9 @@ mod device_registry;
 mod direct;
 mod directory;
 mod persistent_directory;
+// The policy slice lands before its separately owned caller/runtime call site.
+#[allow(dead_code)]
+pub(crate) mod product_authorization;
 mod relay;
 mod transport;
 
