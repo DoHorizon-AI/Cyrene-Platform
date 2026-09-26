@@ -272,6 +272,17 @@ pub enum DeviceDeliveryRecoveryStatus {
     RecoveryBlocked,
 }
 
+/// Outcome of one manager-owned delivery retirement attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceCertificateRetirementWorkOutcome {
+    /// The record is missing, not due, or no longer needs retirement.
+    NoWork,
+    /// The CA confirmed retirement and the state is terminal.
+    Retired,
+    /// Retirement is still durable and must be retried later.
+    Pending(DeviceDeliveryRecoveryStatus),
+}
+
 /// Terminal or intermediate state retained for replay prevention and audit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceAuthorizationState {
@@ -476,11 +487,35 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         &self,
         approval_id: &DeviceAuthorizationId,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError>;
+    /// Resolves one authorization by its non-secret, server-generated ID.
+    ///
+    /// The default is unavailable so legacy adapters cannot accidentally
+    /// become background retirement stores.
+    fn by_authorization_id(
+        &self,
+        _authorization_id: &DeviceAuthorizationId,
+    ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     fn compare_and_swap(
         &self,
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError>;
+    /// Atomically reserves a due `DeliveryPending` record for retirement.
+    ///
+    /// Durable implementations must verify the exact stored revision and
+    /// state, and verify either the delivery deadline or certificate expiry
+    /// against database time in the same transaction before writing
+    /// `RetirementPending`. The default deliberately fails closed for stores
+    /// without that database-time CAS.
+    fn compare_and_swap_due_delivery_to_retirement(
+        &self,
+        _expected_revision: u64,
+        _replacement: DeviceAuthorizationRecord,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     /// Applies an authorization transition only while the immutable Directory
     /// binding and current generation are checked under the same database
     /// transaction/row lock. The default denies use by legacy stores.
@@ -696,12 +731,62 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         })
     }
 
+    fn by_authorization_id(
+        &self,
+        authorization_id: &DeviceAuthorizationId,
+    ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
+        self.find(|record| &record.id == authorization_id)
+    }
+
     fn compare_and_swap(
         &self,
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
         self.compare_and_swap_inner(expected_revision, replacement, false, false)
+    }
+
+    fn compare_and_swap_due_delivery_to_retirement(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let Some(current) = records.get(&replacement.id) else {
+            return Ok(false);
+        };
+        if current.revision != expected_revision {
+            return Ok(false);
+        }
+        if !matches!(
+            &current.state,
+            DeviceAuthorizationState::DeliveryPending { .. }
+        ) {
+            return Ok(false);
+        }
+        if !matches!(
+            &replacement.state,
+            DeviceAuthorizationState::RetirementPending {
+                reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
+                last_failure: None,
+                ..
+            }
+        ) {
+            return Ok(false);
+        }
+        let mut expected = current.clone();
+        expected.revision = expected_revision
+            .checked_add(1)
+            .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+        expected.state = replacement.state.clone();
+        if replacement != expected {
+            return Ok(false);
+        }
+        records.insert(replacement.id, replacement);
+        Ok(true)
     }
 
     fn compare_and_swap_registered(
@@ -2074,7 +2159,7 @@ where
             }
             let mut replacement = record.clone();
             replacement.state = terminal.clone();
-            match self.replace(replacement) {
+            match self.replace_retirement(replacement) {
                 Ok(()) => {
                     record.revision = record
                         .revision
@@ -2127,7 +2212,7 @@ where
                 }
                 state => return Err(state_error(state)),
             }
-            match self.replace(record.clone()) {
+            match self.replace_retirement(record.clone()) {
                 Ok(()) => {
                     record.revision = record
                         .revision
@@ -2183,6 +2268,87 @@ where
             }
             _ => Err(state_error(&record.state)),
         }
+    }
+
+    /// Advances one due delivery or resumes one durable retirement by authorization ID.
+    ///
+    /// `database_now_unix_ms` must come from the durable store's database clock.
+    /// It records when this sweep reserved retirement; the store must independently
+    /// recheck the persisted deadline with database time in the reservation CAS.
+    /// This entrypoint never contacts the CA while the row is `DeliveryPending`.
+    pub(crate) fn retire_certificate_work_by_authorization_id(
+        &self,
+        authorization_id: &DeviceAuthorizationId,
+        database_now_unix_ms: u64,
+        retirement_port: &impl DeviceCertificateRetirementPort,
+    ) -> Result<DeviceCertificateRetirementWorkOutcome, DeviceAuthorizationError> {
+        const MAX_CAS_ATTEMPTS: usize = 5;
+        let Some(mut record_value) = self
+            .store
+            .by_authorization_id(authorization_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(DeviceCertificateRetirementWorkOutcome::NoWork);
+        };
+
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            match &record_value.state {
+                DeviceAuthorizationState::RetirementPending { .. } => {
+                    let retired = self.try_retirement(record_value, retirement_port)?;
+                    return Ok(retirement_work_outcome(&retired));
+                }
+                DeviceAuthorizationState::DeliveryPending {
+                    approval_id,
+                    approver,
+                    certificate,
+                    delivery_id,
+                    certificate_sha256,
+                    delivery_deadline_unix_ms,
+                    ..
+                } => {
+                    if database_now_unix_ms < *delivery_deadline_unix_ms
+                        && database_now_unix_ms < certificate.not_after_unix_ms
+                    {
+                        return Ok(DeviceCertificateRetirementWorkOutcome::NoWork);
+                    }
+                    let expected_revision = record_value.revision;
+                    let mut replacement = record_value.clone();
+                    replacement.revision = expected_revision
+                        .checked_add(1)
+                        .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+                    replacement.state = DeviceAuthorizationState::RetirementPending {
+                        approval_id: *approval_id,
+                        approver: approver.clone(),
+                        certificate: certificate.clone(),
+                        certificate_sha256: *certificate_sha256,
+                        delivery_id: Some(*delivery_id),
+                        reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
+                        entered_at_unix_ms: database_now_unix_ms,
+                        last_failure: None,
+                    };
+                    match self.store.compare_and_swap_due_delivery_to_retirement(
+                        expected_revision,
+                        replacement.clone(),
+                    ) {
+                        Ok(true) => {
+                            return Ok(retirement_work_outcome(
+                                &self.try_retirement(replacement, retirement_port)?,
+                            ));
+                        }
+                        Ok(false) | Err(DeviceAuthorizationStoreError::Conflict) => {
+                            record_value = self
+                                .store
+                                .by_authorization_id(authorization_id)
+                                .map_err(map_store_error)?
+                                .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                        }
+                        Err(error) => return Err(map_store_error(error)),
+                    }
+                }
+                _ => return Ok(DeviceCertificateRetirementWorkOutcome::NoWork),
+            }
+        }
+        Err(DeviceAuthorizationError::ConcurrentTransition)
     }
 
     /// Denies a pending enrollment once. A denial also invalidates any active
@@ -2698,6 +2864,19 @@ where
             .compare_and_swap_registered(expected_revision, replacement)
             .map_err(map_store_error)
     }
+
+    fn replace_retirement(
+        &self,
+        mut replacement: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationError> {
+        let expected_revision = replacement.revision;
+        replacement.revision = expected_revision
+            .checked_add(1)
+            .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+        self.store
+            .compare_and_swap(expected_revision, replacement)
+            .map_err(map_store_error)
+    }
 }
 
 fn validate_scope(scope: &DeviceAuthorizationScope) -> Result<(), DeviceAuthorizationError> {
@@ -2862,6 +3041,25 @@ fn retirement_entered_at(state: &DeviceAuthorizationState) -> u64 {
             entered_at_unix_ms, ..
         } => *entered_at_unix_ms,
         _ => 0,
+    }
+}
+
+fn retirement_work_outcome(
+    record: &DeviceAuthorizationRecord,
+) -> DeviceCertificateRetirementWorkOutcome {
+    match &record.state {
+        DeviceAuthorizationState::RetirementPending { last_failure, .. } => {
+            DeviceCertificateRetirementWorkOutcome::Pending(last_failure.map_or(
+                DeviceDeliveryRecoveryStatus::RevocationPending,
+                DeviceCertificateRetirementError::recovery_status,
+            ))
+        }
+        DeviceAuthorizationState::DeliveryExpired { .. }
+        | DeviceAuthorizationState::IssuanceFailed {
+            certificate_sha256: Some(_),
+            ..
+        } => DeviceCertificateRetirementWorkOutcome::Retired,
+        _ => DeviceCertificateRetirementWorkOutcome::NoWork,
     }
 }
 
@@ -4638,6 +4836,101 @@ mod tests {
                 .state,
             DeviceAuthorizationState::DeliveryExpired { .. }
         ));
+    }
+
+    #[test]
+    fn retirement_worker_entrypoint_reserves_before_revoke_and_retries_unknown_result() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let start = start(&manager);
+        let (ports, _verifier_started) =
+            CoordinatedApprovalPorts::new(VerifierBehavior::Allow, 300);
+        let challenge = manager
+            .begin_approval(&start.user_code, &scope(), &user(), &[26; 32], 200, &ports)
+            .expect("challenge");
+        manager
+            .complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                300,
+                &ports,
+            )
+            .expect("approval creates delivery");
+
+        let delivery_deadline_unix_ms = match store
+            .by_authorization_id(&start.authorization_id)
+            .expect("read authorization")
+            .expect("authorization")
+            .state
+        {
+            DeviceAuthorizationState::DeliveryPending {
+                delivery_deadline_unix_ms,
+                ..
+            } => delivery_deadline_unix_ms,
+            state => panic!("unexpected state: {state:?}"),
+        };
+        assert_eq!(
+            manager.retire_certificate_work_by_authorization_id(
+                &start.authorization_id,
+                delivery_deadline_unix_ms - 1,
+                &ports,
+            ),
+            Ok(DeviceCertificateRetirementWorkOutcome::NoWork)
+        );
+        assert_eq!(ports.retirement_calls(), 0);
+
+        ports.set_retirement_failures_remaining(1);
+        assert_eq!(
+            manager.retire_certificate_work_by_authorization_id(
+                &start.authorization_id,
+                delivery_deadline_unix_ms,
+                &ports,
+            ),
+            Ok(DeviceCertificateRetirementWorkOutcome::Pending(
+                DeviceDeliveryRecoveryStatus::RevocationPending,
+            ))
+        );
+        let pending = store
+            .by_authorization_id(&start.authorization_id)
+            .expect("read retirement reservation")
+            .expect("authorization");
+        assert!(matches!(
+            pending.state,
+            DeviceAuthorizationState::RetirementPending {
+                reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
+                entered_at_unix_ms,
+                last_failure: Some(DeviceCertificateRetirementError::OutcomeUnknown),
+                ..
+            } if entered_at_unix_ms == delivery_deadline_unix_ms
+        ));
+        assert_eq!(ports.retirement_calls(), 1);
+
+        assert_eq!(
+            manager.retire_certificate_work_by_authorization_id(
+                &start.authorization_id,
+                delivery_deadline_unix_ms + 1,
+                &ports,
+            ),
+            Ok(DeviceCertificateRetirementWorkOutcome::Retired)
+        );
+        assert!(matches!(
+            store
+                .by_authorization_id(&start.authorization_id)
+                .expect("read terminal state")
+                .expect("authorization")
+                .state,
+            DeviceAuthorizationState::DeliveryExpired { .. }
+        ));
+        assert_eq!(ports.retirement_calls(), 2);
+        assert_eq!(
+            manager.retire_certificate_work_by_authorization_id(
+                &start.authorization_id,
+                delivery_deadline_unix_ms + 2,
+                &ports,
+            ),
+            Ok(DeviceCertificateRetirementWorkOutcome::NoWork)
+        );
+        assert_eq!(ports.retirement_calls(), 2);
     }
 
     #[test]
