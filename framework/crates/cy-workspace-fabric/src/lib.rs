@@ -18,6 +18,8 @@ mod persistent_directory;
 mod relay;
 mod transport;
 
+pub mod device_authorization;
+
 pub use api::{LocalWorkspaceClient, WorkspaceApi};
 pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
