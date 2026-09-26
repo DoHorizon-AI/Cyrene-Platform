@@ -42,7 +42,8 @@ pub(super) fn target(
                 Owner::Reactor,
                 ProductHttpMethod::Get,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("model-imports"),
                 ],
@@ -63,7 +64,8 @@ pub(super) fn target(
                 Owner::Reactor,
                 ProductHttpMethod::Post,
                 vec![
-                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("internal"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("v1"),
                     ProductHttpPathSegment::Static("model-imports"),
                 ],
@@ -208,7 +210,10 @@ mod tests {
             .expect("request was dispatched");
         assert_eq!(observed.owner, Owner::Reactor);
         assert_eq!(observed.method, ProductHttpMethod::Get);
-        assert_eq!(observed.url, "https://reactor.test/api/v1/model-imports");
+        assert_eq!(
+            observed.url,
+            "https://reactor.test/internal/workspace/v1/model-imports"
+        );
         assert!(observed.body.is_empty());
         assert_eq!(observed.idempotency_key, None);
         assert!(!observed.debug.contains("private-reactor-bearer"));
@@ -246,7 +251,10 @@ mod tests {
             .expect("request was dispatched");
         assert_eq!(observed.owner, Owner::Reactor);
         assert_eq!(observed.method, ProductHttpMethod::Post);
-        assert_eq!(observed.url, "https://reactor.test/api/v1/model-imports");
+        assert_eq!(
+            observed.url,
+            "https://reactor.test/internal/workspace/v1/model-imports"
+        );
         assert_eq!(observed.body, body.as_bytes());
         assert_eq!(
             observed.idempotency_key.as_deref(),
@@ -314,6 +322,49 @@ mod tests {
         assert_eq!(
             target(&create_with_array_body),
             Err(ProductInvocationError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn legacy_global_route_is_not_an_allowed_reactor_target() {
+        assert_eq!(
+            ProductHttpTarget::new(
+                Owner::Reactor,
+                ProductHttpMethod::Get,
+                vec![
+                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("v1"),
+                    ProductHttpPathSegment::Static("model-imports"),
+                ],
+            ),
+            Err(ProductInvocationError::InvalidRequest)
+        );
+    }
+
+    #[tokio::test]
+    async fn serving_binding_forbidden_response_remains_forbidden() {
+        let (client, _) = test_client(403, r#"{"detail":"serving binding is not granted"}"#);
+        let request = invocation(
+            Operation::WorkspaceProductApiOperation06,
+            Kind::Command,
+            None,
+            br#"{"name":"small-model","servingBindingId":"binding-1","source":{"kind":"HUGGING_FACE","repository":"org/model"}}"#,
+            None,
+        );
+
+        let response = client
+            .send(
+                &crate::product_adapters::test_member_caller("organization-1", "workspace-1"),
+                target(&request).expect("mapped private route"),
+                &request,
+            )
+            .await
+            .expect("owner authorization response remains a Product response");
+
+        assert_eq!(response.status_code, 403);
+        assert_eq!(
+            response.json_body,
+            br#"{"detail":"serving binding is not granted"}"#
         );
     }
 }

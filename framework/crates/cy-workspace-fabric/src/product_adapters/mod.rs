@@ -65,14 +65,9 @@ impl ProductInvocationPort for ProductHttpApiAdapter {
         caller: &WorkspaceCallerContext,
         request: ProductInvocationRequest,
     ) -> Result<ProductInvocationResponse, ProductInvocationError> {
-        // These owners still map to legacy global Product routes. Keep every
-        // operation unavailable at the dispatch boundary until its private
-        // route and scope-bound service credential are integrated. Endpoint
-        // configuration alone must never re-enable a legacy request.
-        if matches!(
-            request.owner,
-            WorkspaceProductApiOwner::Reactor | WorkspaceProductApiOwner::Navigator
-        ) {
+        // Navigator still lacks an authorized private Product route. Endpoint
+        // configuration alone must never re-enable its legacy request path.
+        if request.owner == WorkspaceProductApiOwner::Navigator {
             return Err(ProductInvocationError::Unavailable);
         }
 
@@ -142,6 +137,21 @@ mod tests {
     fn exchange_writer_caller() -> WorkspaceCallerContext {
         let mut roles = BTreeSet::new();
         roles.insert("workspace.product.command.exchange.create_route_draft.v1".to_string());
+        WorkspaceCallerContext::user_member(
+            UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-1".to_string(),
+            },
+            "organization-1",
+            "workspace-1",
+            roles,
+        )
+        .unwrap()
+    }
+
+    fn reactor_writer_caller() -> WorkspaceCallerContext {
+        let mut roles = BTreeSet::new();
+        roles.insert("workspace.product.command.reactor.create_model_import.v1".to_string());
         WorkspaceCallerContext::user_member(
             UserIdentityRef {
                 issuer: "https://identity.test".to_string(),
@@ -248,6 +258,11 @@ mod tests {
                 br#"{"name":"suite","evaluator":"exact_match.v1","expectedField":"expected","actualField":"actual","threshold":1.0}"#.to_vec(),
             ),
             (
+                Owner::Reactor,
+                Operation::WorkspaceProductApiOperation06,
+                br#"{"name":"small-model","servingBindingId":"binding-1","source":{"kind":"HUGGING_FACE","repository":"org/model"}}"#.to_vec(),
+            ),
+            (
                 Owner::Exchange,
                 Operation::WorkspaceProductApiOperation08,
                 br#"{"endpointId":"endpoint-1"}"#.to_vec(),
@@ -277,6 +292,14 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = adapter(calls.clone());
         let requests = [
+            ProductInvocationRequest {
+                owner: Owner::Reactor,
+                operation: Operation::WorkspaceProductApiOperation05,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
             ProductInvocationRequest {
                 owner: Owner::Yield,
                 operation: Operation::WorkspaceProductApiOperation03,
@@ -311,7 +334,7 @@ mod tests {
             assert_eq!(response.status_code, 200);
         }
 
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
@@ -338,26 +361,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reactor_and_navigator_operations_remain_unavailable_with_configured_endpoints() {
+    async fn reactor_command_uses_its_binding_granted_private_route() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let adapter = adapter(calls.clone());
+        let response = adapter
+            .invoke(
+                &reactor_writer_caller(),
+                ProductInvocationRequest {
+                    owner: Owner::Reactor,
+                    operation: Operation::WorkspaceProductApiOperation06,
+                    kind: Kind::Command,
+                    resource_id: None,
+                    json_body: br#"{"name":"small-model","servingBindingId":"binding-1","source":{"kind":"HUGGING_FACE","repository":"org/model"}}"#.to_vec(),
+                    idempotency_key: Some("reactor-command-1".to_string()),
+                },
+            )
+            .await
+            .expect("the exact Reactor role may reach the scoped private route");
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn navigator_operations_remain_unavailable_with_configured_endpoints() {
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = adapter(calls.clone());
         let requests = [
-            ProductInvocationRequest {
-                owner: Owner::Reactor,
-                operation: Operation::WorkspaceProductApiOperation05,
-                kind: Kind::Read,
-                resource_id: None,
-                json_body: Vec::new(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Reactor,
-                operation: Operation::WorkspaceProductApiOperation06,
-                kind: Kind::Command,
-                resource_id: None,
-                json_body: br#"{"model":"test"}"#.to_vec(),
-                idempotency_key: Some("reactor-command-1".to_string()),
-            },
             ProductInvocationRequest {
                 owner: Owner::Navigator,
                 operation: Operation::WorkspaceProductApiOperation11,
@@ -471,6 +501,7 @@ mod tests {
         let adapter = ProductHttpApiAdapter::new(client);
         for (owner, operation) in [
             (Owner::Catalyst, Operation::WorkspaceProductApiOperation01),
+            (Owner::Reactor, Operation::WorkspaceProductApiOperation05),
             (Owner::Exchange, Operation::WorkspaceProductApiOperation07),
         ] {
             let result = adapter
