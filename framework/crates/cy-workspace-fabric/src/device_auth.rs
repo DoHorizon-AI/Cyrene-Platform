@@ -326,6 +326,9 @@ mod tests {
         let mut request = Request::new(());
         request
             .metadata_mut()
+            .insert("forwarded", "for=192.0.2.1;proto=https".parse().unwrap());
+        request
+            .metadata_mut()
             .insert("x-forwarded-client-cert", "Cert=spoofed".parse().unwrap());
 
         assert_eq!(

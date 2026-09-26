@@ -856,11 +856,14 @@ mod tests {
         let registry =
             RegistryWorkspaceDeviceVerifier::new(Arc::new(TestDeviceRegistry::approved("unused")));
         let valid = xfcc_header(&chain);
+        let valid_without_chain = valid.split_once(";Chain=").unwrap().0;
         let invalid_values = vec![
             "Hash=abcd;Cert=\"missing-quote\"".to_string(),
             valid.replace("Hash=", "Hash=not-hex;Hash="),
             valid.replace("Hash=", "Unknown=x;Hash="),
             valid.replace("Hash=", "Hash=00"),
+            format!("{valid_without_chain};Chain=\"\""),
+            format!("{valid_without_chain};Chain=\"not-a-pem-certificate\""),
         ];
         for invalid in invalid_values {
             assert_eq!(
