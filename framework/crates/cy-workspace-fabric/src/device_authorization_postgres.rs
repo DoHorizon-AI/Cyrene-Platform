@@ -57,7 +57,7 @@ const SELECT_COLUMNS: &str =
      registration_binding_id, device_id, authorization_generation, \
      csr_der, csr_sha256, spki_sha256, created_at_unix_ms, expires_at_unix_ms, \
      poll_interval_ms, last_poll_at_unix_ms, revision, state_kind, approval_id, \
-     state_deadline_unix_ms, state_payload";
+     state_deadline_unix_ms, delivery_certificate_not_after_unix_ms, state_payload";
 
 type StoreResult<T> = Result<T, DeviceAuthorizationStoreError>;
 type StoreReply<T> = SyncSender<StoreResult<T>>;
@@ -563,7 +563,7 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
             .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
     } else {
         sqlx::query(
-            "SELECT state_deadline_unix_ms \
+            "SELECT state_deadline_unix_ms, delivery_certificate_not_after_unix_ms \
              FROM cyrene_workspace_device_authorization.authorizations LIMIT 0",
         )
         .fetch_all(&pool)
@@ -578,7 +578,7 @@ async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> Sto
     let result = sqlx::query(&format!(
         "INSERT INTO {TABLE} ({SELECT_COLUMNS}) VALUES \
          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-          $18, $19, $20, $21)"
+          $18, $19, $20, $21, $22)"
     ))
     .bind(encoded.id)
     .bind(encoded.device_code_hash)
@@ -600,6 +600,7 @@ async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> Sto
     .bind(encoded.state_kind)
     .bind(encoded.approval_id)
     .bind(encoded.state_deadline_unix_ms)
+    .bind(encoded.delivery_certificate_not_after_unix_ms)
     .bind(encoded.state_payload)
     .execute(pool)
     .await;
@@ -737,7 +738,7 @@ async fn insert_encoded(
     sqlx::query(&format!(
         "INSERT INTO {TABLE} ({SELECT_COLUMNS}) VALUES \
          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-          $18, $19, $20, $21)"
+          $18, $19, $20, $21, $22)"
     ))
     .bind(&encoded.id)
     .bind(&encoded.device_code_hash)
@@ -759,6 +760,7 @@ async fn insert_encoded(
     .bind(encoded.state_kind)
     .bind(&encoded.approval_id)
     .bind(encoded.state_deadline_unix_ms)
+    .bind(encoded.delivery_certificate_not_after_unix_ms)
     .bind(&encoded.state_payload)
     .execute(&mut **transaction)
     .await
@@ -894,13 +896,10 @@ async fn due_certificate_deliveries(
         "SELECT {SELECT_COLUMNS} FROM {TABLE} \
          WHERE state_kind = 'delivery_pending' AND ( \
              state_deadline_unix_ms <= $1 OR \
-             ((convert_from(state_payload, 'UTF8')::jsonb #>> \
-                 '{{state,certificate,not_after_unix_ms}}')::NUMERIC <= $1) \
+             delivery_certificate_not_after_unix_ms <= $1 \
          ) \
          ORDER BY LEAST( \
-             state_deadline_unix_ms::NUMERIC, \
-             (convert_from(state_payload, 'UTF8')::jsonb #>> \
-                 '{{state,certificate,not_after_unix_ms}}')::NUMERIC \
+             state_deadline_unix_ms, delivery_certificate_not_after_unix_ms \
          ), id LIMIT $2"
     ))
     .bind(now)
@@ -1018,7 +1017,8 @@ async fn compare_and_swap(
     let update = sqlx::query(&format!(
         "UPDATE {TABLE} SET \
          poll_interval_ms = $3, last_poll_at_unix_ms = $4, revision = $5, \
-         state_kind = $6, approval_id = $7, state_deadline_unix_ms = $8, state_payload = $9 \
+         state_kind = $6, approval_id = $7, state_deadline_unix_ms = $8, \
+         delivery_certificate_not_after_unix_ms = $9, state_payload = $10 \
          WHERE id = $1 AND revision = $2{deadline_guard}"
     ))
     .bind(encoded.id)
@@ -1029,6 +1029,7 @@ async fn compare_and_swap(
     .bind(encoded.state_kind)
     .bind(encoded.approval_id)
     .bind(encoded.state_deadline_unix_ms)
+    .bind(encoded.delivery_certificate_not_after_unix_ms)
     .bind(encoded.state_payload)
     .execute(&mut *transaction)
     .await
@@ -1077,16 +1078,16 @@ async fn compare_and_swap_due_delivery_to_retirement(
     let encoded = EncodedRecord::new(replacement)?;
     let update = sqlx::query(&format!(
         "UPDATE {TABLE} SET revision = $3, state_kind = $4, approval_id = $5, \
-         state_deadline_unix_ms = NULL, state_payload = $6 \
+         state_deadline_unix_ms = NULL, delivery_certificate_not_after_unix_ms = NULL, \
+         state_payload = $6 \
          WHERE id = $1 AND revision = $2 AND state_kind = 'delivery_pending' \
            AND registration_binding_id = $7 AND device_id = $8 \
            AND authorization_generation = $9 \
            AND $10 <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
            AND ( \
              state_deadline_unix_ms <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
-             OR ((convert_from(state_payload, 'UTF8')::jsonb #>> \
-                 '{{state,certificate,not_after_unix_ms}}')::NUMERIC \
-                 <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::NUMERIC) \
+             OR delivery_certificate_not_after_unix_ms \
+                 <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
            )"
     ))
     .bind(&encoded.id)
@@ -1266,6 +1267,7 @@ struct EncodedRecord {
     state_kind: &'static str,
     approval_id: Option<Vec<u8>>,
     state_deadline_unix_ms: Option<i64>,
+    delivery_certificate_not_after_unix_ms: Option<i64>,
     state_payload: Vec<u8>,
 }
 
@@ -1296,6 +1298,10 @@ impl EncodedRecord {
         let state_kind = stored_state.kind();
         let approval_id = stored_state.approval_id().map(|id| id.to_vec());
         let state_deadline_unix_ms = stored_state.deadline_unix_ms().map(to_i64).transpose()?;
+        let delivery_certificate_not_after_unix_ms = stored_state
+            .delivery_certificate_not_after_unix_ms()
+            .map(to_i64)
+            .transpose()?;
         let format_version = stored_state.format_version();
         let state_payload = serde_json::to_vec(&StoredState {
             format_version,
@@ -1329,6 +1335,7 @@ impl EncodedRecord {
             state_kind,
             approval_id,
             state_deadline_unix_ms,
+            delivery_certificate_not_after_unix_ms,
             state_payload,
         })
     }
@@ -1387,6 +1394,10 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
     let state_deadline_unix_ms = get!("state_deadline_unix_ms", Option<i64>)
         .map(from_i64)
         .transpose()?;
+    let delivery_certificate_not_after_unix_ms =
+        get!("delivery_certificate_not_after_unix_ms", Option<i64>)
+            .map(from_i64)
+            .transpose()?;
     let state_payload: Vec<u8> = get!("state_payload", Vec<u8>);
     if state_payload.is_empty()
         || state_payload.len() > MAX_STATE_PAYLOAD_BYTES
@@ -1406,6 +1417,8 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
         || wrapper.state.kind() != state_kind
         || wrapper.state.approval_id() != approval_id
         || wrapper.state.deadline_unix_ms() != state_deadline_unix_ms
+        || wrapper.state.delivery_certificate_not_after_unix_ms()
+            != delivery_certificate_not_after_unix_ms
         || !wrapper
             .state
             .is_valid(&scope, &spki_sha256, &id, &csr_sha256)
@@ -2071,6 +2084,13 @@ impl StoredAuthorizationState {
         }
     }
 
+    fn delivery_certificate_not_after_unix_ms(&self) -> Option<u64> {
+        match self {
+            Self::DeliveryPending { certificate, .. } => Some(certificate.not_after_unix_ms),
+            _ => None,
+        }
+    }
+
     fn matches_registration(&self, binding: &DeviceAuthorizationRegistrationBinding) -> bool {
         match self {
             Self::DeliveryPending { certificate, .. }
@@ -2634,10 +2654,15 @@ mod tests {
         assert_eq!(pending_delivery.kind(), "delivery_pending");
         assert_eq!(pending_delivery.approval_id(), Some([13; 16]));
         assert_eq!(pending_delivery.deadline_unix_ms(), Some(6_000));
+        assert_eq!(
+            pending_delivery.delivery_certificate_not_after_unix_ms(),
+            Some(9_000)
+        );
 
         let expired = StoredAuthorizationState::Expired;
         assert_eq!(expired.kind(), "expired");
         assert_eq!(expired.approval_id(), None);
+        assert_eq!(expired.delivery_certificate_not_after_unix_ms(), None);
     }
 
     #[test]
@@ -2800,6 +2825,13 @@ mod tests {
         assert!(delivery_migration.contains("WHERE state_kind = 'approved'"));
         assert!(!delivery_migration.contains("user_code TEXT"));
         assert!(!delivery_migration.contains("device_code TEXT"));
+
+        let registration_migration = include_str!(
+            "../migrations/device_authorization/0003_directory_registration_fence.up.sql"
+        );
+        assert!(registration_migration.contains("delivery_certificate_not_after_unix_ms BIGINT"));
+        assert!(registration_migration.contains("(delivery_certificate_not_after_unix_ms, id)"));
+        assert!(!registration_migration.contains("convert_from(state_payload"));
     }
 
     #[test]

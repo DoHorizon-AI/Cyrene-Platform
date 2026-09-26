@@ -14,6 +14,8 @@ DROP INDEX cyrene_workspace_device_authorization.authorizations_delivery_certifi
 DROP INDEX cyrene_workspace_device_authorization.authorizations_registration_binding_unique;
 
 ALTER TABLE cyrene_workspace_device_authorization.authorizations
+    DROP CONSTRAINT authorizations_delivery_certificate_not_after_shape,
+    DROP COLUMN delivery_certificate_not_after_unix_ms,
     DROP COLUMN authorization_generation,
     DROP COLUMN device_id,
     DROP COLUMN registration_binding_id;
