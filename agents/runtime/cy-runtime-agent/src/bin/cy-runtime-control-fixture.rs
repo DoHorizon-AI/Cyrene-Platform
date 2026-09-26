@@ -49,6 +49,7 @@ struct FixtureState {
     enrollment: DevelopmentEnrollmentProvider,
     authority_generation: u64,
     next_session: u64,
+    initial_lease_duration_ms: u64,
     disconnect_generation: u64,
     wait_for_assignment_trigger: bool,
     disconnected_generations: BTreeSet<u64>,
@@ -158,7 +159,10 @@ impl NodeControlService for Fixture {
                 );
                 false
             };
-            let lease = new_lease(&runtime, now_unix_ms().saturating_add(10_000));
+            let lease = new_lease(
+                &runtime,
+                now_unix_ms().saturating_add(state.initial_lease_duration_ms),
+            );
             state
                 .leases
                 .entry(runtime.generation)
@@ -765,6 +769,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         authority_generation: 0,
         next_session: 0,
+        initial_lease_duration_ms: env::var("CYRENE_FIXTURE_INITIAL_LEASE_MS")
+            .unwrap_or_else(|_| "10000".to_string())
+            .parse()?,
         disconnect_generation: env::var("CYRENE_FIXTURE_DISCONNECT_GENERATION")
             .unwrap_or_else(|_| "2".to_string())
             .parse()?,

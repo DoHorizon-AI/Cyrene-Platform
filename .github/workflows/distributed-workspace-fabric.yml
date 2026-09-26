@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Run real Workspace relay and Runtime Agent proof
+      - name: Run real Workspace direct, relay, and Runtime Agent proof
         env:
           CYRENE_ACCEPTANCE_BASE_IMAGE: ubuntu:24.04
           CYRENE_ACCEPTANCE_PULL_IMAGE: "1"
