@@ -23,7 +23,7 @@ use cy_proto::workspace_v1::{
 };
 use thiserror::Error;
 
-use crate::WorkspaceApi;
+use crate::{WorkspaceApi, WorkspaceAuthorizationError, WorkspaceCallerContext};
 
 /// A product-neutral request that a composition root can route to a Product
 /// API adapter without transferring Workspace identity ownership.
@@ -223,7 +223,11 @@ impl WorkspaceControlPlane {
 impl WorkspaceApi for WorkspaceControlPlane {
     /// Validates Workspace authority, dispatches a Product-neutral request, and
     /// returns a fail-closed error for malformed or mismatched projections.
-    async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+    async fn handle_authenticated(
+        &self,
+        request: WorkspaceApiRequest,
+        caller: WorkspaceCallerContext,
+    ) -> WorkspaceApiResponse {
         let request_id = request.request_id;
         if request_id.trim().is_empty() {
             return Self::error_response(request_id, 3, "WORKSPACE_REQUEST_ID_REQUIRED");
@@ -239,6 +243,19 @@ impl WorkspaceApi for WorkspaceControlPlane {
         let Some(request_payload) = request.request else {
             return Self::error_response(request_id, 3, "WORKSPACE_REQUEST_UNSUPPORTED");
         };
+        let authorization = match &request_payload {
+            workspace_api_request::Request::GetOperation(_) => {
+                caller.authorize_workspace_read(&request.workspace_id)
+            }
+            workspace_api_request::Request::StartOperation(_) => {
+                caller.authorize_workspace_command(&request.workspace_id)
+            }
+            #[allow(unreachable_patterns)]
+            _ => caller.authorize_workspace_scope(&request.workspace_id),
+        };
+        if let Err(error) = authorization {
+            return Self::authorization_error_response(request_id, error);
+        }
         let (product_request, requested_operation) =
             match Self::validated_product_request(request_payload) {
                 Ok(validated) => validated,
@@ -265,12 +282,33 @@ impl WorkspaceApi for WorkspaceControlPlane {
     }
 }
 
+impl WorkspaceControlPlane {
+    fn authorization_error_response(
+        request_id: String,
+        error: WorkspaceAuthorizationError,
+    ) -> WorkspaceApiResponse {
+        let (code, message) = match error {
+            WorkspaceAuthorizationError::Unauthenticated => {
+                (16, "WORKSPACE_CALLER_CONTEXT_REQUIRED")
+            }
+            WorkspaceAuthorizationError::WorkspaceMismatch => (7, "WORKSPACE_AUTHORITY_MISMATCH"),
+            WorkspaceAuthorizationError::MemberRequired => (7, "WORKSPACE_MEMBERSHIP_DENIED"),
+            WorkspaceAuthorizationError::CommandPolicyUnconfigured => {
+                (7, "WORKSPACE_COMMAND_POLICY_UNCONFIGURED")
+            }
+        };
+        Self::error_response(request_id, code, message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
 
+    use crate::WorkspaceCallerPrincipal;
     use cy_proto::workspace_v1::{
-        workspace_api_request, workspace_api_response, WorkspaceOperationState,
+        workspace_api_request, workspace_api_response, UserIdentityRef, WorkspaceOperationState,
     };
 
     use super::*;
@@ -365,6 +403,19 @@ mod tests {
             .expect("valid authority configuration")
     }
 
+    fn member_caller() -> WorkspaceCallerContext {
+        WorkspaceCallerContext::user_member(
+            UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-1".to_string(),
+            },
+            "organization-1",
+            "workspace-1",
+            BTreeSet::from(["workspace.reader".to_string()]),
+        )
+        .expect("valid member caller")
+    }
+
     fn error(response: WorkspaceApiResponse) -> RpcStatus {
         match response.outcome {
             Some(workspace_api_response::Outcome::Error(error)) => error,
@@ -381,7 +432,10 @@ mod tests {
         let handler = handler(dispatcher.clone());
 
         let response = handler
-            .handle(request("workspace-1", identity("operation-1", 4)))
+            .handle_authenticated(
+                request("workspace-1", identity("operation-1", 4)),
+                member_caller(),
+            )
             .await;
 
         let Some(workspace_api_response::Outcome::Operation(operation)) = response.outcome else {
@@ -395,33 +449,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwards_start_inputs_without_product_specific_interpretation() {
+    async fn denies_commands_until_a_role_policy_is_configured() {
         let dispatcher = Arc::new(RecordingDispatcher::new(Ok(projection(
             "workspace-1",
             identity("operation-1", 4),
         ))));
         let handler = handler(dispatcher.clone());
 
-        let response = handler
-            .handle(start_request(
-                "workspace-1",
-                identity("operation-1", 4),
-                vec!["artifact://sha256/abc".to_string()],
-            ))
-            .await;
-
-        assert!(matches!(
-            response.outcome,
-            Some(workspace_api_response::Outcome::Operation(_))
-        ));
-        let request = dispatcher.request.lock().expect("request mutex");
-        let Some(WorkspaceProductRequest::StartOperation(start)) = request.as_ref() else {
-            panic!("expected a StartOperation dispatch");
-        };
-        assert_eq!(
-            start.input_artifact_uris,
-            vec!["artifact://sha256/abc".to_string()]
+        let status = error(
+            handler
+                .handle_authenticated(
+                    start_request(
+                        "workspace-1",
+                        identity("operation-1", 4),
+                        vec!["artifact://sha256/abc".to_string()],
+                    ),
+                    member_caller(),
+                )
+                .await,
         );
+        assert_eq!(status.code, 7);
+        assert_eq!(status.message, "WORKSPACE_COMMAND_POLICY_UNCONFIGURED");
+        assert!(dispatcher.request.lock().expect("request mutex").is_none());
     }
 
     #[tokio::test]
@@ -434,7 +483,10 @@ mod tests {
 
         let status = error(
             handler
-                .handle(request("workspace-2", identity("operation-1", 4)))
+                .handle_authenticated(
+                    request("workspace-2", identity("operation-1", 4)),
+                    member_caller(),
+                )
                 .await,
         );
 
@@ -453,7 +505,10 @@ mod tests {
 
         let status = error(
             handler
-                .handle(request("workspace-1", identity("operation-1", 4)))
+                .handle_authenticated(
+                    request("workspace-1", identity("operation-1", 4)),
+                    member_caller(),
+                )
                 .await,
         );
 
@@ -474,7 +529,10 @@ mod tests {
 
         let status = error(
             handler
-                .handle(request("workspace-1", identity("operation-1", 4)))
+                .handle_authenticated(
+                    request("workspace-1", identity("operation-1", 4)),
+                    member_caller(),
+                )
                 .await,
         );
 
@@ -494,11 +552,65 @@ mod tests {
 
         let status = error(
             handler
-                .handle(request("workspace-1", identity("operation-1", 4)))
+                .handle_authenticated(
+                    request("workspace-1", identity("operation-1", 4)),
+                    member_caller(),
+                )
                 .await,
         );
 
         assert_eq!(status.code, 14);
         assert_eq!(status.message, "WORKSPACE_PRODUCT_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn legacy_unauthenticated_handler_fails_closed() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Ok(projection(
+            "workspace-1",
+            identity("operation-1", 4),
+        ))));
+        let handler = handler(dispatcher.clone());
+
+        let status = error(
+            handler
+                .handle(request("workspace-1", identity("operation-1", 4)))
+                .await,
+        );
+
+        assert_eq!(status.code, 16);
+        assert_eq!(status.message, "WORKSPACE_CALLER_CONTEXT_REQUIRED");
+        assert!(dispatcher.request.lock().expect("request mutex").is_none());
+    }
+
+    #[tokio::test]
+    async fn operation_reads_require_directory_member_context() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Ok(projection(
+            "workspace-1",
+            identity("operation-1", 4),
+        ))));
+        let handler = handler(dispatcher.clone());
+        let nonmember = WorkspaceCallerContext::from_verified(
+            WorkspaceCallerPrincipal::User(UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-2".to_string(),
+            }),
+            "organization-1",
+            "workspace-1",
+            BTreeSet::new(),
+        )
+        .expect("valid but nonmember identity");
+
+        let status = error(
+            handler
+                .handle_authenticated(
+                    request("workspace-1", identity("operation-1", 4)),
+                    nonmember,
+                )
+                .await,
+        );
+
+        assert_eq!(status.code, 7);
+        assert_eq!(status.message, "WORKSPACE_MEMBERSHIP_DENIED");
+        assert!(dispatcher.request.lock().expect("request mutex").is_none());
     }
 }

@@ -9,12 +9,28 @@
 use std::sync::Arc;
 
 use cy_observability::TraceContext;
+use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::workspace_v1::{WorkspaceApiRequest, WorkspaceApiResponse};
+
+use crate::WorkspaceCallerContext;
 
 /// Workspace-owned request handler. Relay implementations only forward it.
 #[tonic::async_trait]
 pub trait WorkspaceApi: Send + Sync + 'static {
-    async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse;
+    /// Legacy unauthenticated entry point. It always fails closed.
+    async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+        unauthenticated_response(request.request_id)
+    }
+
+    /// Handles a request after a trusted transport supplied server-derived context.
+    /// Implementations must apply operation-specific authorization before dispatch.
+    async fn handle_authenticated(
+        &self,
+        request: WorkspaceApiRequest,
+        _caller: WorkspaceCallerContext,
+    ) -> WorkspaceApiResponse {
+        unauthenticated_response(request.request_id)
+    }
 }
 
 /// LOCAL connectivity adapter for in-process client and CLI composition.
@@ -40,6 +56,21 @@ pub(crate) async fn dispatch_workspace_request(
     api: &dyn WorkspaceApi,
     mut request: WorkspaceApiRequest,
 ) -> WorkspaceApiResponse {
+    sanitize_traceparent(&mut request);
+    api.handle(request).await
+}
+
+/// Validates trace context and dispatches with a caller established by a trusted boundary.
+pub(crate) async fn dispatch_authenticated_workspace_request(
+    api: &dyn WorkspaceApi,
+    mut request: WorkspaceApiRequest,
+    caller: WorkspaceCallerContext,
+) -> WorkspaceApiResponse {
+    sanitize_traceparent(&mut request);
+    api.handle_authenticated(request, caller).await
+}
+
+fn sanitize_traceparent(request: &mut WorkspaceApiRequest) {
     let trace_context = TraceContext::parse_traceparent(&request.traceparent).ok();
     if let Some(context) = trace_context {
         request.traceparent = context.to_traceparent();
@@ -54,7 +85,23 @@ pub(crate) async fn dispatch_workspace_request(
         // 无效的非可信输入会被丢弃，且不记录其内容。
         request.traceparent.clear();
     }
-    api.handle(request).await
+}
+
+fn unauthenticated_response(request_id: String) -> WorkspaceApiResponse {
+    WorkspaceApiResponse {
+        request_id,
+        outcome: Some(
+            cy_proto::workspace_v1::workspace_api_response::Outcome::Error(RpcStatus {
+                code: 16,
+                message: "WORKSPACE_CALLER_CONTEXT_REQUIRED".to_string(),
+                details: Vec::new(),
+            }),
+        ),
+    }
+}
+
+pub(crate) fn unauthenticated_workspace_response(request_id: String) -> WorkspaceApiResponse {
+    unauthenticated_response(request_id)
 }
 
 #[cfg(test)]
@@ -71,7 +118,11 @@ mod tests {
 
     #[tonic::async_trait]
     impl WorkspaceApi for FixtureWorkspaceApi {
-        async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+        async fn handle_authenticated(
+            &self,
+            request: WorkspaceApiRequest,
+            _caller: WorkspaceCallerContext,
+        ) -> WorkspaceApiResponse {
             let operation = match request.request {
                 Some(workspace_api_request::Request::GetOperation(value)) => value.operation,
                 _ => None,
@@ -99,7 +150,11 @@ mod tests {
 
     #[tonic::async_trait]
     impl WorkspaceApi for CapturingApi {
-        async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+        async fn handle_authenticated(
+            &self,
+            request: WorkspaceApiRequest,
+            _caller: WorkspaceCallerContext,
+        ) -> WorkspaceApiResponse {
             *self.0.lock().unwrap() = Some(request.clone());
             WorkspaceApiResponse {
                 request_id: request.request_id,
@@ -115,6 +170,19 @@ mod tests {
             traceparent: traceparent.to_string(),
             request: None,
         }
+    }
+
+    fn caller() -> WorkspaceCallerContext {
+        WorkspaceCallerContext::user_member(
+            cy_proto::workspace_v1::UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-1".to_string(),
+            },
+            "organization-1",
+            "workspace-trace-test",
+            std::collections::BTreeSet::new(),
+        )
+        .expect("valid verified caller")
     }
 
     #[tokio::test]
@@ -135,6 +203,34 @@ mod tests {
                 )),
             })
             .await;
+        let Some(workspace_api_response::Outcome::Error(error)) = response.outcome else {
+            panic!("expected an unauthenticated response");
+        };
+        assert_eq!(error.code, 16);
+        assert_eq!(error.message, "WORKSPACE_CALLER_CONTEXT_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn explicit_authenticated_dispatch_preserves_fixture_handler_path() {
+        let api = FixtureWorkspaceApi;
+        let response = dispatch_authenticated_workspace_request(
+            &api,
+            WorkspaceApiRequest {
+                request_id: "request-1".to_string(),
+                workspace_id: "workspace-trace-test".to_string(),
+                traceparent: String::new(),
+                request: Some(workspace_api_request::Request::GetOperation(
+                    GetWorkspaceOperationRequest {
+                        operation: Some(Identity {
+                            id: "operation-1".to_string(),
+                            generation: 1,
+                        }),
+                    },
+                )),
+            },
+            caller(),
+        )
+        .await;
         let Some(workspace_api_response::Outcome::Operation(operation)) = response.outcome else {
             panic!("expected Workspace operation view");
         };
@@ -148,7 +244,7 @@ mod tests {
         let api = CapturingApi(captured.clone());
         let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-        dispatch_workspace_request(&api, traced_request(traceparent)).await;
+        dispatch_authenticated_workspace_request(&api, traced_request(traceparent), caller()).await;
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.as_ref().unwrap().traceparent, traceparent);
@@ -163,7 +259,7 @@ mod tests {
         let api = CapturingApi(captured.clone());
         let untrusted = "Bearer sensitive-session-value";
 
-        dispatch_workspace_request(&api, traced_request(untrusted)).await;
+        dispatch_authenticated_workspace_request(&api, traced_request(untrusted), caller()).await;
 
         assert!(captured
             .lock()
@@ -179,7 +275,7 @@ mod tests {
         let captured = Arc::new(std::sync::Mutex::new(None));
         let api = CapturingApi(captured.clone());
 
-        dispatch_workspace_request(&api, traced_request("")).await;
+        dispatch_authenticated_workspace_request(&api, traced_request(""), caller()).await;
 
         assert!(captured
             .lock()

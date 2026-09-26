@@ -14,9 +14,9 @@ use cy_proto::workspace_v1::relay_frame;
 use cy_proto::workspace_v1::workspace_direct_service_client::WorkspaceDirectServiceClient;
 use cy_proto::workspace_v1::workspace_relay_service_client::WorkspaceRelayServiceClient;
 use cy_proto::workspace_v1::{
-    DiscoverWorkspacesRequest, RelayForwardedResponse, RelayFrame, RelayHello, UserIdentityRef,
-    WorkspaceApiRequest, WorkspaceApiResponse, WorkspaceConnectionCandidate,
-    WorkspaceConnectionDescriptor, WorkspaceDirectRequest,
+    DiscoverWorkspacesRequest, RelayForwardedResponse, RelayFrame, RelayHello,
+    RelayParticipantRole, UserIdentityRef, WorkspaceApiRequest, WorkspaceApiResponse,
+    WorkspaceConnectionCandidate, WorkspaceConnectionDescriptor, WorkspaceDirectRequest,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -24,7 +24,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::{Request, Streaming};
 
-use crate::{validate_descriptor, WorkspaceApi};
+use crate::{validate_descriptor, WorkspaceApi, WorkspaceCallerContext};
 
 const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -208,6 +208,7 @@ async fn connect_candidate(
 /// One authenticated bidirectional relay session.
 pub struct RelaySession {
     relay_session_id: String,
+    participant_role: RelayParticipantRole,
     outbound: mpsc::Sender<RelayFrame>,
     inbound: Streaming<RelayFrame>,
 }
@@ -275,15 +276,31 @@ impl RelaySession {
         mut self,
         api: Arc<dyn WorkspaceApi>,
     ) -> Result<(), RelayTransportError> {
+        if self.participant_role != RelayParticipantRole::WorkspaceConnector {
+            return Err(RelayTransportError::Protocol(
+                "only an authenticated Workspace connector stream may serve requests".to_string(),
+            ));
+        }
         loop {
             let frame = self.next().await?;
             let Some(relay_frame::Body::ForwardedRequest(forwarded)) = frame.body else {
                 continue;
             };
+            let caller = WorkspaceCallerContext::from_relay_forwarded(&forwarded);
             let Some(request) = forwarded.request else {
                 continue;
             };
-            let response = crate::api::dispatch_workspace_request(api.as_ref(), request).await;
+            let response = match caller {
+                Ok(caller) => {
+                    crate::api::dispatch_authenticated_workspace_request(
+                        api.as_ref(),
+                        request,
+                        caller,
+                    )
+                    .await
+                }
+                Err(_) => crate::api::unauthenticated_workspace_response(request.request_id),
+            };
             self.send(RelayFrame {
                 frame_id: frame.frame_id,
                 body: Some(relay_frame::Body::ForwardedResponse(
@@ -331,6 +348,9 @@ pub async fn connect_relay_session(
     config: &RelayClientConfig,
     hello: RelayHello,
 ) -> Result<RelaySession, RelayTransportError> {
+    let participant_role = RelayParticipantRole::try_from(hello.role).map_err(|_| {
+        RelayTransportError::Protocol("relay participant role is invalid".to_string())
+    })?;
     let channel = connect_channel(config).await?;
     let mut client = WorkspaceRelayServiceClient::new(channel);
     let (outbound, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
@@ -358,6 +378,7 @@ pub async fn connect_relay_session(
     };
     Ok(RelaySession {
         relay_session_id: ready.relay_session_id,
+        participant_role,
         outbound,
         inbound,
     })

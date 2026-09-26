@@ -226,6 +226,14 @@ service WorkspaceDirectService {
 message RelayForwardedRequest {
   string frontend_session_id = 1;
   WorkspaceApiRequest request = 2;
+  oneof caller_principal {
+    UserIdentityRef user = 3;
+    DeviceEnrollmentRef device = 4;
+    cyrene.core.v1.WorkloadIdentity workload = 5;
+  }
+  string caller_organization_id = 6;
+  string caller_workspace_id = 7;
+  repeated string caller_roles = 8;
 }
 
 message RelayForwardedResponse {

@@ -24,7 +24,10 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::{RelayAuthenticator, RelaySessionClaims, SessionPrincipal, WorkspaceDirectory};
+use crate::{
+    RelayAuthenticator, RelaySessionClaims, SessionPrincipal, WorkspaceCallerContext,
+    WorkspaceDirectory,
+};
 
 type RelayStream = Pin<Box<dyn Stream<Item = Result<RelayFrame, Status>> + Send + 'static>>;
 type RelaySender = mpsc::Sender<Result<RelayFrame, Status>>;
@@ -272,13 +275,7 @@ impl WorkspaceRelay {
                     }
                     Some(relay_frame::Body::WorkspaceRequest(request)) => {
                         relay
-                            .forward_workspace_request(
-                                &sender,
-                                &relay_session_id,
-                                &user,
-                                &claims,
-                                request,
-                            )
+                            .forward_workspace_request(&sender, &relay_session_id, &claims, request)
                             .await;
                     }
                     _ => {
@@ -315,16 +312,20 @@ impl WorkspaceRelay {
         &self,
         frontend_sender: &RelaySender,
         frontend_session_id: &str,
-        user: &cy_proto::workspace_v1::UserIdentityRef,
         claims: &RelaySessionClaims,
         request: cy_proto::workspace_v1::WorkspaceApiRequest,
     ) {
-        if (!claims.workspace_id.is_empty() && request.workspace_id != claims.workspace_id)
-            || !self
-                .state
-                .directory
-                .is_member(user, &claims.organization_id, &request.workspace_id)
-        {
+        let SessionPrincipal::User(user) = &claims.principal else {
+            let _ = send_workspace_error(
+                frontend_sender,
+                request.request_id,
+                7,
+                "WORKSPACE_MEMBERSHIP_DENIED",
+            )
+            .await;
+            return;
+        };
+        if !claims.workspace_id.is_empty() && request.workspace_id != claims.workspace_id {
             let _ = send_workspace_error(
                 frontend_sender,
                 request.request_id,
@@ -334,6 +335,38 @@ impl WorkspaceRelay {
             .await;
             return;
         }
+        let Some(directory_roles) = self.state.directory.roles_for_member(
+            user,
+            &claims.organization_id,
+            &request.workspace_id,
+        ) else {
+            let _ = send_workspace_error(
+                frontend_sender,
+                request.request_id,
+                7,
+                "WORKSPACE_MEMBERSHIP_DENIED",
+            )
+            .await;
+            return;
+        };
+        let caller = match WorkspaceCallerContext::user_member(
+            user.clone(),
+            claims.organization_id.clone(),
+            request.workspace_id.clone(),
+            directory_roles,
+        ) {
+            Ok(caller) => caller,
+            Err(_) => {
+                let _ = send_workspace_error(
+                    frontend_sender,
+                    request.request_id,
+                    7,
+                    "WORKSPACE_MEMBERSHIP_DENIED",
+                )
+                .await;
+                return;
+            }
+        };
         let workspace_sender = match self.register_pending(
             &request.workspace_id,
             frontend_session_id,
@@ -365,6 +398,8 @@ impl WorkspaceRelay {
             return;
         };
         let request_id = request.request_id.clone();
+        let (caller_principal, caller_organization_id, caller_workspace_id, caller_roles) =
+            caller.to_relay_fields();
         if send_frame(
             &workspace_sender,
             RelayFrame {
@@ -372,6 +407,10 @@ impl WorkspaceRelay {
                 body: Some(relay_frame::Body::ForwardedRequest(RelayForwardedRequest {
                     frontend_session_id: frontend_session_id.to_string(),
                     request: Some(request),
+                    caller_principal,
+                    caller_organization_id,
+                    caller_workspace_id,
+                    caller_roles,
                 })),
             },
         )
@@ -622,7 +661,15 @@ fn timestamp_from_ms(value: u64) -> prost_types::Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DevelopmentSessionVerifier, InMemoryWorkspaceDirectory};
+    use std::collections::BTreeSet;
+
+    use cy_proto::workspace_v1::{relay_forwarded_request, UserIdentityRef};
+    use prost::Message;
+
+    use crate::{
+        DevelopmentSessionVerifier, InMemoryWorkspaceDirectory, RelaySessionClaims,
+        SessionPrincipal, WorkspaceMembership,
+    };
 
     use super::*;
 
@@ -699,5 +746,83 @@ mod tests {
             Err((3, "WORKSPACE_REQUEST_ID_INVALID"))
         ));
         assert!(relay.state.connections.lock().unwrap().pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forwarded_caller_comes_from_verified_session_not_request_wire() {
+        let verified_user = UserIdentityRef {
+            issuer: "https://identity.test".to_string(),
+            subject: "verified-user".to_string(),
+        };
+        let directory = Arc::new(
+            InMemoryWorkspaceDirectory::new(
+                vec![WorkspaceMembership {
+                    user: verified_user.clone(),
+                    organization_id: "organization-1".to_string(),
+                    workspace_id: "workspace-1".to_string(),
+                    roles: BTreeSet::from(["workspace.operator".to_string()]),
+                }],
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let relay = WorkspaceRelay::new(directory, Arc::new(DevelopmentSessionVerifier::default()));
+        let (frontend_sender, _) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let (workspace_sender, mut workspace_receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        relay.state.connections.lock().unwrap().workspaces.insert(
+            "workspace-1".to_string(),
+            RegisteredConnection {
+                relay_session_id: "workspace-session-1".to_string(),
+                sender: workspace_sender,
+            },
+        );
+
+        let mut encoded_request = cy_proto::workspace_v1::WorkspaceApiRequest {
+            request_id: "request-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            traceparent: String::new(),
+            request: None,
+        }
+        .encode_to_vec();
+        // Tag 4 is not part of WorkspaceApiRequest. A caller-like browser field is ignored.
+        encoded_request.extend_from_slice(&[0x22, 11]);
+        encoded_request.extend_from_slice(b"forged-user");
+        let request =
+            cy_proto::workspace_v1::WorkspaceApiRequest::decode(encoded_request.as_slice())
+                .expect("unknown browser-supplied field should be ignored");
+
+        relay
+            .forward_workspace_request(
+                &frontend_sender,
+                "frontend-1",
+                &RelaySessionClaims {
+                    principal: SessionPrincipal::User(verified_user.clone()),
+                    organization_id: "organization-1".to_string(),
+                    workspace_id: String::new(),
+                    expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+                },
+                request,
+            )
+            .await;
+
+        let frame = workspace_receiver
+            .recv()
+            .await
+            .expect("relay should forward the request")
+            .expect("forwarded frame should be valid");
+        let Some(relay_frame::Body::ForwardedRequest(forwarded)) = frame.body else {
+            panic!("expected a Relay-only forwarded request");
+        };
+        let Some(relay_forwarded_request::CallerPrincipal::User(user)) = forwarded.caller_principal
+        else {
+            panic!("expected the verified user principal");
+        };
+        assert_eq!(user, verified_user);
+        assert!(forwarded
+            .caller_roles
+            .contains(&"workspace.member".to_string()));
+        assert!(forwarded
+            .caller_roles
+            .contains(&"workspace.operator".to_string()));
     }
 }

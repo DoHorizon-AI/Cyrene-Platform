@@ -44,6 +44,20 @@ pub trait WorkspaceDirectory: Send + Sync {
     ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError>;
 
     fn is_member(&self, user: &UserIdentityRef, organization_id: &str, workspace_id: &str) -> bool;
+
+    /// Returns Directory-owned roles only when the user is a current member.
+    ///
+    /// Adapters that only expose membership can leave the role set empty;
+    /// membership remains distinct from optional assigned roles.
+    fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Option<BTreeSet<String>> {
+        self.is_member(user, organization_id, workspace_id)
+            .then(BTreeSet::new)
+    }
 }
 
 /// Development/reference Directory with explicit membership records.
@@ -99,6 +113,22 @@ impl WorkspaceDirectory for InMemoryWorkspaceDirectory {
                 && membership.organization_id == organization_id
                 && membership.workspace_id == workspace_id
         })
+    }
+
+    fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Option<BTreeSet<String>> {
+        self.memberships
+            .iter()
+            .find(|membership| {
+                same_user(&membership.user, user)
+                    && membership.organization_id == organization_id
+                    && membership.workspace_id == workspace_id
+            })
+            .map(|membership| membership.roles.clone())
     }
 }
 

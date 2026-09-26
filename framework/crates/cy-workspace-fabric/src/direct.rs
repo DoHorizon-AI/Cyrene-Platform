@@ -13,7 +13,9 @@ use cy_proto::workspace_v1::workspace_direct_service_server::WorkspaceDirectServ
 use cy_proto::workspace_v1::{RelayParticipantRole, WorkspaceApiResponse, WorkspaceDirectRequest};
 use tonic::{Request, Response, Status};
 
-use crate::{RelayAuthenticator, SessionPrincipal, WorkspaceApi, WorkspaceDirectory};
+use crate::{
+    RelayAuthenticator, SessionPrincipal, WorkspaceApi, WorkspaceCallerContext, WorkspaceDirectory,
+};
 
 /// Serve a Workspace API over a private, mutually authenticated TLS listener.
 ///
@@ -68,12 +70,22 @@ impl WorkspaceDirectService for DirectWorkspaceServer {
             .ok_or_else(|| Status::invalid_argument("Workspace request is required"))?;
         if api_request.workspace_id != self.workspace_id
             || (!claims.workspace_id.is_empty() && claims.workspace_id != self.workspace_id)
-            || !self
-                .directory
-                .is_member(&user, &claims.organization_id, &self.workspace_id)
         {
             return Err(Status::permission_denied("WORKSPACE_MEMBERSHIP_DENIED"));
         }
+        let Some(directory_roles) =
+            self.directory
+                .roles_for_member(&user, &claims.organization_id, &self.workspace_id)
+        else {
+            return Err(Status::permission_denied("WORKSPACE_MEMBERSHIP_DENIED"));
+        };
+        let caller = WorkspaceCallerContext::user_member(
+            user,
+            claims.organization_id,
+            self.workspace_id.clone(),
+            directory_roles,
+        )
+        .map_err(|_| Status::permission_denied("WORKSPACE_MEMBERSHIP_DENIED"))?;
         tracing::info!(
             event.name = "platform.workspace.direct_request",
             workspace_id = %self.workspace_id,
@@ -81,7 +93,12 @@ impl WorkspaceDirectService for DirectWorkspaceServer {
             message = "Workspace request used the private direct endpoint",
         );
         Ok(Response::new(
-            crate::api::dispatch_workspace_request(self.api.as_ref(), api_request).await,
+            crate::api::dispatch_authenticated_workspace_request(
+                self.api.as_ref(),
+                api_request,
+                caller,
+            )
+            .await,
         ))
     }
 }
@@ -107,14 +124,24 @@ mod tests {
     use super::*;
     use crate::{
         DevelopmentSessionVerifier, InMemoryWorkspaceDirectory, RelaySessionClaims,
-        WorkspaceMembership,
+        WorkspaceCallerPrincipal, WorkspaceMembership,
     };
 
     struct FixtureApi;
 
     #[tonic::async_trait]
     impl WorkspaceApi for FixtureApi {
-        async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+        async fn handle_authenticated(
+            &self,
+            request: WorkspaceApiRequest,
+            caller: WorkspaceCallerContext,
+        ) -> WorkspaceApiResponse {
+            assert_eq!(caller.workspace_id(), "workspace-1");
+            assert!(caller.is_member());
+            assert!(matches!(
+                caller.principal(),
+                WorkspaceCallerPrincipal::User(_)
+            ));
             WorkspaceApiResponse {
                 request_id: request.request_id,
                 outcome: None,
@@ -188,5 +215,24 @@ mod tests {
 
         let expired = server(true, 1).execute(direct_request()).await;
         assert_eq!(expired.unwrap_err().code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn direct_endpoint_rejects_a_forged_user_claim() {
+        let mut request = direct_request();
+        request
+            .get_mut()
+            .frontend
+            .as_mut()
+            .unwrap()
+            .user
+            .as_mut()
+            .unwrap()
+            .subject = "user-2".to_string();
+
+        let denied = server(true, now_unix_ms().saturating_add(60_000))
+            .execute(request)
+            .await;
+        assert_eq!(denied.unwrap_err().code(), Code::Unauthenticated);
     }
 }

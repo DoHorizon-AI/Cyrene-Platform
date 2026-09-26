@@ -10,6 +10,7 @@
 
 mod api;
 mod auth;
+mod caller;
 mod control_plane;
 mod device_registry;
 mod direct;
@@ -26,6 +27,10 @@ pub mod device_authorization;
 pub use api::{LocalWorkspaceClient, WorkspaceApi};
 pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
+};
+pub use caller::{
+    WorkspaceAuthorizationError, WorkspaceCallerContext, WorkspaceCallerPrincipal,
+    WorkspaceDeviceIdentity, NAVIGATOR_SERVICE_WRITER_ROLE, WORKSPACE_MEMBER_ROLE,
 };
 pub use control_plane::{
     WorkspaceControlPlane, WorkspaceControlPlaneConfigError, WorkspaceDispatchError,

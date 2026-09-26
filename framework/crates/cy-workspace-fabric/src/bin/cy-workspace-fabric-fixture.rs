@@ -44,7 +44,8 @@ use cy_proto::workspace_v1::{
 use cy_workspace_fabric::{
     connect_discovered_workspace, connect_relay_session, DevelopmentSessionVerifier,
     DirectWorkspaceServer, InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims,
-    SessionPrincipal, WorkspaceApi, WorkspaceConnection, WorkspaceMembership, WorkspaceRelay,
+    SessionPrincipal, WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal,
+    WorkspaceConnection, WorkspaceMembership, WorkspaceRelay,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::Code;
@@ -699,7 +700,20 @@ impl FileWorkspaceApi {
 
 #[tonic::async_trait]
 impl WorkspaceApi for FileWorkspaceApi {
-    async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+    async fn handle_authenticated(
+        &self,
+        request: WorkspaceApiRequest,
+        caller: WorkspaceCallerContext,
+    ) -> WorkspaceApiResponse {
+        // The fixture keeps one explicitly authenticated start path for relay proof;
+        // production command authorization remains fail-closed in WorkspaceControlPlane.
+        if caller.workspace_id() != self.workspace_id
+            || caller.organization_id().trim().is_empty()
+            || !caller.is_member()
+            || !matches!(caller.principal(), WorkspaceCallerPrincipal::User(_))
+        {
+            return workspace_error(request.request_id, 7, "WORKSPACE_MEMBERSHIP_DENIED");
+        }
         if let Ok(context) = TraceContext::parse_traceparent(&request.traceparent) {
             trace(
                 &self.connector_trace,

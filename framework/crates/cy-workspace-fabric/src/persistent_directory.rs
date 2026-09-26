@@ -202,6 +202,19 @@ impl WorkspaceDirectory for FileWorkspaceDirectory {
             .read()
             .is_ok_and(|state| state.index.is_member(user, organization_id, workspace_id))
     }
+
+    fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Option<BTreeSet<String>> {
+        self.state.read().ok().and_then(|state| {
+            state
+                .index
+                .roles_for_member(user, organization_id, workspace_id)
+        })
+    }
 }
 
 impl WorkspaceDeviceRegistry for FileWorkspaceDirectory {
