@@ -136,9 +136,28 @@ Frontend user-session path and must not use a Workspace device certificate as
 its user identity.
 
 The registry store validates fingerprint syntax but does not parse
-certificates, verify TLS peers, or issue credentials. No private keys,
-certificate bodies, or session credentials are stored, and this crate does not
-itself run a Directory service.
+certificates, verify TLS peers, or issue credentials. The PostgreSQL
+authorization store persists issued certificate DER and CA-chain bytes in its
+versioned state payload for delivery acknowledgement and retirement recovery.
+It never stores device private keys, raw enrollment codes, or session
+credentials, and this crate does not itself run a Directory service.
+
+## Durable device authorization records
+
+`PostgresDeviceAuthorizationStore::start_or_recover_registered` is the only
+PostgreSQL entry point that creates a new device authorization. It resolves
+the registration binding and writes the authorization in one transaction,
+locking the Directory device identity while it checks the current generation.
+The legacy `insert` and `insert_registered` store methods return unavailable;
+a caller-supplied binding snapshot cannot prove that Directory and
+authorization changes were atomic.
+
+Rows created before the registration recovery digest was introduced keep a
+`NULL` digest. They remain readable and can finish an already pending
+certificate acknowledgement, but cannot be used for code recovery or rotation.
+The store never reconstructs a missing digest or persists raw device or user
+codes. New-key mTLS rotation stays unavailable until its predecessor
+supersede/retirement transition is committed in the same transaction.
 
 ## Relay host security state
 
@@ -338,7 +357,19 @@ RPC 附加 `authorization: Bearer <local-token>` metadata。
 
 此证书只认证 Workspace Connector 到 Relay 的客户端身份，不认证 Relay 服务到 Connector 的服务端身份。Workspace 接收端只能在 Relay 会话的服务端证书由配置的 Relay CA 验证且匹配配置的 server name 时信任转发的 `caller_roles`。出站 transport 会独立校验这些服务端事实与 Connector 已注册客户端证书。Direct 端点仍是 Frontend 用户会话路径，不得把 Workspace 设备证书用作用户身份。
 
-存储层只校验指纹格式，不解析证书、不验证 TLS 对端、不签发凭据。这里不保存私钥、证书正文或会话凭据，crate 也不自行运行 Directory 服务。
+注册表只校验指纹格式，不解析证书、不验证 TLS 对端、不签发凭据。PostgreSQL 授权存储会在版本化状态载荷中保存签发证书的 DER 与 CA 链，以支持交付确认和撤销恢复；它不会保存设备私钥、明文注册 code 或 session credential，crate 也不自行运行 Directory 服务。
+
+## 设备授权的 PostgreSQL 持久记录
+
+PostgreSQL 中只有 `PostgresDeviceAuthorizationStore::start_or_recover_registered`
+可以创建新的设备授权。它在一个事务内解析注册绑定并写入授权，同时锁定 Directory
+设备身份并检查当前世代。旧 `insert` 与 `insert_registered` store 方法均返回
+unavailable；调用方传入的绑定快照不能证明 Directory 更新与授权写入具备原子性。
+
+在注册恢复摘要引入前创建的记录保留 `NULL` 摘要。它们仍可读取，也可完成已经待处理的
+证书确认，但不能用于 code 恢复或设备轮换。存储层不会补造缺失摘要，也不会持久化明文
+device/user code。在旧记录安全地进入 supersede/retirement 且同事务实现前，使用新 key 的
+mTLS 设备轮换保持不可用。
 
 ## Relay host 安全状态
 

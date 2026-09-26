@@ -21,12 +21,14 @@ use sqlx::{PgPool, Postgres, Row};
 use thiserror::Error;
 
 use crate::device_authorization::{
-    DeviceAuthorizationCodeHash, DeviceAuthorizationDeviceKey, DeviceAuthorizationId,
+    DeviceAuthorizationCodeHash, DeviceAuthorizationCommittedSnapshot,
+    DeviceAuthorizationDeviceKey, DeviceAuthorizationId, DeviceAuthorizationPollSnapshot,
     DeviceAuthorizationRecord, DeviceAuthorizationRegistrationBinding, DeviceAuthorizationScope,
+    DeviceAuthorizationStartCandidate, DeviceAuthorizationStartDisposition,
     DeviceAuthorizationState, DeviceAuthorizationStore, DeviceAuthorizationStoreError,
     DeviceCertificateDeliveryReceipt, DeviceCertificateIssuanceFailure,
-    DeviceCertificateRetirementError, DeviceCertificateRetirementReason, IssuedDeviceCertificate,
-    VerifiedDirectoryRegistrationBinding,
+    DeviceCertificateRetirementError, DeviceCertificateRetirementReason,
+    DeviceRegistrationKeyDigest, IssuedDeviceCertificate, VerifiedDirectoryRegistrationBinding,
 };
 use crate::VersionedUserCodeDigest;
 
@@ -57,7 +59,8 @@ const SELECT_COLUMNS: &str =
      registration_binding_id, device_id, authorization_generation, \
      csr_der, csr_sha256, spki_sha256, created_at_unix_ms, expires_at_unix_ms, \
      poll_interval_ms, last_poll_at_unix_ms, revision, state_kind, approval_id, \
-     state_deadline_unix_ms, delivery_certificate_not_after_unix_ms, state_payload";
+     state_deadline_unix_ms, delivery_certificate_not_after_unix_ms, state_payload, \
+     registration_key_digest, device_code_generation";
 
 type StoreResult<T> = Result<T, DeviceAuthorizationStoreError>;
 type StoreReply<T> = SyncSender<StoreResult<T>>;
@@ -262,6 +265,27 @@ impl DeviceAuthorizationStore for PostgresDeviceAuthorizationStore {
         self.call(Command::InsertRegistered(record, reply), result)
     }
 
+    fn start_or_recover_registered(
+        &self,
+        candidate: DeviceAuthorizationStartCandidate,
+    ) -> StoreResult<DeviceAuthorizationCommittedSnapshot> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(Command::StartOrRecoverRegistered(candidate, reply), result)
+    }
+
+    fn current_poll_snapshot(
+        &self,
+        code_hash: &DeviceAuthorizationCodeHash,
+        expected_revision: Option<u64>,
+        observed_at_unix_ms: u64,
+    ) -> StoreResult<Option<DeviceAuthorizationPollSnapshot>> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::CurrentPollSnapshot(*code_hash, expected_revision, observed_at_unix_ms, reply),
+            result,
+        )
+    }
+
     fn require_current_registered_record(
         &self,
         record: &DeviceAuthorizationRecord,
@@ -405,6 +429,16 @@ impl crate::device_authorization_sweeper::DeviceCertificateRetirementSweepSource
 enum Command {
     Insert(DeviceAuthorizationRecord, StoreReply<()>),
     InsertRegistered(DeviceAuthorizationRecord, StoreReply<()>),
+    StartOrRecoverRegistered(
+        DeviceAuthorizationStartCandidate,
+        StoreReply<DeviceAuthorizationCommittedSnapshot>,
+    ),
+    CurrentPollSnapshot(
+        DeviceAuthorizationCodeHash,
+        Option<u64>,
+        u64,
+        StoreReply<Option<DeviceAuthorizationPollSnapshot>>,
+    ),
     RequireCurrentRegisteredRecord(DeviceAuthorizationRecord, StoreReply<()>),
     ByDeviceCodeHash(
         DeviceAuthorizationCodeHash,
@@ -478,6 +512,17 @@ fn worker_main(
             }
             Command::InsertRegistered(record, reply) => {
                 let _ = reply.send(runtime.block_on(insert_registered_record(&pool, &record)));
+            }
+            Command::StartOrRecoverRegistered(candidate, reply) => {
+                let _ = reply.send(runtime.block_on(start_or_recover_registered(&pool, candidate)));
+            }
+            Command::CurrentPollSnapshot(hash, revision, observed_at, reply) => {
+                let _ = reply.send(runtime.block_on(current_poll_snapshot(
+                    &pool,
+                    &hash,
+                    revision,
+                    observed_at,
+                )));
             }
             Command::RequireCurrentRegisteredRecord(record, reply) => {
                 let _ =
@@ -591,7 +636,8 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
             .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
     } else {
         sqlx::query(
-            "SELECT state_deadline_unix_ms, delivery_certificate_not_after_unix_ms \
+            "SELECT state_deadline_unix_ms, delivery_certificate_not_after_unix_ms, \
+                    registration_key_digest, device_code_generation \
              FROM cyrene_workspace_device_authorization.authorizations LIMIT 0",
         )
         .fetch_all(&pool)
@@ -601,84 +647,442 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
     Ok(pool)
 }
 
-async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> StoreResult<()> {
-    let encoded = EncodedRecord::new(record)?;
-    let result = sqlx::query(&format!(
-        "INSERT INTO {TABLE} ({SELECT_COLUMNS}) VALUES \
-         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-          $18, $19, $20, $21, $22)"
+async fn insert_record(_pool: &PgPool, _record: &DeviceAuthorizationRecord) -> StoreResult<()> {
+    // A record carries a Directory snapshot, not proof that the Directory and
+    // authorization writes shared one transaction. Creation must use the
+    // composite start path; legacy rows remain readable and transitionable.
+    Err(DeviceAuthorizationStoreError::Unavailable)
+}
+
+/// Creates or recovers an authorization while holding the Directory identity
+/// lock and writing both schemas through the same PostgreSQL transaction.
+///
+/// Legacy rows without a registration digest can still be read and ACKed, but
+/// they are never treated as recovery evidence. New-key mTLS rotation remains
+/// fail-closed until the certificate-retirement transition is available.
+async fn start_or_recover_registered(
+    pool: &PgPool,
+    candidate: DeviceAuthorizationStartCandidate,
+) -> StoreResult<DeviceAuthorizationCommittedSnapshot> {
+    validate_start_candidate(&candidate)?;
+    let registration_digest = *candidate.registration_key_digest().as_bytes();
+    let mut transaction = pool.begin().await.map_err(map_database_error)?;
+
+    // Match the Directory authority's lock derivation so registration-key
+    // creation, recovery, and Directory binding writes serialize identically.
+    let mut lock_prefix = [0; 8];
+    lock_prefix.copy_from_slice(&registration_digest[..8]);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(i64::from_be_bytes(lock_prefix))
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+
+    let existing_binding = sqlx::query(
+        "SELECT uuid_send(binding_id) AS binding_id, organization_id, workspace_id, device_id, \
+                authorization_generation, csr_sha256, spki_sha256 \
+         FROM cyrene_workspace_directory.device_registration_bindings \
+         WHERE registration_key_digest = $1",
+    )
+    .bind(registration_digest.to_vec())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    let binding = match existing_binding {
+        Some(row) => {
+            let binding = directory_binding_from_row(row)?;
+            if !candidate_matches_binding(&candidate, &binding)
+                || candidate
+                    .authenticated_device()
+                    .is_some_and(|device| device.key() != binding.key())
+            {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+            lock_and_validate_registration(&mut transaction, &binding).await?;
+
+            let rows = sqlx::query(&format!(
+                "SELECT {SELECT_COLUMNS} FROM {TABLE} \
+                 WHERE registration_binding_id = $1 OR registration_key_digest = $2 \
+                 FOR UPDATE"
+            ))
+            .bind(binding.binding_id().to_vec())
+            .bind(registration_digest.to_vec())
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+            if rows.len() > 1 {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+            if let Some(row) = rows.into_iter().next() {
+                let current = decode_record(row)?;
+                if current.registration_key_digest.as_ref()
+                    != Some(candidate.registration_key_digest())
+                    || current.registration_binding != binding
+                {
+                    // V3 rows have no credential digest. They remain readable
+                    // and pollable, but cannot be recovered or rebound.
+                    return Err(DeviceAuthorizationStoreError::Conflict);
+                }
+                let database_now = database_time_in_transaction(&mut transaction).await?;
+                let record =
+                    recover_authorization(&mut transaction, &candidate, current, database_now)
+                        .await?;
+                transaction.commit().await.map_err(map_database_error)?;
+                return Ok(DeviceAuthorizationCommittedSnapshot {
+                    record,
+                    database_now_unix_ms: database_now,
+                    disposition: DeviceAuthorizationStartDisposition::Recovered,
+                });
+            }
+
+            if candidate.authenticated_device().is_some() {
+                // A verified mTLS device cannot rotate without a persisted
+                // predecessor authorization to supersede or retire atomically.
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+
+            binding
+        }
+        None => {
+            if candidate.authenticated_device().is_some() {
+                // mTLS rotation requires a same-transaction predecessor fence.
+                // This path is enabled once the rotation transition is wired.
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+            create_initial_registration_binding(&mut transaction, &candidate).await?
+        }
+    };
+
+    let database_now = database_time_in_transaction(&mut transaction).await?;
+    let record = new_authorization_record(&candidate, binding, database_now)?;
+    let encoded = EncodedRecord::new(&record)?;
+    insert_encoded(&mut transaction, &encoded).await?;
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(DeviceAuthorizationCommittedSnapshot {
+        record,
+        database_now_unix_ms: database_now,
+        disposition: DeviceAuthorizationStartDisposition::Created,
+    })
+}
+
+async fn create_initial_registration_binding(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    candidate: &DeviceAuthorizationStartCandidate,
+) -> StoreResult<DeviceAuthorizationRegistrationBinding> {
+    let scope = candidate.scope();
+    let key = candidate.registration_key_digest().as_bytes();
+    let device_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO cyrene_workspace_directory.workspace_device_identities \
+             (organization_id, workspace_id, device_id, current_authorization_generation) \
+         VALUES ($1, $2, $3, 1)",
+    )
+    .bind(&scope.organization_id)
+    .bind(&scope.workspace_id)
+    .bind(&device_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    let binding_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO cyrene_workspace_directory.device_registration_bindings \
+             (binding_id, registration_key_digest, organization_id, workspace_id, device_id, \
+              authorization_generation, csr_sha256, spki_sha256) \
+         VALUES ($1::UUID, $2, $3, $4, $5, 1, $6, $7)",
+    )
+    .bind(binding_id.to_string())
+    .bind(key.as_slice())
+    .bind(&scope.organization_id)
+    .bind(&scope.workspace_id)
+    .bind(&device_id)
+    .bind(candidate.csr_sha256().as_slice())
+    .bind(candidate.spki_sha256().as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    let snapshot = PersistedDirectoryBinding {
+        binding_id: *binding_id.as_bytes(),
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        device_id,
+        authorization_generation: 1,
+        csr_sha256: *candidate.csr_sha256(),
+        spki_sha256: *candidate.spki_sha256(),
+    };
+    Ok(DeviceAuthorizationRegistrationBinding::from_verified_directory_binding(&snapshot))
+}
+
+fn directory_binding_from_row(row: PgRow) -> StoreResult<DeviceAuthorizationRegistrationBinding> {
+    let snapshot = PersistedDirectoryBinding {
+        binding_id: fixed::<16>(
+            row.try_get("binding_id")
+                .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        )?,
+        organization_id: row
+            .try_get("organization_id")
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        workspace_id: row
+            .try_get("workspace_id")
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        device_id: row
+            .try_get("device_id")
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        authorization_generation: from_i64(
+            row.try_get("authorization_generation")
+                .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        )?,
+        csr_sha256: fixed::<32>(
+            row.try_get("csr_sha256")
+                .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        )?,
+        spki_sha256: fixed::<32>(
+            row.try_get("spki_sha256")
+                .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+        )?,
+    };
+    Ok(DeviceAuthorizationRegistrationBinding::from_verified_directory_binding(&snapshot))
+}
+
+fn candidate_matches_binding(
+    candidate: &DeviceAuthorizationStartCandidate,
+    binding: &DeviceAuthorizationRegistrationBinding,
+) -> bool {
+    binding.authorization_generation() > 0
+        && binding.key().organization_id == candidate.scope().organization_id
+        && binding.key().workspace_id == candidate.scope().workspace_id
+        && binding.csr_sha256() == candidate.csr_sha256()
+        && binding.spki_sha256() == candidate.spki_sha256()
+}
+
+fn validate_start_candidate(candidate: &DeviceAuthorizationStartCandidate) -> StoreResult<()> {
+    let scope = candidate.scope();
+    let csr_der = candidate.csr_der();
+    let (_, user_code_mac) = candidate.user_code_digest_candidate().storage_parts();
+    if scope.organization_id.trim().is_empty()
+        || scope.organization_id.len() > 256
+        || scope.workspace_id.trim().is_empty()
+        || scope.workspace_id.len() > 256
+        || csr_der.is_empty()
+        || csr_der.len() > MAX_CSR_BYTES
+        || sha256(csr_der) != *candidate.csr_sha256()
+        || candidate
+            .registration_key_digest()
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        || candidate.authorization_ttl_ms() == 0
+        || candidate.authorization_ttl_ms() > 10 * 60 * 1_000
+        || candidate.initial_poll_interval_ms() == 0
+        || candidate.initial_poll_interval_ms() > 60 * 1_000
+        || candidate.maximum_recovery_attempts() == 0
+        || candidate.maximum_recovery_attempts() > 10
+        || candidate.user_code_digest_candidate().key_version() == 0
+        || user_code_mac.iter().all(|byte| *byte == 0)
+    {
+        return Err(DeviceAuthorizationStoreError::Unavailable);
+    }
+    if let Some(device) = candidate.authenticated_device() {
+        let key = device.key();
+        if key.organization_id != scope.organization_id
+            || key.workspace_id != scope.workspace_id
+            || key.device_id.trim().is_empty()
+            || key.device_id.len() > 256
+        {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+fn new_authorization_record(
+    candidate: &DeviceAuthorizationStartCandidate,
+    binding: DeviceAuthorizationRegistrationBinding,
+    database_now_unix_ms: u64,
+) -> StoreResult<DeviceAuthorizationRecord> {
+    let expires_at_unix_ms = database_now_unix_ms
+        .checked_add(candidate.authorization_ttl_ms())
+        .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
+    to_i64(expires_at_unix_ms)?;
+    let record = DeviceAuthorizationRecord {
+        id: *candidate.authorization_id_candidate(),
+        registration_binding: binding,
+        registration_key_digest: Some(candidate.registration_key_digest().clone()),
+        device_code_generation: 1,
+        device_code_hash: *candidate.device_code_hash_candidate(),
+        user_code_digest: *candidate.user_code_digest_candidate(),
+        scope: candidate.scope().clone(),
+        csr_der: candidate.csr_der().to_vec(),
+        csr_sha256: *candidate.csr_sha256(),
+        spki_sha256: *candidate.spki_sha256(),
+        created_at_unix_ms: database_now_unix_ms,
+        expires_at_unix_ms,
+        poll_interval_ms: candidate.initial_poll_interval_ms(),
+        last_poll_at_unix_ms: None,
+        revision: 0,
+        state: DeviceAuthorizationState::Pending,
+    };
+    Ok(record)
+}
+
+async fn recover_authorization(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    candidate: &DeviceAuthorizationStartCandidate,
+    current: DeviceAuthorizationRecord,
+    database_now_unix_ms: u64,
+) -> StoreResult<DeviceAuthorizationRecord> {
+    if current.registration_key_digest.as_ref() != Some(candidate.registration_key_digest())
+        || current.scope != *candidate.scope()
+        || current.csr_der != candidate.csr_der()
+        || current.csr_sha256 != *candidate.csr_sha256()
+        || current.spki_sha256 != *candidate.spki_sha256()
+        || current.expires_at_unix_ms <= database_now_unix_ms
+        || !state_allows_code_recovery(&current.state)
+    {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    if current.device_code_hash == *candidate.device_code_hash_candidate()
+        || current.user_code_digest == *candidate.user_code_digest_candidate()
+    {
+        return Err(DeviceAuthorizationStoreError::CodeCollision);
+    }
+    let recovery_count = current.device_code_generation.saturating_sub(1);
+    if recovery_count >= u64::from(candidate.maximum_recovery_attempts()) {
+        return Err(DeviceAuthorizationStoreError::RecoveryLimit);
+    }
+    let next_generation = current
+        .device_code_generation
+        .checked_add(1)
+        .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+    let next_revision = current
+        .revision
+        .checked_add(1)
+        .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+    let mut replacement = current.clone();
+    replacement.registration_key_digest = Some(candidate.registration_key_digest().clone());
+    replacement.device_code_generation = next_generation;
+    replacement.device_code_hash = *candidate.device_code_hash_candidate();
+    replacement.user_code_digest = *candidate.user_code_digest_candidate();
+    replacement.revision = next_revision;
+    let encoded = EncodedRecord::new(&replacement)?;
+    let (user_code_key_version, user_code_mac) = replacement.user_code_digest.storage_parts();
+    let update = sqlx::query(&format!(
+        "UPDATE {TABLE} SET device_code_hash = $3, user_code_key_version = $4, \
+         user_code_mac = $5, device_code_generation = $6, revision = $7, \
+         state_kind = $8, approval_id = $9, state_deadline_unix_ms = $10, \
+         delivery_certificate_not_after_unix_ms = $11, state_payload = $12 \
+         WHERE id = $1 AND revision = $2 AND registration_key_digest = $13"
     ))
-    .bind(encoded.id)
+    .bind(replacement.id.to_vec())
+    .bind(to_i64(current.revision)?)
     .bind(encoded.device_code_hash)
-    .bind(encoded.user_code_key_version)
-    .bind(encoded.user_code_mac)
-    .bind(encoded.organization_id)
-    .bind(encoded.workspace_id)
-    .bind(encoded.registration_binding_id)
-    .bind(encoded.device_id)
-    .bind(encoded.authorization_generation)
-    .bind(encoded.csr_der)
-    .bind(encoded.csr_sha256)
-    .bind(encoded.spki_sha256)
-    .bind(encoded.created_at_unix_ms)
-    .bind(encoded.expires_at_unix_ms)
-    .bind(encoded.poll_interval_ms)
-    .bind(encoded.last_poll_at_unix_ms)
-    .bind(encoded.revision)
+    .bind(i64::from(user_code_key_version))
+    .bind(user_code_mac.to_vec())
+    .bind(to_i64(next_generation)?)
+    .bind(to_i64(next_revision)?)
     .bind(encoded.state_kind)
     .bind(encoded.approval_id)
     .bind(encoded.state_deadline_unix_ms)
     .bind(encoded.delivery_certificate_not_after_unix_ms)
     .bind(encoded.state_payload)
-    .execute(pool)
-    .await;
-    result.map(|_| ()).map_err(map_database_error)
+    .bind(candidate.registration_key_digest().as_bytes().to_vec())
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    if update.rows_affected() != 1 {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    Ok(replacement)
+}
+
+fn state_allows_code_recovery(state: &DeviceAuthorizationState) -> bool {
+    matches!(
+        state,
+        DeviceAuthorizationState::Pending
+            | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+            | DeviceAuthorizationState::VerifyingWebAuthn { .. }
+            | DeviceAuthorizationState::Issuing { .. }
+            | DeviceAuthorizationState::DeliveryPending { .. }
+            | DeviceAuthorizationState::Delivered { .. }
+            | DeviceAuthorizationState::RetirementPending { .. }
+    )
+}
+
+async fn current_poll_snapshot(
+    pool: &PgPool,
+    code_hash: &DeviceAuthorizationCodeHash,
+    expected_revision: Option<u64>,
+    _observed_at_unix_ms: u64,
+) -> StoreResult<Option<DeviceAuthorizationPollSnapshot>> {
+    let mut transaction = pool.begin().await.map_err(map_database_error)?;
+    let Some(preliminary_row) = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM {TABLE} WHERE device_code_hash = $1"
+    ))
+    .bind(code_hash.to_vec())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?
+    else {
+        return Ok(None);
+    };
+    let preliminary = decode_record(preliminary_row)?;
+    match lock_and_validate_registration(&mut transaction, &preliminary.registration_binding).await
+    {
+        Ok(()) => {}
+        Err(DeviceAuthorizationStoreError::Conflict) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+
+    // Re-read and lock after the Directory identity lock. Recovery and every
+    // registered transition use the same lock order, so this row is one current
+    // code/state/generation snapshot rather than a cross-transaction projection.
+    let Some(row) = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM {TABLE} WHERE id = $1 AND device_code_hash = $2 FOR UPDATE"
+    ))
+    .bind(preliminary.id.to_vec())
+    .bind(code_hash.to_vec())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?
+    else {
+        return Ok(None);
+    };
+    let current = decode_record(row)?;
+    if current.registration_binding != preliminary.registration_binding
+        || expected_revision.is_some_and(|revision| revision != current.revision)
+    {
+        return Ok(None);
+    }
+    let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(Some(DeviceAuthorizationPollSnapshot {
+        record: current,
+        database_now_unix_ms,
+    }))
+}
+
+async fn database_time_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+) -> StoreResult<u64> {
+    let now = sqlx::query_scalar::<_, i64>(
+        "SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    from_i64(now)
 }
 
 async fn insert_registered_record(
-    pool: &PgPool,
-    record: &DeviceAuthorizationRecord,
+    _pool: &PgPool,
+    _record: &DeviceAuthorizationRecord,
 ) -> StoreResult<()> {
-    let encoded = EncodedRecord::new(record)?;
-    let mut transaction = pool.begin().await.map_err(map_database_error)?;
-    lock_and_validate_registration(&mut transaction, &record.registration_binding).await?;
-
-    let key = record.registration_binding.key();
-    let newest = sqlx::query(
-        "SELECT authorization_generation, state_kind \
-         FROM cyrene_workspace_device_authorization.authorizations \
-         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 \
-         ORDER BY authorization_generation DESC LIMIT 1 FOR UPDATE",
-    )
-    .bind(&key.organization_id)
-    .bind(&key.workspace_id)
-    .bind(&key.device_id)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(map_database_error)?;
-
-    if let Some(newest) = newest {
-        let newest_generation: i64 = newest
-            .try_get("authorization_generation")
-            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
-        let newest_generation = from_i64(newest_generation)?;
-        let newest_state: String = newest
-            .try_get("state_kind")
-            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
-        let generation = record.registration_binding.authorization_generation();
-        if generation < newest_generation
-            || (generation > newest_generation
-                && matches!(
-                    newest_state.as_str(),
-                    "issuing" | "delivery_pending" | "retirement_pending"
-                ))
-        {
-            return Err(DeviceAuthorizationStoreError::Conflict);
-        }
-    }
-
-    insert_encoded(&mut transaction, &encoded).await?;
-    transaction.commit().await.map_err(map_database_error)
+    // This legacy insert accepts a binding snapshot produced outside the auth
+    // transaction. Keep it unavailable so no runtime can split Directory
+    // generation changes from predecessor supersede/retirement.
+    Err(DeviceAuthorizationStoreError::Unavailable)
 }
 
 async fn require_current_registered_record(
@@ -766,7 +1170,7 @@ async fn insert_encoded(
     sqlx::query(&format!(
         "INSERT INTO {TABLE} ({SELECT_COLUMNS}) VALUES \
          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-          $18, $19, $20, $21, $22)"
+          $18, $19, $20, $21, $22, $23, $24)"
     ))
     .bind(&encoded.id)
     .bind(&encoded.device_code_hash)
@@ -790,6 +1194,8 @@ async fn insert_encoded(
     .bind(encoded.state_deadline_unix_ms)
     .bind(encoded.delivery_certificate_not_after_unix_ms)
     .bind(&encoded.state_payload)
+    .bind(&encoded.registration_key_digest)
+    .bind(encoded.device_code_generation)
     .execute(&mut **transaction)
     .await
     .map_err(map_database_error)?;
@@ -1243,6 +1649,8 @@ fn same_immutable_fields(
     replacement: &DeviceAuthorizationRecord,
 ) -> bool {
     current.id == replacement.id
+        && current.registration_key_digest == replacement.registration_key_digest
+        && current.device_code_generation == replacement.device_code_generation
         && current.device_code_hash == replacement.device_code_hash
         && current.user_code_digest == replacement.user_code_digest
         && current.scope == replacement.scope
@@ -1267,6 +1675,10 @@ fn map_database_error(error: sqlx::Error) -> DeviceAuthorizationStoreError {
                     | "authorizations_user_code_digest_unique"
                     | "authorizations_registration_binding_unique",
                 ) => DeviceAuthorizationStoreError::CodeCollision,
+                Some(
+                    "authorizations_registration_key_digest_unique"
+                    | "authorizations_directory_generation_unique",
+                ) => DeviceAuthorizationStoreError::Conflict,
                 _ => DeviceAuthorizationStoreError::Unavailable,
             };
         }
@@ -1297,6 +1709,8 @@ struct EncodedRecord {
     state_deadline_unix_ms: Option<i64>,
     delivery_certificate_not_after_unix_ms: Option<i64>,
     state_payload: Vec<u8>,
+    registration_key_digest: Option<Vec<u8>>,
+    device_code_generation: i64,
 }
 
 impl EncodedRecord {
@@ -1309,6 +1723,11 @@ impl EncodedRecord {
             || sha256(&record.csr_der) != record.csr_sha256
             || record.created_at_unix_ms >= record.expires_at_unix_ms
             || record.poll_interval_ms == 0
+            || record.device_code_generation == 0
+            || record
+                .registration_key_digest
+                .as_ref()
+                .is_some_and(|digest| digest.as_bytes().iter().all(|byte| *byte == 0))
         {
             return Err(DeviceAuthorizationStoreError::Unavailable);
         }
@@ -1365,6 +1784,11 @@ impl EncodedRecord {
             state_deadline_unix_ms,
             delivery_certificate_not_after_unix_ms,
             state_payload,
+            registration_key_digest: record
+                .registration_key_digest
+                .as_ref()
+                .map(|digest| digest.as_bytes().to_vec()),
+            device_code_generation: to_i64(record.device_code_generation)?,
         })
     }
 }
@@ -1388,6 +1812,11 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
     let user_code_mac = fixed::<32>(get!("user_code_mac", Vec<u8>))?;
     let user_code_digest = VersionedUserCodeDigest::from_storage_parts(key_version, user_code_mac)
         .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let registration_key_digest = get!("registration_key_digest", Option<Vec<u8>>)
+        .map(fixed::<32>)
+        .transpose()?
+        .map(DeviceRegistrationKeyDigest::from_stored_bytes);
+    let device_code_generation = from_i64(get!("device_code_generation", i64))?;
     let scope = DeviceAuthorizationScope {
         organization_id: get!("organization_id", String),
         workspace_id: get!("workspace_id", String),
@@ -1434,6 +1863,8 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
         || sha256(&csr_der) != csr_sha256
         || created_at_unix_ms >= expires_at_unix_ms
         || poll_interval_ms == 0
+        || device_code_generation == 0
+        || (registration_key_digest.is_none() && device_code_generation != 1)
     {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
@@ -1458,6 +1889,8 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
     let record = DeviceAuthorizationRecord {
         id,
         registration_binding,
+        registration_key_digest,
+        device_code_generation,
         device_code_hash,
         user_code_digest,
         scope,
@@ -2489,6 +2922,8 @@ mod tests {
         DeviceAuthorizationRecord {
             id,
             registration_binding,
+            registration_key_digest: Some(DeviceRegistrationKeyDigest::from_secret(&[id[0]; 32])),
+            device_code_generation: 1,
             device_code_hash: sha256(&id),
             user_code_digest: VersionedUserCodeDigest::from_storage_parts(1, user_code_mac)
                 .expect("versioned digest"),
@@ -2920,6 +3355,8 @@ mod tests {
                 [6; 32],
                 [4; 32],
             ),
+            registration_key_digest: Some(DeviceRegistrationKeyDigest::from_secret(&[0x09; 32])),
+            device_code_generation: 1,
             device_code_hash: [2; 32],
             user_code_digest: VersionedUserCodeDigest::from_storage_parts(1, [3; 32])
                 .expect("versioned digest"),
