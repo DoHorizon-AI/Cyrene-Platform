@@ -26,8 +26,9 @@
 
 Relay and Directory code must never become Product, execution, Lease/Event,
 or Artifact identity authorities. A Workspace connector is accepted only when
-its Tonic TLS peer certificate matches an approved, non-revoked device record;
-frontend direct requests remain user-session and membership checked.
+either its Tonic TLS peer certificate or the explicitly configured ACA XFCC
+certificate matches an approved, non-revoked device record; frontend direct
+requests remain user-session and membership checked.
 
 The ACA forwarded-certificate adapter is opt-in and requires a configured
 private client-CA trust bundle. It must only be selected behind ACA HTTP/2
@@ -73,7 +74,7 @@ identity 权威。
 
 `cy-workspace-directory-admin` 使用分离的 operator 和 migration 数据库 URL。成员/角色/descriptor 变更与审计记录原子提交；服务 reader 角色仅能 SELECT。OIDC 验证、数据库用户/secret/部署，以及 production host 配置仍属于外部工作。
 
-Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。Workspace Connector 仅在 Tonic TLS 对端证书匹配已批准且未撤销的设备记录时接受；frontend 直连仍校验用户会话和成员关系。
+Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。Workspace Connector 仅在 Tonic TLS 对端证书或显式配置的 ACA XFCC 证书匹配已批准且未撤销的设备记录时接受；frontend 直连仍校验用户会话和成员关系。
 
 已注册设备证书只认证 Connector 到 Relay 的客户端身份，不认证 Relay 服务到 Workspace 接收端的服务端身份。信任转发 `caller_roles` 的接收端必须使用服务端证书由配置的 Relay CA 验证且匹配配置的 server name 的 Relay 会话。Direct 请求仍使用 Frontend 用户会话。
 

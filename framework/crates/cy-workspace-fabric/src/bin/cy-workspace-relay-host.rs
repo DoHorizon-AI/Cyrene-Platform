@@ -8,21 +8,21 @@
 //!
 //! The host owns only Workspace relay transport and its persistent directory
 //! snapshot. It does not create Product, Kernel, Runtime, or Artifact authority.
-//! Production device IAM and directory administration are not wired yet, so the
-//! service remains unready and rejects every relay session.
+//! ACA XFCC device identity is an explicit opt-in, while frontend identity,
+//! DeviceAuthorization, CA issuance, WebAuthn, and Product access remain unready.
 
 use std::env;
 use std::error::Error;
-use std::io;
+use std::io::{self, Read};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use cy_observability::{init_observability, ObservabilityConfig};
 use cy_workspace_fabric::{
-    bounded_workspace_relay_server, FileWorkspaceDirectory, RelayAuthenticationError,
-    RelayAuthenticator, RelaySessionClaims, WorkspaceRelay,
+    bounded_workspace_relay_server, AcaForwardedCertificateAdapter, FileWorkspaceDirectory,
+    RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims, WorkspaceRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,18 +33,20 @@ use tonic::transport::Server;
 const DEFAULT_RELAY_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_HEALTH_BIND: &str = "127.0.0.1:8081";
 const ACA_INGRESS_ASSERTION: &str = "client-certificate-required";
+const ACA_CLIENT_CA_BUNDLE_ENV: &str = "CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE";
 const HEALTH_BIND_ASSERTION: &str = "probe-only-not-ingress";
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_HEALTH_REQUEST_BYTES: usize = 2048;
 const MAX_HEALTH_CONNECTIONS: usize = 32;
-const NOT_READY_BODY: &str =
-    r#"{"status":"not_ready","reason":"production_identity_and_directory_admin_unavailable"}"#;
+const MAX_ACA_CLIENT_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
+const NOT_READY_BODY: &str = r#"{"status":"not_ready","reason":"frontend_identity_directory_admin_ca_webauthn_and_product_dependencies_unavailable"}"#;
 
 struct HostConfig {
     relay_bind: SocketAddr,
     health_bind: SocketAddr,
     directory: PathBuf,
+    aca_client_ca_bundle: Option<PathBuf>,
 }
 
 impl HostConfig {
@@ -54,26 +56,20 @@ impl HostConfig {
         let relay_bind = socket_addr_from_env("CYRENE_WORKSPACE_RELAY_BIND", DEFAULT_RELAY_BIND)?;
         let health_bind =
             socket_addr_from_env("CYRENE_WORKSPACE_RELAY_HEALTH_BIND", DEFAULT_HEALTH_BIND)?;
-        let ingress_assertion = env::var("CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION").ok();
+        let ingress_assertion =
+            match env::var_os("CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION") {
+                Some(value) => Some(value.into_string().map_err(|_| {
+                    "CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION must be valid UTF-8"
+                })?),
+                None => None,
+            };
+        let configured_ca_bundle = env::var_os(ACA_CLIENT_CA_BUNDLE_ENV).map(PathBuf::from);
         let health_assertion = env::var("CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION").ok();
-
-        if ingress_assertion
-            .as_deref()
-            .is_some_and(|assertion| assertion != ACA_INGRESS_ASSERTION)
-        {
-            return Err(format!(
-                "CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION must be '{ACA_INGRESS_ASSERTION}'"
-            )
-            .into());
-        }
-        if !relay_bind.ip().is_loopback()
-            && ingress_assertion.as_deref() != Some(ACA_INGRESS_ASSERTION)
-        {
-            return Err(format!(
-                "non-loopback relay bind {relay_bind} requires CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION={ACA_INGRESS_ASSERTION}"
-            )
-            .into());
-        }
+        let aca_client_ca_bundle = validate_aca_ingress_config(
+            relay_bind,
+            ingress_assertion.as_deref(),
+            configured_ca_bundle,
+        )?;
         if health_assertion
             .as_deref()
             .is_some_and(|assertion| assertion != HEALTH_BIND_ASSERTION)
@@ -100,8 +96,74 @@ impl HostConfig {
             relay_bind,
             health_bind,
             directory,
+            aca_client_ca_bundle,
         })
     }
+}
+
+fn validate_aca_ingress_config(
+    relay_bind: SocketAddr,
+    ingress_assertion: Option<&str>,
+    ca_bundle: Option<PathBuf>,
+) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    if ingress_assertion.is_some_and(|value| value != ACA_INGRESS_ASSERTION) {
+        return Err(format!(
+            "CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION must be '{ACA_INGRESS_ASSERTION}'"
+        )
+        .into());
+    }
+
+    let selected_ca_bundle = match (ingress_assertion, ca_bundle) {
+        (Some(_), Some(path)) if !path.as_os_str().is_empty() => Some(path),
+        (Some(_), None) => {
+            return Err(format!(
+                "ACA ingress requires {ACA_CLIENT_CA_BUNDLE_ENV} with a private client CA bundle"
+            )
+            .into());
+        }
+        (Some(_), Some(_)) => {
+            return Err(format!("{ACA_CLIENT_CA_BUNDLE_ENV} must not be empty").into());
+        }
+        (None, Some(_)) => {
+            return Err(format!(
+                "{ACA_CLIENT_CA_BUNDLE_ENV} requires CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION={ACA_INGRESS_ASSERTION}"
+            )
+            .into());
+        }
+        (None, None) => None,
+    };
+
+    if !relay_bind.ip().is_loopback() && selected_ca_bundle.is_none() {
+        return Err(format!(
+            "non-loopback relay bind {relay_bind} requires an ACA client CA bundle and the explicit ACA ingress assertion"
+        )
+        .into());
+    }
+
+    Ok(selected_ca_bundle)
+}
+
+fn read_aca_client_ca_bundle(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ACA_CLIENT_CA_BUNDLE_BYTES
+    {
+        return Err(format!(
+            "ACA client CA bundle must be a regular file no larger than {MAX_ACA_CLIENT_CA_BUNDLE_BYTES} bytes"
+        )
+        .into());
+    }
+
+    let mut contents = Vec::with_capacity(usize::try_from(metadata.len())?);
+    file.take(MAX_ACA_CLIENT_CA_BUNDLE_BYTES + 1)
+        .read_to_end(&mut contents)?;
+    if contents.is_empty() || contents.len() as u64 > MAX_ACA_CLIENT_CA_BUNDLE_BYTES {
+        return Err(format!(
+            "ACA client CA bundle must not exceed {MAX_ACA_CLIENT_CA_BUNDLE_BYTES} bytes"
+        )
+        .into());
+    }
+    Ok(contents)
 }
 
 fn socket_addr_from_env(name: &str, default: &str) -> Result<SocketAddr, Box<dyn Error>> {
@@ -128,11 +190,10 @@ fn reject_fixture_credentials() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Production identity is deliberately unavailable until device IAM is wired.
-/// Every Relay Hello is rejected; this keeps the runnable host fail-closed.
-struct UnavailableProductionDeviceIam;
+/// Frontend user-session authentication remains unavailable until its production verifier is wired.
+struct UnavailableFrontendIdentity;
 
-impl RelayAuthenticator for UnavailableProductionDeviceIam {
+impl RelayAuthenticator for UnavailableFrontendIdentity {
     fn authenticate(
         &self,
         _hello: &cy_proto::workspace_v1::RelayHello,
@@ -164,7 +225,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn run_host() -> Result<(), Box<dyn Error>> {
     let config = HostConfig::from_env()?;
     let directory = Arc::new(FileWorkspaceDirectory::open(&config.directory)?);
-    let relay = WorkspaceRelay::new(directory, Arc::new(UnavailableProductionDeviceIam));
+    let aca_ingress_enabled = config.aca_client_ca_bundle.is_some();
+    let authenticator = Arc::new(UnavailableFrontendIdentity);
+    let relay = if let Some(bundle_path) = &config.aca_client_ca_bundle {
+        let ca_bundle = read_aca_client_ca_bundle(bundle_path)?;
+        let adapter = AcaForwardedCertificateAdapter::new(&ca_bundle)?;
+        WorkspaceRelay::with_aca_forwarded_certificate_adapter(
+            directory.clone(),
+            authenticator,
+            directory.clone(),
+            adapter,
+        )
+    } else {
+        WorkspaceRelay::new(directory, authenticator)
+    };
     let health_listener = TcpListener::bind(config.health_bind).await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -183,14 +257,15 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
         event.name = "platform.workspace_relay.host_started",
         relay_bind = %config.relay_bind,
         health_bind = %config.health_bind,
-        authentication = "deny_all_until_production_device_iam",
+        frontend_authentication = "deny_all_until_production_user_identity",
+        workspace_device_authentication = if aca_ingress_enabled { "aca_xfcc_with_file_registry" } else { "disabled" },
         ready = false,
         message = "Workspace Relay host is listening with fail-closed authentication",
     );
     tracing::warn!(
         event.name = "platform.workspace_relay.production_gate",
         error.code = "RELAY_PRODUCTION_ACCESS_CONTROL_UNAVAILABLE",
-        message = "Production device IAM and directory administration are not connected; /readyz will remain unavailable and all Relay sessions will be rejected",
+        message = "Frontend identity, Directory administration, DeviceAuthorization, CA issuance, WebAuthn and Product private access are not connected; /readyz remains unavailable",
     );
 
     enum HostExit {
@@ -360,5 +435,84 @@ async fn read_health_request(stream: &mut TcpStream) -> io::Result<String> {
             return String::from_utf8(request)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP header"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loopback_bind() -> SocketAddr {
+        "127.0.0.1:8080".parse().unwrap()
+    }
+
+    #[test]
+    fn default_loopback_configuration_does_not_select_aca_identity() {
+        assert_eq!(
+            validate_aca_ingress_config(loopback_bind(), None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn aca_identity_requires_both_ingress_assertion_and_private_ca_bundle() {
+        let ca_bundle = PathBuf::from("/etc/cyrene/device-ca/roots.pem");
+        assert!(
+            validate_aca_ingress_config(loopback_bind(), None, Some(ca_bundle.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("ACA_INGRESS_ASSERTION")
+        );
+        assert!(
+            validate_aca_ingress_config(loopback_bind(), Some(ACA_INGRESS_ASSERTION), None)
+                .unwrap_err()
+                .to_string()
+                .contains(ACA_CLIENT_CA_BUNDLE_ENV)
+        );
+    }
+
+    #[test]
+    fn unknown_ingress_assertion_is_rejected() {
+        assert!(validate_aca_ingress_config(
+            loopback_bind(),
+            Some("trust-forwarded-headers"),
+            Some(PathBuf::from("/etc/cyrene/device-ca/roots.pem"))
+        )
+        .unwrap_err()
+        .to_string()
+        .contains(ACA_INGRESS_ASSERTION));
+    }
+
+    #[test]
+    fn non_loopback_bind_requires_explicit_aca_identity_configuration() {
+        let bind = "0.0.0.0:8080".parse().unwrap();
+        assert!(validate_aca_ingress_config(bind, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("ACA client CA bundle"));
+        assert_eq!(
+            validate_aca_ingress_config(
+                bind,
+                Some(ACA_INGRESS_ASSERTION),
+                Some(PathBuf::from("/etc/cyrene/device-ca/roots.pem"))
+            )
+            .unwrap(),
+            Some(PathBuf::from("/etc/cyrene/device-ca/roots.pem"))
+        );
+    }
+
+    #[test]
+    fn aca_ca_bundle_reader_enforces_its_size_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let bundle_path = directory.path().join("roots.pem");
+        std::fs::write(&bundle_path, b"trusted roots").unwrap();
+        assert_eq!(
+            read_aca_client_ca_bundle(&bundle_path).unwrap(),
+            b"trusted roots"
+        );
+
+        let oversized = vec![0_u8; usize::try_from(MAX_ACA_CLIENT_CA_BUNDLE_BYTES + 1).unwrap()];
+        std::fs::write(&bundle_path, oversized).unwrap();
+        assert!(read_aca_client_ca_bundle(&bundle_path).is_err());
     }
 }

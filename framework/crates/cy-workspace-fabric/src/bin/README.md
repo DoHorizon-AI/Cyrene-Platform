@@ -3,15 +3,19 @@
 `cy-workspace-relay-host` is the non-fixture process entrypoint for
 `WorkspaceRelay`. It opens the private file-backed Workspace Directory, emits
 structured logs, serves `/healthz` and `/readyz` on its health listener, and
-handles SIGINT/SIGTERM with graceful shutdown. It intentionally rejects every
-Relay session until a production device IAM verifier and directory
-administration path are connected. `/healthz` reports process liveness;
-`/readyz` remains HTTP 503 while those production gates are missing.
+handles SIGINT/SIGTERM with graceful shutdown. Frontend user sessions remain
+denied. Workspace connector certificate checks are disabled by default; the
+explicit ACA mode validates XFCC against a configured client CA and the
+file-backed device registry. `/healthz` reports process liveness; `/readyz`
+remains HTTP 503 while production identity, authorization, and Product access
+dependencies are missing.
 
 The host defaults to loopback binds. A non-loopback Relay bind requires
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`.
-The assertion is not checked against live Azure resources. A non-loopback
-health bind also requires
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required` and
+`CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE` pointing to an operator-managed
+client CA bundle. Setting both variables opts into ACA XFCC validation, even
+on loopback. The assertion is not checked against live Azure resources. A
+non-loopback health bind also requires
 `CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`; that
 listener exposes only the liveness and readiness responses and must not be
 mapped as ACA ingress or an `additionalPortMappings` target. In ACA, both
@@ -40,6 +44,8 @@ template:
           value: 0.0.0.0:8081
         - name: CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION
           value: client-certificate-required
+        - name: CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE
+          value: /etc/cyrene/device-ca/roots.pem
         - name: CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION
           value: probe-only-not-ingress
         - name: CYRENE_WORKSPACE_RELAY_DIRECTORY
@@ -66,10 +72,14 @@ no ingress traffic. This scaffold can therefore be started for deployment
 configuration validation, but it cannot serve production traffic. Mount private
 persistent storage at `/var/lib/cyrene/workspace-relay` and keep one active
 Directory owner; the host's file lock is exclusive.
-ACA terminates client TLS at Envoy. The host listens in plaintext
-behind that private boundary and does not consume or trust
-`X-Forwarded-Client-Cert`. It is not production-ready until device IAM
-validates the enrolled certificate and Workspace/user authorization.
+ACA terminates client TLS at Envoy. When the two explicit settings above are
+present, the host reads `X-Forwarded-Client-Cert`, validates its chain against
+the mounted CA bundle, and applies the approved-device registry checks. This
+mode is safe only when the deployed ACA ingress requires client certificates
+and overwrites caller-supplied XFCC; the environment assertion does not prove
+that configuration. The Relay remains unready until user identity, durable
+device authorization, CA issuance, WebAuthn, Directory administration, Product
+private credentials, and live ingress identity are connected and verified.
 
 `cy-workspace-relay-host` 是 `WorkspaceRelay` 的非 fixture 进程入口。它打开私有文件式
 Workspace Directory，以结构化格式写日志，在健康监听端口提供 `/healthz` 与 `/readyz`，并在收到
@@ -77,8 +87,9 @@ SIGINT/SIGTERM 后优雅停止。生产设备 IAM verifier 和目录管理路径
 session。`/healthz` 表示进程存活；缺少生产门槛时 `/readyz` 保持 HTTP 503。
 
 host 默认仅绑定 loopback。Relay 使用非 loopback bind 时，必须设置
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`。这只是运维声明，
-不会对照 Azure 实际资源配置校验。健康监听使用非 loopback bind 时，还必须设置
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`，并设置
+`CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE` 指向运维管理的客户端 CA bundle；两者同时设置才会启用
+ACA XFCC 校验，loopback 也可显式启用。这只是运维声明，不会对照 Azure 实际资源配置校验。健康监听使用非 loopback bind 时，还必须设置
 `CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`；该 listener 只响应存活和就绪
 探针，且不得映射为 ACA ingress 或 `additionalPortMappings` target。使用 ACA 时，两个 listener 都要绑定容器网卡（例如
 `0.0.0.0:8080` 与 `0.0.0.0:8081`）；loopback 默认值仅用于本地运行。必须显式将 ingress
@@ -87,9 +98,10 @@ target port 设为 `8080`，transport 设为 HTTP/2，`allowInsecure: false`，�
 在容器上显式配置启动与存活 HTTP probe：`port: 8081`、`path: /healthz`；就绪 HTTP probe 使用
 `port: 8081`、`path: /readyz`。ACA 默认 probe 检查 ingress port；若不显式配置，它们会检查 gRPC
 listener 而不是健康端点。当前 `/readyz` 返回 503，因此 ACA 会正确地将该 revision 保持为未就绪并且
-不向它发送 ingress 流量。该脚手架可用于部署配置验证，但不能服务生产流量。ACA Envoy 在入口终止客户端 TLS；host 在该私有边界之后监听明文协议，
-不读取或信任 `X-Forwarded-Client-Cert`。设备 IAM 尚未校验已登记证书及 Workspace/用户授权前，host
-不可用于生产。
+不向它发送 ingress 流量。该脚手架可用于部署配置验证，但不能服务生产流量。ACA Envoy 在入口终止客户端 TLS；host 在该私有边界之后监听明文协议。
+显式配置上述两项后，host 会读取 XFCC、用挂载的 CA bundle 校验证书链并查询设备注册表；该路径依赖真实 ACA
+ingress 强制客户端证书并覆盖客户端提交的 XFCC，环境变量声明不是部署证据。生产就绪前仍须接通持久设备授权、CA
+签发、WebAuthn、用户身份、Product 私有凭据并验证 ingress 配置。
 
 The ACA ingress requirements follow Microsoft's [client certificate
 authorization](https://learn.microsoft.com/en-us/azure/container-apps/client-certificate-authorization),

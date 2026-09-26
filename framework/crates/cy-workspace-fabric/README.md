@@ -136,11 +136,12 @@ itself run a Directory service.
 ## Relay host security state
 
 `cy-workspace-relay-host` is a runnable, non-fixture process shell around
-`WorkspaceRelay`. The production device IAM verifier and directory
-administration integration are not implemented, so the host uses an
-unavailable verifier that rejects every Relay session and keeps `/readyz` at
-HTTP 503. `/healthz` reports only that the process is alive. This is a
-fail-closed host scaffold, not a production Relay deployment.
+`WorkspaceRelay`. Frontend user identity remains unavailable, so those
+sessions are rejected and `/readyz` stays HTTP 503. Workspace connector
+certificate validation is disabled unless the explicit ACA mode is configured;
+then the host validates XFCC against the mounted private CA bundle and the
+file-backed device registry. `/healthz` reports only process liveness. This is
+a fail-closed host scaffold, not a production Relay deployment.
 
 Run the host locally with an owner-only state directory:
 
@@ -153,9 +154,11 @@ The default listeners are `127.0.0.1:8080` for gRPC and `127.0.0.1:8081` for
 health probes. `GET /healthz` returns HTTP 200; `GET /readyz` returns HTTP 503
 until production identity and directory administration exist.
 
-The host defaults to loopback. A non-loopback Relay bind requires the explicit
+The host defaults to loopback. Enabling ACA device identity requires both
 `CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`
-setting. A non-loopback health bind also requires
+and `CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE` pointing to a mounted,
+operator-managed client CA bundle. A non-loopback Relay bind requires this
+explicit ACA mode. A non-loopback health bind also requires
 `CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`. Both
 settings are operator assertions, not proof of live ACA configuration. ACA
 must bind both listeners to the container interface (for example
@@ -167,11 +170,14 @@ and readiness at `8081/readyz`. ACA's default probes target the ingress port,
 so explicit probe configuration is required with both listeners. The current
 `/readyz` response is 503 by design, which keeps the revision unready and
 prevents it receiving ingress traffic. Mount a private persistent directory
-and maintain a single active owner for its lock. The host does not read or trust
-`X-Forwarded-Client-Cert`; production IAM must validate the enrolled
-certificate fingerprint and bind it to an authorized device and Workspace
-session before readiness can be enabled. Do not deploy fixture credentials or
-`DevelopmentSessionVerifier` as production identity.
+and maintain a single active owner for its lock. In ACA mode, the host validates
+the forwarded XFCC certificate chain and then checks its fingerprint against
+the approved device registry. This depends on live ACA ingress requiring client
+certificates and overwriting caller-supplied XFCC; the environment assertion is
+not deployment evidence. Durable device authorization, CA issuance, WebAuthn,
+user identity, Product private credentials, and verified ingress configuration
+must be connected before readiness can be enabled. Do not deploy fixture
+credentials or `DevelopmentSessionVerifier` as production identity.
 
 The Relay host transports Workspace requests only. Product, Kernel/Lease,
 Runtime, and Artifact authorities remain in their owning components; the host
@@ -303,10 +309,10 @@ RPC 附加 `authorization: Bearer <local-token>` metadata。
 
 ## Relay host 安全状态
 
-`cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的可运行非 fixture 进程入口。生产设备 IAM
-verifier 与目录管理集成尚未实现，因此 host 使用不可用 verifier，拒绝所有 Relay session，并使
-`/readyz` 保持 HTTP 503。`/healthz` 只表示进程存活。这是 fail-closed host 脚手架，不是生产
-Relay 部署。
+`cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的可运行非 fixture 进程入口。Frontend 用户身份
+仍不可用，因此这些 session 会被拒绝，`/readyz` 保持 HTTP 503。Workspace Connector 证书校验默认关闭；
+显式配置 ACA 模式后，host 才会使用挂载的私有 CA bundle 校验 XFCC，并查询文件式设备注册表。
+`/healthz` 只表示进程存活。这是 fail-closed host 脚手架，不是生产 Relay 部署。
 
 使用仅限服务所有者访问的状态目录，可在本地启动 host：
 
@@ -319,9 +325,10 @@ CYRENE_WORKSPACE_RELAY_DIRECTORY=/path/to/private/workspace-relay-state \
 `127.0.0.1:8081`。`GET /healthz` 返回 HTTP 200；在生产身份和目录管理接通前，
 `GET /readyz` 返回 HTTP 503。
 
-host 默认绑定 loopback。Relay 使用非 loopback bind 时，必须显式设置
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`。该设置只是运维声明，
-不能证明 ACA 的实时配置。健康 listener 使用非 loopback bind 时，也必须设置
+host 默认绑定 loopback。启用 ACA 设备身份必须同时设置
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required` 和
+`CYRENE_WORKSPACE_RELAY_ACA_CLIENT_CA_BUNDLE`，后者指向运维挂载的客户端 CA bundle。非 loopback Relay
+bind 必须启用此显式 ACA 模式。该设置只是运维声明，不能证明 ACA 的实时配置。健康 listener 使用非 loopback bind 时，也必须设置
 `CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`。ACA 必须在 Envoy 终止客户端
 TLS、强制客户端证书；两个 listener 绑定容器网卡（例如 `0.0.0.0:8080` 与
 `0.0.0.0:8081`），显式将 ingress `targetPort: 8080`、`transport: http2`、
@@ -329,9 +336,10 @@ TLS、强制客户端证书；两个 listener 绑定容器网卡（例如 `0.0.0
 `additionalPortMappings`。启动/存活 probe 配为 `8081/healthz`，就绪 probe 配为
 `8081/readyz`。两个 listener 并存时，ACA 默认 probe 会检查 ingress port，因此必须显式配置 probe。
 当前 `/readyz` 按设计返回 503，使 revision 保持未就绪并且不接收 ingress 流量。挂载私有持久目录，
-并保证同一时间只有一个 owner 持有目录锁。host 不读取或信任
-`X-Forwarded-Client-Cert`；生产 IAM 必须验证已登记证书指纹，并将其绑定到授权设备及 Workspace
-session 后才能启用 readiness。不得将 fixture credential 或 `DevelopmentSessionVerifier` 用作生产身份。
+并保证同一时间只有一个 owner 持有目录锁。ACA 模式会校验转发的 XFCC 证书链，再按已批准设备注册表
+检查指纹。该路径依赖真实 ACA ingress 强制客户端证书并覆盖客户端提交的 XFCC；环境声明不是部署证据。
+生产就绪前仍须接通持久设备授权、CA 签发、WebAuthn、用户身份、Product 私有凭据并验证 ingress 配置。
+不得将 fixture credential 或 `DevelopmentSessionVerifier` 用作生产身份。
 
 Relay host 只传输 Workspace request。Product、Kernel/Lease、Runtime 与 Artifact authority 仍属于
 各自的组件；host 不加载 fixture handler，也不获得 fixture 状态。
