@@ -22,7 +22,7 @@
 | `user_code_secret.rs` | Versioned HMAC key ring for user-code storage and verification. | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixtures, Workspace sidecar, and restricted Directory provisioning CLI. | Acceptance fixture、Workspace sidecar 与受限 Directory 配置 CLI。 |
 
-`cy-workspace-directory-admin` uses separate operator and migration database URLs. Membership/role/descriptor writes and audit records commit atomically; the runtime reader role is SELECT-only. OIDC verification, database users/secrets/deployment, and the production async caller wiring remain external work.
+`cy-workspace-directory-admin` uses separate operator and migration database URLs. Membership/role/descriptor writes and audit records commit atomically; the runtime reader role is SELECT-only. OIDC verification, database users/secrets/deployment, and production host configuration remain external work.
 
 Relay and Directory code must never become Product, execution, Lease/Event,
 or Artifact identity authorities. A Workspace connector is accepted only when
@@ -71,7 +71,7 @@ identity 权威。
 | `user_code_secret.rs` | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixture、Workspace sidecar 与受限 Directory 配置 CLI。 |
 
-`cy-workspace-directory-admin` 使用分离的 operator 和 migration 数据库 URL。成员/角色/descriptor 变更与审计记录原子提交；服务 reader 角色仅能 SELECT。OIDC 验证、数据库用户/secret/部署，以及生产异步调用方接线仍属于外部工作。
+`cy-workspace-directory-admin` 使用分离的 operator 和 migration 数据库 URL。成员/角色/descriptor 变更与审计记录原子提交；服务 reader 角色仅能 SELECT。OIDC 验证、数据库用户/secret/部署，以及 production host 配置仍属于外部工作。
 
 Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。Workspace Connector 仅在 Tonic TLS 对端证书匹配已批准且未撤销的设备记录时接受；frontend 直连仍校验用户会话和成员关系。
 

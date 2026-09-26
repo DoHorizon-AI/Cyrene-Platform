@@ -183,8 +183,9 @@ impl FileWorkspaceDirectory {
     }
 }
 
+#[tonic::async_trait]
 impl WorkspaceDirectory for FileWorkspaceDirectory {
-    fn discover(
+    async fn discover(
         &self,
         user: &UserIdentityRef,
         organization_id: &str,
@@ -194,26 +195,39 @@ impl WorkspaceDirectory for FileWorkspaceDirectory {
             .state
             .read()
             .map_err(|_| storage_error("directory state poisoned"))?;
-        state.index.discover(user, organization_id, now_unix_ms)
+        state
+            .index
+            .discover_sync(user, organization_id, now_unix_ms)
     }
 
-    fn is_member(&self, user: &UserIdentityRef, organization_id: &str, workspace_id: &str) -> bool {
-        self.state
-            .read()
-            .is_ok_and(|state| state.index.is_member(user, organization_id, workspace_id))
-    }
-
-    fn roles_for_member(
+    async fn is_member(
         &self,
         user: &UserIdentityRef,
         organization_id: &str,
         workspace_id: &str,
-    ) -> Option<BTreeSet<String>> {
-        self.state.read().ok().and_then(|state| {
-            state
-                .index
-                .roles_for_member(user, organization_id, workspace_id)
-        })
+    ) -> Result<bool, WorkspaceDirectoryError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| storage_error("directory state poisoned"))?;
+        state
+            .index
+            .is_member_sync(user, organization_id, workspace_id)
+    }
+
+    async fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| storage_error("directory state poisoned"))?;
+        state
+            .index
+            .roles_for_member_sync(user, organization_id, workspace_id)
     }
 }
 
@@ -566,8 +580,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn restart_preserves_authorized_discovery_only() {
+    #[tokio::test]
+    async fn restart_preserves_authorized_discovery_only() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("directory");
         {
@@ -579,9 +593,12 @@ mod tests {
             assert!(FileWorkspaceDirectory::open(&path).is_err());
         }
         let directory = FileWorkspaceDirectory::open(&path).unwrap();
-        assert!(directory.is_member(&user(), "org-1", "workspace-1"));
+        assert!(directory
+            .is_member(&user(), "org-1", "workspace-1")
+            .await
+            .unwrap());
         assert_eq!(
-            directory.discover(&user(), "org-1", 1).unwrap(),
+            directory.discover(&user(), "org-1", 1).await.unwrap(),
             vec![descriptor()]
         );
         let stranger = UserIdentityRef {
@@ -590,12 +607,13 @@ mod tests {
         };
         assert!(directory
             .discover(&stranger, "org-1", 1)
+            .await
             .unwrap()
             .is_empty());
     }
 
-    #[test]
-    fn invalid_replacement_preserves_previous_revision() {
+    #[tokio::test]
+    async fn invalid_replacement_preserves_previous_revision() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("directory");
         let directory = FileWorkspaceDirectory::open(&path).unwrap();
@@ -607,7 +625,10 @@ mod tests {
             .replace(vec![membership(), membership()], vec![descriptor()])
             .is_err());
         assert_eq!(fs::read(path.join("directory.json")).unwrap(), before);
-        assert!(directory.is_member(&user(), "org-1", "workspace-1"));
+        assert!(directory
+            .is_member(&user(), "org-1", "workspace-1")
+            .await
+            .unwrap());
     }
 
     #[test]
@@ -626,8 +647,8 @@ mod tests {
         assert_eq!(fs::read(&snapshot).unwrap(), b"{bad json");
     }
 
-    #[test]
-    fn approved_device_certificate_and_revocation_survive_restart_and_directory_replace() {
+    #[tokio::test]
+    async fn approved_device_certificate_and_revocation_survive_restart_and_directory_replace() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("directory");
         let expected;
@@ -658,7 +679,36 @@ mod tests {
                 .unwrap(),
             Some(expected)
         );
-        assert!(directory.is_member(&user(), "org-1", "workspace-1"));
+        assert!(directory
+            .is_member(&user(), "org-1", "workspace-1")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn poisoned_snapshot_reads_return_storage_errors_not_empty_authorization() {
+        let root = TempDir::new().unwrap();
+        let directory = FileWorkspaceDirectory::open(root.path().join("directory")).unwrap();
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = directory.state.write().unwrap();
+            panic!("poison Directory state for fail-closed test");
+        }));
+        assert!(poison_result.is_err());
+
+        assert!(matches!(
+            directory.is_member(&user(), "org-1", "workspace-1").await,
+            Err(WorkspaceDirectoryError::Storage(_))
+        ));
+        assert!(matches!(
+            directory
+                .roles_for_member(&user(), "org-1", "workspace-1")
+                .await,
+            Err(WorkspaceDirectoryError::Storage(_))
+        ));
+        assert!(matches!(
+            directory.discover(&user(), "org-1", 1).await,
+            Err(WorkspaceDirectoryError::Storage(_))
+        ));
     }
 
     #[test]

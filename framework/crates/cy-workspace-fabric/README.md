@@ -177,18 +177,21 @@ The Relay host transports Workspace requests only. Product, Kernel/Lease,
 Runtime, and Artifact authorities remain in their owning components; the host
 does not load fixture handlers or acquire their state.
 
-## PostgreSQL authority (standalone async port)
+## PostgreSQL authority (async Directory port)
 
 `PostgresWorkspaceDirectory` provides async reads of memberships, assigned
-Product roles, and published descriptors. `organization_for_verified_identity`
-accepts only an issuer/subject pair supplied by a separate trusted OIDC
-verifier; it rejects both no mapping and mappings to multiple organizations.
-This store does not validate OIDC tokens or create memberships from identity
-claims. It deliberately does not implement the crate's current synchronous
-`WorkspaceDirectory` trait, so the existing Relay and Direct request paths still
-use their configured in-memory or private JSON store until a separate async
-caller integration is completed. There is no fallback from PostgreSQL errors
-to a snapshot.
+Product roles, and published descriptors. `organizations_for_verified_identity`
+accepts an issuer/subject pair supplied by a separate trusted OIDC verifier and
+returns the distinct organization candidates; callers reject zero or multiple
+candidates. The strict convenience method `organization_for_verified_identity`
+returns an error unless there is exactly one organization. This store does not
+validate OIDC tokens or create memberships from identity claims. It implements
+the object-safe async `WorkspaceDirectory` port, and Relay and Direct await each
+read while preserving storage errors separately from non-membership. The
+adapter can be injected into those services without `block_on` or synchronous
+database calls. The local Relay host still uses its explicitly configured file
+store; production database selection, credentials, and deployment are not
+configured here. There is no fallback from PostgreSQL errors to a snapshot.
 
 The migration creates `memberships`, `roles`, `descriptors`, and append-only
 `audit_events` tables. Operator grant/revoke operations write their changes and
@@ -223,9 +226,10 @@ cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT 
 cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TICKET
 ```
 
-The down migration drops the Directory schema and its data. No PostgreSQL
-deployment, credentials, OIDC verifier, or async request-path integration is
-included here, so this is a persistence adapter, not a production cutover.
+The down migration drops the Directory schema and its data. The async trait and
+Relay/Direct callers are wired, but PostgreSQL deployment, credentials, OIDC
+verification, and production host configuration remain external work; this is
+not a production cutover.
 
 Run:
 
@@ -334,7 +338,7 @@ Relay host 只传输 Workspace request。Product、Kernel/Lease、Runtime 与 Ar
 
 ## PostgreSQL 权威存储（独立异步接口）
 
-`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organization_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject；没有映射或映射到多个 organization 时都会拒绝。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它暂不实现当前同步的 `WorkspaceDirectory` trait；Relay 和 Direct 请求路径在后续异步接线完成前仍使用已配置的内存或私有 JSON 存储。PostgreSQL 查询失败时不会回退到快照。
+`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organizations_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject 并返回候选 organization；无候选或多个候选由调用方拒绝。严格便利方法 `organization_for_verified_identity` 在无映射或多 organization 时返回错误。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它实现 object-safe async `WorkspaceDirectory` port；Relay 和 Direct await 目录读取，并区分存储错误与非成员。适配器可注入这些服务，不使用 `block_on` 或同步数据库调用。本地 Relay host 仍使用显式配置的文件存储；生产数据库选择、凭据和部署尚未配置。PostgreSQL 查询失败时不会回退到快照。
 
 迁移创建 `memberships`、`roles`、`descriptors` 和只追加的 `audit_events` 表。Operator 授权/撤销与审计行在同一数据库事务中提交；撤销成员时级联删除其角色，并在同一事务记录被移除角色。仅允许分配当前五种 Product 用户命令角色；成员标记和 workload 角色由其他 authority 管理。审计表拒绝 UPDATE/DELETE，reader 角色仅有 SELECT 权限。
 
@@ -354,7 +358,7 @@ cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT 
 cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TICKET
 ```
 
-down migration 会删除 Directory schema 及其中数据。此改动不包含 PostgreSQL 部署、凭据、OIDC verifier 或异步请求路径接线，因此是持久化 adapter，尚未完成生产切换。
+down migration 会删除 Directory schema 及其中数据。异步 trait 和 Relay/Direct 调用方已接线，但 PostgreSQL 部署、凭据、OIDC verifier 和 production host 配置仍属于外部工作，尚未完成生产切换。
 
 运行：
 

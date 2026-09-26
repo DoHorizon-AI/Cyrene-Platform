@@ -314,11 +314,12 @@ impl WorkspaceRelay {
                             .await;
                             continue;
                         }
-                        match relay.state.directory.discover(
-                            &user,
-                            &claims.organization_id,
-                            now_unix_ms(),
-                        ) {
+                        match relay
+                            .state
+                            .directory
+                            .discover(&user, &claims.organization_id, now_unix_ms())
+                            .await
+                        {
                             Ok(workspaces) => {
                                 let _ = send_frame(
                                     &sender,
@@ -332,8 +333,8 @@ impl WorkspaceRelay {
                                 .await;
                             }
                             Err(error) => {
-                                let _ = send_error(&sender, &frame.frame_id, 9, &error.to_string())
-                                    .await;
+                                let (code, message) = error.rpc_error();
+                                let _ = send_error(&sender, &frame.frame_id, code, message).await;
                             }
                         }
                     }
@@ -399,19 +400,29 @@ impl WorkspaceRelay {
             .await;
             return;
         }
-        let Some(directory_roles) = self.state.directory.roles_for_member(
-            user,
-            &claims.organization_id,
-            &request.workspace_id,
-        ) else {
-            let _ = send_workspace_error(
-                frontend_sender,
-                request.request_id,
-                7,
-                "WORKSPACE_MEMBERSHIP_DENIED",
-            )
-            .await;
-            return;
+        let directory_roles = match self
+            .state
+            .directory
+            .roles_for_member(user, &claims.organization_id, &request.workspace_id)
+            .await
+        {
+            Ok(Some(roles)) => roles,
+            Ok(None) => {
+                let _ = send_workspace_error(
+                    frontend_sender,
+                    request.request_id,
+                    7,
+                    "WORKSPACE_MEMBERSHIP_DENIED",
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                let (code, message) = error.rpc_error();
+                let _ =
+                    send_workspace_error(frontend_sender, request.request_id, code, message).await;
+                return;
+            }
         };
         let caller = match WorkspaceCallerContext::user_member(
             user.clone(),
@@ -735,12 +746,14 @@ fn timestamp_from_ms(value: u64) -> prost_types::Timestamp {
 mod tests {
     use std::collections::BTreeSet;
 
-    use cy_proto::workspace_v1::{relay_forwarded_request, UserIdentityRef};
+    use cy_proto::workspace_v1::{
+        relay_forwarded_request, UserIdentityRef, WorkspaceConnectionDescriptor,
+    };
     use prost::Message;
 
     use crate::{
         DevelopmentSessionVerifier, InMemoryWorkspaceDirectory, RelaySessionClaims,
-        SessionPrincipal, WorkspaceMembership,
+        SessionPrincipal, WorkspaceDirectory, WorkspaceDirectoryError, WorkspaceMembership,
     };
 
     use super::*;
@@ -926,5 +939,90 @@ mod tests {
         assert!(forwarded
             .caller_roles
             .contains(&"workspace.operator".to_string()));
+    }
+
+    struct UnavailableDirectory;
+
+    #[tonic::async_trait]
+    impl WorkspaceDirectory for UnavailableDirectory {
+        async fn discover(
+            &self,
+            _user: &UserIdentityRef,
+            _organization_id: &str,
+            _now_unix_ms: u64,
+        ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "postgres://private-diagnostics".into(),
+            ))
+        }
+
+        async fn is_member(
+            &self,
+            _user: &UserIdentityRef,
+            _organization_id: &str,
+            _workspace_id: &str,
+        ) -> Result<bool, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "postgres://private-diagnostics".into(),
+            ))
+        }
+
+        async fn roles_for_member(
+            &self,
+            _user: &UserIdentityRef,
+            _organization_id: &str,
+            _workspace_id: &str,
+        ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "postgres://private-diagnostics".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_outage_fails_closed_without_leaking_backend_details() {
+        let relay = WorkspaceRelay::new(
+            Arc::new(UnavailableDirectory),
+            Arc::new(DevelopmentSessionVerifier::default()),
+        );
+        let (frontend_sender, mut frontend_receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let request = cy_proto::workspace_v1::WorkspaceApiRequest {
+            request_id: "request-1".into(),
+            workspace_id: "workspace-1".into(),
+            traceparent: String::new(),
+            request: None,
+        };
+
+        relay
+            .forward_workspace_request(
+                &frontend_sender,
+                "frontend-1",
+                &RelaySessionClaims {
+                    principal: SessionPrincipal::User(UserIdentityRef {
+                        issuer: "https://identity.test".into(),
+                        subject: "user-1".into(),
+                    }),
+                    organization_id: "organization-1".into(),
+                    workspace_id: String::new(),
+                    expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+                },
+                request,
+            )
+            .await;
+
+        let frame = frontend_receiver
+            .recv()
+            .await
+            .expect("Relay should return a closed failure")
+            .expect("failure frame should be valid");
+        let Some(relay_frame::Body::WorkspaceResponse(response)) = frame.body else {
+            panic!("expected a Workspace error response");
+        };
+        let Some(workspace_api_response::Outcome::Error(status)) = response.outcome else {
+            panic!("expected a Workspace error status");
+        };
+        assert_eq!(status.code, 14);
+        assert_eq!(status.message, "WORKSPACE_DIRECTORY_UNAVAILABLE");
+        assert!(!status.message.contains("private-diagnostics"));
     }
 }

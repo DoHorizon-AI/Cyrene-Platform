@@ -89,15 +89,15 @@ impl PostgresWorkspaceDirectory {
         Self::connect(&database_url).await
     }
 
-    /// Resolve one organization for a verified OIDC issuer/subject pair.
+    /// Return distinct organization candidates for a verified OIDC issuer/subject pair.
     ///
-    /// Multiple workspaces within one organization remain valid. No row or
-    /// more than one distinct organization is rejected instead of selecting
-    /// an organization from a token or request field.
-    pub async fn organization_for_verified_identity(
+    /// This narrow identity lookup does not select between organizations. The
+    /// caller must reject zero or multiple candidates; it must not choose from
+    /// a token or request field.
+    pub async fn organizations_for_verified_identity(
         &self,
         user: &UserIdentityRef,
-    ) -> Result<String, DurableDirectoryError> {
+    ) -> Result<Vec<String>, DurableDirectoryError> {
         validate_identity(user)?;
         let organizations = sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT organization_id \
@@ -110,7 +110,18 @@ impl PostgresWorkspaceDirectory {
         .fetch_all(&self.pool)
         .await
         .map_err(|_| DurableDirectoryError::Storage)?;
-        unique_organization(organizations)
+        Ok(organizations)
+    }
+
+    /// Resolve exactly one organization for a verified OIDC issuer/subject pair.
+    ///
+    /// Multiple workspaces within one organization remain valid. No row or
+    /// more than one distinct organization is rejected.
+    pub async fn organization_for_verified_identity(
+        &self,
+        user: &UserIdentityRef,
+    ) -> Result<String, DurableDirectoryError> {
+        unique_organization(self.organizations_for_verified_identity(user).await?)
     }
 
     /// Return descriptors for active memberships in the requested organization.

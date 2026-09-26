@@ -73,11 +73,23 @@ impl WorkspaceDirectService for DirectWorkspaceServer {
         {
             return Err(Status::permission_denied("WORKSPACE_MEMBERSHIP_DENIED"));
         }
-        let Some(directory_roles) =
-            self.directory
-                .roles_for_member(&user, &claims.organization_id, &self.workspace_id)
-        else {
-            return Err(Status::permission_denied("WORKSPACE_MEMBERSHIP_DENIED"));
+        let directory_roles = match self
+            .directory
+            .roles_for_member(&user, &claims.organization_id, &self.workspace_id)
+            .await
+        {
+            Ok(Some(roles)) => roles,
+            Ok(None) => {
+                return Err(Status::permission_denied("WORKSPACE_MEMBERSHIP_DENIED"));
+            }
+            Err(error) => {
+                let (code, message) = error.rpc_error();
+                return Err(match code {
+                    3 => Status::invalid_argument(message),
+                    13 => Status::internal(message),
+                    _ => Status::unavailable(message),
+                });
+            }
         };
         let caller = WorkspaceCallerContext::user_member(
             user,
@@ -118,14 +130,53 @@ mod tests {
 
     use cy_proto::workspace_v1::{
         RelayHello, RelayParticipantRole, UserIdentityRef, WorkspaceApiRequest,
+        WorkspaceConnectionDescriptor,
     };
     use tonic::Code;
 
     use super::*;
     use crate::{
         DevelopmentSessionVerifier, InMemoryWorkspaceDirectory, RelaySessionClaims,
-        WorkspaceCallerPrincipal, WorkspaceMembership,
+        WorkspaceCallerPrincipal, WorkspaceDirectoryError, WorkspaceMembership,
     };
+
+    struct UnavailableDirectory;
+
+    #[tonic::async_trait]
+    impl WorkspaceDirectory for UnavailableDirectory {
+        async fn discover(
+            &self,
+            _user: &UserIdentityRef,
+            _organization_id: &str,
+            _now_unix_ms: u64,
+        ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "private database diagnostics".into(),
+            ))
+        }
+
+        async fn is_member(
+            &self,
+            _user: &UserIdentityRef,
+            _organization_id: &str,
+            _workspace_id: &str,
+        ) -> Result<bool, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "private database diagnostics".into(),
+            ))
+        }
+
+        async fn roles_for_member(
+            &self,
+            _user: &UserIdentityRef,
+            _organization_id: &str,
+            _workspace_id: &str,
+        ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "private database diagnostics".into(),
+            ))
+        }
+    }
 
     struct FixtureApi;
 
@@ -246,5 +297,29 @@ mod tests {
             .execute(request)
             .await;
         assert_eq!(rejected.unwrap_err().code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn direct_directory_outage_is_unavailable_without_exposing_diagnostics() {
+        let authenticator = Arc::new(DevelopmentSessionVerifier::new([(
+            "frontend-session".to_string(),
+            RelaySessionClaims {
+                principal: SessionPrincipal::User(user()),
+                organization_id: "organization-1".to_string(),
+                workspace_id: String::new(),
+                expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+            },
+        )]));
+        let server = DirectWorkspaceServer::new(
+            "workspace-1",
+            Arc::new(UnavailableDirectory),
+            authenticator,
+            Arc::new(FixtureApi),
+        );
+
+        let error = server.execute(direct_request()).await.unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(error.message(), "WORKSPACE_DIRECTORY_UNAVAILABLE");
+        assert!(!error.message().contains("private database diagnostics"));
     }
 }
