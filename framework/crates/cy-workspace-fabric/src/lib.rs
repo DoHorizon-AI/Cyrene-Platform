@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod aca_forwarded_certificate;
 mod api;
 mod auth;
 mod caller;
@@ -29,6 +30,9 @@ mod transport;
 mod user_code_secret;
 mod web_identity;
 
+pub use aca_forwarded_certificate::{
+    AcaForwardedCertificateAdapter, AcaForwardedCertificateConfigError,
+};
 pub use api::{
     bounded_workspace_direct_server, bounded_workspace_relay_server, LocalWorkspaceClient,
     WorkspaceApi,

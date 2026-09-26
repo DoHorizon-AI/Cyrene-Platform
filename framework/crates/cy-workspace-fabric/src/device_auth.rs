@@ -54,6 +54,18 @@ impl VerifiedClientCertificate {
     }
 
     fn from_tls_peer_der(der: &[u8]) -> Result<Self, WorkspaceDeviceAuthenticationError> {
+        Self::from_validated_der(der)
+    }
+
+    /// Build certificate identity from DER only after its transport has validated the chain.
+    ///
+    /// Direct Tonic TLS calls this after Rustls verification. The ACA adapter calls it only after
+    /// `rustls-webpki` verifies the forwarded leaf against configured roots and intermediates.
+    /// This crate-private boundary prevents external callers from converting arbitrary headers
+    /// into a verified identity.
+    pub(crate) fn from_validated_der(
+        der: &[u8],
+    ) -> Result<Self, WorkspaceDeviceAuthenticationError> {
         let (remaining, certificate) = parse_x509_certificate(der)
             .map_err(|_| WorkspaceDeviceAuthenticationError::InvalidClientCertificate)?;
         if !remaining.is_empty() {
