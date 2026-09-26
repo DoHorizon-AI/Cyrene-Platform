@@ -1,0 +1,58 @@
+id	request	expected
+principal_verified	valid Azure AD access token with exact configured iss/aud, nonempty sub, current exp/nbf, required Workspace.Web.Access scp, and one server Directory organization mapping	ACCEPT_SESSION
+principal_missing	missing token-store access token on private BFF origin	REJECT_401
+principal_spoofed	public request supplies Authorization, X-MS-CLIENT-PRINCIPAL, X-MS-TOKEN-*, X-Cyrene-Verified-Principal, or X-Cyrene-Principal-*	INGRESS_STRIP_AND_REPLACE_WITH_TOKEN_STORE_VALUE
+principal_unsigned_header	unsigned X-MS-CLIENT-PRINCIPAL or forwarded identity header is the only identity input	REJECT_401
+principal_invalid	wrong access-token signature, issuer, audience, subject, malformed claims, or invalid algorithm	REJECT_401
+principal_scope_missing	valid access token omits required Workspace.Web.Access in scp	REJECT_403
+principal_ambiguous	duplicate access-token headers, browser Authorization credential, or token-provided jku/x5u	REJECT_401
+principal_expired	exp is elapsed or nbf is in the future	REJECT_401
+principal_directory_missing	verified iss+sub has no unique server-side organization mapping	REJECT_403
+principal_gate_closed	Easy Auth token store or Workspace.Web.Access API scope is not configured	FAIL_CLOSED_NO_ROUTE
+origin_bypass	direct public request to BFF container/app origin or a route bypassing the trusted ingress	DENY_NETWORK
+session_minimal	GET /api/workspace/v1/session with valid validated access token and Directory mapping	RETURN_ISS_SUB_ORG_EXPIRY_ONLY
+session_no_credentials	session response inspected for OIDC token, device certificate, relay credential, Product token, or API key	REJECT_LEAK
+discovery_derived_identity	GET /api/workspace/v1/workspaces	USE_VERIFIED_ISS_SUB_ORG
+discovery_override	query/header attempts to override issuer, subject, or organization	REJECT_400
+discovery_member_scope	directory returns only Workspaces where verified iss+sub belongs to verified organization	RETURN_MEMBER_WORKSPACES_ONLY
+discovery_response_limit	member discovery response would exceed the 4 MiB JSON limit	PROBLEM_503_NO_PARTIAL_RESULT
+workspace_recheck	Product call names a Workspace not in current authoritative member discovery	REJECT_404_OR_403
+discovery_no_transport	searched discovery output for candidate URI, routing hint, enrollment credential, relay secret	OMIT_PRIVATE_CONNECTION_DATA
+operation_enum_parity	Web BFF operation keys compared with WorkspaceProductApiOperation enum and product-projections.tsv	EXACT_ONE_TO_ONE
+operation_unknown	unknown or unspecified operation key	PROBLEM_422_NO_UPSTREAM_CALL
+operation_method_closed	GET or any unsupported method on Product operation route	PROBLEM_405_NO_UPSTREAM_CALL
+operation_kind_derived	operation key resolves to manifest row with owner, operationId, and READ/COMMAND kind	DERIVE_ALL_FIELDS_SERVER_SIDE
+operation_owner_derived	request attempts to supply or override Product owner, URL, host, path, or HTTP method	IGNORE_OR_REJECT_BEFORE_UPSTREAM
+product_method_derived	allowlisted operation has Product upstream method declared in owner OpenAPI	MAP_METHOD_SERVER_SIDE
+product_path_mapping	owner path has zero or one workspace_id/workspaceId parameter and at most one remaining required path parameter	MAP_WORKSPACE_AND_OPAQUE_RESOURCE_ID
+product_path_ambiguous	owner operation has multiple non-Workspace path parameters or unsupported query/header input	PROBLEM_422_NO_UPSTREAM_CALL
+request_content_type	invocation carries a body with a media type other than application/json	PROBLEM_415
+request_accept	Accept excludes both application/json and application/problem+json	PROBLEM_406
+request_invalid_json	invocation body is malformed or invalid UTF-8	PROBLEM_400
+request_body_schema	body is valid JSON but does not match owner request schema	PROBLEM_422_NO_UPSTREAM_CALL
+request_body_limit	invocation body exceeds 4 MiB	PROBLEM_413_NO_UPSTREAM_CALL
+read_has_no_csrf	POST invocation for manifest READ operation has matching Origin and no CSRF token	ALLOW_IF_AUTHORIZED
+read_body_required	READ operation observeWorkspaceSnapshot omits its owner-required JSON body	PROBLEM_422_NO_UPSTREAM_CALL
+command_missing_csrf	POST invocation for manifest COMMAND lacks X-CSRF-Token or __Host-cyrene-csrf cookie	PROBLEM_403_NO_UPSTREAM_CALL
+command_csrf_mismatch	CSRF header differs from cookie	PROBLEM_403_NO_UPSTREAM_CALL
+invocation_missing_origin	Product invocation omits Origin	PROBLEM_403_NO_UPSTREAM_CALL
+invocation_cross_origin	Product invocation Origin differs from exact configured Client origin	PROBLEM_403_NO_UPSTREAM_CALL
+command_idempotency	Exchange route-draft command omits Idempotency-Key	PROBLEM_400_NO_UPSTREAM_CALL
+traceparent_valid	valid W3C Trace Context v00 traceparent	PROPAGATE_THROUGH_WORKSPACE_FABRIC
+traceparent_invalid	malformed traceparent	PROBLEM_400_NO_UPSTREAM_CALL
+traceparent_zero_ids	traceparent has an all-zero trace-id or parent-id	PROBLEM_400_NO_UPSTREAM_CALL
+traceparent_missing	traceparent absent	GENERATE_TRUSTED_CONTEXT_AND_PROPAGATE
+product_body_limit	Product response JSON exceeds 4 MiB	PROBLEM_502_NO_BODY_FORWARD
+all_response_limits	session, discovery, Product, and error JSON responses exceed 4 MiB	NEVER_RETURN_OVERSIZED_BODY
+product_media_type	Product response is not application/json or application/problem+json	PROBLEM_502_NO_BODY_FORWARD
+product_status_body	Product response has valid JSON within limit	RETURN_STATUS_AND_BODY_UNCHANGED
+error_bounded	BFF-owned error uses closed RFC 9457 schema, field limits, application/problem+json, and 4 MiB byte cap	RETURN_BOUNDED_PROBLEM_JSON
+cache_control_no_store	success and error response from any Web BFF route	SET_CACHE_CONTROL_NO_STORE
+product_headers	Product response contains Location, Content-Location, Set-Cookie, Authorization, hop-by-hop, or server-identifying headers	STRIP_UNSAFE_HEADERS
+product_url_hidden	Product response resource-link field contains a raw service URL, raw Product path, or internal routing address	PROBLEM_502_NO_BODY_FORWARD
+resource_ref_relative	owner-declared ProductResourceReference contains an allowlisted READ operation and opaque resourceId only	ACCEPT_SAME_ORIGIN_RELATIVE_REFERENCE
+resource_ref_command	ProductResourceReference names an allowlisted COMMAND operation	PROBLEM_502_NO_BODY_FORWARD
+resource_ref_absolute	resource reference contains href, scheme, authority, raw Product path, or network-path prefix	PROBLEM_502_NO_BODY_FORWARD
+resource_ref_schema_missing	allowlisted operation has no accepted owner response schema identifying resource-reference fields	PROBLEM_502_NO_BODY_FORWARD
+product_domain_authority	Product read or command is proxied	PRODUCT_REMAINS_STATE_AUTHORITY
+runtime_absent	real OIDC/BFF/Workspace integration is not deployed	FAIL_CLOSED_NOT_IMPLEMENTED
