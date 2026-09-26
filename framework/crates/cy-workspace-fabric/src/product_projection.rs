@@ -17,6 +17,10 @@ use cy_proto::workspace_v1::{
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::product_authorization::{
+    authorize_product_operation, ProductAuthorizationOperation, ProductAuthorizationPrincipal,
+    ProductCommand, ProductReadOwner,
+};
 use crate::WorkspaceCallerContext;
 
 /// Maximum Product request or response JSON body size.
@@ -205,9 +209,9 @@ pub(crate) fn validate_product_request_body(
 
 /// Authorizes a Product operation from the authenticated Workspace caller.
 ///
-/// Reads require Directory-confirmed Workspace membership. Frontend commands
-/// stay denied until an explicit Product role policy is connected. Navigator
-/// append is restricted to a verified Workload with the trusted writer role.
+/// Directory membership allows reads. Each user command requires its own exact
+/// versioned Directory role. Current Workload callers remain untrusted for
+/// Navigator append until a separate typed server-side writer handoff exists.
 pub(crate) fn authorize_product_invocation(
     caller: &WorkspaceCallerContext,
     workspace_id: &str,
@@ -220,27 +224,67 @@ pub(crate) fn authorize_product_invocation(
         return Err(ProductInvocationError::PermissionDenied);
     }
 
-    if request.kind == WorkspaceProductApiRequestKind::Read {
-        return caller
-            .authorize_workspace_read(workspace_id)
-            .map_err(|_| ProductInvocationError::PermissionDenied);
-    }
+    let principal = match caller.principal() {
+        crate::WorkspaceCallerPrincipal::User(_) => ProductAuthorizationPrincipal::DirectoryUser,
+        crate::WorkspaceCallerPrincipal::Device(_) => {
+            ProductAuthorizationPrincipal::WorkspaceDevice
+        }
+        crate::WorkspaceCallerPrincipal::Workload(_) => {
+            ProductAuthorizationPrincipal::UntrustedWorkload
+        }
+    };
+    authorize_product_operation(
+        principal,
+        caller.roles(),
+        authorization_operation(request.operation),
+    )
+    .map_err(|_| ProductInvocationError::PermissionDenied)
+}
 
-    if request.operation != WorkspaceProductApiOperation::WorkspaceProductApiOperation13 {
-        return Err(ProductInvocationError::PermissionDenied);
-    }
+fn authorization_operation(
+    operation: WorkspaceProductApiOperation,
+) -> ProductAuthorizationOperation {
+    use WorkspaceProductApiOperation as Operation;
 
-    let is_trusted_writer = matches!(
-        caller.principal(),
-        crate::WorkspaceCallerPrincipal::Workload(_)
-    ) && caller
-        .roles()
-        .contains(crate::NAVIGATOR_SERVICE_WRITER_ROLE);
-    if !is_trusted_writer {
-        return Err(ProductInvocationError::PermissionDenied);
+    match operation {
+        Operation::WorkspaceProductApiOperation01 => {
+            ProductAuthorizationOperation::Read(ProductReadOwner::Catalyst)
+        }
+        Operation::WorkspaceProductApiOperation02 => {
+            ProductAuthorizationOperation::Command(ProductCommand::CatalystCreateDataset)
+        }
+        Operation::WorkspaceProductApiOperation03 => {
+            ProductAuthorizationOperation::Read(ProductReadOwner::Yield)
+        }
+        Operation::WorkspaceProductApiOperation04 => {
+            ProductAuthorizationOperation::Command(ProductCommand::YieldStartRun)
+        }
+        Operation::WorkspaceProductApiOperation05 => {
+            ProductAuthorizationOperation::Read(ProductReadOwner::Reactor)
+        }
+        Operation::WorkspaceProductApiOperation06 => {
+            ProductAuthorizationOperation::Command(ProductCommand::ReactorCreateModelImport)
+        }
+        Operation::WorkspaceProductApiOperation07 => {
+            ProductAuthorizationOperation::Read(ProductReadOwner::Exchange)
+        }
+        Operation::WorkspaceProductApiOperation08 => {
+            ProductAuthorizationOperation::Command(ProductCommand::ExchangeCreateRouteDraft)
+        }
+        Operation::WorkspaceProductApiOperation09 => {
+            ProductAuthorizationOperation::Read(ProductReadOwner::Echo)
+        }
+        Operation::WorkspaceProductApiOperation10 => {
+            ProductAuthorizationOperation::Command(ProductCommand::EchoCreateEvaluationSuite)
+        }
+        Operation::WorkspaceProductApiOperation11 | Operation::WorkspaceProductApiOperation12 => {
+            ProductAuthorizationOperation::Read(ProductReadOwner::Navigator)
+        }
+        Operation::WorkspaceProductApiOperation13 => {
+            ProductAuthorizationOperation::NavigatorHarnessAppendEvents
+        }
+        Operation::Unspecified => ProductAuthorizationOperation::Unmapped,
     }
-
-    Ok(())
 }
 
 /// Validates a Product response before returning it to the frontend.
@@ -348,10 +392,19 @@ fn valid_resource_id(resource_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product_authorization::{
+        CATALYST_CREATE_DATASET_ROLE, ECHO_CREATE_EVALUATION_SUITE_ROLE,
+        EXCHANGE_CREATE_ROUTE_DRAFT_ROLE, REACTOR_CREATE_MODEL_IMPORT_ROLE, WORKSPACE_MEMBER_ROLE,
+        YIELD_START_RUN_ROLE,
+    };
+    use crate::{WorkspaceCallerContext, WorkspaceCallerPrincipal};
+    use cy_proto::core_v1::{AccountScope, WorkloadIdentity};
+    use cy_proto::semantic_v1::Identity;
     use cy_proto::workspace_v1::{
         relay_frame, RelayForwardedRequest, RelayFrame, RelayHello, RelayParticipantRole,
         UserIdentityRef, WorkspaceApiRequest, WorkspaceDirectRequest,
     };
+    use std::collections::BTreeSet;
 
     fn request(
         owner: WorkspaceProductApiOwner,
@@ -366,6 +419,161 @@ mod tests {
             json_body: Vec::new(),
             idempotency_key: String::new(),
         }
+    }
+
+    fn user_caller(roles: &[&str]) -> WorkspaceCallerContext {
+        WorkspaceCallerContext::from_verified(
+            WorkspaceCallerPrincipal::User(UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-1".to_string(),
+            }),
+            "organization-1",
+            "workspace-1",
+            roles.iter().map(|role| (*role).to_string()).collect(),
+        )
+        .expect("valid caller context")
+    }
+
+    fn invocation(operation: WorkspaceProductApiOperation) -> ProductInvocationRequest {
+        let (owner, kind, needs_resource_id) =
+            operation_mapping(operation).expect("mapped Product operation");
+        let mut input = request(owner, operation, kind);
+        if needs_resource_id {
+            input.resource_id = "owner-issued-id".to_string();
+        }
+        if operation == WorkspaceProductApiOperation::WorkspaceProductApiOperation08 {
+            input.idempotency_key = "exchange-command-key".to_string();
+        }
+        validate_product_invocation(input).expect("valid mapped operation")
+    }
+
+    fn navigator_workload_caller() -> WorkspaceCallerContext {
+        WorkspaceCallerContext::from_verified(
+            WorkspaceCallerPrincipal::Workload(WorkloadIdentity {
+                identity: Some(Identity {
+                    id: "navigator-writer-1".to_string(),
+                    generation: 1,
+                }),
+                scope: Some(AccountScope {
+                    user_id: String::new(),
+                    organization_id: "organization-1".to_string(),
+                    workspace_id: "workspace-1".to_string(),
+                }),
+                runtime: None,
+                allowed_actions: vec!["navigator.append_events".to_string()],
+                expires_at: None,
+            }),
+            "organization-1",
+            "workspace-1",
+            BTreeSet::from([crate::NAVIGATOR_SERVICE_WRITER_ROLE.to_string()]),
+        )
+        .expect("valid workload caller context")
+    }
+
+    #[test]
+    fn directory_membership_allows_reads_but_membership_alone_denies_commands() {
+        let member = user_caller(&[WORKSPACE_MEMBER_ROLE]);
+        for operation in [
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation01,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation03,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation05,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation07,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation09,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation11,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation12,
+        ] {
+            assert_eq!(
+                authorize_product_invocation(&member, "workspace-1", &invocation(operation)),
+                Ok(())
+            );
+        }
+
+        for operation in [
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation02,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation04,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation06,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation08,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation10,
+            WorkspaceProductApiOperation::WorkspaceProductApiOperation13,
+        ] {
+            assert_eq!(
+                authorize_product_invocation(&member, "workspace-1", &invocation(operation)),
+                Err(ProductInvocationError::PermissionDenied)
+            );
+        }
+
+        let nonmember = user_caller(&[]);
+        assert_eq!(
+            authorize_product_invocation(
+                &nonmember,
+                "workspace-1",
+                &invocation(WorkspaceProductApiOperation::WorkspaceProductApiOperation01),
+            ),
+            Err(ProductInvocationError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn each_versioned_command_role_grants_only_its_exact_operation() {
+        let commands = [
+            (
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation02,
+                CATALYST_CREATE_DATASET_ROLE,
+            ),
+            (
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation04,
+                YIELD_START_RUN_ROLE,
+            ),
+            (
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation06,
+                REACTOR_CREATE_MODEL_IMPORT_ROLE,
+            ),
+            (
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation08,
+                EXCHANGE_CREATE_ROUTE_DRAFT_ROLE,
+            ),
+            (
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation10,
+                ECHO_CREATE_EVALUATION_SUITE_ROLE,
+            ),
+        ];
+
+        for (authorized_operation, authorized_role) in commands {
+            let caller = user_caller(&[WORKSPACE_MEMBER_ROLE, authorized_role]);
+            for (operation, _) in commands {
+                let expected = if operation == authorized_operation {
+                    Ok(())
+                } else {
+                    Err(ProductInvocationError::PermissionDenied)
+                };
+                assert_eq!(
+                    authorize_product_invocation(&caller, "workspace-1", &invocation(operation)),
+                    expected,
+                    "role {authorized_role} must be scoped to {authorized_operation:?}"
+                );
+            }
+        }
+
+        let no_roles = user_caller(&[]);
+        for (operation, _) in commands {
+            assert_eq!(
+                authorize_product_invocation(&no_roles, "workspace-1", &invocation(operation)),
+                Err(ProductInvocationError::PermissionDenied)
+            );
+        }
+    }
+
+    #[test]
+    fn current_workload_identity_cannot_append_with_a_writer_role_string() {
+        let caller = navigator_workload_caller();
+        assert_eq!(
+            authorize_product_invocation(
+                &caller,
+                "workspace-1",
+                &invocation(WorkspaceProductApiOperation::WorkspaceProductApiOperation13),
+            ),
+            Err(ProductInvocationError::PermissionDenied)
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@
 | `persistent_directory.rs` | Private, single-owner snapshot storage for Directory and device records. | Directory 与设备记录的私有单实例快照存储。 |
 | `api.rs` | Workspace-owned API port, LOCAL adapter, and bounded gRPC server builders. | Workspace 权威 API port、LOCAL adapter 与有界 gRPC server 构造器。 |
 | `control_plane.rs` | Workspace authority-pinned API handler and Product dispatch port. | 固定 Workspace 权威的 API handler 与 Product 分发 port。 |
+| `product_authorization.rs` | Versioned fail-closed Product read and command role matrix. | 版本化且默认拒绝的 Product 读取与命令角色矩阵。 |
 | `product_projection.rs` | Closed Product API operation map, bounded JSON projection, and invocation port. | 封闭 Product API 操作映射、有界 JSON 投影及 invocation port。 |
 | `direct.rs` | Session- and membership-checked private API endpoint. | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | Ephemeral authenticated routing. | 临时认证路由。 |
@@ -47,6 +48,7 @@ identity 权威。
 | `persistent_directory.rs` | Directory 与设备记录的私有单实例持久化快照存储。 |
 | `api.rs` | Workspace 所有的 API port、LOCAL adapter 与有界 gRPC server 构造器。 |
 | `control_plane.rs` | 固定 Workspace 权威的 API handler 与 Product 分发 port。 |
+| `product_authorization.rs` | 版本化且默认拒绝的 Product 读取与命令角色矩阵。 |
 | `product_projection.rs` | 封闭 Product API 操作映射、有界 JSON 投影及 invocation port。 |
 | `direct.rs` | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | 临时认证路由。 |

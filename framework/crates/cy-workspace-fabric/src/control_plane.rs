@@ -534,6 +534,19 @@ mod tests {
         .expect("valid member caller")
     }
 
+    fn member_with_product_command_role(role: &str) -> WorkspaceCallerContext {
+        WorkspaceCallerContext::from_verified(
+            WorkspaceCallerPrincipal::User(UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-1".to_string(),
+            }),
+            "organization-1",
+            "workspace-1",
+            BTreeSet::from([crate::WORKSPACE_MEMBER_ROLE.to_string(), role.to_string()]),
+        )
+        .expect("valid caller with exact Product command role")
+    }
+
     fn error(response: WorkspaceApiResponse) -> RpcStatus {
         match response.outcome {
             Some(workspace_api_response::Outcome::Error(error)) => error,
@@ -775,6 +788,55 @@ mod tests {
                 owner: WorkspaceProductApiOwner::Catalyst,
                 operation: WorkspaceProductApiOperation::WorkspaceProductApiOperation01,
                 kind: WorkspaceProductApiRequestKind::Read,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn exact_product_command_role_reaches_only_its_owner_adapter() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Err(
+            WorkspaceDispatchError::Unavailable,
+        )));
+        let product_port = Arc::new(RecordingProductInvocationPort::new(Ok(
+            ProductInvocationResponse {
+                status_code: 201,
+                json_body: br#"{"id":"dataset-1"}"#.to_vec(),
+                content_type: WorkspaceProductApiContentType::ApplicationJson,
+            },
+        )));
+        let handler = handler(dispatcher).with_product_invocation_port(product_port.clone());
+
+        let response = handler
+            .handle_authenticated(
+                product_api_request(
+                    WorkspaceProductApiOwner::Catalyst,
+                    WorkspaceProductApiOperation::WorkspaceProductApiOperation02,
+                    WorkspaceProductApiRequestKind::Command,
+                    "",
+                    b"{}",
+                    "",
+                ),
+                member_with_product_command_role(
+                    crate::product_authorization::CATALYST_CREATE_DATASET_ROLE,
+                ),
+            )
+            .await;
+
+        let Some(workspace_api_response::Outcome::ProductApi(projected)) = response.outcome else {
+            panic!("expected authorized Product API response");
+        };
+        assert_eq!(projected.status_code, 201);
+        assert!(matches!(
+            product_port
+                .request
+                .lock()
+                .expect("product request mutex")
+                .as_ref(),
+            Some(ProductInvocationRequest {
+                owner: WorkspaceProductApiOwner::Catalyst,
+                operation: WorkspaceProductApiOperation::WorkspaceProductApiOperation02,
+                kind: WorkspaceProductApiRequestKind::Command,
                 ..
             })
         ));
