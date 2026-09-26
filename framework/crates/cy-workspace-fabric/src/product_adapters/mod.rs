@@ -71,9 +71,7 @@ impl ProductInvocationPort for ProductHttpApiAdapter {
         // configuration alone must never re-enable a legacy request.
         if matches!(
             request.owner,
-            WorkspaceProductApiOwner::Reactor
-                | WorkspaceProductApiOwner::Exchange
-                | WorkspaceProductApiOwner::Navigator
+            WorkspaceProductApiOwner::Reactor | WorkspaceProductApiOwner::Navigator
         ) {
             return Err(ProductInvocationError::Unavailable);
         }
@@ -137,6 +135,21 @@ mod tests {
             "organization-1",
             "workspace-1",
             BTreeSet::new(),
+        )
+        .unwrap()
+    }
+
+    fn exchange_writer_caller() -> WorkspaceCallerContext {
+        let mut roles = BTreeSet::new();
+        roles.insert("workspace.product.command.exchange.create_route_draft.v1".to_string());
+        WorkspaceCallerContext::user_member(
+            UserIdentityRef {
+                issuer: "https://identity.test".to_string(),
+                subject: "user-1".to_string(),
+            },
+            "organization-1",
+            "workspace-1",
+            roles,
         )
         .unwrap()
     }
@@ -234,6 +247,11 @@ mod tests {
                 Operation::WorkspaceProductApiOperation10,
                 br#"{"name":"suite","evaluator":"exact_match.v1","expectedField":"expected","actualField":"actual","threshold":1.0}"#.to_vec(),
             ),
+            (
+                Owner::Exchange,
+                Operation::WorkspaceProductApiOperation08,
+                br#"{"endpointId":"endpoint-1"}"#.to_vec(),
+            ),
         ] {
             let result = adapter
                 .invoke(
@@ -268,6 +286,14 @@ mod tests {
                 idempotency_key: None,
             },
             ProductInvocationRequest {
+                owner: Owner::Exchange,
+                operation: Operation::WorkspaceProductApiOperation07,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
                 owner: Owner::Echo,
                 operation: Operation::WorkspaceProductApiOperation09,
                 kind: Kind::Read,
@@ -285,11 +311,34 @@ mod tests {
             assert_eq!(response.status_code, 200);
         }
 
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
-    async fn legacy_owner_operations_remain_unavailable_with_configured_endpoints() {
+    async fn exchange_command_uses_the_scoped_owner_adapter() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let adapter = adapter(calls.clone());
+        let response = adapter
+            .invoke(
+                &exchange_writer_caller(),
+                ProductInvocationRequest {
+                    owner: Owner::Exchange,
+                    operation: Operation::WorkspaceProductApiOperation08,
+                    kind: Kind::Command,
+                    resource_id: None,
+                    json_body: br#"{"endpointId":"endpoint-1"}"#.to_vec(),
+                    idempotency_key: Some("exchange-command-1".to_string()),
+                },
+            )
+            .await
+            .expect("the exact Exchange role may reach its private route");
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reactor_and_navigator_operations_remain_unavailable_with_configured_endpoints() {
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = adapter(calls.clone());
         let requests = [
@@ -308,22 +357,6 @@ mod tests {
                 resource_id: None,
                 json_body: br#"{"model":"test"}"#.to_vec(),
                 idempotency_key: Some("reactor-command-1".to_string()),
-            },
-            ProductInvocationRequest {
-                owner: Owner::Exchange,
-                operation: Operation::WorkspaceProductApiOperation07,
-                kind: Kind::Read,
-                resource_id: None,
-                json_body: Vec::new(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Exchange,
-                operation: Operation::WorkspaceProductApiOperation08,
-                kind: Kind::Command,
-                resource_id: None,
-                json_body: br#"{"name":"route"}"#.to_vec(),
-                idempotency_key: Some("exchange-command-1".to_string()),
             },
             ProductInvocationRequest {
                 owner: Owner::Navigator,
@@ -436,13 +469,52 @@ mod tests {
     async fn empty_private_endpoint_configuration_fails_closed() {
         let client = ProductHttpClient::from_private_config(Vec::new()).unwrap();
         let adapter = ProductHttpApiAdapter::new(client);
+        for (owner, operation) in [
+            (Owner::Catalyst, Operation::WorkspaceProductApiOperation01),
+            (Owner::Exchange, Operation::WorkspaceProductApiOperation07),
+        ] {
+            let result = adapter
+                .invoke(
+                    &member_caller(),
+                    ProductInvocationRequest {
+                        owner,
+                        operation,
+                        kind: Kind::Read,
+                        resource_id: None,
+                        json_body: Vec::new(),
+                        idempotency_key: None,
+                    },
+                )
+                .await;
 
+            assert_eq!(result.unwrap_err(), ProductInvocationError::Unavailable);
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_endpoint_with_mismatched_configured_scope_fails_before_transport() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = ConfiguredProductEndpointResolver::new(vec![ProductEndpointConfig::new(
+            Owner::Exchange,
+            "organization-2",
+            "workspace-1",
+            "https://exchange.test/",
+            "private-test-credential",
+        )])
+        .unwrap();
+        let client = ProductHttpClient::with_transport(
+            Arc::new(resolver),
+            Arc::new(CountingTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let adapter = ProductHttpApiAdapter::new(client);
         let result = adapter
             .invoke(
                 &member_caller(),
                 ProductInvocationRequest {
-                    owner: Owner::Catalyst,
-                    operation: Operation::WorkspaceProductApiOperation01,
+                    owner: Owner::Exchange,
+                    operation: Operation::WorkspaceProductApiOperation07,
                     kind: Kind::Read,
                     resource_id: None,
                     json_body: Vec::new(),
@@ -452,5 +524,6 @@ mod tests {
             .await;
 
         assert_eq!(result.unwrap_err(), ProductInvocationError::Unavailable);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

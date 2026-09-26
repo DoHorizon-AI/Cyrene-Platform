@@ -150,10 +150,33 @@ impl ProductHttpTarget {
                 ..
             ]
         );
+        let is_exchange_private_route = matches!(
+            (owner, method, path_segments.as_slice()),
+            (
+                WorkspaceProductApiOwner::Exchange,
+                ProductHttpMethod::Get,
+                [
+                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("v1"),
+                    ProductHttpPathSegment::Static("workspace"),
+                    ProductHttpPathSegment::Static("gateway-routes")
+                ]
+            ) | (
+                WorkspaceProductApiOwner::Exchange,
+                ProductHttpMethod::Post,
+                [
+                    ProductHttpPathSegment::Static("api"),
+                    ProductHttpPathSegment::Static("v1"),
+                    ProductHttpPathSegment::Static("workspace"),
+                    ProductHttpPathSegment::Static("gateway-route-drafts")
+                ]
+            )
+        );
         if !allowlisted_owner(owner)
             || (!is_legacy_product_route && !is_private_workspace_route)
             || (is_legacy_product_route && path_segments.len() < 3)
             || (is_private_workspace_route && path_segments.len() < 4)
+            || (owner == WorkspaceProductApiOwner::Exchange && !is_exchange_private_route)
             || path_segments
                 .iter()
                 .any(|segment| !valid_segment(segment.value()))

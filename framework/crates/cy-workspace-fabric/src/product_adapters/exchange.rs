@@ -36,6 +36,7 @@ pub(super) fn target(
                 vec![
                     ProductHttpPathSegment::Static("api"),
                     ProductHttpPathSegment::Static("v1"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("gateway-routes"),
                 ],
             )
@@ -57,6 +58,7 @@ pub(super) fn target(
                 vec![
                     ProductHttpPathSegment::Static("api"),
                     ProductHttpPathSegment::Static("v1"),
+                    ProductHttpPathSegment::Static("workspace"),
                     ProductHttpPathSegment::Static("gateway-route-drafts"),
                 ],
             )
@@ -182,7 +184,7 @@ mod tests {
         assert_eq!(requests[0].method(), ProductHttpMethod::Get);
         assert_eq!(
             requests[0].url().as_str(),
-            "https://exchange.test/api/v1/gateway-routes"
+            "https://exchange.test/api/v1/workspace/gateway-routes"
         );
         assert!(requests[0].body().is_empty());
         assert_eq!(requests[0].idempotency_key(), None);
@@ -216,7 +218,7 @@ mod tests {
         assert_eq!(requests[0].method(), ProductHttpMethod::Post);
         assert_eq!(
             requests[0].url().as_str(),
-            "https://exchange.test/api/v1/gateway-route-drafts"
+            "https://exchange.test/api/v1/workspace/gateway-route-drafts"
         );
         assert_eq!(requests[0].body(), request_body);
         assert_eq!(requests[0].idempotency_key(), Some("draft-replay-1"));
@@ -252,5 +254,29 @@ mod tests {
             target(&request),
             Err(ProductInvocationError::InvalidRequest)
         );
+    }
+
+    #[test]
+    fn exchange_targets_never_use_legacy_global_routes() {
+        assert!(ProductHttpTarget::new(
+            Owner::Exchange,
+            ProductHttpMethod::Get,
+            vec![
+                ProductHttpPathSegment::Static("api"),
+                ProductHttpPathSegment::Static("v1"),
+                ProductHttpPathSegment::Static("gateway-routes"),
+            ],
+        )
+        .is_err());
+        assert!(ProductHttpTarget::new(
+            Owner::Exchange,
+            ProductHttpMethod::Post,
+            vec![
+                ProductHttpPathSegment::Static("api"),
+                ProductHttpPathSegment::Static("v1"),
+                ProductHttpPathSegment::Static("gateway-route-drafts"),
+            ],
+        )
+        .is_err());
     }
 }
