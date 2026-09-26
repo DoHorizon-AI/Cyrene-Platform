@@ -26,6 +26,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | `provider/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `sandbox/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `semantic/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `workspace/` | Workspace discovery, API projection, and local sidecar contracts. | Workspace discovery、API projection 与本地 sidecar 合同。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
@@ -59,5 +60,6 @@ This snapshot is intentionally limited to direct entries; nested directories own
 | `provider/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `sandbox/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `semantic/` | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `workspace/` | Workspace discovery、API projection 与本地 sidecar 合同。 |
 
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

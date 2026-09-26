@@ -16,7 +16,8 @@
 | `direct.rs` | Session- and membership-checked private API endpoint. | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | Ephemeral authenticated routing. | 临时认证路由。 |
 | `transport.rs` | Direct candidate selection and outbound mTLS transport. | 直连候选选择与出站 mTLS 传输。 |
-| `bin/` | Acceptance-only executable fixture. | 仅用于 acceptance 的可执行 fixture。 |
+| `sidecar.rs` | External-credential consumer and authenticated local gRPC bridge. | 外部凭据 consumer 与本地认证 gRPC 代理。 |
+| `bin/` | Acceptance fixtures and the standalone Workspace sidecar. | Acceptance fixture 与独立 Workspace sidecar。 |
 
 Relay and Directory code must never become Product, execution, Lease/Event,
 or Artifact identity authorities. A Workspace connector is accepted only when
@@ -53,7 +54,7 @@ identity 权威。
 | `direct.rs` | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | 临时认证路由。 |
 | `transport.rs` | 直连候选选择与出站 mTLS 传输。 |
-| `bin/` | 仅用于 acceptance 的可执行 fixture。 |
+| `bin/` | Acceptance fixture 与独立 Workspace sidecar。 |
 
 Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。Workspace Connector 仅在 Tonic TLS 对端证书匹配已批准且未撤销的设备记录时接受；frontend 直连仍校验用户会话和成员关系。
 

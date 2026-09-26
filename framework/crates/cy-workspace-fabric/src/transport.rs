@@ -321,7 +321,7 @@ impl RelaySession {
         }
     }
 
-    async fn send(&self, frame: RelayFrame) -> Result<(), RelayTransportError> {
+    async fn send(&mut self, frame: RelayFrame) -> Result<(), RelayTransportError> {
         self.outbound
             .send(frame)
             .await

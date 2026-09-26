@@ -23,6 +23,7 @@ pub(crate) mod product_authorization;
 pub mod device_authorization;
 mod product_projection;
 mod relay;
+mod sidecar;
 mod transport;
 
 pub use api::{
@@ -59,6 +60,7 @@ pub use product_projection::{
     ProductInvocationResponse, PRODUCT_JSON_BODY_MAX_BYTES, WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES,
 };
 pub use relay::WorkspaceRelay;
+pub use sidecar::{LocalBearerInterceptor, SidecarConfigurationError, WorkspaceSidecar};
 pub use transport::{
     connect_discovered_workspace, connect_relay_session, run_workspace_connector_session,
     RelayClientConfig, RelaySession, WorkspaceConnection,

@@ -32,6 +32,68 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
 | `src/transport.rs` | Direct candidate selection and outbound mTLS Relay transport. | 直连候选选择与出站 mTLS Relay 传输。 |
 | `src/bin/` | Fail-closed Relay host and acceptance-only connector/reference frontend fixtures. | fail-closed Relay host 与仅用于验收的 Connector/参考 frontend fixture。 |
+| `src/sidecar.rs` | Loopback-authenticated bridge for non-Rust Workspace clients. | 为非 Rust Workspace client 提供 loopback 认证代理。 |
+| `src/bin/` | Acceptance relay/connector/frontend fixtures and the loopback sidecar executable. | 验收 Relay/Connector/frontend fixture 与 loopback sidecar 可执行程序。 |
+
+## Local Python bridge
+
+`cy-workspace-sidecar` exposes the versioned local gRPC contract in
+`cyrene.workspace.local.v1` on `127.0.0.1:41680` by default. It accepts only a
+local `Authorization: Bearer ...` token, returns Workspace IDs and display
+names without private route candidates, and forwards the existing generic
+Workspace Operation API. The bind address is fixed to IPv4 loopback; only the
+port can be changed with `CYRENE_WORKSPACE_SIDECAR_PORT`.
+
+The Python service must share the sidecar's network namespace so its own
+`127.0.0.1` reaches this listener. A host loopback binding is not reachable from
+an unrelated container namespace.
+
+Python clients should generate their gRPC stub from
+`contracts/proto/cyrene/workspace/local/v1/workspace_sidecar.proto` and attach
+`authorization: Bearer <local-token>` metadata to every RPC.
+
+The sidecar never issues identity. A trusted credential/profile provisioner
+must place the externally issued session credential, user identity, and local
+allowlist in a protected JSON bundle, with the client key at an absolute path:
+
+```json
+{
+  "relay_endpoint": "https://relay.example.invalid",
+  "relay_server_name": "relay.example.invalid",
+  "relay_ca_certificate_file": "/run/secrets/relay-ca.pem",
+  "client_certificate_file": "/run/secrets/workspace-client.pem",
+  "client_key_file": "/run/secrets/workspace-client-key.pem",
+  "session_credential": "<short-lived issuer-provided credential>",
+  "user_issuer": "https://identity.example.invalid",
+  "user_subject": "<issuer-provided subject>",
+  "organization_id": "<issuer-provided organization>",
+  "allowed_workspace_ids": ["<deployment-approved-workspace>"],
+  "allowed_operations": ["get_operation", "start_operation"]
+}
+```
+
+Set `CYRENE_WORKSPACE_SIDECAR_CREDENTIAL_BUNDLE` and
+`CYRENE_WORKSPACE_SIDECAR_LOCAL_TOKEN_FILE` to absolute paths. On Unix, the
+credential bundle and client key must be mode `0600` or `0400`; the local token
+may be `0640` or `0440` when its group contains only the sidecar and authorized
+Python client. Generate the local bearer independently as a high-entropy secret;
+never reuse or derive it from a Relay session or device-enrollment credential.
+Startup and every bundle reload reject a local bearer equal to the current Relay
+session credential. The `allowed_workspace_ids` and `allowed_operations` fields are
+deployment policy: keep them scoped to one sidecar instance and never use `*`.
+Python services sharing a local token share that instance's full allowlist, so
+use a separate sidecar profile/token for each service trust boundary. The local
+token must contain at least 32 ASCII letters, digits, dots,
+underscores, or hyphens. Missing, malformed, or overly accessible secrets make
+the process fail closed. Credentials are re-read on each remote call, so an
+issuer can rotate the bundle through an atomic file replacement. The local
+bearer token is read at startup and changes require a restart.
+
+`Health` reports local configuration/listener readiness only, not Relay health.
+Each `Execute` call discovers the requested Workspace and selects the current
+`LAN_DIRECT` or `RELAY` candidate. The local API currently forwards only the
+generic Start/Get Operation contract; it does not define Product-specific
+Python APIs, which still require the Phase 3 Workspace projections.
 
 `FileWorkspaceDirectory::open` needs a private directory on a persistent volume
 with one active owner. `replace` publishes a complete membership and descriptor
@@ -145,6 +207,37 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 | `src/relay.rs` | 不拥有 Workspace authority 的实时应用请求路由。 |
 | `src/transport.rs` | 直连候选选择、出站 mTLS Relay client 和 connector session。 |
 | `src/bin/` | fail-closed Relay host 与仅用于 acceptance 的 Connector/参考 frontend fixture。 |
+| `src/sidecar.rs` | 消费外部凭据并提供本地认证 gRPC 代理。 |
+| `src/bin/` | 验收 fixture 与独立 Workspace sidecar。 |
+
+## 本地 Python 代理
+
+`cy-workspace-sidecar` 默认在 `127.0.0.1:41680` 提供版本化本地 gRPC 合同
+`cyrene.workspace.local.v1`。每个调用都必须携带单独配置的 local bearer token；代理只返回
+Workspace ID 与显示名称，不向 Python 暴露私有路由候选，并转发现有的通用 Workspace
+Operation API。监听地址固定为 IPv4 loopback，只能通过
+`CYRENE_WORKSPACE_SIDECAR_PORT` 调整端口。Python service 必须与 sidecar 共享 network
+namespace，才能通过自己的 `127.0.0.1` 访问；独立 container namespace 无法访问宿主机 loopback。
+
+Sidecar 不签发身份。受信任的 credential/profile provisioner 必须把外部签发的 session
+credential、user identity 与本地 allowlist 写入受保护的 JSON bundle，并通过绝对路径设置
+`CYRENE_WORKSPACE_SIDECAR_CREDENTIAL_BUNDLE` 和
+`CYRENE_WORKSPACE_SIDECAR_LOCAL_TOKEN_FILE`；bundle 示例字段见英文部分。Unix 上 bundle 与 client key 权限必须为
+`0600` 或 `0400`；若 local token 使用 `0640` 或 `0440`，共享组只能包含 sidecar 与获准的 Python
+client。`allowed_workspace_ids` 与 `allowed_operations` 是部署策略，应限制在单个 sidecar
+instance 内，不能使用 `*`。local bearer 必须独立生成并具有高熵，不能复用或派生自 Relay
+session 或 device enrollment credential；启动时及每次 bundle reload 都会拒绝与当前 Relay
+session credential 相同的 local bearer。共享 local token 的 Python service 共用该实例的完整 allowlist；
+不同的 service trust boundary 应使用不同的 sidecar profile/token。权限不安全、凭据缺失或格式错误都会让进程 fail closed。每次远端调用都会重新读取
+bundle，因此外部 issuer 可以通过原子替换文件轮换凭据；local bearer token 在启动时读取，变更后
+需重启 sidecar。
+
+`Health` 只报告本地 listener/config 状态，不代表 Relay 可达。每次 `Execute` 都会重新发现
+Workspace，并按当前 descriptor 在 `LAN_DIRECT` 与 `RELAY` 中选路。当前代理仅转发通用
+Start/Get Operation contract；Product 专属 Python API 仍需 Phase 3 Workspace projection。
+Python client 应基于
+`contracts/proto/cyrene/workspace/local/v1/workspace_sidecar.proto` 生成 gRPC stub，并为每个
+RPC 附加 `authorization: Bearer <local-token>` metadata。
 
 `FileWorkspaceDirectory::open` 需要挂载在持久卷上的私有目录，同一时间仅允许一个实例持有。`replace` 原子发布成员关系和描述符版本，并保留设备记录。注册表只导入已经外部批准并签发的证书记录，导入时状态为 `Approved`；记录作用域身份和调用方提供的 SHA-256 证书指纹，支持按设备键或指纹查找，拒绝重复身份/指纹，并允许撤销。撤销后的身份和指纹不能重新导入；证书轮换需由未来的显式操作处理。注册表不表示待审批请求，也不执行审批决策。
 

@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.workspace.local.v1;
+
+import "cyrene/workspace/v1/workspace_fabric.proto";
+
+message HealthRequest {}
+
+message HealthResponse {
+  // This reports only local process/config readiness, not Relay reachability.
+  bool local_ready = 1;
+}
+
+message DiscoverWorkspacesRequest {}
+
+// Deliberately omits private transport candidates from the local client view.
+message WorkspaceSummary {
+  string workspace_id = 1;
+  string display_name = 2;
+}
+
+message DiscoverWorkspacesResponse {
+  repeated WorkspaceSummary workspaces = 1;
+}
+
+message ExecuteRequest {
+  cyrene.workspace.v1.WorkspaceApiRequest workspace_request = 1;
+}
+
+message ExecuteResponse {
+  cyrene.workspace.v1.WorkspaceApiResponse workspace_response = 1;
+}
+
+// Loopback-only cross-language boundary; callers must send a local bearer token.
+service WorkspaceSidecarService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc DiscoverWorkspaces(DiscoverWorkspacesRequest) returns (DiscoverWorkspacesResponse);
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+}

@@ -106,6 +106,21 @@ not reuse the file-backed operation view or development session tokens.
 `frontend-start` 与 `frontend-observe`。生产部署必须提供持久 Workspace 状态和真实
 Identity Provider，不得复用文件驱动的 Operation view 或开发 session token。
 
+## `cy-workspace-sidecar`
+
+`cy-workspace-sidecar` is a separate loopback client bridge for non-Rust
+consumers. It requires an externally issued credential bundle and a local
+bearer token; it does not use fixture credentials or the development verifier.
+Its gRPC contract is `cyrene.workspace.local.v1.WorkspaceSidecarService`.
+See the crate README for the protected file format and deployment constraints.
+
+## `cy-workspace-sidecar` 本地代理
+
+`cy-workspace-sidecar` 为非 Rust client 提供独立的 loopback 代理。它要求外部签发的
+credential bundle 与本地 bearer token，不使用 fixture credential 或 development
+verifier。gRPC 合同是 `cyrene.workspace.local.v1.WorkspaceSidecarService`。受保护文件格式
+与部署边界见 crate README。
+
 The full executable path is owned by
 `tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh`.
 

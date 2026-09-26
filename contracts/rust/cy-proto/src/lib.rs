@@ -66,6 +66,12 @@ pub mod cyrene {
     }
 
     pub mod workspace {
+        pub mod local {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.workspace.local.v1");
+            }
+        }
+
         pub mod v1 {
             tonic::include_proto!("cyrene.workspace.v1");
         }
@@ -89,6 +95,8 @@ pub use cyrene::sandbox::v1 as sandbox_v1;
 /// Transport projection of the Kernel Semantic Contract v1 nouns.
 /// 中文：Kernel Semantic Contract v1 术语的传输投影。
 pub use cyrene::semantic::v1 as semantic_v1;
+/// Loopback cross-language Workspace sidecar boundary.
+pub use cyrene::workspace::local::v1 as workspace_local_v1;
 /// Transport-neutral Workspace discovery and relay API projection.
 /// 中文：与传输方式无关的 Workspace 发现与中继 API 投影。
 pub use cyrene::workspace::v1 as workspace_v1;
