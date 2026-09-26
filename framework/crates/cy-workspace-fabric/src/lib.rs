@@ -27,6 +27,7 @@ mod relay;
 mod sidecar;
 mod transport;
 mod user_code_secret;
+mod web_identity;
 
 pub use api::{
     bounded_workspace_direct_server, bounded_workspace_relay_server, LocalWorkspaceClient,
@@ -72,6 +73,10 @@ pub use transport::{
 };
 pub use user_code_secret::{
     UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest, MAX_USER_CODE_KEY_VERSIONS,
+};
+pub use web_identity::{
+    AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, VerifiedWebPrincipal,
+    WebIdentityDirectory, WebIdentityDirectoryError, WebIdentityError, WebPrincipalVerifier,
 };
 
 pub use cy_proto::workspace_v1;

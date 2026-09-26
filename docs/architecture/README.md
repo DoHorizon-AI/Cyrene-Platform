@@ -8,6 +8,7 @@ adapters cooperate without moving product semantics into the Kernel.
 
 | File | Responsibility | 文件职责 |
 | --- | --- | --- |
+| `workspace-web-bff-identity.md` | Fixed-tenant Azure AD access-token verification and server-side Directory organization binding for the Workspace Web BFF. | Workspace Web BFF 的固定 tenant Azure AD access-token 验证与服务端 Directory 组织绑定。 |
 | `overview.md` | Component map, layers, and end-to-end data flow. | 组件图、分层与端到端数据流 |
 | `system-adapter.md` | SystemAdapter port, Linux implementation, and target-build boundary. | SystemAdapter 端口、Linux 实现与目标系统构建边界 |
 | `sandbox-adapter.md` | SandboxBackend port, native cgroup backend, and Docker/OCI status. | SandboxBackend 端口、native cgroup 后端与 Docker/OCI 状态 |
@@ -46,6 +47,7 @@ before opening implementation crates.
 
 | 文件 | 职责 |
 |---|---|
+| `workspace-web-bff-identity.md` | Workspace Web BFF 的固定 tenant Azure AD access-token 验证与服务端 Directory 组织绑定。 |
 | `overview.md` | 组件图、分层和端到端数据流。 |
 | `system-adapter.md` | SystemAdapter port、Linux 实现和目标构建边界。 |
 | `sandbox-adapter.md` | SandboxBackend port、原生 cgroup 后端和 Docker/OCI 状态。 |
