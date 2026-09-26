@@ -31,9 +31,12 @@ use webauthn_rs::prelude::{
 
 pub use crate::webauthn_credential_store::{
     PersistedWebAuthnCeremony, PersistedWebAuthnRegistration, StoredWebAuthnCredential,
-    StoredWebAuthnCredentialSet, WebAuthnCredentialStore, WebAuthnCredentialStoreError,
+    StoredWebAuthnCredentialSet, WebAuthnAuthenticationCommit, WebAuthnCredentialStore,
+    WebAuthnCredentialStoreError,
 };
 
+#[cfg(test)]
+use crate::device_authorization::DeviceAuthorizationDeviceKey;
 use crate::device_authorization::{
     DeviceAuthorizationClockPort, DeviceAuthorizationId, DeviceAuthorizationPortError,
     WebAuthnAuthenticationContext, WebAuthnAuthenticationPort, WebAuthnAuthenticationStart,
@@ -968,19 +971,19 @@ impl WebAuthnAuthenticationPort for WebAuthnAuthenticationVerifier {
             );
         }
         self.store
-            .commit_authentication(
+            .commit_authentication(WebAuthnAuthenticationCommit {
                 context,
                 opaque_state,
                 assertion_sha256,
                 credential_id,
-                old_counter,
-                stored_credential.serialized_sha256,
-                &updated_passkey,
-                now,
-                result.user_verified(),
-                result.backup_eligible(),
-                result.backup_state(),
-            )
+                expected_counter: old_counter,
+                expected_passkey_sha256: stored_credential.serialized_sha256,
+                updated_passkey: &updated_passkey,
+                now_unix_ms: now,
+                user_verified: result.user_verified(),
+                backup_eligible: result.backup_eligible(),
+                backup_state: result.backup_state(),
+            })
             .map_err(store_to_port_error)
     }
 }
@@ -1157,18 +1160,21 @@ impl WebAuthnCredentialStore for SqliteWebAuthnCredentialStore {
 
     fn commit_authentication(
         &self,
-        context: &WebAuthnAuthenticationContext,
-        opaque_state: &[u8],
-        assertion_sha256: [u8; 32],
-        credential_id: &[u8],
-        expected_counter: u32,
-        expected_passkey_sha256: [u8; 32],
-        updated_passkey: &Passkey,
-        now_unix_ms: u64,
-        user_verified: bool,
-        backup_eligible: bool,
-        backup_state: bool,
+        commit: WebAuthnAuthenticationCommit<'_>,
     ) -> Result<(), WebAuthnCredentialStoreError> {
+        let WebAuthnAuthenticationCommit {
+            context,
+            opaque_state,
+            assertion_sha256,
+            credential_id,
+            expected_counter,
+            expected_passkey_sha256,
+            updated_passkey,
+            now_unix_ms,
+            user_verified,
+            backup_eligible,
+            backup_state,
+        } = commit;
         let updated = Credential::from(updated_passkey.clone());
         if !user_verified
             || updated.cred_id.as_ref() != credential_id
@@ -2236,6 +2242,13 @@ mod tests {
         WebAuthnAuthenticationContext {
             approval_id: [0x11; 16],
             authorization_id: [0x22; 16],
+            registration_binding_id: [0x55; 16],
+            device_key: DeviceAuthorizationDeviceKey {
+                organization_id: "org-test".to_owned(),
+                workspace_id: "workspace-test".to_owned(),
+                device_id: "device-test".to_owned(),
+            },
+            authorization_generation: 1,
             approver: owner,
             scope: DeviceAuthorizationScope {
                 organization_id: "org-test".to_owned(),

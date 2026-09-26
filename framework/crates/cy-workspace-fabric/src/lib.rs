@@ -125,7 +125,9 @@ pub use web_relay_session::{
     WebRelaySessionCredentialIssuer, WebRelaySessionError, WebRelaySessionIssuer,
     WebRelaySessionVerifier,
 };
-pub use webauthn_credential_store::{WebAuthnCredentialStore, WebAuthnCredentialStoreError};
+pub use webauthn_credential_store::{
+    WebAuthnAuthenticationCommit, WebAuthnCredentialStore, WebAuthnCredentialStoreError,
+};
 pub use webauthn_http::{
     authorize_verified_web_session_role, webauthn_http_router, VerifiedWebSessionContext,
     WebAuthnHttpAuthorizationError, WebAuthnHttpCeremonyPurpose, WebAuthnHttpConfigurationError,

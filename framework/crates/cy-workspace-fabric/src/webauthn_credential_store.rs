@@ -77,6 +77,33 @@ pub struct PersistedWebAuthnRegistration {
     pub consumed_credential_id: Option<Vec<u8>>,
 }
 
+/// All verified inputs required to atomically consume one authentication assertion.
+#[derive(Debug, Clone, Copy)]
+pub struct WebAuthnAuthenticationCommit<'a> {
+    /// Authorization and approver context bound to the ceremony.
+    pub context: &'a WebAuthnAuthenticationContext,
+    /// Opaque verifier state persisted when the challenge began.
+    pub opaque_state: &'a [u8],
+    /// Digest of the exact assertion response being consumed.
+    pub assertion_sha256: [u8; 32],
+    /// Identifier of the credential that verified the assertion.
+    pub credential_id: &'a [u8],
+    /// Counter observed before assertion verification.
+    pub expected_counter: u32,
+    /// Digest of the credential snapshot verified by the caller.
+    pub expected_passkey_sha256: [u8; 32],
+    /// Updated credential snapshot returned by the WebAuthn verifier.
+    pub updated_passkey: &'a Passkey,
+    /// Trusted time used for ceremony expiry checks.
+    pub now_unix_ms: u64,
+    /// Whether the authenticator verified the user.
+    pub user_verified: bool,
+    /// Whether the credential is eligible for backup.
+    pub backup_eligible: bool,
+    /// Whether the credential is currently backed up.
+    pub backup_state: bool,
+}
+
 /// Storage boundary for the verifier and protected registrar.
 pub trait WebAuthnCredentialStore: Send + Sync {
     fn ensure_user_handle(
@@ -106,17 +133,7 @@ pub trait WebAuthnCredentialStore: Send + Sync {
 
     fn commit_authentication(
         &self,
-        context: &WebAuthnAuthenticationContext,
-        opaque_state: &[u8],
-        assertion_sha256: [u8; 32],
-        credential_id: &[u8],
-        expected_counter: u32,
-        expected_passkey_sha256: [u8; 32],
-        updated_passkey: &Passkey,
-        now_unix_ms: u64,
-        user_verified: bool,
-        backup_eligible: bool,
-        backup_state: bool,
+        commit: WebAuthnAuthenticationCommit<'_>,
     ) -> Result<(), WebAuthnCredentialStoreError>;
 
     fn begin_registration(

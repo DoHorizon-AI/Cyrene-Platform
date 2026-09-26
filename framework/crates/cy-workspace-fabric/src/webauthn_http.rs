@@ -544,7 +544,11 @@ async fn begin_credential_registration(
     validate_workspace_id(&request.workspace_id)?;
     let now = current_time(&state)?;
     ensure_session_fresh(&session, now)?;
-    let (enrollment, directory, bindings) = required_enrollment_dependencies(&state)?;
+    let WebAuthnEnrollmentDependencies {
+        enrollment,
+        directory,
+        session_bindings: bindings,
+    } = required_enrollment_dependencies(&state)?;
     authorize_verified_web_session_role(
         directory.as_ref(),
         &session,
@@ -612,7 +616,11 @@ async fn complete_credential_registration(
         .into_bytes();
     let now = current_time(&state)?;
     ensure_session_fresh(&session, now)?;
-    let (enrollment, directory, bindings) = required_enrollment_dependencies(&state)?;
+    let WebAuthnEnrollmentDependencies {
+        enrollment,
+        directory,
+        session_bindings: bindings,
+    } = required_enrollment_dependencies(&state)?;
     let active_binding = bindings
         .active_binding(
             WebAuthnHttpCeremonyPurpose::CredentialRegistration,
@@ -794,31 +802,30 @@ fn ensure_session_fresh(
 
 fn required_enrollment_dependencies(
     state: &WebAuthnHttpState,
-) -> Result<
-    (
-        Arc<dyn WebAuthnCredentialEnrollmentHttpPort>,
-        Arc<dyn WorkspaceDirectory>,
-        Arc<dyn WebAuthnHttpSessionBindingStore>,
-    ),
-    WebAuthnHttpError,
-> {
-    Ok((
-        state
+) -> Result<WebAuthnEnrollmentDependencies, WebAuthnHttpError> {
+    Ok(WebAuthnEnrollmentDependencies {
+        enrollment: state
             .enrollment
             .as_ref()
             .cloned()
             .ok_or(WebAuthnHttpError::Unavailable)?,
-        state
+        directory: state
             .directory
             .as_ref()
             .cloned()
             .ok_or(WebAuthnHttpError::Unavailable)?,
-        state
+        session_bindings: state
             .session_bindings
             .as_ref()
             .cloned()
             .ok_or(WebAuthnHttpError::Unavailable)?,
-    ))
+    })
+}
+
+struct WebAuthnEnrollmentDependencies {
+    enrollment: Arc<dyn WebAuthnCredentialEnrollmentHttpPort>,
+    directory: Arc<dyn WorkspaceDirectory>,
+    session_bindings: Arc<dyn WebAuthnHttpSessionBindingStore>,
 }
 
 fn validate_fixed_origin(origin: &Url) -> Result<(), WebAuthnHttpConfigurationError> {
@@ -1095,12 +1102,18 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct ReservedFinish {
+        response_sha256: [u8; 32],
+        complete: bool,
+    }
+
     #[derive(Default)]
     struct TestBindingStore {
         records: Mutex<
             BTreeMap<(WebAuthnHttpCeremonyPurpose, [u8; 16]), WebAuthnSessionCeremonyBinding>,
         >,
-        reserved: Mutex<BTreeMap<(WebAuthnHttpCeremonyPurpose, [u8; 16]), ([u8; 32], bool)>>,
+        reserved: Mutex<BTreeMap<(WebAuthnHttpCeremonyPurpose, [u8; 16]), ReservedFinish>>,
     }
 
     #[tonic::async_trait]
@@ -1159,15 +1172,21 @@ mod tests {
                 .lock()
                 .map_err(|_| WebAuthnHttpSessionBindingError::Unavailable)?;
             match reserved.get(&key) {
-                Some((digest, complete)) if digest == &response_sha256 && *complete => {
+                Some(entry) if entry.response_sha256 == response_sha256 && entry.complete => {
                     Ok(WebAuthnSessionFinishReservation::AlreadyComplete)
                 }
-                Some((digest, _)) if digest == &response_sha256 => {
+                Some(entry) if entry.response_sha256 == response_sha256 => {
                     Ok(WebAuthnSessionFinishReservation::Continue)
                 }
                 Some(_) => Err(WebAuthnHttpSessionBindingError::Conflict),
                 None => {
-                    reserved.insert(key, (response_sha256, false));
+                    reserved.insert(
+                        key,
+                        ReservedFinish {
+                            response_sha256,
+                            complete: false,
+                        },
+                    );
                     Ok(WebAuthnSessionFinishReservation::Continue)
                 }
             }
@@ -1188,8 +1207,8 @@ mod tests {
                 .lock()
                 .map_err(|_| WebAuthnHttpSessionBindingError::Unavailable)?;
             match reserved.get_mut(&(purpose, *ceremony_id)) {
-                Some((digest, complete)) if digest == &response_sha256 => {
-                    *complete = true;
+                Some(entry) if entry.response_sha256 == response_sha256 => {
+                    entry.complete = true;
                     Ok(())
                 }
                 _ => Err(WebAuthnHttpSessionBindingError::Conflict),

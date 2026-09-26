@@ -19,10 +19,13 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 use webauthn_rs::prelude::{Credential, Passkey};
 
+#[cfg(test)]
+use crate::device_authorization::DeviceAuthorizationDeviceKey;
 use crate::device_authorization::{DeviceAuthorizationId, WebAuthnAuthenticationContext};
 use crate::webauthn_credential_store::{
     PersistedWebAuthnCeremony, PersistedWebAuthnRegistration, StoredWebAuthnCredential,
-    StoredWebAuthnCredentialSet, WebAuthnCredentialStore, WebAuthnCredentialStoreError,
+    StoredWebAuthnCredentialSet, WebAuthnAuthenticationCommit, WebAuthnCredentialStore,
+    WebAuthnCredentialStoreError,
 };
 use crate::webauthn_verifier::{
     context_digest, credential_set_digest, same_owner, valid_user_handle, validate_context,
@@ -45,6 +48,32 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations/webauthn");
 
 type StoreResult<T> = Result<T, WebAuthnCredentialStoreError>;
 type StoreReply<T> = SyncSender<StoreResult<T>>;
+
+struct AuthenticationCommitCommand {
+    context: WebAuthnAuthenticationContext,
+    opaque_state: Vec<u8>,
+    assertion_sha256: [u8; 32],
+    credential_id: Vec<u8>,
+    expected_counter: u32,
+    expected_passkey_sha256: [u8; 32],
+    updated_passkey_json: Vec<u8>,
+    now_unix_ms: u64,
+    user_verified: bool,
+    backup_eligible: bool,
+    backup_state: bool,
+}
+
+struct RegistrationCommitCommand {
+    registration_id: DeviceAuthorizationId,
+    owner: UserIdentityRef,
+    opaque_state: Vec<u8>,
+    response_sha256: [u8; 32],
+    passkey_json: Vec<u8>,
+    signature_counter: u32,
+    backup_eligible: bool,
+    backup_state: bool,
+    now_unix_ms: u64,
+}
 
 /// Configuration or startup errors from the PostgreSQL WebAuthn adapter.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -194,20 +223,7 @@ enum Command {
         DeviceAuthorizationId,
         StoreReply<Option<PersistedWebAuthnCeremony>>,
     ),
-    CommitAuthentication(
-        WebAuthnAuthenticationContext,
-        Vec<u8>,
-        [u8; 32],
-        Vec<u8>,
-        u32,
-        [u8; 32],
-        Vec<u8>,
-        u64,
-        bool,
-        bool,
-        bool,
-        StoreReply<()>,
-    ),
+    CommitAuthentication(AuthenticationCommitCommand, StoreReply<()>),
     BeginRegistration(
         DeviceAuthorizationId,
         UserIdentityRef,
@@ -221,18 +237,7 @@ enum Command {
         DeviceAuthorizationId,
         StoreReply<Option<PersistedWebAuthnRegistration>>,
     ),
-    CommitRegistration(
-        DeviceAuthorizationId,
-        UserIdentityRef,
-        Vec<u8>,
-        [u8; 32],
-        Vec<u8>,
-        u32,
-        bool,
-        bool,
-        u64,
-        StoreReply<()>,
-    ),
+    CommitRegistration(RegistrationCommitCommand, StoreReply<()>),
     RevokeCredential(
         UserIdentityRef,
         Vec<u8>,
@@ -308,34 +313,8 @@ fn worker_main(
             Command::AuthenticationCeremony(id, reply) => {
                 let _ = reply.send(runtime.block_on(authentication_ceremony(&pool, &id)));
             }
-            Command::CommitAuthentication(
-                context,
-                state,
-                assertion_hash,
-                credential_id,
-                expected_counter,
-                expected_passkey_hash,
-                updated_json,
-                now,
-                user_verified,
-                backup_eligible,
-                backup_state,
-                reply,
-            ) => {
-                let _ = reply.send(runtime.block_on(commit_authentication(
-                    &pool,
-                    &context,
-                    &state,
-                    assertion_hash,
-                    &credential_id,
-                    expected_counter,
-                    expected_passkey_hash,
-                    &updated_json,
-                    now,
-                    user_verified,
-                    backup_eligible,
-                    backup_state,
-                )));
+            Command::CommitAuthentication(commit, reply) => {
+                let _ = reply.send(runtime.block_on(commit_authentication(&pool, commit)));
             }
             Command::BeginRegistration(id, owner, handle, state, expires, now, reply) => {
                 let _ = reply.send(runtime.block_on(begin_registration(
@@ -345,30 +324,8 @@ fn worker_main(
             Command::RegistrationCeremony(id, reply) => {
                 let _ = reply.send(runtime.block_on(registration_ceremony(&pool, &id)));
             }
-            Command::CommitRegistration(
-                id,
-                owner,
-                state,
-                response_hash,
-                passkey_json,
-                counter,
-                backup_eligible,
-                backup_state,
-                now,
-                reply,
-            ) => {
-                let _ = reply.send(runtime.block_on(commit_registration(
-                    &pool,
-                    &id,
-                    &owner,
-                    &state,
-                    response_hash,
-                    &passkey_json,
-                    counter,
-                    backup_eligible,
-                    backup_state,
-                    now,
-                )));
+            Command::CommitRegistration(commit, reply) => {
+                let _ = reply.send(runtime.block_on(commit_registration(&pool, commit)));
             }
             Command::RevokeCredential(owner, credential_id, reason, now, reply) => {
                 let _ = reply.send(runtime.block_on(revoke_credential(
@@ -493,20 +450,20 @@ impl WebAuthnCredentialStore for PostgresWebAuthnCredentialStore {
         self.call(Command::AuthenticationCeremony(*approval_id, reply), result)
     }
 
-    fn commit_authentication(
-        &self,
-        context: &WebAuthnAuthenticationContext,
-        opaque_state: &[u8],
-        assertion_sha256: [u8; 32],
-        credential_id: &[u8],
-        expected_counter: u32,
-        expected_passkey_sha256: [u8; 32],
-        updated_passkey: &Passkey,
-        now_unix_ms: u64,
-        user_verified: bool,
-        backup_eligible: bool,
-        backup_state: bool,
-    ) -> StoreResult<()> {
+    fn commit_authentication(&self, commit: WebAuthnAuthenticationCommit<'_>) -> StoreResult<()> {
+        let WebAuthnAuthenticationCommit {
+            context,
+            opaque_state,
+            assertion_sha256,
+            credential_id,
+            expected_counter,
+            expected_passkey_sha256,
+            updated_passkey,
+            now_unix_ms,
+            user_verified,
+            backup_eligible,
+            backup_state,
+        } = commit;
         let internal = Credential::from(updated_passkey.clone());
         if !user_verified
             || internal.cred_id.as_ref() != credential_id
@@ -522,17 +479,19 @@ impl WebAuthnCredentialStore for PostgresWebAuthnCredentialStore {
         let (reply, result) = mpsc::sync_channel(1);
         self.call(
             Command::CommitAuthentication(
-                context.clone(),
-                opaque_state.to_vec(),
-                assertion_sha256,
-                credential_id.to_vec(),
-                expected_counter,
-                expected_passkey_sha256,
-                encoded,
-                now_unix_ms,
-                user_verified,
-                backup_eligible,
-                backup_state,
+                AuthenticationCommitCommand {
+                    context: context.clone(),
+                    opaque_state: opaque_state.to_vec(),
+                    assertion_sha256,
+                    credential_id: credential_id.to_vec(),
+                    expected_counter,
+                    expected_passkey_sha256,
+                    updated_passkey_json: encoded,
+                    now_unix_ms,
+                    user_verified,
+                    backup_eligible,
+                    backup_state,
+                },
                 reply,
             ),
             result,
@@ -608,15 +567,17 @@ impl WebAuthnCredentialStore for PostgresWebAuthnCredentialStore {
         let (reply, result) = mpsc::sync_channel(1);
         self.call(
             Command::CommitRegistration(
-                *registration_id,
-                owner.clone(),
-                opaque_state.to_vec(),
-                response_sha256,
-                passkey_json,
-                credential.signature_counter(),
-                credential.backup_eligible(),
-                credential.backup_state(),
-                now_unix_ms,
+                RegistrationCommitCommand {
+                    registration_id: *registration_id,
+                    owner: owner.clone(),
+                    opaque_state: opaque_state.to_vec(),
+                    response_sha256,
+                    passkey_json,
+                    signature_counter: credential.signature_counter(),
+                    backup_eligible: credential.backup_eligible(),
+                    backup_state: credential.backup_state(),
+                    now_unix_ms,
+                },
                 reply,
             ),
             result,
@@ -965,18 +926,25 @@ fn decode_authentication_ceremony(row: PgRow) -> StoreResult<PersistedWebAuthnCe
 
 async fn commit_authentication(
     pool: &PgPool,
-    context: &WebAuthnAuthenticationContext,
-    opaque_state: &[u8],
-    assertion_sha256: [u8; 32],
-    credential_id: &[u8],
-    expected_counter: u32,
-    expected_passkey_sha256: [u8; 32],
-    updated_passkey_json: &[u8],
-    now_unix_ms: u64,
-    user_verified: bool,
-    backup_eligible: bool,
-    backup_state: bool,
+    command: AuthenticationCommitCommand,
 ) -> StoreResult<()> {
+    let AuthenticationCommitCommand {
+        context,
+        opaque_state,
+        assertion_sha256,
+        credential_id,
+        expected_counter,
+        expected_passkey_sha256,
+        updated_passkey_json,
+        now_unix_ms,
+        user_verified,
+        backup_eligible,
+        backup_state,
+    } = command;
+    let context = &context;
+    let opaque_state = opaque_state.as_slice();
+    let credential_id = credential_id.as_slice();
+    let updated_passkey_json = updated_passkey_json.as_slice();
     let updated_passkey: Passkey = serde_json::from_slice(updated_passkey_json)
         .map_err(|_| WebAuthnCredentialStoreError::InvalidRecord)?;
     let updated = Credential::from(updated_passkey);
@@ -1251,18 +1219,22 @@ fn decode_registration_ceremony(row: PgRow) -> StoreResult<PersistedWebAuthnRegi
     })
 }
 
-async fn commit_registration(
-    pool: &PgPool,
-    registration_id: &DeviceAuthorizationId,
-    owner: &UserIdentityRef,
-    opaque_state: &[u8],
-    response_sha256: [u8; 32],
-    passkey_json: &[u8],
-    signature_counter: u32,
-    backup_eligible: bool,
-    backup_state: bool,
-    now_unix_ms: u64,
-) -> StoreResult<()> {
+async fn commit_registration(pool: &PgPool, command: RegistrationCommitCommand) -> StoreResult<()> {
+    let RegistrationCommitCommand {
+        registration_id,
+        owner,
+        opaque_state,
+        response_sha256,
+        passkey_json,
+        signature_counter,
+        backup_eligible,
+        backup_state,
+        now_unix_ms,
+    } = command;
+    let registration_id = &registration_id;
+    let owner = &owner;
+    let opaque_state = opaque_state.as_slice();
+    let passkey_json = passkey_json.as_slice();
     let passkey: Passkey = serde_json::from_slice(passkey_json)
         .map_err(|_| WebAuthnCredentialStoreError::InvalidRecord)?;
     let internal = Credential::from(passkey.clone());
@@ -1737,6 +1709,13 @@ mod tests {
         let context = WebAuthnAuthenticationContext {
             approval_id: *uuid::Uuid::new_v4().as_bytes(),
             authorization_id: *uuid::Uuid::new_v4().as_bytes(),
+            registration_binding_id: [0x55; 16],
+            device_key: DeviceAuthorizationDeviceKey {
+                organization_id: "org-test".to_owned(),
+                workspace_id: "workspace-test".to_owned(),
+                device_id: "device-test".to_owned(),
+            },
+            authorization_generation: 1,
             approver: owner.clone(),
             scope: DeviceAuthorizationScope {
                 organization_id: "org-test".to_owned(),
