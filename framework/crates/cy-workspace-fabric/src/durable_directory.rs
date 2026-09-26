@@ -1,34 +1,41 @@
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │  📄 durable_directory.rs                                            │
 //! │  Module: cy_workspace_fabric::durable_directory                    │
-//! │  Role: Async PostgreSQL membership, role, descriptor, and audit I/O. │
+//! │  Role: Async PostgreSQL Directory and device-registration authority. │
 //! │                                                                     │
-//! │  模块职责：异步 PostgreSQL 成员、角色、描述符及审计存储。                │
+//! │  模块职责：异步 PostgreSQL Directory 与设备 registration authority。  │
 //! └─────────────────────────────────────────────────────────────────────┘
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
 use cy_proto::workspace_v1::{UserIdentityRef, WorkspaceConnectionDescriptor};
 use prost::Message;
+use sha2::{Digest, Sha256};
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::device_authorization::DeviceAuthorizationScope;
+use crate::device_registry::WorkspaceDeviceKey;
 use crate::directory::validate_descriptor;
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL";
 const MIGRATION_DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL";
 const OPERATOR_DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL";
 const OPERATOR_ID_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID";
+const DEVICE_REGISTRATION_DATABASE_URL_ENV: &str =
+    "CYRENE_WORKSPACE_DEVICE_REGISTRATION_DATABASE_URL";
 const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 const MAX_OPERATOR_ID_BYTES: usize = 256;
 const MAX_REASON_BYTES: usize = 2000;
 const POOL_MAX_CONNECTIONS: u32 = 8;
 const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
+const REGISTRATION_KEY_DOMAIN: &[u8] = b"cyrene-workspace-device-registration-key:v1\0";
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -57,15 +64,354 @@ pub enum DurableDirectoryError {
     Storage,
 }
 
-/// Async, PostgreSQL-backed Directory reads.
+/// Failure while binding a device recovery credential to an immutable registration.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceRegistrationError {
+    #[error("WORKSPACE_DEVICE_REGISTRATION_CONFIGURATION_INVALID")]
+    Configuration,
+    #[error("WORKSPACE_DEVICE_REGISTRATION_REQUEST_INVALID")]
+    InvalidRequest,
+    #[error("WORKSPACE_DEVICE_REGISTRATION_KEY_CONFLICT")]
+    RegistrationKeyConflict,
+    #[error("WORKSPACE_DEVICE_REGISTRATION_DEVICE_NOT_FOUND")]
+    AuthenticatedDeviceNotFound,
+    #[error("WORKSPACE_DEVICE_REGISTRATION_GENERATION_EXHAUSTED")]
+    GenerationExhausted,
+    #[error("WORKSPACE_DEVICE_REGISTRATION_STORAGE_UNAVAILABLE")]
+    Storage,
+}
+
+/// Domain-separated digest of a high-entropy registration recovery credential.
 ///
-/// This store intentionally does not implement the current synchronous
-/// `WorkspaceDirectory` trait. A later async Directory adapter can compose
-/// this port without blocking Relay or Direct request workers. It also does
-/// not verify OIDC tokens: callers must pass an issuer and subject obtained
-/// from a separately trusted authentication boundary.
+/// The opaque bytes are suitable for persistence and lookup but remain redacted
+/// from debug output to avoid turning a database key into a diagnostic token.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeviceRegistrationKeyDigest([u8; 32]);
+
+impl DeviceRegistrationKeyDigest {
+    /// Bytes to bind to PostgreSQL or a same-crate composite authorization store.
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DeviceRegistrationKeyDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("DeviceRegistrationKeyDigest")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Directory result that permanently binds one registration credential to a
+/// stable device identity, authorization generation, and validated key material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRegistrationBinding {
+    /// Opaque Directory binding handle; it is not an authorization ID or secret.
+    binding_id: [u8; 16],
+    /// Stable identity allocated by Directory or reused from authenticated mTLS context.
+    key: WorkspaceDeviceKey,
+    /// Monotonic generation for a new authorization on this stable device.
+    authorization_generation: u64,
+    /// Server-recomputed digest of the submitted CSR DER.
+    csr_sha256: [u8; 32],
+    /// Server-recomputed digest of the CSR subject public key information.
+    spki_sha256: [u8; 32],
+}
+
+impl DeviceRegistrationBinding {
+    /// Returns the opaque Directory binding handle, distinct from an authorization ID.
+    pub fn binding_id(&self) -> &[u8; 16] {
+        &self.binding_id
+    }
+
+    /// Returns the stable organization, Workspace, and device identity.
+    pub fn key(&self) -> &WorkspaceDeviceKey {
+        &self.key
+    }
+
+    /// Returns the monotonic generation assigned to this new authorization.
+    pub fn authorization_generation(&self) -> u64 {
+        self.authorization_generation
+    }
+
+    /// Returns the server-recomputed CSR DER SHA-256 digest.
+    pub fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    /// Returns the server-recomputed SPKI SHA-256 digest.
+    pub fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    /// Create a test-only binding fixture without exposing a production constructor.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        binding_id: [u8; 16],
+        key: WorkspaceDeviceKey,
+        authorization_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            binding_id,
+            key,
+            authorization_generation,
+            csr_sha256,
+            spki_sha256,
+        }
+    }
+}
+
+/// Workspace device key captured from a verified current mTLS client identity.
 ///
-/// 此存储暂不实现现有同步 trait；OIDC 验证仍由独立身份边界负责，本模块只按已验证 issuer/subject 查询持久授权。
+/// The private field prevents external request adapters from constructing a
+/// rotation authority from a client-supplied device ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedWorkspaceDevice {
+    key: WorkspaceDeviceKey,
+}
+
+impl AuthenticatedWorkspaceDevice {
+    /// Capture the device key after the caller has verified the current mTLS peer.
+    ///
+    /// This constructor is crate-private so public request fields cannot create
+    /// the rotation marker. Only trusted authentication adapters may call it.
+    #[allow(dead_code)] // Reserved for the separate mTLS enrollment route; this adapter stays unwired.
+    pub(crate) fn from_verified_mtls_peer(key: WorkspaceDeviceKey) -> Self {
+        Self { key }
+    }
+
+    /// Returns the exact device identity established by the mTLS verifier.
+    pub fn key(&self) -> &WorkspaceDeviceKey {
+        &self.key
+    }
+}
+
+/// Async authority for stable Workspace device IDs and registration-key bindings.
+///
+/// Implementations bind a client-generated, cryptographically random 256-bit
+/// recovery credential to exact scope and CSR digests. This port does not read or mutate authorization state; the caller
+/// must combine it with the authorization store transaction before enabling
+/// enrollment start or approval.
+#[tonic::async_trait]
+pub trait WorkspaceDeviceRegistrationAuthority: Send + Sync {
+    /// Bind a recovery credential to a device registration.
+    ///
+    /// The client must generate `registration_key` with a CSPRNG; it is secret
+    /// input and must not be logged or stored directly. `authenticated_device`
+    /// must come only from a verified current
+    /// Workspace device certificate, never from request fields. Supplying it
+    /// creates a new authorization generation for that stable device; omitting
+    /// it allocates a new stable device ID on first use. An exact credential
+    /// retry returns its existing binding and generation. The caller must first
+    /// validate CSR proof of possession and recompute both digests from the CSR;
+    /// request-supplied digest fields are not authoritative.
+    async fn bind_registration(
+        &self,
+        registration_key: &[u8; 32],
+        scope: &DeviceAuthorizationScope,
+        csr_sha256: &[u8; 32],
+        spki_sha256: &[u8; 32],
+        authenticated_device: Option<&AuthenticatedWorkspaceDevice>,
+    ) -> Result<DeviceRegistrationBinding, DeviceRegistrationError>;
+}
+
+/// PostgreSQL-backed registration-key to stable device-ID authority.
+///
+/// Use the dedicated device registrar database role; this pool is separate
+/// from the read-only Workspace Directory pool and operator provisioning pool.
+#[derive(Clone)]
+pub struct PostgresDeviceRegistrationAuthority {
+    pool: PgPool,
+}
+
+impl PostgresDeviceRegistrationAuthority {
+    /// Connect with the restricted registration writer URL from trusted process configuration.
+    pub async fn connect_from_environment() -> Result<Self, DeviceRegistrationError> {
+        let database_url = std::env::var(DEVICE_REGISTRATION_DATABASE_URL_ENV)
+            .map_err(|_| DeviceRegistrationError::Configuration)?;
+        Self::connect(&database_url).await
+    }
+
+    /// Connect using the registrar role with PostgreSQL TLS verification and bounded pooling.
+    pub async fn connect(database_url: &str) -> Result<Self, DeviceRegistrationError> {
+        let pool = connect_pool(database_url, "cyrene-device-registration-registrar")
+            .await
+            .map_err(map_registration_directory_error)?;
+        Ok(Self { pool })
+    }
+}
+
+#[tonic::async_trait]
+impl WorkspaceDeviceRegistrationAuthority for PostgresDeviceRegistrationAuthority {
+    async fn bind_registration(
+        &self,
+        registration_key: &[u8; 32],
+        scope: &DeviceAuthorizationScope,
+        csr_sha256: &[u8; 32],
+        spki_sha256: &[u8; 32],
+        authenticated_device: Option<&AuthenticatedWorkspaceDevice>,
+    ) -> Result<DeviceRegistrationBinding, DeviceRegistrationError> {
+        validate_registration_input(scope, registration_key, authenticated_device)?;
+        let registration_digest = registration_key_digest(registration_key);
+        let mut lock_prefix = [0; 8];
+        lock_prefix.copy_from_slice(&registration_digest.as_bytes()[..8]);
+        let lock_id = i64::from_be_bytes(lock_prefix);
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| DeviceRegistrationError::Storage)?;
+
+        // Serialize exact-key retries, including concurrent first starts, before
+        // either allocating an identity or advancing a rotation generation.
+        // 用 registration-key 派生的事务锁串行化同 key 请求，避免并发创建多个 device ID。
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| DeviceRegistrationError::Storage)?;
+
+        let existing = sqlx::query(
+            "SELECT binding_id, organization_id, workspace_id, device_id, \
+                    authorization_generation, csr_sha256, spki_sha256 \
+             FROM cyrene_workspace_directory.device_registration_bindings \
+             WHERE registration_key_digest = $1",
+        )
+        .bind(registration_digest.as_bytes().as_slice())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| DeviceRegistrationError::Storage)?;
+
+        if let Some(row) = existing {
+            let binding = registration_binding_from_row(row)?;
+            if binding.key.organization_id != scope.organization_id
+                || binding.key.workspace_id != scope.workspace_id
+                || binding.csr_sha256 != *csr_sha256
+                || binding.spki_sha256 != *spki_sha256
+                || authenticated_device.is_some_and(|device| device.key() != &binding.key)
+            {
+                return Err(DeviceRegistrationError::RegistrationKeyConflict);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| DeviceRegistrationError::Storage)?;
+            return Ok(binding);
+        }
+
+        let (device_id, authorization_generation) = match authenticated_device {
+            Some(authenticated) => {
+                let device = authenticated.key();
+                let generation = sqlx::query_scalar::<_, i64>(
+                    "UPDATE cyrene_workspace_directory.workspace_device_identities \
+                     SET current_authorization_generation = current_authorization_generation + 1, \
+                         updated_at = clock_timestamp() \
+                     WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 \
+                       AND current_authorization_generation < 9223372036854775807 \
+                     RETURNING current_authorization_generation",
+                )
+                .bind(&device.organization_id)
+                .bind(&device.workspace_id)
+                .bind(&device.device_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| DeviceRegistrationError::Storage)?;
+                let Some(generation) = generation else {
+                    let exists = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM \
+                            cyrene_workspace_directory.workspace_device_identities \
+                         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3)",
+                    )
+                    .bind(&device.organization_id)
+                    .bind(&device.workspace_id)
+                    .bind(&device.device_id)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|_| DeviceRegistrationError::Storage)?;
+                    return Err(if exists {
+                        DeviceRegistrationError::GenerationExhausted
+                    } else {
+                        DeviceRegistrationError::AuthenticatedDeviceNotFound
+                    });
+                };
+                (
+                    device.device_id.clone(),
+                    u64::try_from(generation).map_err(|_| DeviceRegistrationError::Storage)?,
+                )
+            }
+            None => {
+                let device_id = Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO cyrene_workspace_directory.workspace_device_identities \
+                        (organization_id, workspace_id, device_id, current_authorization_generation) \
+                     VALUES ($1, $2, $3, 1)",
+                )
+                .bind(&scope.organization_id)
+                .bind(&scope.workspace_id)
+                .bind(&device_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| DeviceRegistrationError::Storage)?;
+                (device_id, 1)
+            }
+        };
+
+        let binding_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO cyrene_workspace_directory.device_registration_bindings \
+                (binding_id, registration_key_digest, organization_id, workspace_id, device_id, \
+                 authorization_generation, csr_sha256, spki_sha256) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(binding_id)
+        .bind(registration_digest.as_bytes().as_slice())
+        .bind(&scope.organization_id)
+        .bind(&scope.workspace_id)
+        .bind(&device_id)
+        .bind(
+            i64::try_from(authorization_generation)
+                .map_err(|_| DeviceRegistrationError::Storage)?,
+        )
+        .bind(csr_sha256.as_slice())
+        .bind(spki_sha256.as_slice())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| DeviceRegistrationError::Storage)?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|_| DeviceRegistrationError::Storage)?;
+        Ok(DeviceRegistrationBinding {
+            binding_id: *binding_id.as_bytes(),
+            key: WorkspaceDeviceKey {
+                organization_id: scope.organization_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                device_id,
+            },
+            authorization_generation,
+            csr_sha256: *csr_sha256,
+            spki_sha256: *spki_sha256,
+        })
+    }
+}
+
+/// Async PostgreSQL Directory reads and stable device-registration bindings.
+///
+/// `PostgresWorkspaceDirectory` implements the async `WorkspaceDirectory`
+/// adapter without blocking Relay or Direct workers. This module does not
+/// verify OIDC tokens: callers must provide identities from a separately
+/// trusted authentication boundary. Registration binding also does not create
+/// or supersede authorization records; production start and approval must
+/// compose it with the authorization store in one locked PostgreSQL transaction.
+///
+/// `PostgresWorkspaceDirectory` 通过异步 `WorkspaceDirectory` adapter 提供查询，不阻塞 Relay/Direct。
+/// OIDC token 验证由独立可信边界负责。Registration binding 不创建或 supersede 授权记录；生产 start/approval
+/// 必须在同一带锁 PostgreSQL transaction 中与授权存储组合。
 #[derive(Clone)]
 pub struct PostgresWorkspaceDirectory {
     pool: PgPool,
@@ -685,6 +1031,86 @@ impl DirectoryOperatorProvisioner {
     }
 }
 
+fn validate_registration_input(
+    scope: &DeviceAuthorizationScope,
+    registration_key: &[u8; 32],
+    authenticated_device: Option<&AuthenticatedWorkspaceDevice>,
+) -> Result<(), DeviceRegistrationError> {
+    validate_scope(&scope.organization_id, &scope.workspace_id)
+        .map_err(|_| DeviceRegistrationError::InvalidRequest)?;
+    if registration_key.iter().all(|byte| *byte == 0) {
+        return Err(DeviceRegistrationError::InvalidRequest);
+    }
+    if let Some(authenticated) = authenticated_device {
+        let device = authenticated.key();
+        if device.organization_id != scope.organization_id
+            || device.workspace_id != scope.workspace_id
+            || device.device_id.trim().is_empty()
+            || device.device_id.len() > 256
+            || device.device_id.chars().any(char::is_control)
+        {
+            return Err(DeviceRegistrationError::InvalidRequest);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn registration_key_digest(registration_key: &[u8; 32]) -> DeviceRegistrationKeyDigest {
+    let mut digest = Sha256::new();
+    digest.update(REGISTRATION_KEY_DOMAIN);
+    digest.update(registration_key);
+    DeviceRegistrationKeyDigest(digest.finalize().into())
+}
+
+fn registration_binding_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<DeviceRegistrationBinding, DeviceRegistrationError> {
+    let binding_id: Uuid = row
+        .try_get("binding_id")
+        .map_err(|_| DeviceRegistrationError::Storage)?;
+    let authorization_generation: i64 = row
+        .try_get("authorization_generation")
+        .map_err(|_| DeviceRegistrationError::Storage)?;
+    Ok(DeviceRegistrationBinding {
+        binding_id: *binding_id.as_bytes(),
+        key: WorkspaceDeviceKey {
+            organization_id: row
+                .try_get("organization_id")
+                .map_err(|_| DeviceRegistrationError::Storage)?,
+            workspace_id: row
+                .try_get("workspace_id")
+                .map_err(|_| DeviceRegistrationError::Storage)?,
+            device_id: row
+                .try_get("device_id")
+                .map_err(|_| DeviceRegistrationError::Storage)?,
+        },
+        authorization_generation: u64::try_from(authorization_generation)
+            .map_err(|_| DeviceRegistrationError::Storage)?,
+        csr_sha256: digest_column(&row, "csr_sha256")?,
+        spki_sha256: digest_column(&row, "spki_sha256")?,
+    })
+}
+
+fn digest_column(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<[u8; 32], DeviceRegistrationError> {
+    let bytes: Vec<u8> = row
+        .try_get(column)
+        .map_err(|_| DeviceRegistrationError::Storage)?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| DeviceRegistrationError::Storage)
+}
+
+fn map_registration_directory_error(error: DurableDirectoryError) -> DeviceRegistrationError {
+    match error {
+        DurableDirectoryError::Configuration => DeviceRegistrationError::Configuration,
+        _ => DeviceRegistrationError::Storage,
+    }
+}
+
 async fn connect_pool(
     database_url: &str,
     application_name: &'static str,
@@ -926,5 +1352,73 @@ mod tests {
             Err(DurableDirectoryError::AuditReasonRequired)
         );
         assert!(validate_operator_and_reason("operator-1", "ticket 123").is_ok());
+    }
+
+    #[test]
+    fn registration_key_digest_uses_its_own_domain_separator() {
+        let registration_key = [7u8; 32];
+        let digest = registration_key_digest(&registration_key);
+        let plain_digest: [u8; 32] = Sha256::digest(registration_key).into();
+
+        assert_eq!(digest, registration_key_digest(&registration_key));
+        assert_ne!(*digest.as_bytes(), plain_digest);
+        assert_ne!(digest.as_bytes().as_slice(), registration_key.as_slice());
+        assert_eq!(
+            format!("{digest:?}"),
+            "DeviceRegistrationKeyDigest(\"[REDACTED]\")"
+        );
+    }
+
+    #[test]
+    fn registration_validation_requires_secret_and_verified_device_scope() {
+        let scope = DeviceAuthorizationScope {
+            organization_id: "organization-1".into(),
+            workspace_id: "workspace-1".into(),
+        };
+        let registration_key = [9u8; 32];
+        let matching_device = WorkspaceDeviceKey {
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            device_id: "device-1".into(),
+        };
+        let authenticated_device =
+            AuthenticatedWorkspaceDevice::from_verified_mtls_peer(matching_device.clone());
+
+        assert!(validate_registration_input(
+            &scope,
+            &registration_key,
+            Some(&authenticated_device)
+        )
+        .is_ok());
+        assert_eq!(
+            validate_registration_input(&scope, &[0; 32], None),
+            Err(DeviceRegistrationError::InvalidRequest)
+        );
+        let wrong_scope_device =
+            AuthenticatedWorkspaceDevice::from_verified_mtls_peer(WorkspaceDeviceKey {
+                organization_id: "organization-2".into(),
+                ..matching_device
+            });
+        assert_eq!(
+            validate_registration_input(&scope, &registration_key, Some(&wrong_scope_device)),
+            Err(DeviceRegistrationError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn registration_binding_exposes_only_read_accessors() {
+        let key = WorkspaceDeviceKey {
+            organization_id: "organization-1".into(),
+            workspace_id: "workspace-1".into(),
+            device_id: "device-1".into(),
+        };
+        let binding =
+            DeviceRegistrationBinding::test_fixture([1; 16], key.clone(), 3, [2; 32], [3; 32]);
+
+        assert_eq!(binding.binding_id(), &[1; 16]);
+        assert_eq!(binding.key(), &key);
+        assert_eq!(binding.authorization_generation(), 3);
+        assert_eq!(binding.csr_sha256(), &[2; 32]);
+        assert_eq!(binding.spki_sha256(), &[3; 32]);
     }
 }

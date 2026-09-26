@@ -199,15 +199,15 @@ database calls. The local Relay host still uses its explicitly configured file
 store; production database selection, credentials, and deployment are not
 configured here. There is no fallback from PostgreSQL errors to a snapshot.
 
-The migration creates `memberships`, `roles`, `descriptors`, and append-only
-`audit_events` tables. Operator grant/revoke operations write their changes and
+The migrations create `memberships`, `roles`, `descriptors`, append-only
+`audit_events`, and stable device-registration binding tables. Operator grant/revoke operations write their changes and
 audit rows in one database transaction. Revoking a membership cascades its
 roles and records the removed roles in that transaction. Only the five current
 Product user-command roles can be assigned; membership and workload roles come
 from separate authorities. The audit table rejects UPDATE and DELETE, and the
 reader role has SELECT-only access.
 
-Configure three separate trusted process URLs:
+Configure four separate trusted process URLs:
 
 * `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`: runtime reader login, a member of
   `cyrene_workspace_directory_reader` only.
@@ -215,6 +215,9 @@ Configure three separate trusted process URLs:
   login, a member of `cyrene_workspace_directory_operator`.
 * `CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL`: deployment migration
   login with the database privileges needed to create roles and schema.
+* `CYRENE_WORKSPACE_DEVICE_REGISTRATION_DATABASE_URL`: enrollment binding
+  login, a member only of `cyrene_workspace_device_registrar`; it cannot mutate
+  memberships, Product roles, descriptors, or operator audit rows.
 
 All connections require PostgreSQL TLS with certificate and hostname
 verification (`sslmode=verify-full`); configure `sslrootcert` when using a
@@ -232,10 +235,17 @@ cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT 
 cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TICKET
 ```
 
-The down migration drops the Directory schema and its data. The async trait and
-Relay/Direct callers are wired, but PostgreSQL deployment, credentials, OIDC
-verification, and production host configuration remain external work; this is
-not a production cutover.
+The down migrations drop the Directory and device-registration tables. The
+registration adapter binds a client-generated, cryptographically random
+256-bit recovery credential (stored only as a domain-separated SHA-256 digest) to exact scope, CSR/SPKI digests, stable
+`device_id`, and authorization generation. Exact retries return the original
+binding; changing any bound value conflicts. A new key can reuse a device ID
+only when a trusted caller supplies the current mTLS-authenticated device key.
+This adapter does not enable enrollment start or approval: production must
+combine binding/generation and authorization-state CAS in one PostgreSQL
+transaction while locking the device identity row. Relay/Direct PostgreSQL
+deployment, credentials, OIDC verification, and production host configuration
+remain external work; this is not a production cutover.
 
 Run:
 
@@ -350,11 +360,12 @@ Relay host 只传输 Workspace request。Product、Kernel/Lease、Runtime 与 Ar
 
 迁移创建 `memberships`、`roles`、`descriptors` 和只追加的 `audit_events` 表。Operator 授权/撤销与审计行在同一数据库事务中提交；撤销成员时级联删除其角色，并在同一事务记录被移除角色。仅允许分配当前五种 Product 用户命令角色；成员标记和 workload 角色由其他 authority 管理。审计表拒绝 UPDATE/DELETE，reader 角色仅有 SELECT 权限。
 
-使用三个独立的可信运行时 URL：
+使用四个独立的可信运行时 URL：
 
 * `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`：服务 reader 登录，只加入 `cyrene_workspace_directory_reader`。
 * `CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL`：本地 provisioning CLI 登录，只加入 `cyrene_workspace_directory_operator`。
 * `CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL`：部署迁移登录，需有创建角色和 schema 的数据库权限。
+* `CYRENE_WORKSPACE_DEVICE_REGISTRATION_DATABASE_URL`：enrollment binding 登录，只加入 `cyrene_workspace_device_registrar`，不能修改成员、Product role、descriptor 或 operator audit。
 
 所有连接均强制 PostgreSQL TLS 证书与主机名校验（`sslmode=verify-full`）；私有数据库 CA 需配置 `sslrootcert`。`CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID` 从可信进程配置提供审计 actor，CLI 参数不接受 actor ID。服务进程不得使用 operator 或 migration URL。数据库用户、角色成员授权、secret、TLS、备份和部署由 crate 外部管理。
 
@@ -366,7 +377,7 @@ cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT 
 cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TICKET
 ```
 
-down migration 会删除 Directory schema 及其中数据。异步 trait 和 Relay/Direct 调用方已接线，但 PostgreSQL 部署、凭据、OIDC verifier 和 production host 配置仍属于外部工作，尚未完成生产切换。
+down migration 会删除 Directory 与设备 registration 表。Registration adapter 将客户端使用 CSPRNG 生成的 256-bit recovery credential（仅以 domain-separated SHA-256 digest 存储）绑定到精确 scope、CSR/SPKI digest、稳定 `device_id` 与 authorization generation；完全相同的重试返回原绑定，任一绑定值变化都会冲突。只有可信调用方提供当前通过 mTLS 认证的设备 key 时，新 key 才能复用 device ID。此 adapter 不启用 enrollment start 或 approval：生产必须在锁定设备身份行的同一 PostgreSQL transaction 中组合 binding/generation 与授权状态 CAS。Relay/Direct PostgreSQL 部署、凭据、OIDC verifier 和 production host 配置仍属于外部工作，尚未完成生产切换。
 
 运行：
 

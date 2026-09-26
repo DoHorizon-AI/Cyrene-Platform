@@ -63,8 +63,10 @@ pub use directory::{
     WorkspaceMembership,
 };
 pub use durable_directory::{
+    AuthenticatedWorkspaceDevice, DeviceRegistrationBinding, DeviceRegistrationError,
     DirectoryMutation, DirectoryOperatorProvisioner, DurableDirectoryError,
-    PostgresWorkspaceDirectory, SUPPORTED_OPERATOR_ROLES,
+    PostgresDeviceRegistrationAuthority, PostgresWorkspaceDirectory,
+    WorkspaceDeviceRegistrationAuthority, SUPPORTED_OPERATOR_ROLES,
 };
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_adapters::{
