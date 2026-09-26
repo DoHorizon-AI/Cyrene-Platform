@@ -37,6 +37,15 @@ const POOL_MAX_CONNECTIONS: u32 = 8;
 const POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 const REGISTRATION_KEY_DOMAIN: &[u8] = b"cyrene-workspace-device-registration-key:v1\0";
 
+/// Directory-owned Workspace capability required to approve device enrollment.
+///
+/// This role is granted only by the audited Directory operator boundary. It is
+/// intentionally separate from Product COMMAND authorization roles.
+///
+/// 设备 enrollment approval 所需的 Directory Workspace capability。
+/// 该 role 仅能由带审计的 Directory operator 边界授予，且不属于 Product COMMAND role。
+pub const WORKSPACE_DEVICE_ENROLLMENT_APPROVE_ROLE: &str = "workspace.device.enrollment.approve.v1";
+
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// Errors from the durable Directory store and its restricted operator port.
@@ -1257,6 +1266,21 @@ fn validate_roles(roles: &BTreeSet<String>) -> Result<(), DurableDirectoryError>
 
 fn validate_role(role: &str) -> Result<(), DurableDirectoryError> {
     if SUPPORTED_OPERATOR_ROLES.contains(&role) {
+        return validate_product_command_role(role);
+    }
+    validate_device_enrollment_approval_role(role)
+}
+
+fn validate_product_command_role(role: &str) -> Result<(), DurableDirectoryError> {
+    if SUPPORTED_OPERATOR_ROLES.contains(&role) {
+        Ok(())
+    } else {
+        Err(DurableDirectoryError::UnsupportedRole)
+    }
+}
+
+fn validate_device_enrollment_approval_role(role: &str) -> Result<(), DurableDirectoryError> {
+    if role == WORKSPACE_DEVICE_ENROLLMENT_APPROVE_ROLE {
         Ok(())
     } else {
         Err(DurableDirectoryError::UnsupportedRole)

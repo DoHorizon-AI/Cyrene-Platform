@@ -110,6 +110,7 @@ pub use durable_directory::{
     DirectoryMutation, DirectoryOperatorProvisioner, DurableDirectoryError,
     PostgresDeviceRegistrationAuthority, PostgresWorkspaceDirectory,
     WorkspaceDeviceRegistrationAuthority, SUPPORTED_OPERATOR_ROLES,
+    WORKSPACE_DEVICE_ENROLLMENT_APPROVE_ROLE,
 };
 pub use frontend_relay_client::{
     FrontendRelayClient, FrontendRelayClientConfig, FrontendRelayClientError,
