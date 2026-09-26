@@ -10,6 +10,7 @@
 
 mod agent;
 mod config;
+mod journal;
 mod outbox;
 mod process;
 

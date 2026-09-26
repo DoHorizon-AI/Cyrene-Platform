@@ -26,11 +26,64 @@ by a per-Runtime/Node process lock; credential state files are regular,
 owner-only `0600` files replaced relative to the opened directory descriptor.
 The enrollment proof is never persisted.
 
-This supports reconnect and a fresh Agent invocation while the same
-execution-control service retains the matching grant/token. It does not claim
-control-service restart or workload recovery: session/grant state is currently
-in memory, `CONTAINER_AGENT` advertises `RestartCapability::None`, and accepted
-assignment and child-process state are not persisted.
+The execution journal also persists an assignment fingerprint before spawning,
+its admission result, and immutable terminal observations before reporting them.
+Every terminal observation copies the original assignment and Product attempt
+identities. The control service validates those identities against the accepted
+assignment and durably records the exact terminal bytes before acknowledging the
+Agent sequence. A conflicting replay fences the session instead of replacing the
+first terminal fact.
+Reopening a completed generation authenticates with the retained token and
+replays the original terminal fact without executing the command again. The
+control service must retain the matching grant, either in memory or through its
+explicitly configured session store. A new workload requires a new Runtime
+generation and matching enrollment/certificate configuration.
+
+An interrupted spawn or previously accepted assignment without terminal evidence
+becomes `RECOVERY_REQUIRES_RECONCILIATION`. The Agent reports a lost observation
+with unspecified termination and neither restarts the command nor claims that a
+StopCommand killed an unowned process. The provider must reconcile/fence the
+original execution before creating another attempt. `RestartCapability::None`
+remains accurate: this is admission/terminal recovery, not adoption of a surviving
+OS process or automatic training checkpoint resume.
+
+Journal files use the same descriptor-relative private storage and per-generation
+lock as resume credentials. Corrupt, shared-permission, symlinked, or mismatched
+state is preserved and rejected. Existing installations with a resume token but
+no execution journal require explicit reconciliation and a fresh generation;
+do not delete the old state to bypass this check. Ordinary pending log/progress
+frames remain an in-memory reconnect outbox; terminal facts are separately
+durable in both the Agent journal and the configured control session store.
+Frame identifiers include an Agent incarnation so a restart cannot
+collide with prior observation IDs.
+
+A valid `StopCommand` for the active assignment is acknowledged before child
+termination begins. Replayed command IDs receive another correlated `StopAck`,
+so a lost acknowledgement can be retried safely while the session remains
+live. The Agent then stops the whole child process group within the supplied
+grace period and journals a `Stopped`/`Graceful` terminal observation. The
+acknowledgement is not completion evidence; supervisors must wait for the
+durable terminal observation before releasing the Lease. A stop with no active
+assignment cannot manufacture terminal evidence.
+
+Connection establishment and retry backoff continue checking child exit and
+Lease expiry. Artifact staging revalidates the Lease immediately before spawn.
+Drop/error cleanup kills a known child group but does not fabricate a terminal
+fact. Unknown recovery does not renew or acquire a Lease.
+
+The mTLS/Kernel UDS TCK supports actual Agent processes as well as the default
+in-process composition:
+
+```sh
+cargo build -p cy-runtime-agent --bin cy-runtime-agent --locked
+CYRENE_RUNTIME_AGENT_TEST_BINARY="$PWD/target/debug/cy-runtime-agent" \
+cargo test -p cy-execution-control --test mtls_runtime_agent_tck --locked
+```
+
+The process variant checks terminal replay after OS-process restart, fresh
+generation enrollment, real workloads, Artifact rejection and canonical Lease
+release. It does not validate surviving-child adoption, GPU training, Docker
+recreation, or guaranteed delivery of every pending log frame.
 
 Remote Artifact assignments must carry Artifact Plane-selected sources and a
 short-lived, source/destination/part/expiry/byte-scoped transfer ticket. The

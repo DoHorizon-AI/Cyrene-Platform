@@ -96,6 +96,7 @@ impl ChildSupervisor {
         command.args(&self.command[1..]);
         command.envs(additions);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.kill_on_drop(true);
         if let Some(path) = working_directory {
             command.current_dir(path);
         }
@@ -172,6 +173,18 @@ impl ChildSupervisor {
                     exit: child_exit(child.wait().await?),
                     forced: true,
                 })
+            }
+        }
+    }
+}
+
+impl Drop for ChildSupervisor {
+    fn drop(&mut self) {
+        // Error/cancellation paths must not leave a known child running without
+        // Lease supervision. This is cleanup, not proof of a terminal outcome.
+        if let Some(pid) = self.child.as_ref().and_then(Child::id) {
+            if let Ok(pid) = i32::try_from(pid) {
+                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
             }
         }
     }

@@ -23,7 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cy_execution_control::{
     AuthenticatedAgent, CertificateFingerprintAuthenticator, DispatchReceipt,
     ExecutionControlService, ExecutionController, ExecutionDispatchRequest,
-    ExecutionReleaseRequest, FileExecutionIntentStore, IntentDisposition,
+    ExecutionReleaseRequest, ExecutionStopRequest, FileExecutionIntentStore, IntentDisposition,
+    StopDisposition,
 };
 use cy_execution_fabric::{
     execution_capability, plan_execution_placement, ArtifactAvailability, ArtifactPlacementQuote,
@@ -75,9 +76,9 @@ const CONTROL_SERVER_NAME: &str = "control.test";
 /// through a UDS Kernel lease to a Runtime Agent child process.
 ///
 /// The test intentionally composes production components inside one test OS
-/// process. It is not proof of an Agent OS-process restart, Docker, or a
-/// multi-container deployment; the transport, credential, lease, assignment,
-/// workload, and durable release boundaries are nevertheless real.
+/// process by default. Set CYRENE_RUNTIME_AGENT_TEST_BINARY to a freshly built
+/// Agent binary to exercise actual OS-process termination/restart and terminal
+/// replay instead. Neither mode proves Docker or a multi-container deployment.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestResult {
     let temporary = tempdir()?;
@@ -117,7 +118,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         id: RUNTIME_ID.to_string(),
         generation: 1,
     };
-    let authenticator = Arc::new(CertificateFingerprintAuthenticator::new([
+    let mut certificate_bindings = vec![
         (
             certificates.host_der.clone(),
             AuthenticatedAgent::Host { node: node_ref() },
@@ -129,11 +130,30 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
                 node: node_ref(),
             },
         ),
-    ])?);
+    ];
+    for (index, (_, _, der)) in certificates.later_runtimes.iter().enumerate() {
+        certificate_bindings.push((
+            der.clone(),
+            AuthenticatedAgent::Runtime {
+                runtime: semantic::Identity {
+                    id: RUNTIME_ID.into(),
+                    generation: index as u64 + 2,
+                },
+                node: node_ref(),
+            },
+        ));
+    }
+    let authenticator = Arc::new(CertificateFingerprintAuthenticator::new(
+        certificate_bindings,
+    )?);
     let service = ExecutionControlService::new(
         authenticator,
         Arc::new(DevelopmentEnrollmentProvider::new(
-            ["mtls-runtime-enrollment".to_string()],
+            [
+                "mtls-runtime-enrollment".to_string(),
+                "mtls-runtime-enrollment-2".to_string(),
+                "mtls-runtime-enrollment-3".to_string(),
+            ],
             120_000,
         )),
         Duration::from_millis(100),
@@ -173,6 +193,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         runtime_state.clone(),
         artifact_root.clone(),
         "CYRENE_REAL_WORKLOAD_ONE",
+        1,
     ));
     wait_for_runtime_session(
         "authenticated Runtime session",
@@ -226,6 +247,12 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         TerminationClassification::External as i32
     );
     assert_eq!(terminal.reason_code, "WORKLOAD_EXITED");
+    assert_eq!(terminal.assignment_id, "assignment-mtls-one");
+    assert_eq!(terminal.attempt_id, "attempt-mtls-one");
+    assert_eq!(
+        service.terminal_observation("assignment-mtls-one")?,
+        Some(terminal.clone())
+    );
     runtime_task.await??;
     wait_until("Runtime session removal after terminal workload", || {
         !service.has_runtime_session(&runtime)
@@ -280,6 +307,24 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     );
     assert!(!persisted_resume_state_text.contains("mtls-runtime-enrollment"));
 
+    // Reopening the same generation replays its terminal fact using the persisted
+    // resume token. It must not run another command or overwrite the old log.
+    let replay_task = spawn_runtime_agent(runtime_config(
+        &certificates,
+        &control_endpoint,
+        runtime_state.clone(),
+        artifact_root.clone(),
+        "CYRENE_REAL_WORKLOAD_ONE",
+        1,
+    ));
+    let replayed_terminal = wait_for_terminal_observation(&mut observations, &runtime).await?;
+    assert_eq!(replayed_terminal, terminal);
+    replay_task.await??;
+    wait_until("terminal replay session removal", || {
+        !service.has_runtime_session(&runtime)
+    })
+    .await?;
+
     drop(controller);
     drop(controller_store);
     let restarted_store = Arc::new(FileExecutionIntentStore::open(&intent_path)?);
@@ -307,20 +352,24 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     );
     assert!(!resources.is_allocated(&cpu.identity.id));
 
+    let runtime = semantic::Identity {
+        id: RUNTIME_ID.into(),
+        generation: 2,
+    };
     let second_runtime_config = runtime_config(
         &certificates,
         &control_endpoint,
         runtime_state.clone(),
         artifact_root.clone(),
         "CYRENE_REAL_WORKLOAD_TWO",
+        2,
     );
     assert_eq!(
         second_runtime_config.enrollment_proof,
-        "mtls-runtime-enrollment"
+        "mtls-runtime-enrollment-2"
     );
     assert!(second_runtime_config.resume_token.is_empty());
-    // The one-shot enrollment provider has no second proof. A successful
-    // reconnect therefore proves the Agent resolved the persisted token.
+    // New execution requires a fresh generation, scoped certificate and proof.
     let mut second_runtime_task = spawn_runtime_agent(second_runtime_config);
     wait_for_runtime_session(
         "reconnected Runtime session",
@@ -382,6 +431,10 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         runtime.id, runtime.generation
     ));
     let completed_log = fs::read(&workload_log)?;
+    let runtime = semantic::Identity {
+        id: RUNTIME_ID.into(),
+        generation: 3,
+    };
     let missing_artifact = artifact_ref(b"missing local Artifact input");
     let mut rejected_runtime_task = spawn_runtime_agent(runtime_config(
         &certificates,
@@ -389,6 +442,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         runtime_state,
         artifact_root,
         "CYRENE_REJECTION_RECOVERY_WORKLOAD",
+        3,
     ));
     wait_for_runtime_session(
         "Runtime session for rejected local Artifact",
@@ -470,11 +524,40 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
         "CYRENE_REJECTION_RECOVERY_WORKLOAD",
     )
     .await?;
-    let terminal = wait_for_terminal_observation(&mut observations, &runtime).await?;
+    let stop_receipt = restarted_controller
+        .stop(ExecutionStopRequest {
+            assignment_id: "assignment-mtls-rejection-recovery".to_string(),
+            command_id: "stop-mtls-rejection-recovery".to_string(),
+            grace_period: Duration::from_millis(500),
+            reason_code: "PRODUCT_CANCELLED".to_string(),
+        })
+        .await?;
+    assert_eq!(stop_receipt.disposition, StopDisposition::Accepted);
+    assert!(stop_receipt.terminal_observation.is_none());
+    let terminal = restarted_controller
+        .wait_terminal_observation("assignment-mtls-rejection-recovery", Duration::from_secs(5))
+        .await?;
     assert_eq!(
         terminal.observed_state,
         RuntimeObservedState::Stopped as i32
     );
+    assert_eq!(
+        terminal.termination,
+        TerminationClassification::Graceful as i32
+    );
+    assert_eq!(terminal.reason_code, "GRACEFUL_TERMINATION");
+    assert_eq!(terminal.assignment_id, "assignment-mtls-rejection-recovery");
+    assert_eq!(terminal.attempt_id, "attempt-mtls-rejection-recovery");
+    let repeated_stop = restarted_controller
+        .stop(ExecutionStopRequest {
+            assignment_id: "assignment-mtls-rejection-recovery".to_string(),
+            command_id: "stop-mtls-rejection-recovery-retry".to_string(),
+            grace_period: Duration::from_millis(500),
+            reason_code: "PRODUCT_CANCELLED".to_string(),
+        })
+        .await?;
+    assert_eq!(repeated_stop.disposition, StopDisposition::AlreadyTerminal);
+    assert_eq!(repeated_stop.terminal_observation, Some(terminal));
     rejected_runtime_task.await??;
     wait_until("recovery Runtime session removal", || {
         !service.has_runtime_session(&runtime)
@@ -508,6 +591,7 @@ struct Certificates {
     runtime_pem: PathBuf,
     runtime_key: PathBuf,
     runtime_der: Vec<u8>,
+    later_runtimes: Vec<(PathBuf, PathBuf, Vec<u8>)>,
     rogue_pem: PathBuf,
     rogue_key: PathBuf,
 }
@@ -638,6 +722,23 @@ impl Certificates {
                 extended_key_usage: "clientAuth",
             },
         )?;
+        let mut later_runtimes = Vec::new();
+        for generation in [2, 3] {
+            later_runtimes.push(issue_leaf(
+                directory,
+                &ca_config,
+                &ca_pem,
+                &ca_key,
+                &not_before,
+                &not_after,
+                LeafCertificateSpec {
+                    name: &format!("runtime-{generation}"),
+                    subject: &format!("/CN=cyrene-runtime-{generation}"),
+                    subject_alt_name: "DNS:runtime.test",
+                    extended_key_usage: "clientAuth",
+                },
+            )?);
+        }
         let (rogue_pem, rogue_key, _) = issue_leaf(
             directory,
             &ca_config,
@@ -663,6 +764,7 @@ impl Certificates {
             runtime_pem,
             runtime_key,
             runtime_der,
+            later_runtimes,
             rogue_pem,
             rogue_key,
         })
@@ -923,13 +1025,20 @@ fn runtime_config(
     state_dir: PathBuf,
     artifact_destination_root: PathBuf,
     marker: &str,
+    generation: u64,
 ) -> RuntimeAgentConfig {
+    let (certificate, key) = if generation == 1 {
+        (&certificates.runtime_pem, &certificates.runtime_key)
+    } else {
+        let (pem, key, _) = &certificates.later_runtimes[(generation - 2) as usize];
+        (pem, key)
+    };
     RuntimeAgentConfig {
         control_plane_endpoint: endpoint.to_string(),
         control_plane_server_name: CONTROL_SERVER_NAME.to_string(),
         control_plane_ca: certificates.ca_pem.clone(),
-        client_certificate: certificates.runtime_pem.clone(),
-        client_key: certificates.runtime_key.clone(),
+        client_certificate: certificate.clone(),
+        client_key: key.clone(),
         artifact_ca: certificates.ca_pem.clone(),
         artifact_ticket_key: None,
         organization_id: ORGANIZATION_ID.to_string(),
@@ -939,10 +1048,14 @@ fn runtime_config(
         persistent: false,
         runtime: semantic::Identity {
             id: RUNTIME_ID.to_string(),
-            generation: 1,
+            generation,
         },
         agent_version: "mtls-runtime-tck".to_string(),
-        enrollment_proof: "mtls-runtime-enrollment".to_string(),
+        enrollment_proof: if generation == 1 {
+            "mtls-runtime-enrollment".into()
+        } else {
+            format!("mtls-runtime-enrollment-{generation}")
+        },
         resume_token: String::new(),
         state_dir,
         artifact_destination_root,
@@ -951,7 +1064,11 @@ fn runtime_config(
         workload: vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            format!("printf '{marker}\\n'; exit 0"),
+            if marker == "CYRENE_REJECTION_RECOVERY_WORKLOAD" {
+                format!("printf '{marker}\\n'; sleep 30")
+            } else {
+                format!("printf '{marker}\\n'; exit 0")
+            },
         ],
     }
 }
@@ -959,6 +1076,94 @@ fn runtime_config(
 fn spawn_runtime_agent(
     config: RuntimeAgentConfig,
 ) -> tokio::task::JoinHandle<Result<(), cy_runtime_agent::RuntimeAgentError>> {
+    if let Some(binary) = std::env::var_os("CYRENE_RUNTIME_AGENT_TEST_BINARY") {
+        return tokio::spawn(async move {
+            use cy_runtime_agent::RuntimeAgentError;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let bootstrap = config
+                .state_dir
+                .parent()
+                .unwrap()
+                .join(format!("bootstrap-{}.env", uuid::Uuid::new_v4()));
+            let settings = [
+                (
+                    "CYRENE_CONTROL_PLANE_ENDPOINT",
+                    config.control_plane_endpoint,
+                ),
+                (
+                    "CYRENE_CONTROL_PLANE_SERVER_NAME",
+                    config.control_plane_server_name,
+                ),
+                (
+                    "CYRENE_CONTROL_PLANE_CA",
+                    config.control_plane_ca.display().to_string(),
+                ),
+                (
+                    "CYRENE_AGENT_CLIENT_CERT",
+                    config.client_certificate.display().to_string(),
+                ),
+                (
+                    "CYRENE_AGENT_CLIENT_KEY",
+                    config.client_key.display().to_string(),
+                ),
+                (
+                    "CYRENE_ARTIFACT_CA",
+                    config.artifact_ca.display().to_string(),
+                ),
+                ("CYRENE_ORGANIZATION_ID", config.organization_id),
+                ("CYRENE_WORKSPACE_ID", config.workspace_id),
+                ("CYRENE_NODE_ID", config.node.node_id),
+                ("CYRENE_NODE_EPOCH", config.node.node_epoch.to_string()),
+                ("CYRENE_NODE_TYPE", config.node_type),
+                ("CYRENE_NODE_PERSISTENT", config.persistent.to_string()),
+                ("CYRENE_RUNTIME_ID", config.runtime.id),
+                (
+                    "CYRENE_RUNTIME_GENERATION",
+                    config.runtime.generation.to_string(),
+                ),
+                ("CYRENE_ENROLLMENT_PROOF", config.enrollment_proof),
+                (
+                    "CYRENE_AGENT_STATE_DIR",
+                    config.state_dir.display().to_string(),
+                ),
+                (
+                    "CYRENE_ARTIFACT_ROOT",
+                    config.artifact_destination_root.display().to_string(),
+                ),
+            ];
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&bootstrap)
+                .map_err(|e| RuntimeAgentError::State(e.to_string()))?;
+            for (key, value) in settings {
+                writeln!(file, "{key}={value}")
+                    .map_err(|e| RuntimeAgentError::State(e.to_string()))?;
+            }
+            drop(file);
+            let output = tokio::process::Command::new(binary)
+                .env_clear()
+                .arg("run")
+                .arg("--bootstrap-file")
+                .arg(&bootstrap)
+                .arg("--")
+                .args(config.workload)
+                .kill_on_drop(true)
+                .output()
+                .await;
+            let _ = fs::remove_file(bootstrap);
+            let output = output.map_err(|e| RuntimeAgentError::Child(e.to_string()))?;
+            if !output.status.success() {
+                return Err(RuntimeAgentError::Child(format!(
+                    "Agent process failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            Ok(())
+        });
+    }
     // Poll the real Agent from a blocking-pool thread with only a Tokio handle
     // entered. This keeps cy-artifact-transfer's debug-only blocking client
     // guard outside an already-entered Tokio runtime while its async I/O and

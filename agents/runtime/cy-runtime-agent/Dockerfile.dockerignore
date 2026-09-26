@@ -1,0 +1,14 @@
+.git
+**/.git
+target
+**/target
+**/node_modules
+**/__pycache__
+**/.venv
+**/.env
+**/.env.*
+**/*.key
+**/*.pem
+**/*.p12
+**/sessions.json
+**/bootstrap.env

@@ -16,15 +16,15 @@ use cy_execution_fabric::{
 };
 use cy_kernel_api::{AuthorityCallContext, DEFAULT_NAMESPACE};
 use cy_kernel_contract as semantic;
-use cy_proto::core_v1::{self, AssignmentAckDisposition, NodeRef};
+use cy_proto::core_v1::{self, AssignmentAckDisposition, NodeRef, RuntimeObservation};
 use thiserror::Error;
 
 use crate::intent::{
     ExecutionIntentRecord, ExecutionIntentStore, IntentDisposition, IntentStoreError,
     IntentStoreErrorKind,
 };
-use crate::server::{LeaseAcquisition, RouteSnapshot};
-use crate::ExecutionControlService;
+use crate::server::{HostRouteSnapshot, LeaseAcquisition};
+use crate::{ExecutionControlService, RuntimeLauncher};
 
 /// Stable control-plane failure with explicit unknown-outcome classification.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -107,6 +107,31 @@ pub struct ExecutionReleaseRequest {
     pub context: AuthorityCallContext,
 }
 
+/// Exact correlation and shutdown policy for one accepted assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionStopRequest {
+    pub assignment_id: String,
+    pub command_id: String,
+    pub grace_period: Duration,
+    pub reason_code: String,
+}
+
+/// Whether the Runtime accepted this command or terminal evidence already made
+/// the requested outcome true before command delivery completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopDisposition {
+    Accepted,
+    AlreadyTerminal,
+}
+
+/// Stop-command acknowledgement. `Accepted` is not terminal completion;
+/// callers must await durable terminal evidence before releasing authority.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StopReceipt {
+    pub disposition: StopDisposition,
+    pub terminal_observation: Option<RuntimeObservation>,
+}
+
 /// Product-neutral orchestrator over the one canonical NodeControl service.
 #[derive(Clone)]
 pub struct ExecutionController {
@@ -164,7 +189,195 @@ impl ExecutionController {
     /// resulting immutable assignment to the authenticated Runtime generation.
     pub async fn dispatch(
         &self,
+        request: ExecutionDispatchRequest,
+    ) -> Result<DispatchReceipt, DispatchError> {
+        self.dispatch_inner(request, None).await
+    }
+
+    /// Acquire and durably correlate one Lease before launching an initially
+    /// offline Runtime. Authentication and assignment delivery use that Lease.
+    pub async fn dispatch_with_launcher(
+        &self,
+        request: ExecutionDispatchRequest,
+        launcher: &dyn RuntimeLauncher,
+    ) -> Result<DispatchReceipt, DispatchError> {
+        self.dispatch_inner(request, Some(launcher)).await
+    }
+
+    /// Reconcile the exact Runtime generation and canonical Lease retained by
+    /// an earlier unknown launch or assignment delivery. This path never calls
+    /// AcquireLease and never selects a replacement Node. The caller must first
+    /// read the still-active Lease from Kernel authority and supply that exact
+    /// observation; the durable intent record only stores correlation evidence.
+    pub async fn reconcile_with_launcher(
+        &self,
         mut request: ExecutionDispatchRequest,
+        lease: semantic::Lease,
+        launcher: &dyn RuntimeLauncher,
+    ) -> Result<DispatchReceipt, DispatchError> {
+        let now = now_unix_ms();
+        request.placement.now_unix_ms = now;
+        validate_request(&request, now)?;
+        request.assignment.validate(now)?;
+        lease.validate().map_err(|error| {
+            DispatchError::input(
+                error.reason_code,
+                format!("invalid reconciliation Lease: {}", error.message),
+            )
+        })?;
+
+        let target = place_execution_target(&request.placement, &request.candidates)?;
+        request
+            .assignment
+            .validate_artifact_projection(&request.placement, target)?;
+        let node = target.node.clone();
+        let runtime = request.assignment.runtime().clone();
+        let assignment_id = request.assignment.assignment_id().to_string();
+        let mut intent = self.intent_record(&assignment_id)?.ok_or_else(|| {
+            DispatchError::input(
+                "EXECUTION_INTENT_NOT_FOUND",
+                "reconciliation requires the original durable execution intent",
+            )
+        })?;
+        if intent.payload_digest() != request.intent_payload_digest {
+            return Err(DispatchError::input(
+                "EXECUTION_INTENT_PAYLOAD_MISMATCH",
+                "reconciliation request does not match the immutable intent digest",
+            ));
+        }
+        if intent.disposition() != IntentDisposition::UnknownRequiresReconciliation {
+            return Err(DispatchError::input(
+                "EXECUTION_INTENT_NOT_RECONCILABLE",
+                "only an unknown execution intent can enter launch reconciliation",
+            ));
+        }
+        if !intent.matches_authority(&node, &lease) {
+            return Err(DispatchError::input(
+                "RECONCILIATION_AUTHORITY_MISMATCH",
+                "the observed Node or Lease does not match durable authority evidence",
+            ));
+        }
+        if lease
+            .expires_at_unix_ms
+            .is_some_and(|expires_at| expires_at <= now)
+        {
+            return Err(DispatchError::unknown(
+                "the original Lease expired; fence the old execution before creating a new generation",
+            ));
+        }
+        let assignment = request.assignment.build(&lease, now)?;
+        let _host_route = self.service.snapshot_host_route(&node).map_err(|_| {
+            DispatchError::unknown(
+                "the original Node route is unavailable; retain the intent until authority can be reconciled",
+            )
+        })?;
+
+        tokio::time::timeout(
+            self.response_timeout,
+            launcher.reconcile(&node, &assignment, &lease),
+        )
+        .await
+        .map_err(|_| DispatchError::unknown("Runtime launch reconciliation timed out"))?
+        .map_err(|_| {
+            DispatchError::unknown(
+                "the original Runtime instance was not confirmed; no replacement was created",
+            )
+        })?;
+
+        let deadline = tokio::time::Instant::now() + self.response_timeout;
+        let route = loop {
+            match self.service.snapshot_route(&node, &runtime) {
+                Ok(route) => {
+                    let session = self.service.runtime_session_on_route(&route).map_err(|_| {
+                        DispatchError::unknown(
+                            "the reconnected Runtime session could not be verified",
+                        )
+                    })?;
+                    validate_workload_scope(&request.assignment, &session).map_err(|_| {
+                        DispatchError::unknown(
+                            "the reconnected Runtime scope does not match the original workload",
+                        )
+                    })?;
+                    break route;
+                }
+                Err(error)
+                    if error.reason_code == "RUNTIME_SESSION_UNAVAILABLE"
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(_) => {
+                    return Err(DispatchError::unknown(
+                        "the original Runtime did not authenticate during reconciliation",
+                    ));
+                }
+            }
+        };
+
+        intent = self
+            .transition_intent(
+                &intent,
+                IntentDisposition::AssignmentDispatching,
+                Some((&node, &lease)),
+                now_unix_ms(),
+            )
+            .map_err(|error| store_error(error, true))?;
+        let ack = match self
+            .service
+            .dispatch_assignment_on_route(&route.runtime, assignment.clone(), self.response_timeout)
+            .await
+        {
+            Ok(ack) => ack,
+            Err(error) => {
+                let _ = self.transition_intent(
+                    &intent,
+                    IntentDisposition::UnknownRequiresReconciliation,
+                    None,
+                    now_unix_ms(),
+                );
+                return Err(DispatchError::unknown(format!(
+                    "reconciled assignment delivery remains unknown: {error}"
+                )));
+            }
+        };
+        let disposition = AssignmentAckDisposition::try_from(ack.disposition).map_err(|_| {
+            let _ = self.transition_intent(
+                &intent,
+                IntentDisposition::UnknownRequiresReconciliation,
+                None,
+                now_unix_ms(),
+            );
+            DispatchError::unknown("Runtime returned an unknown reconciliation disposition")
+        })?;
+        match disposition {
+            AssignmentAckDisposition::Accepted | AssignmentAckDisposition::Duplicate => {
+                self.transition_intent(&intent, IntentDisposition::Completed, None, now_unix_ms())
+                    .map_err(|error| store_error(error, true))?;
+                Ok(DispatchReceipt {
+                    node,
+                    assignment,
+                    lease,
+                    ack_disposition: disposition,
+                })
+            }
+            AssignmentAckDisposition::Rejected | AssignmentAckDisposition::Unspecified => {
+                let _ = self.transition_intent(
+                    &intent,
+                    IntentDisposition::UnknownRequiresReconciliation,
+                    None,
+                    now_unix_ms(),
+                );
+                Err(DispatchError::unknown(
+                    "Runtime did not confirm the original assignment; fence it before retrying",
+                ))
+            }
+        }
+    }
+
+    async fn dispatch_inner(
+        &self,
+        mut request: ExecutionDispatchRequest,
+        launcher: Option<&dyn RuntimeLauncher>,
     ) -> Result<DispatchReceipt, DispatchError> {
         let placement_time = now_unix_ms();
         request.placement.now_unix_ms = placement_time;
@@ -177,9 +390,18 @@ impl ExecutionController {
             .validate_artifact_projection(&request.placement, target)?;
         let target_node = target.node.clone();
         let runtime = request.assignment.runtime().clone();
-        let route = self.service.snapshot_route(&target_node, &runtime)?;
-        let runtime_session = self.service.runtime_session_on_route(&route)?;
-        validate_workload_scope(&request.assignment, &runtime_session)?;
+        let initial_route = if launcher.is_none() {
+            let route = self.service.snapshot_route(&target_node, &runtime)?;
+            let runtime_session = self.service.runtime_session_on_route(&route)?;
+            validate_workload_scope(&request.assignment, &runtime_session)?;
+            Some(route)
+        } else {
+            None
+        };
+        let host_route = match &initial_route {
+            Some(route) => route.host.clone(),
+            None => self.service.snapshot_host_route(&target_node)?,
+        };
 
         let assignment_id = request.assignment.assignment_id().to_string();
         let mut intent = self.begin_intent(
@@ -187,21 +409,27 @@ impl ExecutionController {
             &request.intent_payload_digest,
             placement_time,
         )?;
-        let acquired = self
-            .service
-            .acquire_lease_on_route(
-                &route,
-                LeaseAcquisition {
-                    node: &target_node,
-                    command_id: &request.acquire_command_id,
-                    context: &request.acquire_context,
-                    holder: &runtime,
-                    query: &request.placement.resource_query,
-                    ttl: request.lease_ttl,
-                    response_timeout: self.response_timeout,
-                },
-            )
-            .await;
+        let acquisition = LeaseAcquisition {
+            node: &target_node,
+            command_id: &request.acquire_command_id,
+            context: &request.acquire_context,
+            holder: &runtime,
+            query: &request.placement.resource_query,
+            ttl: request.lease_ttl,
+            response_timeout: self.response_timeout,
+        };
+        let acquired = match &initial_route {
+            Some(route) => {
+                self.service
+                    .acquire_lease_on_route(route, acquisition)
+                    .await
+            }
+            None => {
+                self.service
+                    .acquire_lease_on_host_route(&host_route, acquisition)
+                    .await
+            }
+        };
         let lease_proto = match acquired {
             Ok(lease) => lease,
             Err(error) => {
@@ -246,7 +474,7 @@ impl ExecutionController {
             Err(error) => {
                 return self
                     .rollback_after_known_lease(
-                        &route,
+                        &host_route,
                         &target_node,
                         &request,
                         intent,
@@ -270,7 +498,7 @@ impl ExecutionController {
         {
             return self
                 .rollback_after_known_lease(
-                    &route,
+                    &host_route,
                     &target_node,
                     &request,
                     intent,
@@ -291,7 +519,7 @@ impl ExecutionController {
             Ok(_) => {
                 return self
                     .rollback_after_known_lease(
-                        &route,
+                        &host_route,
                         &target_node,
                         &request,
                         intent,
@@ -306,7 +534,7 @@ impl ExecutionController {
             Err(error) => {
                 return self
                     .rollback_after_known_lease(
-                        &route,
+                        &host_route,
                         &target_node,
                         &request,
                         intent,
@@ -322,7 +550,7 @@ impl ExecutionController {
         {
             return self
                 .rollback_after_known_lease(
-                    &route,
+                    &host_route,
                     &target_node,
                     &request,
                     intent,
@@ -336,7 +564,7 @@ impl ExecutionController {
             Err(error) => {
                 return self
                     .rollback_after_known_lease(
-                        &route,
+                        &host_route,
                         &target_node,
                         &request,
                         intent,
@@ -344,6 +572,81 @@ impl ExecutionController {
                         error.into(),
                     )
                     .await;
+            }
+        };
+        let route = match initial_route {
+            Some(route) => route,
+            None => {
+                let launch = tokio::time::timeout(
+                    self.response_timeout,
+                    launcher
+                        .expect("launcher required for offline Runtime")
+                        .launch(&target_node, &assignment, &lease),
+                )
+                .await
+                .unwrap_or_else(|_| Err(DispatchError::unknown("Provider launch timed out")));
+                if let Err(error) = launch {
+                    if !error.reconciliation_required {
+                        return self
+                            .rollback_after_known_lease(
+                                &host_route,
+                                &target_node,
+                                &request,
+                                intent,
+                                lease,
+                                error,
+                            )
+                            .await;
+                    }
+                    let _ = self.transition_intent(
+                        &intent,
+                        IntentDisposition::UnknownRequiresReconciliation,
+                        None,
+                        now_unix_ms(),
+                    );
+                    return Err(DispatchError::unknown("Provider launch outcome is unknown; retain the original Lease and reconcile the same Runtime generation"));
+                }
+                let deadline = tokio::time::Instant::now() + self.response_timeout;
+                loop {
+                    match self.service.snapshot_route(&target_node, &runtime) {
+                        Ok(route) => {
+                            let scope =
+                                self.service
+                                    .runtime_session_on_route(&route)
+                                    .and_then(|session| {
+                                        validate_workload_scope(&request.assignment, &session)
+                                    });
+                            if let Err(error) = scope {
+                                return self
+                                    .rollback_after_known_lease(
+                                        &host_route,
+                                        &target_node,
+                                        &request,
+                                        intent,
+                                        lease,
+                                        error,
+                                    )
+                                    .await;
+                            }
+                            break route;
+                        }
+                        Err(error)
+                            if error.reason_code == "RUNTIME_SESSION_UNAVAILABLE"
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                        Err(_) => {
+                            let _ = self.transition_intent(
+                                &intent,
+                                IntentDisposition::UnknownRequiresReconciliation,
+                                None,
+                                now_unix_ms(),
+                            );
+                            return Err(DispatchError::unknown("Launched Runtime has not authenticated on the selected Node; reconcile before acquiring another Lease"));
+                        }
+                    }
+                }
             }
         };
         intent = match self.transition_intent(
@@ -356,7 +659,7 @@ impl ExecutionController {
             Err(error) => {
                 return self
                     .rollback_after_known_lease(
-                        &route,
+                        &host_route,
                         &target_node,
                         &request,
                         intent,
@@ -376,7 +679,7 @@ impl ExecutionController {
             Err(error) if !error.reconciliation_required => {
                 return self
                     .rollback_after_known_lease(
-                        &route,
+                        &host_route,
                         &target_node,
                         &request,
                         intent,
@@ -435,7 +738,7 @@ impl ExecutionController {
                             .to_string(),
                     });
                 self.rollback_after_known_lease(
-                    &route,
+                    &host_route,
                     &target_node,
                     &request,
                     intent,
@@ -443,6 +746,101 @@ impl ExecutionController {
                     DispatchError::input(rejection.reason_code, rejection.message),
                 )
                 .await
+            }
+        }
+    }
+
+    /// Return terminal evidence that the control service durably accepted for
+    /// an assignment. Product state remains owned by the caller.
+    pub fn terminal_observation(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<RuntimeObservation>, DispatchError> {
+        self.service.terminal_observation(assignment_id)
+    }
+
+    /// Await durable terminal evidence for an assignment. This does not rely
+    /// on a caller retaining the service's best-effort observation broadcast.
+    pub async fn wait_terminal_observation(
+        &self,
+        assignment_id: &str,
+        timeout: Duration,
+    ) -> Result<RuntimeObservation, DispatchError> {
+        self.service
+            .wait_terminal_observation(assignment_id, timeout)
+            .await
+    }
+
+    /// Ask the authenticated Runtime generation that accepted an assignment
+    /// to stop it gracefully. A successful receipt only confirms command
+    /// acceptance; terminal evidence must be awaited before Lease release.
+    pub async fn stop(&self, request: ExecutionStopRequest) -> Result<StopReceipt, DispatchError> {
+        validate_stop_request(&request)?;
+        if let Some(observation) = self.terminal_observation(&request.assignment_id)? {
+            return Ok(StopReceipt {
+                disposition: StopDisposition::AlreadyTerminal,
+                terminal_observation: Some(observation),
+            });
+        }
+        let intent = self.intent_record(&request.assignment_id)?.ok_or_else(|| {
+            DispatchError::input(
+                "EXECUTION_INTENT_NOT_FOUND",
+                "stop requires a durable completed execution intent",
+            )
+        })?;
+        if intent.disposition() != IntentDisposition::Completed {
+            return Err(match intent.disposition() {
+                IntentDisposition::UnknownRequiresReconciliation => DispatchError::unknown(
+                    "cannot stop an assignment whose prior outcome requires reconciliation",
+                ),
+                _ => DispatchError::input(
+                    "EXECUTION_INTENT_NOT_STOPPABLE",
+                    "only a completed dispatch can receive a stop command",
+                ),
+            });
+        }
+        match self
+            .service
+            .stop_assignment(
+                &request.assignment_id,
+                &request.command_id,
+                request.grace_period,
+                &request.reason_code,
+                self.response_timeout,
+            )
+            .await
+        {
+            Ok(ack)
+                if ack.command_id == request.command_id
+                    && ack.runtime.is_some()
+                    && ack.accepted_at.is_some() =>
+            {
+                Ok(StopReceipt {
+                    disposition: StopDisposition::Accepted,
+                    terminal_observation: None,
+                })
+            }
+            Ok(_) => {
+                if let Some(observation) = self.terminal_observation(&request.assignment_id)? {
+                    Ok(StopReceipt {
+                        disposition: StopDisposition::AlreadyTerminal,
+                        terminal_observation: Some(observation),
+                    })
+                } else {
+                    Err(DispatchError::unknown(
+                        "Runtime returned an invalid StopAck; reconcile durable terminal evidence",
+                    ))
+                }
+            }
+            Err(error) => {
+                if let Some(observation) = self.terminal_observation(&request.assignment_id)? {
+                    Ok(StopReceipt {
+                        disposition: StopDisposition::AlreadyTerminal,
+                        terminal_observation: Some(observation),
+                    })
+                } else {
+                    Err(error)
+                }
             }
         }
     }
@@ -585,7 +983,7 @@ impl ExecutionController {
 
     async fn rollback_after_known_lease(
         &self,
-        route: &RouteSnapshot,
+        route: &HostRouteSnapshot,
         node: &NodeRef,
         request: &ExecutionDispatchRequest,
         intent: ExecutionIntentRecord,
@@ -595,7 +993,7 @@ impl ExecutionController {
         let first_release = self
             .service
             .release_lease_on_route(
-                &route.host,
+                route,
                 &lease,
                 &request.release_command_id,
                 &request.release_context,
@@ -677,6 +1075,39 @@ fn store_error(error: IntentStoreError, external_effect_possible: bool) -> Dispa
         IntentStoreErrorKind::Persistence => "INTENT_STORE_UNAVAILABLE",
     };
     DispatchError::transient(reason_code, error.message)
+}
+
+fn validate_stop_request(request: &ExecutionStopRequest) -> Result<(), DispatchError> {
+    if request.assignment_id.is_empty() || request.assignment_id.len() > 256 {
+        return Err(DispatchError::input(
+            "STOP_ASSIGNMENT_ID_INVALID",
+            "stop assignment id must contain 1 to 256 bytes",
+        ));
+    }
+    if request.command_id.is_empty() || request.command_id.len() > 256 {
+        return Err(DispatchError::input(
+            "STOP_COMMAND_ID_INVALID",
+            "stop command id must contain 1 to 256 bytes",
+        ));
+    }
+    if request.grace_period.is_zero() || request.grace_period > Duration::from_secs(60 * 60) {
+        return Err(DispatchError::input(
+            "STOP_GRACE_PERIOD_INVALID",
+            "stop grace period must be positive and at most one hour",
+        ));
+    }
+    if request.reason_code.is_empty()
+        || request.reason_code.len() > 128
+        || !request.reason_code.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || b"_.-".contains(&byte)
+        })
+    {
+        return Err(DispatchError::input(
+            "STOP_REASON_CODE_INVALID",
+            "stop reason code must contain 1 to 128 uppercase ASCII letters, digits, '_', '.', or '-'",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_request(

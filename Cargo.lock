@@ -484,6 +484,7 @@ dependencies = [
  "cy-kernel-contract",
  "cy-proto",
  "nix",
+ "prost",
  "prost-types",
  "rustix",
  "serde",

@@ -20,13 +20,26 @@ struct PendingFrame {
     body: node_to_control_plane::Body,
 }
 
-/// In-memory bounded outbox. Artifact checkpoints provide restart durability.
-#[derive(Default)]
+/// In-memory reconnect outbox. The journal separately preserves terminal facts;
+/// ordinary pending logs/progress are not recovered across an Agent restart.
 pub(crate) struct AgentOutbox {
+    incarnation: String,
     pending: VecDeque<PendingFrame>,
     sent_by_sequence: BTreeMap<u64, String>,
     next_frame_id: u64,
     next_sequence: u64,
+}
+
+impl Default for AgentOutbox {
+    fn default() -> Self {
+        Self {
+            incarnation: uuid::Uuid::new_v4().to_string(),
+            pending: VecDeque::new(),
+            sent_by_sequence: BTreeMap::new(),
+            next_frame_id: 0,
+            next_sequence: 0,
+        }
+    }
 }
 
 impl AgentOutbox {
@@ -40,7 +53,10 @@ impl AgentOutbox {
         }
         self.next_frame_id += 1;
         self.pending.push_back(PendingFrame {
-            frame_id: format!("{runtime_id}-observation-{}", self.next_frame_id),
+            frame_id: format!(
+                "{runtime_id}-{}-observation-{}",
+                self.incarnation, self.next_frame_id
+            ),
             body,
         });
         Ok(())
@@ -90,6 +106,25 @@ mod tests {
     use cy_proto::core_v1::{node_to_control_plane, RuntimeProgress};
 
     use super::*;
+
+    #[test]
+    fn new_agent_incarnation_does_not_reuse_old_frame_ids() {
+        let mut first = AgentOutbox::default();
+        let mut second = AgentOutbox::default();
+        for outbox in [&mut first, &mut second] {
+            outbox
+                .enqueue(
+                    "runtime-1",
+                    node_to_control_plane::Body::RuntimeProgress(RuntimeProgress::default()),
+                )
+                .unwrap();
+            outbox.begin_session();
+        }
+        assert_ne!(
+            first.unsent_frames("session", 1)[0].frame_id,
+            second.unsent_frames("session", 1)[0].frame_id
+        );
+    }
 
     #[test]
     fn unacknowledged_frame_replays_in_a_new_session() {

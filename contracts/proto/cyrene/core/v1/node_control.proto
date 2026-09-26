@@ -310,6 +310,10 @@ message RuntimeObservation {
   google.protobuf.Timestamp observed_at = 6;
   cyrene.semantic.v1.Worker worker = 7;
   cyrene.semantic.v1.Operation operation = 8;
+  // Correlates durable terminal evidence with the immutable assignment.
+  string assignment_id = 9;
+  // Product attempt identity copied from RuntimeAssignment.
+  string attempt_id = 10;
 }
 
 message RuntimeProgress {
