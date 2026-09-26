@@ -142,16 +142,19 @@ Operation 01–12 编译封闭 owner request/path/response schema。Operation 13
 
 ## Deployment gates
 
-There is intentionally no default server, fake verifier, in-memory production
-Directory, or 401/503 placeholder host. The current deployment still needs a
-trusted same-origin ingress route, token-store access token and API scope,
-production OIDC verifier configuration, an unambiguous server-side identity to
-organization mapping, durable Workspace membership, owner OpenAPI validators,
-and an authenticated Workspace Product gateway. The host must not bind a
-public listener until it can compose these real providers and restrict network
-reachability to the trusted ingress.
+The `cy-workspace-web-bff` executable currently binds `0.0.0.0:8080` and exposes
+only `GET /healthz` (liveness) and `GET /readyz` (always 503). It does not mount
+the authenticated application router and is not deployable as a working BFF.
+The production host still needs a trusted same-origin ingress route, token-store
+access token and API scope, production OIDC verifier configuration, an
+unambiguous server-side identity-to-organization mapping, durable Workspace
+membership, the pinned owner OpenAPI bundle, and an authenticated per-principal
+Workspace Relay transport. Do not enable public ingress; the eventual ACA app
+must use internal ingress and must remain unready until these providers are
+composed.
 
-当前没有默认 server、fake verifier、生产 in-memory Directory 或只返回 401/503 的 placeholder host。当前部署仍需可信同源
-ingress route、token-store access token 与 API scope、生产 OIDC verifier 配置、唯一的服务端 identity→organization mapping、
-durable Workspace membership、owner OpenAPI validator 与 authenticated Workspace Product gateway。只有这些真实 provider
-全部可装配，且网络入口限制为可信 ingress 后，host 才可监听。
+`cy-workspace-web-bff` executable 当前绑定 `0.0.0.0:8080`，只提供 `GET /healthz`（存活）与始终返回 503 的
+`GET /readyz`（就绪）；不会挂载已认证应用 router，因此尚不能作为可用 BFF 部署。生产 host 仍需可信同源 ingress、token-store
+access token 与 API scope、生产 OIDC verifier、唯一的服务端 identity→organization mapping、durable Workspace membership、
+锁定来源的 owner OpenAPI bundle，以及按 principal 隔离的认证 Workspace Relay transport。不得启用 public ingress；最终 ACA app
+必须使用 internal ingress，并在全部 provider 装配完成前保持未就绪。
