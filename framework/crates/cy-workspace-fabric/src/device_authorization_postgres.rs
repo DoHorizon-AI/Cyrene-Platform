@@ -23,7 +23,9 @@ use thiserror::Error;
 use crate::device_authorization::{
     DeviceAuthorizationCodeHash, DeviceAuthorizationId, DeviceAuthorizationRecord,
     DeviceAuthorizationScope, DeviceAuthorizationState, DeviceAuthorizationStore,
-    DeviceAuthorizationStoreError, IssuedDeviceCertificate,
+    DeviceAuthorizationStoreError, DeviceCertificateDeliveryReceipt,
+    DeviceCertificateIssuanceFailure, DeviceCertificateRetirementError,
+    DeviceCertificateRetirementReason, IssuedDeviceCertificate,
 };
 use crate::VersionedUserCodeDigest;
 
@@ -41,6 +43,10 @@ const MAX_WEBAUTHN_STATE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_OPTIONS_BYTES: usize = 1024 * 1024;
 const MAX_CERTIFICATE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERIAL_NUMBER_BYTES: usize = 256;
+const MAX_CA_CHAIN_CERTIFICATES: usize = 8;
+// Vec<u8> JSON encoding can expand each DER byte to four characters. Keep the
+// bundle below the database payload limit with room for the typed state fields.
+const MAX_CERTIFICATE_BUNDLE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_STATE_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations/device_authorization");
@@ -48,7 +54,8 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations/device_authorization");
 const SELECT_COLUMNS: &str =
     "id, device_code_hash, user_code_key_version, user_code_mac, organization_id, workspace_id, \
      csr_der, csr_sha256, spki_sha256, created_at_unix_ms, expires_at_unix_ms, \
-     poll_interval_ms, last_poll_at_unix_ms, revision, state_kind, approval_id, state_payload";
+     poll_interval_ms, last_poll_at_unix_ms, revision, state_kind, approval_id, \
+     state_deadline_unix_ms, state_payload";
 
 type StoreResult<T> = Result<T, DeviceAuthorizationStoreError>;
 type StoreReply<T> = SyncSender<StoreResult<T>>;
@@ -129,6 +136,34 @@ impl PostgresDeviceAuthorizationStore {
     ) -> StoreResult<Vec<DeviceAuthorizationRecord>> {
         let (reply, result) = mpsc::sync_channel(1);
         self.call(Command::RecoverableIssuances(limit, reply), result)
+    }
+
+    /// Return a bounded page of certificate deliveries whose ACK deadline passed.
+    ///
+    /// This is an advisory recovery scan. A worker must still re-read the row
+    /// and use trusted current time before attempting certificate retirement.
+    pub fn due_certificate_deliveries(
+        &self,
+        now_unix_ms: u64,
+        limit: usize,
+    ) -> StoreResult<Vec<DeviceAuthorizationRecord>> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::DueCertificateDeliveries(now_unix_ms, limit, reply),
+            result,
+        )
+    }
+
+    /// Return a bounded page of unresolved certificate retirement records.
+    ///
+    /// A worker must retry the idempotent retirement operation with the
+    /// authorization ID and certificate fingerprint from each record.
+    pub fn recoverable_retirements(
+        &self,
+        limit: usize,
+    ) -> StoreResult<Vec<DeviceAuthorizationRecord>> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(Command::RecoverableRetirements(limit, reply), result)
     }
 
     fn start(
@@ -257,6 +292,18 @@ impl DeviceAuthorizationStore for PostgresDeviceAuthorizationStore {
             result,
         )
     }
+
+    fn compare_and_swap_delivery_ack(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> StoreResult<()> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::CompareAndSwapDeliveryAck(expected_revision, replacement, reply),
+            result,
+        )
+    }
 }
 
 enum Command {
@@ -275,8 +322,11 @@ enum Command {
         StoreReply<Option<DeviceAuthorizationRecord>>,
     ),
     CompareAndSwap(u64, DeviceAuthorizationRecord, StoreReply<()>),
+    CompareAndSwapDeliveryAck(u64, DeviceAuthorizationRecord, StoreReply<()>),
     ExpiredRecords(u64, usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
     RecoverableIssuances(usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
+    DueCertificateDeliveries(u64, usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
+    RecoverableRetirements(usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
 }
 
 fn worker_main(
@@ -333,14 +383,32 @@ fn worker_main(
                 let _ = reply.send(runtime.block_on(by_approval_id(&pool, &approval_id)));
             }
             Command::CompareAndSwap(expected, replacement, reply) => {
-                let _ =
-                    reply.send(runtime.block_on(compare_and_swap(&pool, expected, &replacement)));
+                let _ = reply.send(runtime.block_on(compare_and_swap(
+                    &pool,
+                    expected,
+                    &replacement,
+                    false,
+                )));
+            }
+            Command::CompareAndSwapDeliveryAck(expected, replacement, reply) => {
+                let _ = reply.send(runtime.block_on(compare_and_swap(
+                    &pool,
+                    expected,
+                    &replacement,
+                    true,
+                )));
             }
             Command::ExpiredRecords(now, limit, reply) => {
                 let _ = reply.send(runtime.block_on(expired_records(&pool, now, limit)));
             }
             Command::RecoverableIssuances(limit, reply) => {
                 let _ = reply.send(runtime.block_on(recoverable_issuances(&pool, limit)));
+            }
+            Command::DueCertificateDeliveries(now, limit, reply) => {
+                let _ = reply.send(runtime.block_on(due_certificate_deliveries(&pool, now, limit)));
+            }
+            Command::RecoverableRetirements(limit, reply) => {
+                let _ = reply.send(runtime.block_on(recoverable_retirements(&pool, limit)));
             }
         }
     }
@@ -374,10 +442,13 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
             .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?
             .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
     } else {
-        sqlx::query("SELECT id FROM cyrene_workspace_device_authorization.authorizations LIMIT 0")
-            .fetch_all(&pool)
-            .await
-            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        sqlx::query(
+            "SELECT state_deadline_unix_ms \
+             FROM cyrene_workspace_device_authorization.authorizations LIMIT 0",
+        )
+        .fetch_all(&pool)
+        .await
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
     }
     Ok(pool)
 }
@@ -386,7 +457,7 @@ async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> Sto
     let encoded = EncodedRecord::new(record)?;
     let result = sqlx::query(&format!(
         "INSERT INTO {TABLE} ({SELECT_COLUMNS}) VALUES \
-         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
+         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"
     ))
     .bind(encoded.id)
     .bind(encoded.device_code_hash)
@@ -404,6 +475,7 @@ async fn insert_record(pool: &PgPool, record: &DeviceAuthorizationRecord) -> Sto
     .bind(encoded.revision)
     .bind(encoded.state_kind)
     .bind(encoded.approval_id)
+    .bind(encoded.state_deadline_unix_ms)
     .bind(encoded.state_payload)
     .execute(pool)
     .await;
@@ -502,8 +574,28 @@ async fn expired_records(
     let rows = sqlx::query(&format!(
         "SELECT {SELECT_COLUMNS} FROM {TABLE} \
          WHERE expires_at_unix_ms <= $1 \
-           AND state_kind IN ('pending', 'awaiting_webauthn', 'verifying_webauthn', 'approved') \
+           AND state_kind IN ('pending', 'awaiting_webauthn', 'verifying_webauthn') \
          ORDER BY expires_at_unix_ms, id LIMIT $2"
+    ))
+    .bind(now)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(map_database_error)?;
+    rows.into_iter().map(decode_record).collect()
+}
+
+async fn due_certificate_deliveries(
+    pool: &PgPool,
+    now_unix_ms: u64,
+    limit: usize,
+) -> StoreResult<Vec<DeviceAuthorizationRecord>> {
+    let now = i64::try_from(now_unix_ms).map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let limit = bounded_limit(limit)?;
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM {TABLE} \
+         WHERE state_kind = 'delivery_pending' AND state_deadline_unix_ms <= $1 \
+         ORDER BY state_deadline_unix_ms, id LIMIT $2"
     ))
     .bind(now)
     .bind(limit)
@@ -530,6 +622,23 @@ async fn recoverable_issuances(
     rows.into_iter().map(decode_record).collect()
 }
 
+async fn recoverable_retirements(
+    pool: &PgPool,
+    limit: usize,
+) -> StoreResult<Vec<DeviceAuthorizationRecord>> {
+    let limit = bounded_limit(limit)?;
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM {TABLE} \
+         WHERE state_kind = 'retirement_pending' \
+         ORDER BY created_at_unix_ms, id LIMIT $1"
+    ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(map_database_error)?;
+    rows.into_iter().map(decode_record).collect()
+}
+
 fn bounded_limit(limit: usize) -> StoreResult<i64> {
     if !(1..=MAX_SCAN_LIMIT).contains(&limit) {
         return Err(DeviceAuthorizationStoreError::Unavailable);
@@ -541,6 +650,7 @@ async fn compare_and_swap(
     pool: &PgPool,
     expected_revision: u64,
     replacement: &DeviceAuthorizationRecord,
+    delivery_ack: bool,
 ) -> StoreResult<()> {
     let Some(next_revision) = expected_revision.checked_add(1) else {
         return Err(DeviceAuthorizationStoreError::Conflict);
@@ -562,13 +672,31 @@ async fn compare_and_swap(
     if current.revision != expected_revision || !same_immutable_fields(&current, replacement) {
         return Err(DeviceAuthorizationStoreError::Conflict);
     }
+    if delivery_ack {
+        if !valid_delivery_ack_transition(&current, replacement) {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+    } else if matches!(
+        replacement.state,
+        DeviceAuthorizationState::Delivered { .. }
+    ) {
+        // This transition has a database-time deadline guard and must use the
+        // dedicated ACK method below.
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
 
     let encoded = EncodedRecord::new(replacement)?;
+    let deadline_guard = if delivery_ack {
+        " AND state_kind = 'delivery_pending' \
+         AND state_deadline_unix_ms > FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"
+    } else {
+        ""
+    };
     let update = sqlx::query(&format!(
         "UPDATE {TABLE} SET \
          poll_interval_ms = $3, last_poll_at_unix_ms = $4, revision = $5, \
-         state_kind = $6, approval_id = $7, state_payload = $8 \
-         WHERE id = $1 AND revision = $2"
+         state_kind = $6, approval_id = $7, state_deadline_unix_ms = $8, state_payload = $9 \
+         WHERE id = $1 AND revision = $2{deadline_guard}"
     ))
     .bind(encoded.id)
     .bind(i64::try_from(expected_revision).map_err(|_| DeviceAuthorizationStoreError::Conflict)?)
@@ -577,6 +705,7 @@ async fn compare_and_swap(
     .bind(encoded.revision)
     .bind(encoded.state_kind)
     .bind(encoded.approval_id)
+    .bind(encoded.state_deadline_unix_ms)
     .bind(encoded.state_payload)
     .execute(&mut *transaction)
     .await
@@ -585,6 +714,37 @@ async fn compare_and_swap(
         return Err(DeviceAuthorizationStoreError::Conflict);
     }
     transaction.commit().await.map_err(map_database_error)
+}
+
+fn valid_delivery_ack_transition(
+    current: &DeviceAuthorizationRecord,
+    replacement: &DeviceAuthorizationRecord,
+) -> bool {
+    match (&current.state, &replacement.state) {
+        (
+            DeviceAuthorizationState::DeliveryPending {
+                approval_id: current_approval_id,
+                delivery_id: current_delivery_id,
+                certificate_sha256: current_certificate_sha256,
+                delivery_deadline_unix_ms,
+                ..
+            },
+            DeviceAuthorizationState::Delivered {
+                approval_id: next_approval_id,
+                receipt,
+            },
+        ) => {
+            current_approval_id == next_approval_id
+                && receipt.authorization_id == replacement.id
+                && current_delivery_id == &receipt.delivery_id
+                && current_certificate_sha256 == &receipt.certificate_sha256
+                && receipt.csr_sha256 == current.csr_sha256
+                && receipt.csr_spki_sha256 == current.spki_sha256
+                && receipt.acknowledged_at_unix_ms < *delivery_deadline_unix_ms
+                && to_i64(receipt.acknowledged_at_unix_ms).is_ok()
+        }
+        _ => false,
+    }
 }
 
 fn same_immutable_fields(
@@ -638,6 +798,7 @@ struct EncodedRecord {
     revision: i64,
     state_kind: &'static str,
     approval_id: Option<Vec<u8>>,
+    state_deadline_unix_ms: Option<i64>,
     state_payload: Vec<u8>,
 }
 
@@ -646,20 +807,27 @@ impl EncodedRecord {
         if record.csr_der.is_empty()
             || record.csr_der.len() > MAX_CSR_BYTES
             || sha256(&record.csr_der) != record.csr_sha256
-            || record.created_at_unix_ms > record.expires_at_unix_ms
+            || record.created_at_unix_ms >= record.expires_at_unix_ms
             || record.poll_interval_ms == 0
         {
             return Err(DeviceAuthorizationStoreError::Unavailable);
         }
         let (version, mac) = record.user_code_digest.storage_parts();
         let stored_state = StoredAuthorizationState::from_domain(&record.state);
-        if !stored_state.is_valid(&record.scope, &record.spki_sha256) {
+        if !stored_state.is_valid(
+            &record.scope,
+            &record.spki_sha256,
+            &record.id,
+            &record.csr_sha256,
+        ) {
             return Err(DeviceAuthorizationStoreError::Unavailable);
         }
         let state_kind = stored_state.kind();
         let approval_id = stored_state.approval_id().map(|id| id.to_vec());
+        let state_deadline_unix_ms = stored_state.deadline_unix_ms().map(to_i64).transpose()?;
+        let format_version = stored_state.format_version();
         let state_payload = serde_json::to_vec(&StoredState {
-            format_version: 1,
+            format_version,
             state: stored_state,
         })
         .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
@@ -684,6 +852,7 @@ impl EncodedRecord {
             revision: to_i64(record.revision)?,
             state_kind,
             approval_id,
+            state_deadline_unix_ms,
             state_payload,
         })
     }
@@ -726,23 +895,31 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
     let approval_id = get!("approval_id", Option<Vec<u8>>)
         .map(fixed::<16>)
         .transpose()?;
+    let state_deadline_unix_ms = get!("state_deadline_unix_ms", Option<i64>)
+        .map(from_i64)
+        .transpose()?;
     let state_payload: Vec<u8> = get!("state_payload", Vec<u8>);
     if state_payload.is_empty()
         || state_payload.len() > MAX_STATE_PAYLOAD_BYTES
         || csr_der.is_empty()
         || csr_der.len() > MAX_CSR_BYTES
         || sha256(&csr_der) != csr_sha256
-        || created_at_unix_ms > expires_at_unix_ms
+        || created_at_unix_ms >= expires_at_unix_ms
         || poll_interval_ms == 0
     {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
     let wrapper: StoredState = serde_json::from_slice(&state_payload)
         .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
-    if wrapper.format_version != 1
+    if !wrapper
+        .state
+        .supports_format_version(wrapper.format_version)
         || wrapper.state.kind() != state_kind
         || wrapper.state.approval_id() != approval_id
-        || !wrapper.state.is_valid(&scope, &spki_sha256)
+        || wrapper.state.deadline_unix_ms() != state_deadline_unix_ms
+        || !wrapper
+            .state
+            .is_valid(&scope, &spki_sha256, &id, &csr_sha256)
     {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
@@ -807,11 +984,41 @@ enum StoredAuthorizationState {
         approver: StoredIdentity,
         issued_at_unix_ms: u64,
     },
-    Approved {
+    DeliveryPending {
         approval_id: DeviceAuthorizationId,
         approver: StoredIdentity,
         decided_at_unix_ms: u64,
         certificate: StoredCertificate,
+        delivery_id: DeviceAuthorizationId,
+        certificate_sha256: [u8; 32],
+        delivery_deadline_unix_ms: u64,
+    },
+    Delivered {
+        approval_id: DeviceAuthorizationId,
+        receipt: StoredDeliveryReceipt,
+    },
+    RetirementPending {
+        approval_id: DeviceAuthorizationId,
+        approver: StoredIdentity,
+        certificate: StoredCertificate,
+        certificate_sha256: [u8; 32],
+        delivery_id: Option<DeviceAuthorizationId>,
+        reason: StoredRetirementReason,
+        entered_at_unix_ms: u64,
+        last_failure: Option<StoredRetirementError>,
+    },
+    DeliveryExpired {
+        approval_id: DeviceAuthorizationId,
+        delivery_id: DeviceAuthorizationId,
+        certificate_sha256: [u8; 32],
+        expired_at_unix_ms: u64,
+    },
+    IssuanceFailed {
+        approval_id: DeviceAuthorizationId,
+        approver: StoredIdentity,
+        failed_at_unix_ms: u64,
+        failure: StoredIssuanceFailure,
+        certificate_sha256: Option<[u8; 32]>,
     },
     Denied {
         approver: StoredIdentity,
@@ -823,6 +1030,138 @@ enum StoredAuthorizationState {
         consumed_at_unix_ms: u64,
     },
     Expired,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDeliveryReceipt {
+    authorization_id: DeviceAuthorizationId,
+    delivery_id: DeviceAuthorizationId,
+    certificate_sha256: [u8; 32],
+    csr_sha256: [u8; 32],
+    csr_spki_sha256: [u8; 32],
+    acknowledged_at_unix_ms: u64,
+}
+
+impl From<&DeviceCertificateDeliveryReceipt> for StoredDeliveryReceipt {
+    fn from(receipt: &DeviceCertificateDeliveryReceipt) -> Self {
+        Self {
+            authorization_id: receipt.authorization_id,
+            delivery_id: receipt.delivery_id,
+            certificate_sha256: receipt.certificate_sha256,
+            csr_sha256: receipt.csr_sha256,
+            csr_spki_sha256: receipt.csr_spki_sha256,
+            acknowledged_at_unix_ms: receipt.acknowledged_at_unix_ms,
+        }
+    }
+}
+
+impl From<StoredDeliveryReceipt> for DeviceCertificateDeliveryReceipt {
+    fn from(receipt: StoredDeliveryReceipt) -> Self {
+        Self {
+            authorization_id: receipt.authorization_id,
+            delivery_id: receipt.delivery_id,
+            certificate_sha256: receipt.certificate_sha256,
+            csr_sha256: receipt.csr_sha256,
+            csr_spki_sha256: receipt.csr_spki_sha256,
+            acknowledged_at_unix_ms: receipt.acknowledged_at_unix_ms,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredRetirementReason {
+    MisboundCertificate,
+    DeliveryDeadlineReached,
+    CertificateExpiredBeforeDelivery,
+}
+
+impl From<DeviceCertificateRetirementReason> for StoredRetirementReason {
+    fn from(reason: DeviceCertificateRetirementReason) -> Self {
+        match reason {
+            DeviceCertificateRetirementReason::MisboundCertificate => Self::MisboundCertificate,
+            DeviceCertificateRetirementReason::DeliveryDeadlineReached => {
+                Self::DeliveryDeadlineReached
+            }
+            DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery => {
+                Self::CertificateExpiredBeforeDelivery
+            }
+        }
+    }
+}
+
+impl From<StoredRetirementReason> for DeviceCertificateRetirementReason {
+    fn from(reason: StoredRetirementReason) -> Self {
+        match reason {
+            StoredRetirementReason::MisboundCertificate => Self::MisboundCertificate,
+            StoredRetirementReason::DeliveryDeadlineReached => Self::DeliveryDeadlineReached,
+            StoredRetirementReason::CertificateExpiredBeforeDelivery => {
+                Self::CertificateExpiredBeforeDelivery
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredIssuanceFailure {
+    SignerRejectedWithoutCommit,
+    MisboundCertificateRetired,
+    CertificateExpiredBeforeDeliveryRetired,
+}
+
+impl From<DeviceCertificateIssuanceFailure> for StoredIssuanceFailure {
+    fn from(failure: DeviceCertificateIssuanceFailure) -> Self {
+        match failure {
+            DeviceCertificateIssuanceFailure::SignerRejectedWithoutCommit => {
+                Self::SignerRejectedWithoutCommit
+            }
+            DeviceCertificateIssuanceFailure::MisboundCertificateRetired => {
+                Self::MisboundCertificateRetired
+            }
+            DeviceCertificateIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
+                Self::CertificateExpiredBeforeDeliveryRetired
+            }
+        }
+    }
+}
+
+impl From<StoredIssuanceFailure> for DeviceCertificateIssuanceFailure {
+    fn from(failure: StoredIssuanceFailure) -> Self {
+        match failure {
+            StoredIssuanceFailure::SignerRejectedWithoutCommit => Self::SignerRejectedWithoutCommit,
+            StoredIssuanceFailure::MisboundCertificateRetired => Self::MisboundCertificateRetired,
+            StoredIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
+                Self::CertificateExpiredBeforeDeliveryRetired
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredRetirementError {
+    Rejected,
+    OutcomeUnknown,
+}
+
+impl From<DeviceCertificateRetirementError> for StoredRetirementError {
+    fn from(error: DeviceCertificateRetirementError) -> Self {
+        match error {
+            DeviceCertificateRetirementError::Rejected => Self::Rejected,
+            DeviceCertificateRetirementError::OutcomeUnknown => Self::OutcomeUnknown,
+        }
+    }
+}
+
+impl From<StoredRetirementError> for DeviceCertificateRetirementError {
+    fn from(error: StoredRetirementError) -> Self {
+        match error {
+            StoredRetirementError::Rejected => Self::Rejected,
+            StoredRetirementError::OutcomeUnknown => Self::OutcomeUnknown,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -891,6 +1230,7 @@ impl StoredScope {
 #[serde(deny_unknown_fields)]
 struct StoredCertificate {
     certificate_der: Vec<u8>,
+    ca_chain_der: Vec<Vec<u8>>,
     serial_number: Vec<u8>,
     scope: StoredScope,
     spki_sha256: [u8; 32],
@@ -901,6 +1241,7 @@ impl StoredCertificate {
     fn from_domain(certificate: &IssuedDeviceCertificate) -> Self {
         Self {
             certificate_der: certificate.certificate_der.clone(),
+            ca_chain_der: certificate.ca_chain_der.clone(),
             serial_number: certificate.serial_number.clone(),
             scope: (&certificate.scope).into(),
             spki_sha256: certificate.spki_sha256,
@@ -911,6 +1252,7 @@ impl StoredCertificate {
     fn into_domain(self) -> IssuedDeviceCertificate {
         IssuedDeviceCertificate {
             certificate_der: self.certificate_der,
+            ca_chain_der: self.ca_chain_der,
             serial_number: self.serial_number,
             scope: self.scope.into_domain(),
             spki_sha256: self.spki_sha256,
@@ -919,8 +1261,19 @@ impl StoredCertificate {
     }
 
     fn is_valid(&self, scope: &DeviceAuthorizationScope, spki_sha256: &[u8; 32]) -> bool {
+        let chain_bytes = self
+            .ca_chain_der
+            .iter()
+            .try_fold(self.certificate_der.len(), |total, certificate| {
+                total.checked_add(certificate.len())
+            });
         !self.certificate_der.is_empty()
             && self.certificate_der.len() <= MAX_CERTIFICATE_BYTES
+            && self.ca_chain_der.len() <= MAX_CA_CHAIN_CERTIFICATES
+            && self.ca_chain_der.iter().all(|certificate| {
+                !certificate.is_empty() && certificate.len() <= MAX_CERTIFICATE_BYTES
+            })
+            && chain_bytes.is_some_and(|total| total <= MAX_CERTIFICATE_BUNDLE_BYTES)
             && !self.serial_number.is_empty()
             && self.serial_number.len() <= MAX_SERIAL_NUMBER_BYTES
             && self.scope.organization_id == scope.organization_id
@@ -964,16 +1317,72 @@ impl StoredAuthorizationState {
                 approver: StoredIdentity::from_domain(approver),
                 issued_at_unix_ms: *issued_at_unix_ms,
             },
-            DeviceAuthorizationState::Approved {
+            DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver,
                 decided_at_unix_ms,
                 certificate,
-            } => Self::Approved {
+                delivery_id,
+                certificate_sha256,
+                delivery_deadline_unix_ms,
+            } => Self::DeliveryPending {
                 approval_id: *approval_id,
                 approver: StoredIdentity::from_domain(approver),
                 decided_at_unix_ms: *decided_at_unix_ms,
                 certificate: StoredCertificate::from_domain(certificate),
+                delivery_id: *delivery_id,
+                certificate_sha256: *certificate_sha256,
+                delivery_deadline_unix_ms: *delivery_deadline_unix_ms,
+            },
+            DeviceAuthorizationState::Delivered {
+                approval_id,
+                receipt,
+            } => Self::Delivered {
+                approval_id: *approval_id,
+                receipt: receipt.into(),
+            },
+            DeviceAuthorizationState::RetirementPending {
+                approval_id,
+                approver,
+                certificate,
+                certificate_sha256,
+                delivery_id,
+                reason,
+                entered_at_unix_ms,
+                last_failure,
+            } => Self::RetirementPending {
+                approval_id: *approval_id,
+                approver: StoredIdentity::from_domain(approver),
+                certificate: StoredCertificate::from_domain(certificate),
+                certificate_sha256: *certificate_sha256,
+                delivery_id: *delivery_id,
+                reason: (*reason).into(),
+                entered_at_unix_ms: *entered_at_unix_ms,
+                last_failure: last_failure.map(Into::into),
+            },
+            DeviceAuthorizationState::DeliveryExpired {
+                approval_id,
+                delivery_id,
+                certificate_sha256,
+                expired_at_unix_ms,
+            } => Self::DeliveryExpired {
+                approval_id: *approval_id,
+                delivery_id: *delivery_id,
+                certificate_sha256: *certificate_sha256,
+                expired_at_unix_ms: *expired_at_unix_ms,
+            },
+            DeviceAuthorizationState::IssuanceFailed {
+                approval_id,
+                approver,
+                failed_at_unix_ms,
+                failure,
+                certificate_sha256,
+            } => Self::IssuanceFailed {
+                approval_id: *approval_id,
+                approver: StoredIdentity::from_domain(approver),
+                failed_at_unix_ms: *failed_at_unix_ms,
+                failure: (*failure).into(),
+                certificate_sha256: *certificate_sha256,
             },
             DeviceAuthorizationState::Denied {
                 approver,
@@ -1001,10 +1410,33 @@ impl StoredAuthorizationState {
             Self::AwaitingWebauthn { .. } => "awaiting_webauthn",
             Self::VerifyingWebauthn { .. } => "verifying_webauthn",
             Self::Issuing { .. } => "issuing",
-            Self::Approved { .. } => "approved",
+            Self::DeliveryPending { .. } => "delivery_pending",
+            Self::Delivered { .. } => "delivered",
+            Self::RetirementPending { .. } => "retirement_pending",
+            Self::DeliveryExpired { .. } => "delivery_expired",
+            Self::IssuanceFailed { .. } => "issuance_failed",
             Self::Denied { .. } => "denied",
             Self::Consumed { .. } => "consumed",
             Self::Expired => "expired",
+        }
+    }
+
+    fn format_version(&self) -> u8 {
+        match self {
+            Self::DeliveryPending { .. }
+            | Self::Delivered { .. }
+            | Self::RetirementPending { .. }
+            | Self::DeliveryExpired { .. }
+            | Self::IssuanceFailed { .. } => 2,
+            _ => 1,
+        }
+    }
+
+    fn supports_format_version(&self, format_version: u8) -> bool {
+        match format_version {
+            1 => self.format_version() == 1,
+            2 => true,
+            _ => false,
         }
     }
 
@@ -1013,12 +1445,32 @@ impl StoredAuthorizationState {
             Self::AwaitingWebauthn { approval_id, .. }
             | Self::VerifyingWebauthn { approval_id, .. }
             | Self::Issuing { approval_id, .. }
-            | Self::Approved { approval_id, .. } => Some(*approval_id),
+            | Self::DeliveryPending { approval_id, .. }
+            | Self::Delivered { approval_id, .. }
+            | Self::RetirementPending { approval_id, .. }
+            | Self::DeliveryExpired { approval_id, .. }
+            | Self::IssuanceFailed { approval_id, .. } => Some(*approval_id),
             _ => None,
         }
     }
 
-    fn is_valid(&self, scope: &DeviceAuthorizationScope, spki_sha256: &[u8; 32]) -> bool {
+    fn deadline_unix_ms(&self) -> Option<u64> {
+        match self {
+            Self::DeliveryPending {
+                delivery_deadline_unix_ms,
+                ..
+            } => Some(*delivery_deadline_unix_ms),
+            _ => None,
+        }
+    }
+
+    fn is_valid(
+        &self,
+        scope: &DeviceAuthorizationScope,
+        spki_sha256: &[u8; 32],
+        authorization_id: &DeviceAuthorizationId,
+        csr_sha256: &[u8; 32],
+    ) -> bool {
         match self {
             Self::Pending | Self::Expired => true,
             Self::AwaitingWebauthn {
@@ -1042,17 +1494,92 @@ impl StoredAuthorizationState {
                     && !opaque_state.is_empty()
                     && opaque_state.len() <= MAX_WEBAUTHN_STATE_BYTES
             }
-            Self::Issuing { approver, .. } | Self::Denied { approver, .. } => approver.is_valid(),
-            Self::Approved {
+            Self::Issuing {
+                approver,
+                issued_at_unix_ms,
+                ..
+            }
+            | Self::Denied {
+                approver,
+                decided_at_unix_ms: issued_at_unix_ms,
+            } => approver.is_valid() && to_i64(*issued_at_unix_ms).is_ok(),
+            Self::DeliveryPending {
                 approver,
                 certificate,
+                decided_at_unix_ms,
+                certificate_sha256,
+                delivery_deadline_unix_ms,
                 ..
-            } => approver.is_valid() && certificate.is_valid(scope, spki_sha256),
+            } => {
+                approver.is_valid()
+                    && certificate.is_valid(scope, spki_sha256)
+                    && sha256(&certificate.certificate_der) == *certificate_sha256
+                    && *delivery_deadline_unix_ms > *decided_at_unix_ms
+                    && delivery_deadline_unix_ms.saturating_sub(*decided_at_unix_ms)
+                        <= crate::device_authorization::MAX_CERTIFICATE_DELIVERY_TTL_MS
+                    && *delivery_deadline_unix_ms <= certificate.not_after_unix_ms
+                    && to_i64(*decided_at_unix_ms).is_ok()
+                    && to_i64(*delivery_deadline_unix_ms).is_ok()
+            }
+            Self::Delivered { receipt, .. } => {
+                receipt.authorization_id == *authorization_id
+                    && receipt.csr_sha256 == *csr_sha256
+                    && receipt.csr_spki_sha256 == *spki_sha256
+                    && to_i64(receipt.acknowledged_at_unix_ms).is_ok()
+            }
+            Self::RetirementPending {
+                approver,
+                certificate,
+                certificate_sha256,
+                delivery_id,
+                reason,
+                entered_at_unix_ms,
+                ..
+            } => {
+                approver.is_valid()
+                    && certificate.is_valid(scope, spki_sha256)
+                    && sha256(&certificate.certificate_der) == *certificate_sha256
+                    && match reason {
+                        StoredRetirementReason::DeliveryDeadlineReached => delivery_id.is_some(),
+                        StoredRetirementReason::MisboundCertificate
+                        | StoredRetirementReason::CertificateExpiredBeforeDelivery => {
+                            delivery_id.is_none()
+                        }
+                    }
+                    && to_i64(*entered_at_unix_ms).is_ok()
+            }
+            Self::DeliveryExpired {
+                expired_at_unix_ms, ..
+            } => to_i64(*expired_at_unix_ms).is_ok(),
+            Self::IssuanceFailed {
+                approver,
+                failed_at_unix_ms,
+                failure,
+                certificate_sha256,
+                ..
+            } => {
+                approver.is_valid()
+                    && to_i64(*failed_at_unix_ms).is_ok()
+                    && match failure {
+                        StoredIssuanceFailure::SignerRejectedWithoutCommit => {
+                            certificate_sha256.is_none()
+                        }
+                        StoredIssuanceFailure::MisboundCertificateRetired
+                        | StoredIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
+                            certificate_sha256.is_some()
+                        }
+                    }
+            }
             Self::Consumed {
                 approver,
                 consumed_at_unix_ms,
                 decided_at_unix_ms,
-            } => approver.is_valid() && consumed_at_unix_ms >= decided_at_unix_ms,
+            } => {
+                approver.is_valid()
+                    && consumed_at_unix_ms >= decided_at_unix_ms
+                    && to_i64(*decided_at_unix_ms).is_ok()
+                    && to_i64(*consumed_at_unix_ms).is_ok()
+            }
         }
     }
 
@@ -1090,16 +1617,72 @@ impl StoredAuthorizationState {
                 approver: approver.into_domain()?,
                 issued_at_unix_ms,
             },
-            Self::Approved {
+            Self::DeliveryPending {
                 approval_id,
                 approver,
                 decided_at_unix_ms,
                 certificate,
-            } => DeviceAuthorizationState::Approved {
+                delivery_id,
+                certificate_sha256,
+                delivery_deadline_unix_ms,
+            } => DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver: approver.into_domain()?,
                 decided_at_unix_ms,
                 certificate: certificate.into_domain(),
+                delivery_id,
+                certificate_sha256,
+                delivery_deadline_unix_ms,
+            },
+            Self::Delivered {
+                approval_id,
+                receipt,
+            } => DeviceAuthorizationState::Delivered {
+                approval_id,
+                receipt: receipt.into(),
+            },
+            Self::RetirementPending {
+                approval_id,
+                approver,
+                certificate,
+                certificate_sha256,
+                delivery_id,
+                reason,
+                entered_at_unix_ms,
+                last_failure,
+            } => DeviceAuthorizationState::RetirementPending {
+                approval_id,
+                approver: approver.into_domain()?,
+                certificate: certificate.into_domain(),
+                certificate_sha256,
+                delivery_id,
+                reason: reason.into(),
+                entered_at_unix_ms,
+                last_failure: last_failure.map(Into::into),
+            },
+            Self::DeliveryExpired {
+                approval_id,
+                delivery_id,
+                certificate_sha256,
+                expired_at_unix_ms,
+            } => DeviceAuthorizationState::DeliveryExpired {
+                approval_id,
+                delivery_id,
+                certificate_sha256,
+                expired_at_unix_ms,
+            },
+            Self::IssuanceFailed {
+                approval_id,
+                approver,
+                failed_at_unix_ms,
+                failure,
+                certificate_sha256,
+            } => DeviceAuthorizationState::IssuanceFailed {
+                approval_id,
+                approver: approver.into_domain()?,
+                failed_at_unix_ms,
+                failure: failure.into(),
+                certificate_sha256,
             },
             Self::Denied {
                 approver,
@@ -1143,6 +1726,7 @@ mod tests {
     fn certificate() -> IssuedDeviceCertificate {
         IssuedDeviceCertificate {
             certificate_der: vec![0x30, 0x03, 0x01, 0x02, 0x03],
+            ca_chain_der: vec![vec![0x30, 0x01, 0x00]],
             serial_number: vec![1, 2, 3],
             scope: scope(),
             spki_sha256: [4; 32],
@@ -1153,6 +1737,9 @@ mod tests {
     #[test]
     fn every_state_round_trips() {
         let approval_id = [7; 16];
+        let authorization_id = [9; 16];
+        let csr_sha256 = [6; 32];
+        let certificate_sha256 = sha256(&certificate().certificate_der);
         let states = vec![
             DeviceAuthorizationState::Pending,
             DeviceAuthorizationState::AwaitingWebAuthn {
@@ -1172,11 +1759,55 @@ mod tests {
                 approver: identity(),
                 issued_at_unix_ms: 3_000,
             },
-            DeviceAuthorizationState::Approved {
+            DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver: identity(),
                 decided_at_unix_ms: 4_000,
                 certificate: certificate(),
+                delivery_id: [8; 16],
+                certificate_sha256,
+                delivery_deadline_unix_ms: 6_000,
+            },
+            DeviceAuthorizationState::Delivered {
+                approval_id,
+                receipt: DeviceCertificateDeliveryReceipt {
+                    authorization_id,
+                    delivery_id: [8; 16],
+                    certificate_sha256,
+                    csr_sha256,
+                    csr_spki_sha256: [4; 32],
+                    acknowledged_at_unix_ms: 5_000,
+                },
+            },
+            DeviceAuthorizationState::RetirementPending {
+                approval_id,
+                approver: identity(),
+                certificate: certificate(),
+                certificate_sha256,
+                delivery_id: Some([8; 16]),
+                reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
+                entered_at_unix_ms: 6_000,
+                last_failure: Some(DeviceCertificateRetirementError::OutcomeUnknown),
+            },
+            DeviceAuthorizationState::DeliveryExpired {
+                approval_id,
+                delivery_id: [8; 16],
+                certificate_sha256,
+                expired_at_unix_ms: 6_000,
+            },
+            DeviceAuthorizationState::IssuanceFailed {
+                approval_id,
+                approver: identity(),
+                failed_at_unix_ms: 6_000,
+                failure: DeviceCertificateIssuanceFailure::SignerRejectedWithoutCommit,
+                certificate_sha256: None,
+            },
+            DeviceAuthorizationState::IssuanceFailed {
+                approval_id,
+                approver: identity(),
+                failed_at_unix_ms: 6_000,
+                failure: DeviceCertificateIssuanceFailure::MisboundCertificateRetired,
+                certificate_sha256: Some(certificate_sha256),
             },
             DeviceAuthorizationState::Denied {
                 approver: identity(),
@@ -1192,17 +1823,27 @@ mod tests {
 
         for state in states {
             let stored = StoredAuthorizationState::from_domain(&state);
+            let format_version = stored.format_version();
             let encoded = serde_json::to_vec(&StoredState {
-                format_version: 1,
+                format_version,
                 state: stored,
             })
             .expect("state serialization");
             let decoded: StoredState = serde_json::from_slice(&encoded).expect("state parsing");
+            assert!(decoded
+                .state
+                .supports_format_version(decoded.format_version));
             assert_eq!(
                 decoded.state.kind(),
                 StoredAuthorizationState::from_domain(&state).kind()
             );
-            assert!(decoded.state.is_valid(&scope(), &[4; 32]));
+            assert!(decoded
+                .state
+                .is_valid(&scope(), &[4; 32], &authorization_id, &csr_sha256));
+            assert_eq!(
+                decoded.state.deadline_unix_ms(),
+                StoredAuthorizationState::from_domain(&state).deadline_unix_ms()
+            );
             assert_eq!(
                 decoded.state.into_domain().expect("domain conversion"),
                 state
@@ -1222,6 +1863,20 @@ mod tests {
         assert_eq!(awaiting.kind(), "awaiting_webauthn");
         assert_eq!(awaiting.approval_id(), Some([12; 16]));
 
+        let pending_delivery =
+            StoredAuthorizationState::from_domain(&DeviceAuthorizationState::DeliveryPending {
+                approval_id: [13; 16],
+                approver: identity(),
+                decided_at_unix_ms: 4_000,
+                certificate: certificate(),
+                delivery_id: [14; 16],
+                certificate_sha256: sha256(&certificate().certificate_der),
+                delivery_deadline_unix_ms: 6_000,
+            });
+        assert_eq!(pending_delivery.kind(), "delivery_pending");
+        assert_eq!(pending_delivery.approval_id(), Some([13; 16]));
+        assert_eq!(pending_delivery.deadline_unix_ms(), Some(6_000));
+
         let expired = StoredAuthorizationState::Expired;
         assert_eq!(expired.kind(), "expired");
         assert_eq!(expired.approval_id(), None);
@@ -1236,7 +1891,73 @@ mod tests {
                 credential_request_options_json: b"{}".to_vec(),
                 opaque_state: vec![1; MAX_WEBAUTHN_STATE_BYTES + 1],
             });
-        assert!(!state.is_valid(&scope(), &[4; 32]));
+        assert!(!state.is_valid(&scope(), &[4; 32], &[1; 16], &[6; 32]));
+    }
+
+    #[test]
+    fn certificate_chain_payload_bounds_are_enforced() {
+        let mut value = certificate();
+        value.ca_chain_der = vec![vec![7; MAX_CERTIFICATE_BUNDLE_BYTES]];
+        let state =
+            StoredAuthorizationState::from_domain(&DeviceAuthorizationState::RetirementPending {
+                approval_id: [2; 16],
+                approver: identity(),
+                certificate: value,
+                certificate_sha256: sha256(&certificate().certificate_der),
+                delivery_id: None,
+                reason: DeviceCertificateRetirementReason::MisboundCertificate,
+                entered_at_unix_ms: 4_000,
+                last_failure: None,
+            });
+        assert!(!state.is_valid(&scope(), &[4; 32], &[1; 16], &[6; 32]));
+    }
+
+    #[test]
+    fn delivery_ack_requires_matching_receipt_and_open_deadline() {
+        let current = DeviceAuthorizationRecord {
+            id: [9; 16],
+            device_code_hash: [2; 32],
+            user_code_digest: VersionedUserCodeDigest::from_storage_parts(1, [3; 32])
+                .expect("versioned digest"),
+            scope: scope(),
+            csr_der: vec![1, 2, 3],
+            csr_sha256: [6; 32],
+            spki_sha256: [4; 32],
+            created_at_unix_ms: 1,
+            expires_at_unix_ms: 10_000,
+            poll_interval_ms: 1_000,
+            last_poll_at_unix_ms: None,
+            revision: 4,
+            state: DeviceAuthorizationState::DeliveryPending {
+                approval_id: [7; 16],
+                approver: identity(),
+                decided_at_unix_ms: 4_000,
+                certificate: certificate(),
+                delivery_id: [8; 16],
+                certificate_sha256: sha256(&certificate().certificate_der),
+                delivery_deadline_unix_ms: 6_000,
+            },
+        };
+        let mut replacement = current.clone();
+        replacement.revision = 5;
+        replacement.state = DeviceAuthorizationState::Delivered {
+            approval_id: [7; 16],
+            receipt: DeviceCertificateDeliveryReceipt {
+                authorization_id: current.id,
+                delivery_id: [8; 16],
+                certificate_sha256: sha256(&certificate().certificate_der),
+                csr_sha256: current.csr_sha256,
+                csr_spki_sha256: current.spki_sha256,
+                acknowledged_at_unix_ms: 5_999,
+            },
+        };
+        assert!(valid_delivery_ack_transition(&current, &replacement));
+
+        let DeviceAuthorizationState::Delivered { receipt, .. } = &mut replacement.state else {
+            unreachable!();
+        };
+        receipt.acknowledged_at_unix_ms = 6_000;
+        assert!(!valid_delivery_ack_transition(&current, &replacement));
     }
 
     #[test]
@@ -1248,5 +1969,14 @@ mod tests {
         assert!(migration.contains("device_code_hash BYTEA"));
         assert!(!migration.contains("user_code TEXT"));
         assert!(!migration.contains("device_code TEXT"));
+
+        let delivery_migration =
+            include_str!("../migrations/device_authorization/0002_delivery_ack.up.sql");
+        assert!(delivery_migration.contains("state_deadline_unix_ms BIGINT"));
+        assert!(delivery_migration.contains("authorizations_delivery_recovery_idx"));
+        assert!(delivery_migration.contains("authorizations_retirement_recovery_idx"));
+        assert!(delivery_migration.contains("WHERE state_kind = 'approved'"));
+        assert!(!delivery_migration.contains("user_code TEXT"));
+        assert!(!delivery_migration.contains("device_code TEXT"));
     }
 }
