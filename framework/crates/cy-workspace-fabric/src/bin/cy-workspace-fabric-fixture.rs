@@ -521,6 +521,9 @@ fn operation_view(
     match response.outcome {
         Some(workspace_api_response::Outcome::Operation(operation)) => Ok(operation),
         Some(workspace_api_response::Outcome::Error(error)) => Err(error.message.into()),
+        Some(workspace_api_response::Outcome::ProductApi(_)) => {
+            Err("Product API response is not a Workspace operation view".into())
+        }
         None => Err("Workspace API response has no outcome".into()),
     }
 }
@@ -718,6 +721,11 @@ impl WorkspaceApi for FileWorkspaceApi {
             Some(workspace_api_request::Request::GetOperation(get)) => {
                 self.get(request.request_id, get)
             }
+            Some(workspace_api_request::Request::ProductApi(_)) => workspace_error(
+                request.request_id,
+                12,
+                "PRODUCT_API_PROJECTION_NOT_IMPLEMENTED",
+            ),
             None => workspace_error(request.request_id, 3, "WORKSPACE_REQUEST_REQUIRED"),
         }
     }

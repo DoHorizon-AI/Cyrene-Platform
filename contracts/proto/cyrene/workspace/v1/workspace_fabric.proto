@@ -92,6 +92,79 @@ message GetWorkspaceOperationRequest {
   cyrene.semantic.v1.Identity operation = 1;
 }
 
+// Canonical owners addressed by the closed Workspace Product API projection.
+// These names select Product authorities; they do not define Product state.
+// 这些标识只选择 Product 权威，不定义或保存其领域状态。
+enum WorkspaceProductApiOwner {
+  WORKSPACE_PRODUCT_API_OWNER_UNSPECIFIED = 0;
+  WORKSPACE_PRODUCT_API_OWNER_CATALYST = 1;
+  WORKSPACE_PRODUCT_API_OWNER_YIELD = 2;
+  WORKSPACE_PRODUCT_API_OWNER_REACTOR = 3;
+  WORKSPACE_PRODUCT_API_OWNER_EXCHANGE = 4;
+  WORKSPACE_PRODUCT_API_OWNER_ECHO = 5;
+  WORKSPACE_PRODUCT_API_OWNER_NAVIGATOR = 6;
+}
+
+// Stable wire keys for the operations admitted by the Phase 3 projection.
+// The TCK maps each key to one owner contract operation and request kind.
+// TCK 将每个 wire key 映射到 owner 契约操作及请求类型。
+enum WorkspaceProductApiOperation {
+  WORKSPACE_PRODUCT_API_OPERATION_UNSPECIFIED = 0;
+  WORKSPACE_PRODUCT_API_OPERATION_01 = 1;
+  WORKSPACE_PRODUCT_API_OPERATION_02 = 2;
+  WORKSPACE_PRODUCT_API_OPERATION_03 = 3;
+  WORKSPACE_PRODUCT_API_OPERATION_04 = 4;
+  WORKSPACE_PRODUCT_API_OPERATION_05 = 5;
+  WORKSPACE_PRODUCT_API_OPERATION_06 = 6;
+  WORKSPACE_PRODUCT_API_OPERATION_07 = 7;
+  WORKSPACE_PRODUCT_API_OPERATION_08 = 8;
+  WORKSPACE_PRODUCT_API_OPERATION_09 = 9;
+  WORKSPACE_PRODUCT_API_OPERATION_10 = 10;
+  WORKSPACE_PRODUCT_API_OPERATION_11 = 11;
+  WORKSPACE_PRODUCT_API_OPERATION_12 = 12;
+  WORKSPACE_PRODUCT_API_OPERATION_13 = 13;
+}
+
+// The declared kind must match the allowlisted owner operation in the TCK.
+// 声明的类型必须与 TCK allowlist 中的 owner 操作一致。
+enum WorkspaceProductApiRequestKind {
+  WORKSPACE_PRODUCT_API_REQUEST_KIND_UNSPECIFIED = 0;
+  WORKSPACE_PRODUCT_API_REQUEST_KIND_READ = 1;
+  WORKSPACE_PRODUCT_API_REQUEST_KIND_COMMAND = 2;
+}
+
+// A bounded Product call; it carries no URL, path, or caller-selected method.
+message WorkspaceProductApiRequest {
+  WorkspaceProductApiOwner owner = 1;
+  WorkspaceProductApiOperation operation = 2;
+  WorkspaceProductApiRequestKind kind = 3;
+  // Opaque identifier issued by the owner; empty for collection or create calls.
+  string resource_id = 4;
+  // Valid application/json body, at most 4 MiB; forwarded without edits.
+  // 合法的 application/json 请求体，最多 4 MiB；按原内容转发。
+  bytes json_body = 5;
+  // Replay key forwarded to the owner; its meaning and state remain there.
+  // 重放键原样交给 owner，其语义与状态仍由 owner 管理。
+  string idempotency_key = 6;
+}
+
+// Product responses may use JSON or RFC 9457 Problem Details JSON only.
+// Product 响应仅可使用 JSON 或 RFC 9457 Problem Details JSON。
+enum WorkspaceProductApiContentType {
+  WORKSPACE_PRODUCT_API_CONTENT_TYPE_UNSPECIFIED = 0;
+  WORKSPACE_PRODUCT_API_CONTENT_TYPE_APPLICATION_JSON = 1;
+  WORKSPACE_PRODUCT_API_CONTENT_TYPE_APPLICATION_PROBLEM_JSON = 2;
+}
+
+// Product response bytes and status are returned without creating Platform state.
+message WorkspaceProductApiResponse {
+  uint32 status_code = 1;
+  // Valid JSON body, at most 4 MiB; identity and replay data remain owner-owned.
+  // 合法 JSON 响应体，最多 4 MiB；资源标识与重放语义仍归 owner 管理。
+  bytes json_body = 2;
+  WorkspaceProductApiContentType content_type = 3;
+}
+
 message WorkspaceApiRequest {
   string request_id = 1;
   string workspace_id = 2;
@@ -101,6 +174,7 @@ message WorkspaceApiRequest {
   oneof request {
     StartWorkspaceOperationRequest start_operation = 10;
     GetWorkspaceOperationRequest get_operation = 11;
+    WorkspaceProductApiRequest product_api = 12;
   }
 }
 
@@ -133,6 +207,7 @@ message WorkspaceApiResponse {
   oneof outcome {
     WorkspaceOperationView operation = 10;
     google.rpc.Status error = 11;
+    WorkspaceProductApiResponse product_api = 12;
   }
 }
 
