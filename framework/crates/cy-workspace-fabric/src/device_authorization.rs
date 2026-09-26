@@ -512,6 +512,14 @@ pub trait DeviceCertificateIssuer: Send + Sync {
     ) -> Result<IssuedDeviceCertificate, DeviceAuthorizationPortError>;
 }
 
+/// Trusted current time source used after external verifier work.
+///
+/// Caller-supplied request timestamps are not sufficient for a transition that
+/// may cross an authorization TTL while an external port is running.
+pub trait DeviceAuthorizationClockPort: Send + Sync {
+    fn current_unix_ms(&self) -> Result<u64, DeviceAuthorizationPortError>;
+}
+
 /// Aggregate implemented by the approval orchestration layer so a completion
 /// call can invoke all security checks through one explicit port bundle.
 pub trait DeviceApprovalStartPorts: WorkspaceMembershipPort + WebAuthnAuthenticationPort {}
@@ -520,12 +528,18 @@ impl<T> DeviceApprovalStartPorts for T where T: WorkspaceMembershipPort + WebAut
 
 /// Aggregate required to complete and issue an approval.
 pub trait DeviceApprovalPorts:
-    DeviceApprovalStartPorts + DeviceCsrValidator + DeviceCertificateIssuer
+    DeviceApprovalStartPorts
+    + DeviceCsrValidator
+    + DeviceCertificateIssuer
+    + DeviceAuthorizationClockPort
 {
 }
 
 impl<T> DeviceApprovalPorts for T where
-    T: DeviceApprovalStartPorts + DeviceCsrValidator + DeviceCertificateIssuer
+    T: DeviceApprovalStartPorts
+        + DeviceCsrValidator
+        + DeviceCertificateIssuer
+        + DeviceAuthorizationClockPort
 {
 }
 
@@ -548,6 +562,8 @@ pub enum DeviceAuthorizationError {
     InvalidPolicy,
     #[error("operating-system random source unavailable")]
     RandomUnavailable,
+    #[error("trusted clock unavailable")]
+    ClockUnavailable,
     #[error("device authorization storage unavailable")]
     StorageUnavailable,
     #[error("device authorization changed concurrently")]
@@ -947,13 +963,7 @@ where
 
         // This CAS is the approval linearization point. Denial or expiry may
         // win while WebAuthn runs; in that case the signer is never invoked.
-        record = self.reserve_issuance(
-            record,
-            approval_id,
-            &approver,
-            &assertion_sha256,
-            now_unix_ms,
-        )?;
+        record = self.reserve_issuance(record, approval_id, &approver, &assertion_sha256, ports)?;
         self.issue_reserved_approval(record, ports)
     }
 
@@ -1024,7 +1034,7 @@ where
         approval_id: &DeviceAuthorizationId,
         approver: &UserIdentityRef,
         assertion_sha256: &[u8; 32],
-        issued_at_unix_ms: u64,
+        clock: &impl DeviceAuthorizationClockPort,
     ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
         for _ in 0..5 {
             match &record.state {
@@ -1037,6 +1047,23 @@ where
                     && current_approver == approver
                     && current_assertion == assertion_sha256 =>
                 {
+                    let issued_at_unix_ms = clock
+                        .current_unix_ms()
+                        .map_err(|_| DeviceAuthorizationError::ClockUnavailable)?;
+                    if issued_at_unix_ms >= record.expires_at_unix_ms {
+                        match self.expire_if_due(&mut record, issued_at_unix_ms) {
+                            Err(DeviceAuthorizationError::ConcurrentTransition) => {
+                                record = self
+                                    .store
+                                    .by_device_code_hash(&record.device_code_hash)
+                                    .map_err(map_store_error)?
+                                    .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                            Ok(()) => return Err(DeviceAuthorizationError::Expired),
+                        }
+                    }
                     record.state = DeviceAuthorizationState::Issuing {
                         approval_id: *approval_id,
                         approver: approver.clone(),
@@ -1520,6 +1547,7 @@ fn map_store_error(error: DeviceAuthorizationStoreError) -> DeviceAuthorizationE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{mpsc, Condvar};
     use std::thread;
 
@@ -1570,7 +1598,8 @@ mod tests {
             assertion: &[u8],
             _now_unix_ms: u64,
         ) -> Result<(), DeviceAuthorizationPortError> {
-            if opaque_state == &context.approval_id[..] && assertion == b"test-only-valid-assertion"
+            if test_opaque_state_matches(context, opaque_state)
+                && assertion == b"test-only-valid-assertion"
             {
                 Ok(())
             } else {
@@ -1598,13 +1627,205 @@ mod tests {
         }
     }
 
+    impl DeviceAuthorizationClockPort for TestApprovalPorts {
+        fn current_unix_ms(&self) -> Result<u64, DeviceAuthorizationPortError> {
+            Ok(300)
+        }
+    }
+
     fn test_webauthn_start(
         context: &WebAuthnAuthenticationContext,
     ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError> {
         Ok(WebAuthnAuthenticationStart {
-            credential_request_options_json: b"{}".to_vec(),
-            opaque_state: context.approval_id.to_vec(),
+            credential_request_options_json: b"{\"challenge\":\"test-bound-challenge\"}".to_vec(),
+            opaque_state: test_opaque_state(context),
         })
+    }
+
+    fn test_opaque_state(context: &WebAuthnAuthenticationContext) -> Vec<u8> {
+        let mut state = Vec::new();
+        state.extend_from_slice(&context.approval_id);
+        state.extend_from_slice(&context.authorization_id);
+        for value in [
+            context.scope.organization_id.as_bytes(),
+            context.scope.workspace_id.as_bytes(),
+        ] {
+            state.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            state.extend_from_slice(value);
+        }
+        state.extend_from_slice(&context.csr_sha256);
+        state.extend_from_slice(&context.spki_sha256);
+        state.extend_from_slice(&context.expires_at_unix_ms.to_be_bytes());
+        state
+    }
+
+    fn test_opaque_state_matches(
+        context: &WebAuthnAuthenticationContext,
+        opaque_state: &[u8],
+    ) -> bool {
+        opaque_state == test_opaque_state(context).as_slice()
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum VerifierBehavior {
+        Block,
+        UnavailableOnce,
+    }
+
+    #[derive(Default)]
+    struct CoordinatedApprovalState {
+        verifier_released: bool,
+        verifier_calls: usize,
+        credential_counter_updates: usize,
+        consumed_assertions: BTreeMap<DeviceAuthorizationId, [u8; 32]>,
+        issuer_calls: usize,
+    }
+
+    struct CoordinatedApprovalPorts {
+        behavior: VerifierBehavior,
+        state: Mutex<CoordinatedApprovalState>,
+        changed: Condvar,
+        verifier_started: mpsc::Sender<()>,
+        current_time_unix_ms: AtomicU64,
+    }
+
+    impl CoordinatedApprovalPorts {
+        fn new(
+            behavior: VerifierBehavior,
+            current_time_unix_ms: u64,
+        ) -> (Self, mpsc::Receiver<()>) {
+            let (verifier_started, started_rx) = mpsc::channel();
+            (
+                Self {
+                    behavior,
+                    state: Mutex::new(CoordinatedApprovalState::default()),
+                    changed: Condvar::new(),
+                    verifier_started,
+                    current_time_unix_ms: AtomicU64::new(current_time_unix_ms),
+                },
+                started_rx,
+            )
+        }
+
+        fn release_verifier(&self) {
+            let mut state = self.state.lock().expect("verifier state");
+            state.verifier_released = true;
+            self.changed.notify_all();
+        }
+
+        fn set_current_time(&self, now_unix_ms: u64) {
+            self.current_time_unix_ms
+                .store(now_unix_ms, Ordering::SeqCst);
+        }
+
+        fn credential_counter_updates(&self) -> usize {
+            self.state
+                .lock()
+                .expect("verifier state")
+                .credential_counter_updates
+        }
+
+        fn verifier_calls(&self) -> usize {
+            self.state.lock().expect("verifier state").verifier_calls
+        }
+
+        fn issuer_calls(&self) -> usize {
+            self.state.lock().expect("verifier state").issuer_calls
+        }
+    }
+
+    impl DeviceCsrValidator for CoordinatedApprovalPorts {
+        fn validate_and_hash_spki(
+            &self,
+            _csr_der: &[u8],
+        ) -> Result<[u8; 32], DeviceAuthorizationPortError> {
+            Ok([7; 32])
+        }
+    }
+
+    impl WorkspaceMembershipPort for CoordinatedApprovalPorts {
+        fn is_member(
+            &self,
+            _approver: &UserIdentityRef,
+            _scope: &DeviceAuthorizationScope,
+        ) -> Result<bool, DeviceAuthorizationPortError> {
+            Ok(true)
+        }
+    }
+
+    impl WebAuthnAuthenticationPort for CoordinatedApprovalPorts {
+        fn start_authentication(
+            &self,
+            context: &WebAuthnAuthenticationContext,
+        ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError> {
+            test_webauthn_start(context)
+        }
+
+        fn finish_authentication(
+            &self,
+            context: &WebAuthnAuthenticationContext,
+            opaque_state: &[u8],
+            assertion: &[u8],
+            _now_unix_ms: u64,
+        ) -> Result<(), DeviceAuthorizationPortError> {
+            if !test_opaque_state_matches(context, opaque_state)
+                || assertion != b"test-only-valid-assertion"
+            {
+                return Err(DeviceAuthorizationPortError::Rejected);
+            }
+
+            let mut state = self.state.lock().expect("verifier state");
+            state.verifier_calls += 1;
+            let _ = self.verifier_started.send(());
+            if self.behavior == VerifierBehavior::Block {
+                while !state.verifier_released {
+                    state = self.changed.wait(state).expect("verifier state");
+                }
+            }
+
+            let assertion_sha256 = sha256(assertion);
+            match state.consumed_assertions.get(&context.approval_id) {
+                Some(consumed) if consumed == &assertion_sha256 => Ok(()),
+                Some(_) => Err(DeviceAuthorizationPortError::Rejected),
+                None => {
+                    state
+                        .consumed_assertions
+                        .insert(context.approval_id, assertion_sha256);
+                    state.credential_counter_updates += 1;
+                    if self.behavior == VerifierBehavior::UnavailableOnce {
+                        Err(DeviceAuthorizationPortError::Unavailable)
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    impl DeviceCertificateIssuer for CoordinatedApprovalPorts {
+        fn issue_device_certificate(
+            &self,
+            _authorization_id: &DeviceAuthorizationId,
+            scope: &DeviceAuthorizationScope,
+            _csr_der: &[u8],
+            expected_spki_sha256: &[u8; 32],
+            issued_at_unix_ms: u64,
+        ) -> Result<IssuedDeviceCertificate, DeviceAuthorizationPortError> {
+            self.state.lock().expect("verifier state").issuer_calls += 1;
+            Ok(IssuedDeviceCertificate {
+                certificate_der: b"test-only-coordinated-certificate".to_vec(),
+                serial_number: vec![3],
+                scope: scope.clone(),
+                spki_sha256: *expected_spki_sha256,
+                not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
+            })
+        }
+    }
+
+    impl DeviceAuthorizationClockPort for CoordinatedApprovalPorts {
+        fn current_unix_ms(&self) -> Result<u64, DeviceAuthorizationPortError> {
+            Ok(self.current_time_unix_ms.load(Ordering::SeqCst))
+        }
     }
 
     #[derive(Default)]
@@ -1687,7 +1908,8 @@ mod tests {
             assertion: &[u8],
             _now_unix_ms: u64,
         ) -> Result<(), DeviceAuthorizationPortError> {
-            if opaque_state == &context.approval_id[..] && assertion == b"test-only-valid-assertion"
+            if test_opaque_state_matches(context, opaque_state)
+                && assertion == b"test-only-valid-assertion"
             {
                 Ok(())
             } else {
@@ -1738,6 +1960,12 @@ mod tests {
         }
     }
 
+    impl DeviceAuthorizationClockPort for BlockingApprovalPorts {
+        fn current_unix_ms(&self) -> Result<u64, DeviceAuthorizationPortError> {
+            Ok(300)
+        }
+    }
+
     #[derive(Default)]
     struct UncertainOnceApprovalPorts {
         state: Mutex<Option<(DeviceAuthorizationId, IssuedDeviceCertificate)>>,
@@ -1778,7 +2006,8 @@ mod tests {
             assertion: &[u8],
             _now_unix_ms: u64,
         ) -> Result<(), DeviceAuthorizationPortError> {
-            if opaque_state == &context.approval_id[..] && assertion == b"test-only-valid-assertion"
+            if test_opaque_state_matches(context, opaque_state)
+                && assertion == b"test-only-valid-assertion"
             {
                 Ok(())
             } else {
@@ -1816,6 +2045,12 @@ mod tests {
             *state = Some((*enrollment_id, certificate));
             // Model a lost response after the CA committed the certificate.
             Err(DeviceAuthorizationPortError::Unavailable)
+        }
+    }
+
+    impl DeviceAuthorizationClockPort for UncertainOnceApprovalPorts {
+        fn current_unix_ms(&self) -> Result<u64, DeviceAuthorizationPortError> {
+            Ok(300)
         }
     }
 
@@ -1873,6 +2108,64 @@ mod tests {
                 &TestCsrValidator,
             )
             .expect("begin enrollment")
+    }
+
+    #[test]
+    fn webauthn_start_persists_state_bound_to_authorization_scope_and_csr() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let start = start(&manager);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[3; 32],
+                200,
+                &TestApprovalPorts,
+            )
+            .expect("challenge");
+
+        let code_hash = hash_code(b"user", normalize_user_code(&start.user_code).as_bytes());
+        let record = store
+            .by_user_code_hash(&code_hash)
+            .expect("read record")
+            .expect("authorization record");
+        let (approval_id, options, opaque_state) = match &record.state {
+            DeviceAuthorizationState::AwaitingWebAuthn {
+                approval_id,
+                credential_request_options_json,
+                opaque_state,
+                ..
+            } => (*approval_id, credential_request_options_json, opaque_state),
+            state => panic!("unexpected state: {state:?}"),
+        };
+        assert_eq!(approval_id, challenge.approval_id);
+        assert_eq!(options, b"{\"challenge\":\"test-bound-challenge\"}");
+        assert_eq!(&challenge.credential_request_options_json, options);
+
+        let context = WebAuthnAuthenticationContext {
+            approval_id,
+            authorization_id: record.id,
+            approver: user(),
+            scope: record.scope.clone(),
+            csr_sha256: record.csr_sha256,
+            spki_sha256: record.spki_sha256,
+            expires_at_unix_ms: record.expires_at_unix_ms,
+        };
+        assert_eq!(opaque_state.as_slice(), test_opaque_state(&context));
+
+        let retry = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[4; 32],
+                201,
+                &TestApprovalPorts,
+            )
+            .expect("retry returns the same persisted ceremony");
+        assert_eq!(retry, challenge);
     }
 
     #[test]
@@ -2224,5 +2517,263 @@ mod tests {
             manager.poll(&start.device_code, 203),
             Err(DeviceAuthorizationError::Denied)
         );
+    }
+
+    #[test]
+    fn poll_revision_change_during_verifier_is_reloaded_before_issuing() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = Arc::new(manager_with_store(store.clone()));
+        let start = start(manager.as_ref());
+        let (ports, verifier_started) = CoordinatedApprovalPorts::new(VerifierBehavior::Block, 300);
+        let ports = Arc::new(ports);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[10; 32],
+                200,
+                ports.as_ref(),
+            )
+            .expect("challenge");
+
+        let approval_manager = Arc::clone(&manager);
+        let approval_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let approval = thread::spawn(move || {
+            approval_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                approval_ports.as_ref(),
+            )
+        });
+        verifier_started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("verifier call entered");
+
+        ports.set_current_time(1_200);
+        assert_eq!(
+            manager.poll(&start.device_code, 1_200),
+            Ok(DeviceAuthorizationPoll::Pending { interval_ms: 1_000 })
+        );
+        let verifying = store
+            .by_device_code_hash(&hash_code(
+                b"device",
+                start.device_code.to_ascii_lowercase().as_bytes(),
+            ))
+            .expect("read after poll")
+            .expect("authorization");
+        assert!(matches!(
+            verifying.state,
+            DeviceAuthorizationState::VerifyingWebAuthn { .. }
+        ));
+
+        ports.release_verifier();
+        assert_eq!(approval.join().expect("approval thread"), Ok(()));
+        assert_eq!(ports.issuer_calls(), 1);
+        assert!(matches!(
+            store
+                .by_approval_id(&challenge.approval_id)
+                .expect("read approval")
+                .expect("approval record")
+                .state,
+            DeviceAuthorizationState::Approved { .. }
+        ));
+    }
+
+    #[test]
+    fn denial_can_win_while_verifier_runs_and_prevents_signer_call() {
+        let manager = Arc::new(manager());
+        let start = start(manager.as_ref());
+        let (ports, verifier_started) = CoordinatedApprovalPorts::new(VerifierBehavior::Block, 300);
+        let ports = Arc::new(ports);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[11; 32],
+                200,
+                ports.as_ref(),
+            )
+            .expect("challenge");
+
+        let approval_manager = Arc::clone(&manager);
+        let approval_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let approval = thread::spawn(move || {
+            approval_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                approval_ports.as_ref(),
+            )
+        });
+        verifier_started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("verifier call entered");
+
+        manager
+            .deny(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[12; 32],
+                301,
+                ports.as_ref(),
+            )
+            .expect("deny wins before Issuing");
+        ports.release_verifier();
+        assert_eq!(
+            approval.join().expect("approval thread"),
+            Err(DeviceAuthorizationError::Denied)
+        );
+        assert_eq!(ports.issuer_calls(), 0);
+    }
+
+    #[test]
+    fn expiry_can_win_while_verifier_runs_and_prevents_signer_call() {
+        let manager = Arc::new(manager());
+        let start = start(manager.as_ref());
+        let (ports, verifier_started) = CoordinatedApprovalPorts::new(VerifierBehavior::Block, 300);
+        let ports = Arc::new(ports);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[13; 32],
+                200,
+                ports.as_ref(),
+            )
+            .expect("challenge");
+
+        let approval_manager = Arc::clone(&manager);
+        let approval_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let approval = thread::spawn(move || {
+            approval_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                approval_ports.as_ref(),
+            )
+        });
+        verifier_started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("verifier call entered");
+
+        ports.set_current_time(60_100);
+        assert_eq!(
+            manager.poll(&start.device_code, 60_100),
+            Err(DeviceAuthorizationError::Expired)
+        );
+        ports.release_verifier();
+        assert_eq!(
+            approval.join().expect("approval thread"),
+            Err(DeviceAuthorizationError::Expired)
+        );
+        assert_eq!(ports.issuer_calls(), 0);
+    }
+
+    #[test]
+    fn slow_verifier_cannot_reserve_issuance_after_ttl_without_an_expiry_poll() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = Arc::new(manager_with_store(store.clone()));
+        let start = start(manager.as_ref());
+        let (ports, verifier_started) = CoordinatedApprovalPorts::new(VerifierBehavior::Block, 300);
+        let ports = Arc::new(ports);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[14; 32],
+                200,
+                ports.as_ref(),
+            )
+            .expect("challenge");
+
+        let approval_manager = Arc::clone(&manager);
+        let approval_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let approval = thread::spawn(move || {
+            approval_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                approval_ports.as_ref(),
+            )
+        });
+        verifier_started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("verifier call entered");
+
+        // No poll or denial performs expiry; the trusted clock still blocks
+        // the Verifying -> Issuing transition after the verifier returns.
+        ports.set_current_time(60_100);
+        ports.release_verifier();
+        assert_eq!(
+            approval.join().expect("approval thread"),
+            Err(DeviceAuthorizationError::Expired)
+        );
+        assert_eq!(ports.issuer_calls(), 0);
+        assert!(matches!(
+            store
+                .by_device_code_hash(&hash_code(
+                    b"device",
+                    start.device_code.to_ascii_lowercase().as_bytes(),
+                ))
+                .expect("read expired state")
+                .expect("authorization")
+                .state,
+            DeviceAuthorizationState::Expired
+        ));
+    }
+
+    #[test]
+    fn retrying_the_same_assertion_consumes_the_credential_counter_once() {
+        let manager = manager();
+        let start = start(&manager);
+        let (ports, _verifier_started) =
+            CoordinatedApprovalPorts::new(VerifierBehavior::UnavailableOnce, 300);
+        let challenge = manager
+            .begin_approval(&start.user_code, &scope(), &user(), &[15; 32], 200, &ports)
+            .expect("challenge");
+
+        assert_eq!(
+            manager.complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                300,
+                &ports,
+            ),
+            Err(DeviceAuthorizationError::WebAuthnUnavailable)
+        );
+        assert!(matches!(
+            manager
+                .store
+                .by_approval_id(&challenge.approval_id)
+                .expect("read verifying state")
+                .expect("authorization")
+                .state,
+            DeviceAuthorizationState::VerifyingWebAuthn { .. }
+        ));
+        assert_eq!(ports.credential_counter_updates(), 1);
+
+        ports.set_current_time(301);
+        assert_eq!(
+            manager.complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                301,
+                &ports,
+            ),
+            Ok(())
+        );
+        assert_eq!(ports.verifier_calls(), 2);
+        assert_eq!(ports.credential_counter_updates(), 1);
+        assert_eq!(ports.issuer_calls(), 1);
     }
 }
