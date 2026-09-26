@@ -1,0 +1,83 @@
+# Review template for the separate internal Relay app in cae-dh-eastasia.
+# Do not apply while the host's production IAM and enrollment gates are absent.
+location: eastasia
+name: cyrene-workspace-relay
+properties:
+  managedEnvironmentId: REPLACE_WITH_EXISTING_CAE_RESOURCE_ID
+  configuration:
+    activeRevisionsMode: Multiple
+    registries:
+      - server: ghcr.io
+        username: REPLACE_WITH_GHCR_PULL_USERNAME
+        passwordSecretRef: REPLACE_WITH_EXISTING_ACA_REGISTRY_SECRET_REF
+    ingress:
+      external: false
+      allowInsecure: false
+      clientCertificateMode: require
+      transport: http2
+      targetPort: 8080
+      traffic:
+        - latestRevision: true
+          weight: 100
+  template:
+    containers:
+      - name: workspace-relay
+        image: ghcr.io/dohorizon-ai/cyrene-workspace-relay@sha256:REPLACE_WITH_PUBLISHED_DIGEST
+        env:
+          - name: CYRENE_WORKSPACE_RELAY_BIND
+            value: 0.0.0.0:8080
+          - name: CYRENE_WORKSPACE_RELAY_HEALTH_BIND
+            value: 0.0.0.0:8081
+          - name: CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION
+            value: client-certificate-required
+          - name: CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION
+            value: probe-only-not-ingress
+          - name: CYRENE_WORKSPACE_RELAY_DIRECTORY
+            value: /var/lib/cyrene/workspace-relay
+        probes:
+          - type: Startup
+            httpGet:
+              path: /healthz
+              port: 8081
+              scheme: HTTP
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+            successThreshold: 1
+          - type: Liveness
+            httpGet:
+              path: /healthz
+              port: 8081
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          - type: Readiness
+            httpGet:
+              path: /readyz
+              port: 8081
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 1
+            successThreshold: 1
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+        volumeMounts:
+          - volumeName: workspace-relay-state
+            mountPath: /var/lib/cyrene/workspace-relay
+    scale:
+      minReplicas: 1
+      maxReplicas: 1
+    terminationGracePeriodSeconds: 30
+    volumes:
+      - name: workspace-relay-state
+        storageType: AzureFile
+        storageName: REPLACE_WITH_PRECONFIGURED_PRIVATE_CAE_STORAGE_NAME
+        mountOptions: dir_mode=0700,file_mode=0600,uid=10001,gid=10001
+type: Microsoft.App/containerApps
