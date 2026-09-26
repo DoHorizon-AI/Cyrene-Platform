@@ -28,6 +28,9 @@ use crate::{validate_descriptor, WorkspaceApi};
 
 const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+// Match the relay's bounded queue so slow consumers backpressure both directions.
+// 与 Relay 有界队列一致，使双向慢速消费都能向上游施加背压。
+const RELAY_QUEUE_FRAMES: usize = 8;
 
 /// TLS material and public endpoint facts for one outbound relay connection.
 ///
@@ -330,7 +333,7 @@ pub async fn connect_relay_session(
 ) -> Result<RelaySession, RelayTransportError> {
     let channel = connect_channel(config).await?;
     let mut client = WorkspaceRelayServiceClient::new(channel);
-    let (outbound, receiver) = mpsc::channel(128);
+    let (outbound, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
     outbound
         .send(RelayFrame {
             frame_id: "relay-hello".to_string(),
