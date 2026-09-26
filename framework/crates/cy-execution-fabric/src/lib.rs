@@ -28,7 +28,8 @@ pub use capability::{
     ExecutionCapabilityEnvelope, ARTIFACT_TRANSFER_CAPABILITY_ID, EXECUTION_CAPABILITY_ID,
 };
 pub use connectivity::{
-    ConnectivityProvider, ConnectivityRoute, LocalConnectivityProvider, RelayConnectivityProvider,
+    ConnectivityProvider, ConnectivityRoute, LanDirectConnectivityProvider,
+    LocalConnectivityProvider, RelayConnectivityProvider,
 };
 pub use enrollment::{
     DevelopmentEnrollmentProvider, EnrollmentGrant, EnrollmentProvider, RuntimeScope,
