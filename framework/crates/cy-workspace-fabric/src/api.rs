@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use cy_observability::TraceContext;
 use cy_proto::workspace_v1::{WorkspaceApiRequest, WorkspaceApiResponse};
 
 /// Workspace-owned request handler. Relay implementations only forward it.
@@ -28,8 +29,32 @@ impl LocalWorkspaceClient {
     }
 
     pub async fn execute(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
-        self.api.handle(request).await
+        dispatch_workspace_request(self.api.as_ref(), request).await
     }
+}
+
+/// Validates trace context before dispatching to the Workspace authority.
+/// Invalid or missing context is removed without recording the raw value.
+/// 校验追踪上下文后再派发给 Workspace 权威；无效或缺失上下文不会记录原始值。
+pub(crate) async fn dispatch_workspace_request(
+    api: &dyn WorkspaceApi,
+    mut request: WorkspaceApiRequest,
+) -> WorkspaceApiResponse {
+    let trace_context = TraceContext::parse_traceparent(&request.traceparent).ok();
+    if let Some(context) = trace_context {
+        request.traceparent = context.to_traceparent();
+        tracing::info!(
+            event.name = "platform.workspace.api.request",
+            trace_id = %context.trace_id_hex(),
+            span_id = %context.span_id_hex(),
+            message = "Workspace API request reached its authority handler",
+        );
+    } else {
+        // Untrusted invalid input is discarded without exposing its value.
+        // 无效的非可信输入会被丢弃，且不记录其内容。
+        request.traceparent.clear();
+    }
+    api.handle(request).await
 }
 
 #[cfg(test)]
@@ -70,6 +95,28 @@ mod tests {
         }
     }
 
+    struct CapturingApi(Arc<std::sync::Mutex<Option<WorkspaceApiRequest>>>);
+
+    #[tonic::async_trait]
+    impl WorkspaceApi for CapturingApi {
+        async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+            *self.0.lock().unwrap() = Some(request.clone());
+            WorkspaceApiResponse {
+                request_id: request.request_id,
+                outcome: None,
+            }
+        }
+    }
+
+    fn traced_request(traceparent: &str) -> WorkspaceApiRequest {
+        WorkspaceApiRequest {
+            request_id: "request-trace-test".to_string(),
+            workspace_id: "workspace-trace-test".to_string(),
+            traceparent: traceparent.to_string(),
+            request: None,
+        }
+    }
+
     #[tokio::test]
     async fn local_frontend_observes_workspace_api_without_execution_access() {
         let client = LocalWorkspaceClient::new(Arc::new(FixtureWorkspaceApi));
@@ -77,6 +124,7 @@ mod tests {
             .execute(WorkspaceApiRequest {
                 request_id: "request-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
+                traceparent: String::new(),
                 request: Some(workspace_api_request::Request::GetOperation(
                     GetWorkspaceOperationRequest {
                         operation: Some(Identity {
@@ -92,5 +140,53 @@ mod tests {
         };
         assert_eq!(operation.state, WorkspaceOperationState::Running as i32);
         assert_eq!(operation.operation.unwrap().id, "operation-1");
+    }
+
+    #[tokio::test]
+    async fn valid_traceparent_reaches_handler_as_canonical_w3c_context() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let api = CapturingApi(captured.clone());
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        dispatch_workspace_request(&api, traced_request(traceparent)).await;
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.as_ref().unwrap().traceparent, traceparent);
+        let context = TraceContext::parse_traceparent(&captured.as_ref().unwrap().traceparent)
+            .expect("handler context should remain valid");
+        assert_eq!(context.trace_id_hex(), "4bf92f3577b34da6a3ce929d0e0e4736");
+    }
+
+    #[tokio::test]
+    async fn invalid_traceparent_is_removed_before_handler() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let api = CapturingApi(captured.clone());
+        let untrusted = "Bearer sensitive-session-value";
+
+        dispatch_workspace_request(&api, traced_request(untrusted)).await;
+
+        assert!(captured
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .traceparent
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_traceparent_does_not_create_a_trace_context() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let api = CapturingApi(captured.clone());
+
+        dispatch_workspace_request(&api, traced_request("")).await;
+
+        assert!(captured
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .traceparent
+            .is_empty());
     }
 }

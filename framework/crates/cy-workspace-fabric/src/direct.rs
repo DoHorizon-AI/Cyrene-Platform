@@ -80,7 +80,9 @@ impl WorkspaceDirectService for DirectWorkspaceServer {
             request_id = %api_request.request_id,
             message = "Workspace request used the private direct endpoint",
         );
-        Ok(Response::new(self.api.handle(api_request).await))
+        Ok(Response::new(
+            crate::api::dispatch_workspace_request(self.api.as_ref(), api_request).await,
+        ))
     }
 }
 
@@ -140,6 +142,7 @@ mod tests {
             request: Some(WorkspaceApiRequest {
                 request_id: "request-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
+                traceparent: String::new(),
                 request: None,
             }),
         })

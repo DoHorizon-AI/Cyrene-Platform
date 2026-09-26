@@ -225,6 +225,14 @@ grep -q LAN_DIRECT_NO_RELAY=PASS "${proof_root}/frontend-direct.out"
 grep -q LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS "${proof_root}/frontend-direct.out"
 grep -q WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-direct.out"
 
+expected_trace_context='trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7'
+grep -qF "WORKSPACE_API_TRACE request_id=start-operation-1 ${expected_trace_context}" "${proof_root}/state/workspace-connector.trace"
+grep -qF "WORKSPACE_API_TRACE request_id=direct-get-operation-1 ${expected_trace_context}" "${proof_root}/state/workspace-connector.trace"
+if grep -qF '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' "${proof_root}/state/workspace-connector.trace"; then
+  printf '%s\n' 'raw traceparent header was written to Workspace trace output' >&2
+  exit 1
+fi
+
 test "$(sha256sum "${published_path}" | cut -d ' ' -f 1)" = "${source_digest}"
 test "$(docker inspect -f '{{.HostConfig.Privileged}}' "${container_name}")" = false
 test "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "${container_name}")" = 0
@@ -237,6 +245,7 @@ printf '%s\n' \
   'LAN_DIRECT_NO_RELAY=PASS' \
   'LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS' \
   'LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS' \
+  'WORKSPACE_TRACE_CONTEXT_RELAY_DIRECT_CORRELATED=PASS' \
   'MANUAL_IP_REQUIRED=NO' \
   'WORKSPACE_INBOUND_PORT_REQUIRED=NO' \
   'REMOTE_FRONTEND_E2E=PASS' \

@@ -95,6 +95,9 @@ message GetWorkspaceOperationRequest {
 message WorkspaceApiRequest {
   string request_id = 1;
   string workspace_id = 2;
+  // W3C trace context from the frontend; Relay forwards it unchanged.
+  // 前端提供的 W3C 追踪上下文；Relay 按原样转发。
+  string traceparent = 3;
   oneof request {
     StartWorkspaceOperationRequest start_operation = 10;
     GetWorkspaceOperationRequest get_operation = 11;

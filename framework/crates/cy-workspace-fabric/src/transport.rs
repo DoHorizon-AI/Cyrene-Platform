@@ -283,7 +283,7 @@ impl RelaySession {
             let Some(request) = forwarded.request else {
                 continue;
             };
-            let response = api.handle(request).await;
+            let response = crate::api::dispatch_workspace_request(api.as_ref(), request).await;
             self.send(RelayFrame {
                 frame_id: frame.frame_id,
                 body: Some(relay_frame::Body::ForwardedResponse(

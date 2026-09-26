@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cy_observability::TraceContext;
 use cy_proto::core_v1::ConnectivityMode;
 use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::semantic_v1::Identity as OperationIdentity;
@@ -47,6 +48,8 @@ use cy_workspace_fabric::{
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::Code;
+
+const FIXTURE_TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -288,6 +291,7 @@ async fn run_frontend_direct() -> Result<(), Box<dyn std::error::Error>> {
         .execute(WorkspaceApiRequest {
             request_id: "direct-get-operation-1".to_string(),
             workspace_id,
+            traceparent: FIXTURE_TRACEPARENT.to_string(),
             request: Some(workspace_api_request::Request::GetOperation(
                 GetWorkspaceOperationRequest {
                     operation: Some(OperationIdentity {
@@ -313,6 +317,7 @@ async fn run_frontend_direct() -> Result<(), Box<dyn std::error::Error>> {
             request: Some(WorkspaceApiRequest {
                 request_id: "direct-denied-operation-1".to_string(),
                 workspace_id: required("CYRENE_WORKSPACE_ID")?,
+                traceparent: String::new(),
                 request: Some(workspace_api_request::Request::GetOperation(
                     GetWorkspaceOperationRequest {
                         operation: Some(OperationIdentity {
@@ -366,6 +371,7 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
         .execute(WorkspaceApiRequest {
             request_id: "fallback-get-operation-1".to_string(),
             workspace_id,
+            traceparent: FIXTURE_TRACEPARENT.to_string(),
             request: Some(workspace_api_request::Request::GetOperation(
                 GetWorkspaceOperationRequest {
                     operation: Some(OperationIdentity {
@@ -425,6 +431,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
             .execute(WorkspaceApiRequest {
                 request_id: "start-operation-1".to_string(),
                 workspace_id: workspace_id.clone(),
+                traceparent: FIXTURE_TRACEPARENT.to_string(),
                 request: Some(workspace_api_request::Request::StartOperation(
                     StartWorkspaceOperationRequest {
                         operation: Some(operation.clone()),
@@ -442,6 +449,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
             .execute(WorkspaceApiRequest {
                 request_id: format!("get-operation-{}", now_unix_ms()),
                 workspace_id: workspace_id.clone(),
+                traceparent: FIXTURE_TRACEPARENT.to_string(),
                 request: Some(workspace_api_request::Request::GetOperation(
                     GetWorkspaceOperationRequest {
                         operation: Some(operation.clone()),
@@ -689,6 +697,17 @@ impl FileWorkspaceApi {
 #[tonic::async_trait]
 impl WorkspaceApi for FileWorkspaceApi {
     async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+        if let Ok(context) = TraceContext::parse_traceparent(&request.traceparent) {
+            trace(
+                &self.connector_trace,
+                &format!(
+                    "WORKSPACE_API_TRACE request_id={} trace_id={} span_id={}",
+                    request.request_id,
+                    context.trace_id_hex(),
+                    context.span_id_hex()
+                ),
+            );
+        }
         if request.workspace_id != self.workspace_id {
             return workspace_error(request.request_id, 5, "WORKSPACE_NOT_FOUND");
         }
