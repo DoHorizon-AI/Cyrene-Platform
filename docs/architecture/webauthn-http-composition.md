@@ -52,16 +52,18 @@ for local or single-instance use only.
 
 ## Session-binding storage and approval step-up
 
-The existing credential registration persistence stores owner, verifier state,
-and expiry, but it does not store the BFF session digest. Device approval state
-also binds the approver's `(issuer, subject)` but its current HTTP application
-port drops the session context. Consequently, this module requires a separate
-durable `WebAuthnHttpSessionBindingStore`; absence, conflict, or storage failure
-returns 503. The store contract covers both `CredentialRegistration` and
-`DeviceApproval`, binds ceremony ID to owner, Directory scope, session digest,
-expiry and response digest, and makes same-digest finish retries idempotent.
-There is intentionally no in-memory production fallback or PostgreSQL adapter
-in this slice.
+The PostgreSQL `WebAuthnCredentialStore` from `e22498c` already persists
+credentials, registration and authentication verifier state, signature
+counters, replay outcomes, and audit events. Those tables do not store the BFF
+session digest. Device approval state likewise needs its session digest carried
+through the HTTP application boundary. Consequently, this module requires an
+additional durable `WebAuthnHttpSessionBindingStore`; absence, conflict, or
+storage failure returns 503. That separate adapter and schema migration are
+not part of this slice. The store contract covers both
+`CredentialRegistration` and `DeviceApproval`, binds ceremony ID to owner,
+Directory scope, session digest, expiry and response digest, and makes
+same-digest finish retries idempotent. There is no in-memory production
+fallback.
 
 The device approval endpoint remains the existing OpenAPI shape:
 
@@ -70,10 +72,10 @@ The device approval endpoint remains the existing OpenAPI shape:
 - Complete request: `webauthnAssertion` containing the browser's standard
   `PublicKeyCredential` assertion.
 
-The owner of `device_enrollment_http.rs` must pass `VerifiedWebSessionContext`
-through both begin and complete, bind `approvalId` to its session digest on
-begin, and require the same unexpired digest before calling the manager on
-complete. Until that handler and a durable session-binding adapter adopt this
-seam, production approval finish must remain unavailable (503). The assertion
+The device HTTP adapter must pass `VerifiedWebSessionContext` through both begin
+and complete, bind `approvalId` to its session digest on begin, and require the
+same unexpired digest before calling the manager on complete. Until that
+consumer and the separate durable session-binding adapter are wired together,
+production approval finish must remain unavailable (503). The assertion
 verifier and PostgreSQL credential store do not compensate for a handler that
 loses session identity.
