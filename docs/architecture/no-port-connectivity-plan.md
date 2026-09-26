@@ -179,11 +179,12 @@ surface. Direct service endpoints remain internal implementation paths.
 
 The request path is fixed: the Web Client calls the stable Workspace API;
 the connection descriptor selects `LAN_DIRECT` or `RELAY` to reach the same
-Workspace Control Plane. That control plane owns Workspace/Product state and
-calls Product services internally. Directory supplies identity-scoped discovery
-and connection candidates; Relay only carries authenticated traffic. The
-current Web-to-Product proxy routes are an interim deployment path, not the
-Phase 3 Client contract.
+Workspace Control Plane. That control plane owns Workspace authority and
+projects Product APIs; each Product service retains authority over its own
+domain records. Directory supplies identity-scoped discovery and connection
+candidates; Relay only carries authenticated traffic. The current
+Web-to-Product proxy routes are an interim deployment path, not the Phase 3
+Client contract.
 
 ---
 
@@ -266,8 +267,9 @@ widen. Do not attempt every endpoint up front.
 Work:
 
 - Proto definitions and TCK extension under `contracts/`.
-- Implement the Workspace Control Plane as the Workspace/Product state owner and
+- Implement the Workspace Control Plane as the Workspace authority and
   `WorkspaceApi` handler behind both `LAN_DIRECT` and `RELAY` connections.
+  Product domain records remain with their owning services.
 - Client changes to reach products only through the Workspace API.
 
 Acceptance:
@@ -483,9 +485,9 @@ Web Client 最终仅通过 Workspace API 访问各产品投影；服务直连端
 
 请求路径已经确定：Web Client 调用稳定的 Workspace API；连接描述符选择 `LAN_DIRECT`
 或 `RELAY`，两条传输路径均到达同一个 Workspace Control Plane。该控制层持有
-Workspace/Product 状态，并在内部调用各 Product 服务。Directory 只提供按身份过滤的
-发现结果和连接候选，Relay 只承载认证后的流量。当前 Web 到 Product 的代理路由属于
-过渡部署路径，不是 Phase 3 的 Client 契约。
+Workspace 权威并提供 Product API 投影；各 Product 服务继续持有各自领域记录的权威。
+Directory 只提供按身份过滤的发现结果和连接候选，Relay 只承载认证后的流量。
+当前 Web 到 Product 的代理路由属于过渡部署路径，不是 Phase 3 的 Client 契约。
 
 ---
 
@@ -565,8 +567,8 @@ Workspace/Product 状态，并在内部调用各 Product 服务。Directory 只�
 工作：
 
 - `contracts/` 下的 proto 定义与 TCK 扩展。
-- 实现 Workspace Control Plane，由它持有 Workspace/Product 状态并处理 `WorkspaceApi`；
-  `LAN_DIRECT` 和 `RELAY` 均连接到同一个控制层。
+- 实现 Workspace Control Plane，由它持有 Workspace 权威并处理 `WorkspaceApi`；
+  `LAN_DIRECT` 和 `RELAY` 均连接到同一个控制层。Product 领域记录仍由各自服务持有。
 - 客户端改为只经 Workspace API 访问产品。
 
 验收：
