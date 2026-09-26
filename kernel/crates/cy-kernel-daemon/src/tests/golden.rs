@@ -2,11 +2,13 @@
 //!
 //! These tests cover worker loss, lease revocation, event eviction,
 //! backpressure, and replay-to-live handoff behavior.
+//! 中文：故障域 golden tests 与事件流正确性测试。这些测试覆盖 Worker 丢失、Lease 撤销、事件淘汰、背压，以及从重放切换到实时通知的行为。
 
 use super::*;
 
 // Cy Kernel Phase 10: Failure-Domain Golden Tests
 // =========================================================================
+// 中文：Cy Kernel 阶段 10：故障域黄金测试。
 
 /// Golden Test A — Real Worker Lost
 ///
@@ -25,6 +27,7 @@ use super::*;
 ///  -> cleanup/reconciliation completes
 ///  -> Resource becomes safely allocatable
 ///  -> replacement Lease has newer Fence
+/// 中文：黄金测试 A——Worker 真实丢失。端到端故障域场景：真实受控子进程中的 Worker 在未执行正常停止的情况下被杀死；由故障检测器或 watchdog 的心跳期限检查触发，而不是直接调用 mark_worker_lost。验证进程退出后 Worker 进入 LOST、Lease 被撤销、Fence 失效并前移、Endpoint/Grant 被清除、语义事件发出、清理与 reconciliation 完成、Resource 可安全重新分配，且替代 Lease 使用更新的 Fence。
 #[test]
 fn golden_test_a_real_worker_lost_end_to_end() {
     #[derive(Default)]
@@ -149,6 +152,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     };
 
     // 1. Acquire Lease
+    // 中文：1. 获取 Lease。
     let lease = authority
         .acquire_lease(
             &context,
@@ -162,6 +166,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     let initial_fence = lease.fence_token;
 
     // 2. Start Worker (spawns real controlled child process)
+    // 中文：2. 启动 Worker（会启动真实的受控子进程）。
     let worker = semantic_worker_for(
         &worker_identity.id,
         semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
@@ -177,6 +182,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     let child_pid = launched_pids[0];
 
     // 3. Publish Endpoint and Authorize Grant
+    // 中文：3. 发布 Endpoint 并授权 Grant。
     let endpoint = semantic_endpoint_for(&worker);
     authority
         .publish_endpoint(&context, &principal, endpoint.clone())
@@ -198,6 +204,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
         .expect("authorize endpoint grant must succeed");
 
     // 4. Initial heartbeat transitions worker to Running
+    // 中文：4. 首次 heartbeat 将 Worker 转换为 Running。
     let running_worker = authority
         .accept_worker_control_heartbeat(
             &context,
@@ -209,6 +216,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     assert_eq!(running_worker.state, semantic::WorkerState::Running);
 
     // Verify initial active state in snapshot
+    // 中文：验证 snapshot 中的初始活动状态。
     let snapshot_before = authority.snapshot(&context, &principal).unwrap();
     assert!(snapshot_before
         .workers
@@ -226,19 +234,23 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     assert!(adapter.daemon.is_allocated(&lease.identity.id));
 
     // 5. Kill real Worker process without normal stop
+    // 中文：5. 在未执行正常停止的情况下杀死真实 Worker 进程。
     if let Some(mut child) = sandbox.children.lock().unwrap().remove(&child_pid) {
         let _ = child.kill();
         let _ = child.wait();
     }
 
     // 6. Wait for heartbeat deadline expiry (heartbeat_timeout is 30ms)
+    // 中文：6. 等待 heartbeat deadline 到期（heartbeat_timeout 为 30ms）。
     thread::sleep(Duration::from_millis(45));
 
     // 7. Failure detector / watchdog scan runs (NOT calling mark_worker_lost directly!)
+    // 中文：7. 运行 failure detector / watchdog 扫描（不得直接调用 mark_worker_lost）。
     adapter.enforce_heartbeat_deadlines();
 
     // 8. Verify the entire end-to-end failure domain transition:
     // a) Worker state is LOST
+    // 中文：8. 验证完整的端到端故障域状态转换：Worker 状态为 LOST。
     let snapshot_after = authority.snapshot(&context, &principal).unwrap();
     let worker_after = snapshot_after
         .workers
@@ -247,6 +259,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     assert!(worker_after.is_some_and(|w| w.state == semantic::WorkerState::Lost));
 
     // b) Lease is REVOKED
+    // 中文：b) Lease 已撤销（REVOKED）。
     let revoked_daemon_lease = adapter.daemon.lease(&lease.identity.id).unwrap();
     assert_eq!(
         revoked_daemon_lease.state,
@@ -254,9 +267,11 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     );
 
     // c) Fence is invalidated and advanced
+    // 中文：c) Fence 已失效并前移。
     assert!(revoked_daemon_lease.fence_token > initial_fence);
 
     // d) Endpoint and Grant authorities are PURGED
+    // 中文：d) Endpoint 和 Grant authority 已清除（PURGED）。
     assert!(
         snapshot_after.endpoints.is_empty(),
         "endpoint authority must be purged"
@@ -267,6 +282,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     );
 
     // e) Semantic events and journal events are emitted
+    // 中文：e) 已发出语义事件和 journal 事件。
     let journal_records = journal.records.lock().unwrap();
     let journal_events = journal_records.iter().map(|r| r.event).collect::<Vec<_>>();
     assert!(
@@ -317,6 +333,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     );
 
     // f) Cleanup and reconciliation completed
+    // 中文：f) 清理和 reconciliation 已完成。
     assert!(
         !adapter.daemon.is_allocated(&lease.identity.id),
         "physical allocation released after confirmed cleanup"
@@ -327,6 +344,7 @@ fn golden_test_a_real_worker_lost_end_to_end() {
     );
 
     // g) Resource becomes safely allocatable and replacement Lease has strictly newer Fence
+    // 中文：g) Resource 可安全重新分配，且替代 Lease 的 Fence 严格更新。
     let context_repl = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
         namespace: NamespaceId::default(),
@@ -368,6 +386,8 @@ fn golden_test_a_real_worker_lost_end_to_end() {
 /// - consume B's authority
 /// - collide with B's object keys
 ///   And vice versa for B against A.
+///
+/// 中文：黄金测试 B——完整命名空间隔离。Namespace A 和 Namespace B 使用相同裸 ID 表示 Worker、Lease、Operation、Endpoint 和 Grant 时，验证两个方向都完全隔离。A 不得查询或修改 B、接收 B 的事件、使用 B 的 authority 或与 B 的对象键冲突；B 对 A 也必须如此。
 #[test]
 fn golden_test_b_full_bidirectional_namespace_isolation() {
     let resources = vec![
@@ -435,6 +455,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     };
 
     // 1. Acquire Leases with identical bare ID in both namespaces
+    // 中文：1. 在两个 namespace 中获取具有相同裸 ID 的 Lease。
     let lease_a = authority
         .acquire_lease(
             &context_a,
@@ -456,6 +477,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         .expect("acquire lease in B");
 
     // 2. Start Workers with identical bare ID in both namespaces
+    // 中文：2. 在两个 namespace 中启动具有相同裸 ID 的 Worker。
     let worker_a = semantic::Worker {
         identity: shared_worker_id.clone(),
         principal: principal_a.identity.clone(),
@@ -483,6 +505,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         .expect("start worker in B");
 
     // 3. Create Operations with identical bare ID in both namespaces
+    // 中文：3. 在两个 namespace 中创建具有相同裸 ID 的 Operation。
     let op_a = semantic::Operation {
         identity: shared_op_id.clone(),
         owner: principal_a.identity.clone(),
@@ -511,6 +534,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         .expect("create op in B");
 
     // 4. Publish Endpoints with identical bare ID in both namespaces
+    // 中文：4. 在两个 namespace 中发布具有相同裸 ID 的 Endpoint。
     let ep_a = semantic::Endpoint {
         identity: shared_ep_id.clone(),
         provider: worker_a.provider.clone(),
@@ -541,6 +565,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
         .expect("publish ep in B");
 
     // 5. Authorize Grants with identical bare ID in both namespaces
+    // 中文：5. 在两个 namespace 中授权具有相同裸 ID 的 Grant。
     let grant_a = semantic::EndpointGrant {
         identity: shared_grant_id.clone(),
         endpoint: ep_a.identity.clone(),
@@ -567,6 +592,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     // ==========================================
     // Verification 1: Object Keys Do Not Collide
     // ==========================================
+    // 中文：验证 1：对象键不会冲突。
     let snap_a = authority.snapshot(&context_a, &principal_a).unwrap();
     let snap_b = authority.snapshot(&context_b, &principal_b).unwrap();
     assert_eq!(snap_a.workers.len(), 1);
@@ -583,6 +609,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     // ==========================================
     // Verification 2: Query Isolation (A -> B and B -> A)
     // ==========================================
+    // 中文：验证 2：查询隔离（A -> B 和 B -> A）。
     assert_eq!(snap_a.workers[0].principal, principal_a.identity);
     assert_eq!(snap_b.workers[0].principal, principal_b.identity);
     assert_ne!(
@@ -594,6 +621,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     // Verification 3: Mutation Isolation (A -> B and B -> A)
     // ==========================================
     // Cancel op in A
+    // 中文：验证 3：变更隔离（A -> B 和 B -> A）；先在 A 中取消 Operation。
     let cancelled_op_a = authority
         .cancel_operation(&context_a, &principal_a, &shared_op_id)
         .expect("cancel op in A succeeds");
@@ -608,6 +636,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     );
 
     // Verify op in B remains untouched (Created state)
+    // 中文：验证 B 中的 Operation 仍保持原样（Created 状态）。
     let snap_b_after = authority.snapshot(&context_b, &principal_b).unwrap();
     let op_b_after = snap_b_after
         .operations
@@ -621,6 +650,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     );
 
     // Mutate an object that only exists in B from context A -> Rejected
+    // 中文：从 A 的上下文变更一个只存在于 B 的对象；请求应被拒绝。
     let op_only_b = semantic::Identity {
         id: "op-unique-b".to_string(),
         generation: 1,
@@ -648,6 +678,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     assert_eq!(cross_cancel_err.reason_code, "OPERATION_NOT_FOUND");
 
     // Release lease in A
+    // 中文：在 A 中释放 Lease。
     let released_a = authority
         .release_lease(
             &context_a,
@@ -659,12 +690,14 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     assert_eq!(released_a.state, semantic::LeaseState::Released);
 
     // Verify lease in B remains Active
+    // 中文：验证 B 中的 Lease 仍为 Active。
     let snap_b_leases = authority.snapshot(&context_b, &principal_b).unwrap().leases;
     assert_eq!(snap_b_leases[0].state, semantic::LeaseState::Active);
 
     // ==========================================
     // Verification 4: Event Isolation (A <-> B)
     // ==========================================
+    // 中文：验证 4：事件隔离（A <-> B）。
     let replay_a = authority
         .read_events(
             &context_a,
@@ -706,6 +739,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     // Verification 5: Authority Consumption Isolation
     // ==========================================
     // A cannot authorize a grant for B's endpoint
+    // 中文：验证 5：authority 使用隔离。A 不能为 B 的 Endpoint 授权 Grant。
     let cross_grant_err = authority
         .authorize_endpoint(
             &context_a,
@@ -715,7 +749,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
                     id: "cross-grant".to_string(),
                     generation: 1,
                 },
-                endpoint: op_only_b.clone(), // non-existent in A
+                endpoint: op_only_b.clone(), // non-existent in A | 中文：该 endpoint 在 A 中不存在
                 grantee: shared_worker_id.clone(),
                 lease: lease_a.identity.clone(),
                 fence_token: lease_a.fence_token,
@@ -726,6 +760,7 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
     assert_eq!(cross_grant_err.reason_code, "ENDPOINT_NOT_FOUND");
 
     // Reverse: B cannot authorize grant using an endpoint that only exists in A (ep_a)
+    // 中文：反向验证：B 不能使用仅存在于 A 的 Endpoint ep_a 授权 Grant；相关 Endpoint 在 A 中不存在。
     let cross_grant_b_err = authority
         .authorize_endpoint(
             &context_b,
@@ -761,6 +796,8 @@ fn golden_test_b_full_bidirectional_namespace_isolation() {
 /// 3. existing runtime reality enters the real Discover/Classify/Recover startup path;
 /// 4. unresolved Foreign/Unknown reality keeps startup fail-closed;
 /// 5. replacement Lease Fence is strictly greater than the pre-crash Fence once recovery permits allocation.
+///
+/// 中文：黄金测试 C——真实进程下的 daemon 崩溃、重启与恢复冒烟 E2E。场景：在 Epoch N 启动真实 daemon 和受控 sandbox/Worker，建立 Lease/Worker authority，然后意外终止 daemon（不是优雅关闭，子进程仍存活）。使用同一 runtime journal / recovery state 在 Epoch N+1 重启 daemon，并运行正常的 recover_before_listeners 启动恢复。至少证明：崩溃前的 Worker/Lease/Endpoint 语义 authority 不会被静默恢复；旧事件 source/cursor 会被拒绝或要求重新构建；现存 runtime 状态进入真实 Discover/Classify/Recover 启动流程；无法分类的 Foreign/Unknown 状态会让启动保持 fail-closed；恢复允许分配后，替代 Lease 的 Fence 严格大于崩溃前的 Fence。
 #[test]
 fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     use cy_kernel_api::RuntimeProcessEvidence;
@@ -903,6 +940,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     // =========================================================================
     // 1. Epoch 1 (Crash Generation 1): Establish Lease/Worker/Endpoint Authority
     // =========================================================================
+    // 中文：1. Epoch 1（崩溃代次 1）：建立 Lease/Worker/Endpoint authority。
     let epoch_1 = 1;
     let next_fence_token_1 = 1;
     let daemon_1 = Arc::new(KernelDaemon::new(
@@ -924,6 +962,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     let authority_1 = adapter_1.authority();
 
     // Acquire Lease
+    // 中文：获取 Lease。
     let lease_1 = authority_1
         .acquire_lease(
             &context_epoch_1,
@@ -937,6 +976,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     let fence_1 = lease_1.fence_token;
 
     // Start Worker (spawns real controlled child process)
+    // 中文：启动 Worker（会启动真实的受控子进程）。
     let worker_1 = semantic_worker_for(
         &worker_identity.id,
         semantic_provider("test-provider", 1, semantic::ProviderState::Ready).identity,
@@ -956,6 +996,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     let child_pid = launched_pids[0];
 
     // Publish Endpoint & Authorize Grant
+    // 中文：发布 Endpoint 并授权 Grant。
     let endpoint_1 = semantic_endpoint_for(&worker_1);
     authority_1
         .publish_endpoint(&context_epoch_1, &principal, endpoint_1.clone())
@@ -977,6 +1018,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
         .expect("authorize grant epoch 1");
 
     // Heartbeat to Running
+    // 中文：发送 heartbeat，使 Worker 进入 Running。
     let running_worker_1 = authority_1
         .accept_worker_control_heartbeat(
             &context_epoch_1,
@@ -988,6 +1030,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     assert_eq!(running_worker_1.state, semantic::WorkerState::Running);
 
     // Snapshot before crash
+    // 中文：崩溃前的 Snapshot。
     let snapshot_1 = authority_1.snapshot(&context_epoch_1, &principal).unwrap();
     assert_eq!(snapshot_1.workers.len(), 1);
     assert_eq!(snapshot_1.leases.len(), 1);
@@ -998,10 +1041,12 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     // =========================================================================
     // 2. Unexpected Daemon Crash (Termination without graceful stop)
     // =========================================================================
+    // 中文：2. 意外的 daemon 崩溃（未执行优雅停止而终止）。
     drop(authority_1);
     drop(adapter_1);
 
     // Verify child process is still alive in the OS (unreaped until recovery)
+    // 中文：验证子进程仍在操作系统中存活（恢复前尚未 reap）。
     assert!(
         sandbox.children.lock().unwrap().contains_key(&child_pid),
         "pre-crash child process is still running after daemon crash"
@@ -1010,15 +1055,18 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     // =========================================================================
     // 3. Restart in Epoch 2 (Normal recover_before_listeners/startup recovery)
     // =========================================================================
+    // 中文：3. 在 Epoch 2 重启（运行正常的 recover_before_listeners 启动恢复）。
     let epoch_2 = 2;
     let next_fence_token_2 = fence_1 + 10;
 
     // Discover runtime reality
+    // 中文：发现当前 runtime 状态。
     let discovered = sandbox.discover_recovery_processes().unwrap();
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].pid, child_pid);
 
     // Proof 4: Unresolved Foreign/Unknown reality keeps startup fail-closed
+    // 中文：证明 4：尚未解决的 Foreign/Unknown 状态会让启动保持 fail-closed。
     sandbox
         .observed_foreign
         .lock()
@@ -1033,6 +1081,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     assert!(has_unresolved_foreign);
 
     // Startup fails closed when foreign/unknown reality cannot be classified/reaped
+    // 中文：无法分类或 reap Foreign/Unknown 状态时，启动会 fail-closed 失败。
     let fail_closed_startup_check: Result<(), ProviderError> = if has_unresolved_foreign {
         Err(ProviderError::new(
             "recovery",
@@ -1048,9 +1097,11 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     );
 
     // Clear the foreign anomaly to proceed with valid recovery
+    // 中文：清除 foreign 异常，以便继续有效恢复。
     sandbox.observed_foreign.lock().unwrap().clear();
 
     // Proof 3: Existing runtime reality enters the real Discover/Classify/Recover startup path
+    // 中文：证明 3：现有 runtime 状态进入真实的 Discover/Classify/Recover 启动流程。
     let recovery_processes = sandbox.discover_recovery_processes().unwrap();
     for stale_evidence in &recovery_processes {
         sandbox.recover_stale_process(stale_evidence).unwrap();
@@ -1065,6 +1116,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     );
 
     // Initialize Epoch 2 Daemon and Adapter
+    // 中文：初始化 Epoch 2 Daemon 和 Adapter。
     let daemon_2 = Arc::new(KernelDaemon::new(
         hardware.clone(),
         hardware,
@@ -1090,6 +1142,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     };
 
     // Proof 1: Pre-crash semantic Worker/Lease/Endpoint authority is NOT silently restored
+    // 中文：证明 1：崩溃前的 Worker/Lease/Endpoint 语义 authority 不会被静默恢复。
     let snapshot_2 = authority_2.snapshot(&context_epoch_2, &principal).unwrap();
     assert!(
         snapshot_2.workers.is_empty(),
@@ -1109,6 +1162,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     );
 
     // Proof 2: Old event source/cursor is rejected as changed or requires reconstruction
+    // 中文：证明 2：旧 event source/cursor 会被识别为已变更，或要求重新构建。
     assert_ne!(
         snapshot_2.source, snapshot_1.source,
         "Proof 2: Event source is epoch-scoped and changes on restart"
@@ -1124,6 +1178,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
     assert!(old_cursor_replay.events.is_empty());
 
     // Proof 5: Replacement Lease Fence is strictly greater than pre-crash Fence
+    // 中文：证明 5：替代 Lease 的 Fence 严格大于崩溃前的 Fence。
     let repl_worker_id = semantic::Identity {
         id: "golden-worker-c-replacement".to_string(),
         generation: 1,
@@ -1151,6 +1206,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
 // =========================================================================
 // Cy Kernel Phase 11: Canonical Event Model Closure Tests
 // =========================================================================
+// 中文：Cy Kernel 阶段 11：规范事件模型闭环测试。
 
 /// Production Eviction and Resume Test over Real Authority UDS
 ///
@@ -1161,6 +1217,7 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
 /// 4. restart daemon with epoch change;
 /// 5. old source cursor -> SOURCE_CHANGED;
 /// 6. snapshot + new cursor -> resume correctly with CURRENT.
+/// 中文：真实 authority UDS 上的生产环境淘汰与续读测试。验证超过保留窗口产生事件（300 > 256）、从当前 cursor 续读返回 CURRENT、从过期 cursor 续读返回 GAP（不得静默跳过）、daemon epoch 变化后重启时旧 source cursor 返回 SOURCE_CHANGED，以及通过新 snapshot 和 cursor 正确续读并返回 CURRENT。
 #[cfg(unix)]
 #[tokio::test]
 async fn production_event_eviction_and_resume_over_real_authority_uds() {
@@ -1169,6 +1226,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         kernel_authority_service_client::KernelAuthorityServiceClient,
         kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
+    use hyper_util::rt::TokioIo;
     use std::path::PathBuf;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::wrappers::UnixListenerStream;
@@ -1213,6 +1271,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     };
 
     // 1. Start Server in Epoch 1
+    // 中文：1. 在 Epoch 1 启动 Server。
     let (adapter_1, shutdown_tx_1, server_handle_1) = start_server(socket_path.clone(), 1);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -1220,7 +1279,8 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         let channel = Endpoint::try_from("http://[::]:50051")
             .unwrap()
             .connect_with_connector(service_fn(move |_: Uri| {
-                UnixStream::connect(socket.clone())
+                let path = socket.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
             }))
             .await
             .expect("connect to UDS");
@@ -1232,6 +1292,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
 
     // 2. Produce more events than retention window (window is 256)
     // Produce 300 events
+    // 中文：2. 产生超过保留窗口的事件（窗口大小为 256）；总共产生 300 个事件。
     for sequence in 1..=300 {
         adapter_1.publish_semantic_event(
             semantic::Identity {
@@ -1245,6 +1306,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     }
 
     // 3. Resume from current cursor (sequence 260) -> receives streaming events 261..=300
+    // 中文：3. 从当前 cursor（sequence 260）续读，接收 261..=300 的流式事件。
     let current_req = WatchEventsRequest {
         context: Some(authority_context("watch-current")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
@@ -1275,6 +1337,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     assert_eq!(received_events.last().unwrap().sequence, 300);
 
     // 4. Resume from expired cursor (sequence 1, which has been evicted) -> returns typed GAP
+    // 中文：4. 从已淘汰的过期 cursor（sequence 1）续读，返回类型化 GAP。
     let expired_req = WatchEventsRequest {
         context: Some(authority_context("watch-gap")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
@@ -1304,6 +1367,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     }
 
     // 5. Restart daemon (simulate crash/restart with epoch advance)
+    // 中文：5. 重启 daemon（模拟崩溃/重启并推进 epoch）。
     drop(current_stream);
     drop(client);
     let _ = shutdown_tx_1.send(());
@@ -1311,12 +1375,14 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     std::fs::remove_file(&socket_path).ok();
 
     // Start Server in Epoch 2
+    // 中文：在 Epoch 2 启动 Server。
     let (adapter_2, shutdown_tx_2, _server_handle_2) = start_server(socket_path.clone(), 2);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let mut client_2 = connect_client(socket_path.clone()).await;
 
     // 6. Old source cursor -> returns typed SOURCE_CHANGED
+    // 中文：6. 旧 source cursor 返回类型化 SOURCE_CHANGED。
     let old_source_req = WatchEventsRequest {
         context: Some(authority_context("watch-old-source")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
@@ -1346,6 +1412,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
     }
 
     // 7. Snapshot + new cursor -> resume correctly
+    // 中文：7. 获取 snapshot 和新 cursor，并正确续读。
     let snap_ctx = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
         namespace: NamespaceId::default(),
@@ -1379,6 +1446,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
         .into_inner();
 
     // Publish new event in Epoch 2 live
+    // 中文：在 Epoch 2 的活动状态下发布新事件。
     adapter_2.publish_semantic_event(
         semantic::Identity {
             id: "worker-epoch-2".to_string(),
@@ -1411,6 +1479,7 @@ async fn production_event_eviction_and_resume_over_real_authority_uds() {
 /// 4. authority state mutations continue without blocking;
 /// 5. slow stream is disconnected with OutOfRange error;
 /// 6. reconnect using last acknowledged cursor and verify replay resumes correctly.
+/// 中文：真实 authority UDS 上的规范 WatchEvents 服务端流背压测试。验证：打开规范流、读取少量事件后停止读取、产生超过订阅者有界容量的事件、authority 状态变更仍可继续、慢速流以 OutOfRange 错误断开，然后使用最后确认的 cursor 重新连接并验证重放正确恢复。
 #[cfg(unix)]
 #[tokio::test]
 async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds() {
@@ -1419,6 +1488,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
         kernel_authority_service_client::KernelAuthorityServiceClient,
         kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
+    use hyper_util::rt::TokioIo;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
     use tonic::transport::{Endpoint, Server, Uri};
@@ -1465,7 +1535,10 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
         .unwrap()
         .connect_with_connector(service_fn({
             let path = socket_path.clone();
-            move |_: Uri| UnixStream::connect(path.clone())
+            move |_: Uri| {
+                let path = path.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
+            }
         }))
         .await
         .expect("connect to UDS");
@@ -1473,6 +1546,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
     let source = adapter.semantic_event_source();
 
     // 1. Publish 10 initial events
+    // 中文：1. 发布 10 个初始事件。
     for sequence in 1..=10 {
         adapter.publish_semantic_event(
             semantic::Identity {
@@ -1486,6 +1560,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
     }
 
     // 2. Client subscribes from sequence 0
+    // 中文：2. 客户端从 sequence 0 开始订阅。
     let req = WatchEventsRequest {
         context: Some(authority_context("watch-stream-backpressure")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
@@ -1501,6 +1576,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
         .into_inner();
 
     // 3. Client reads 5 events and stops reading
+    // 中文：3. 客户端读取 5 个事件后停止读取。
     let mut acked_cursor = 0;
     for _ in 1..=5 {
         let event = stream.next().await.unwrap().unwrap();
@@ -1511,6 +1587,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
     // 4. Kernel produces more events than the bounded subscriber capacity but
     // stays within durable history, so the transport backpressure path is
     // exercised before the later cursor-gap reconnect assertion.
+    // 中文：4. Kernel 产生的事件超过订阅者有界容量，但仍处于 durable history 范围内；因此先触发传输背压路径，再执行后续 cursor-gap 重连断言。
     for sequence in 11..=110 {
         adapter.publish_semantic_event(
             semantic::Identity {
@@ -1524,6 +1601,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
     }
 
     // 5. Verify slow stream receives OutOfRange disconnect error
+    // 中文：5. 验证慢速流收到 OutOfRange 断开错误。
     let mut observed_disconnect = false;
     while let Some(item) = stream.next().await {
         match item {
@@ -1548,6 +1626,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
 
     // 6. Evict the last acknowledged cursor, then reconnect. GAP is a typed
     // event-history continuity condition, not a transport status.
+    // 中文：6. 淘汰最后确认的 cursor，然后重新连接。GAP 表示事件历史连续性已中断，是类型化的历史状态，不是传输层状态码。
     for sequence in 111..=300 {
         adapter.publish_semantic_event(
             semantic::Identity {
@@ -1600,6 +1679,7 @@ async fn canonical_watch_events_stream_slow_consumer_and_reconnect_over_real_uds
 /// 3. exactly one event is committed (sequence 6) at the replay/live transition boundary;
 /// 4. no subsequent events are published;
 /// 5. subscriber waiting for live events still receives event 6 promptly without requiring future events to wake up.
+/// 中文：规范 WatchEvents 必须在初始 durable replay 与等待实时通知的边界上保留所有事件。验证：先发布事件批次（1..=5）；客户端打开流并消费初始重放；恰好在 replay/live 切换边界提交 sequence 6；此后不再发布事件；等待实时事件的订阅者仍能及时收到事件 6，无需其他事件唤醒。
 #[cfg(unix)]
 #[tokio::test]
 async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
@@ -1608,6 +1688,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
         kernel_authority_service_client::KernelAuthorityServiceClient,
         kernel_authority_service_server::KernelAuthorityServiceServer, WatchEventsRequest,
     };
+    use hyper_util::rt::TokioIo;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_stream::{wrappers::UnixListenerStream, StreamExt};
     use tonic::transport::{Endpoint, Server, Uri};
@@ -1654,7 +1735,10 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
         .unwrap()
         .connect_with_connector(service_fn({
             let path = socket_path.clone();
-            move |_: Uri| UnixStream::connect(path.clone())
+            move |_: Uri| {
+                let path = path.clone();
+                async move { UnixStream::connect(path).await.map(TokioIo::new) }
+            }
         }))
         .await
         .expect("connect to UDS");
@@ -1662,6 +1746,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
     let source = adapter.semantic_event_source();
 
     // 1. Publish 5 initial events
+    // 中文：1. 发布 5 个初始事件。
     for sequence in 1..=5 {
         adapter.publish_semantic_event(
             semantic::Identity {
@@ -1675,6 +1760,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
     }
 
     // 2. Client subscribes from sequence 0
+    // 中文：2. 客户端从 sequence 0 开始订阅。
     let req = WatchEventsRequest {
         context: Some(authority_context("watch-stream-handoff")),
         cursor: Some(cy_proto::semantic_v1::EventCursor {
@@ -1690,6 +1776,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
         .into_inner();
 
     // 3. Read initial 5 events
+    // 中文：3. 读取初始的 5 个事件。
     for expected_seq in 1..=5 {
         let event = tokio::time::timeout(Duration::from_millis(200), stream.next())
             .await
@@ -1700,6 +1787,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
     }
 
     // 4. Publish exactly one event at the replay -> live transition boundary, and no subsequent events
+    // 中文：4. 在 replay -> live 切换边界只发布一个事件，之后不再发布其他事件。
     adapter.publish_semantic_event(
         semantic::Identity {
             id: "worker-handoff-test".to_string(),
@@ -1711,6 +1799,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
     );
 
     // 5. Subscriber must receive event 6 without any subsequent events being produced
+    // 中文：5. 即使之后没有产生其他事件，订阅者也必须收到事件 6。
     let live_event = tokio::time::timeout(Duration::from_millis(200), stream.next())
         .await
         .expect("timeout waiting for live handoff event")
@@ -1728,6 +1817,7 @@ async fn canonical_watch_events_does_not_lose_event_at_replay_live_handoff() {
 }
 
 /// Slow consumer on streaming endpoint cannot block Kernel authority state transitions
+/// 中文：流式端点上的慢速消费者不能阻止 Kernel authority 状态转换。
 #[tokio::test]
 async fn watch_operations_slow_consumer_lags_and_disconnects_without_blocking_kernel() {
     use core_v1::kernel_service_server::KernelService;
@@ -1736,6 +1826,7 @@ async fn watch_operations_slow_consumer_lags_and_disconnects_without_blocking_ke
     let adapter = heartbeat_adapter();
 
     // 1. Client subscribes to WatchOperations
+    // 中文：1. 客户端订阅 WatchOperations。
     let response = adapter
         .watch_operations(Request::new(core_v1::WatchOperationsRequest {
             context: None,
@@ -1748,6 +1839,7 @@ async fn watch_operations_slow_consumer_lags_and_disconnects_without_blocking_ke
 
     // 2. Kernel publishes more events than OPERATION_EVENT_SUBSCRIBER_CAPACITY (1024)
     // without the subscriber polling or consuming the stream
+    // 中文：2. Kernel 发布的事件超过 OPERATION_EVENT_SUBSCRIBER_CAPACITY（1024），而订阅者没有轮询或消费该流。
     for i in 1..=1500 {
         adapter.publish_runtime_event(
             core_v1::RuntimeEventType::InstanceStateChanged,
@@ -1758,12 +1850,14 @@ async fn watch_operations_slow_consumer_lags_and_disconnects_without_blocking_ke
     }
 
     // 3. Verify kernel publications completed without deadlock or stalling
+    // 中文：3. 验证 Kernel 发布已完成，没有死锁或停滞。
     assert_eq!(
         adapter.operation_events.lock().unwrap().len(),
         OPERATION_EVENT_HISTORY_CAPACITY
     );
 
     // 4. The slow subscriber consumes stream and eventually observes Lagged error (out_of_range)
+    // 中文：4. 慢速订阅者继续消费该流，最终观察到 Lagged 错误（out_of_range）。
     let mut observed_lagged = false;
     while let Some(item) = stream.next().await {
         match item {

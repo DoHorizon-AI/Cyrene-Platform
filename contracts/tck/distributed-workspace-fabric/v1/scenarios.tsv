@@ -5,6 +5,10 @@ descriptor_modes	LOCAL+LAN_DIRECT+DIRECT+OVERLAY+RELAY candidates	contract valid
 descriptor_expiry	expired descriptor	contract validation	REJECTED
 identity_address_independence	WorkspaceId+candidate URI	identity validation	WORKSPACE_ID_UNCHANGED
 local_access	LOCAL candidate+Workspace API	LocalWorkspaceClient	CONNECTED
+direct_private_access	LAN_DIRECT candidate+private mTLS Workspace endpoint	WorkspaceDirectService	NO_RELAY_TRANSIT
+direct_unreachable_fallback	unreachable LAN_DIRECT+RELAY candidate	candidate selection	RELAY_CONNECTED
+direct_membership_denied	unrelated user+private Workspace endpoint	WorkspaceDirectService	DENIED
+direct_expired_credential	expired frontend session+private Workspace endpoint	WorkspaceDirectService	DENIED
 relay_workspace_connect	approved device+short-lived credential+outbound mTLS	Relay registration	CONNECTED
 relay_frontend_connect	member user+short-lived credential+mTLS	Relay registration	CONNECTED
 credential_role_separation	user token used as Workspace device	authentication	REJECTED

@@ -13,10 +13,26 @@ use cy_package_runtime::{
 };
 
 fn main() -> ExitCode {
+    let log_format = std::env::var("CYRENE_LOG_FORMAT")
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(cy_observability::LogFormat::Json);
+    let log_level = std::env::var("CYRENE_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let obs_config = cy_observability::ObservabilityConfig::managed("cy-package-runtime")
+        .with_format(log_format)
+        .with_log_level(log_level);
+    let _guard = cy_observability::init_observability(obs_config).ok();
+
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("cy-package-runtime: {message}");
+            tracing::error!(
+                event.name = "platform.package.runtime_failed",
+                error.code = cy_observability::PlatformErrorCode::PackageActivationFailed.as_str(),
+                message = %message,
+            );
             ExitCode::FAILURE
         }
     }

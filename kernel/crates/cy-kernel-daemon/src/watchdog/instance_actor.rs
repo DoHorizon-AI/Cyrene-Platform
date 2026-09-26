@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use crate::sandboxed_process::SandboxedProcess;
 
 /// Lifecycle state for an active Worker Instance Actor.
+/// active Worker Instance Actor 的生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceActorState {
     Starting,
@@ -44,6 +45,7 @@ pub enum InstanceHealthVerdict {
 }
 
 /// Protocol-neutral command sent to the framework-owned worker transport.
+/// 发送给 framework 所拥有的 worker transport 的、与协议无关的命令。
 #[derive(Debug)]
 pub enum WorkerTransportCommand {
     Request(WorkerTransportRequest),
@@ -69,6 +71,7 @@ pub struct WorkerTransportRequest {
     pub generation: u64,
     pub fence_token: u64,
     /// Encoded worker-control Envelope. The Kernel keeps this opaque.
+    /// 编码后的 worker-control Envelope。Kernel 将其保持为不透明数据。
     pub payload: Vec<u8>,
 }
 
@@ -127,6 +130,7 @@ impl WorkerTransportDispatcher {
 }
 
 /// Actor representing one running instance managed by the Kernel.
+/// 代表一个由 Kernel 管理的运行中实例的 actor。
 pub struct InstanceActor {
     instance_id: String,
     lease_name: String,
@@ -196,17 +200,20 @@ impl InstanceActor {
 
     /// Read-only access to the last observed heartbeat timestamp. Used by the
     /// kernel watchdog scan loop without requiring `&mut` borrow.
+    /// 只读访问最近观测到的心跳时间戳。Kernel watchdog 扫描循环可读取此值，无需获取 &mut 借用。
     pub fn last_heartbeat(&self) -> Option<Instant> {
         self.last_heartbeat
     }
 
     /// Read-only access to the configured heartbeat deadline. Used by the
     /// kernel watchdog scan loop to detect overdue instances.
+    /// 只读访问已配置的心跳 deadline。Kernel watchdog 扫描循环据此检测超时实例。
     pub fn heartbeat_deadline(&self) -> Duration {
         self.heartbeat_deadline
     }
 
     /// Attach a communication channel to the sandboxed worker.
+    /// 为 sandbox worker 连接通信通道。
     pub fn attach_transport_channel(&mut self, tx: mpsc::Sender<WorkerTransportCommand>) {
         self.transport_tx = Some(tx);
         self.consecutive_timeouts = 0;
@@ -224,6 +231,7 @@ impl InstanceActor {
     }
 
     /// Access the pending request map for incoming response routing.
+    /// 访问用于路由传入响应的待处理请求映射。
     pub async fn dispatch_transport_response(&self, response: WorkerTransportResponse) -> bool {
         self.transport_dispatcher().dispatch(response).await
     }
@@ -240,6 +248,7 @@ impl InstanceActor {
     /// Detach a failed transport only if it still belongs to the active
     /// generation and fence. Dropping pending senders wakes blocked invokes;
     /// an invoke waiting on one records the crash when it observes closure.
+    /// 仅当失败的 transport 仍属于 active generation 和 fence 时才将其断开。移除待处理 sender 会唤醒被阻塞的 invoke；等待该请求的 invoke 观察到通道关闭后会记录崩溃。
     pub async fn mark_transport_lost(&mut self, generation: u64, fence_token: u64) -> bool {
         if generation != self.generation
             || fence_token != self.fence_token
@@ -272,6 +281,9 @@ impl InstanceActor {
     /// This is a Kernel-internal transport hook, not the supported public
     /// plugin API. External workers use the versioned wire contract carried by
     /// this opaque payload.
+    /// 对运行中的 sandbox worker 调用一个扩展点 RPC。
+    ///
+    /// 这是 Kernel 内部的传输钩子，不是受支持的公共 plugin API。外部 worker 使用此不透明 payload 所承载的版本化 wire 契约。
     #[doc(hidden)]
     pub async fn invoke_raw(
         &mut self,
@@ -286,6 +298,9 @@ impl InstanceActor {
     ///
     /// The Kernel owns correlation, timeout, cancellation, generation and
     /// fence enforcement, but does not decode the worker protocol.
+    /// 通过 instance transport 发送一个不透明的 worker-control Envelope。
+    ///
+    /// Kernel 负责 correlation、超时、取消、generation 和 fence 检查，但不会解码 worker 协议。
     pub async fn send_request(
         &mut self,
         request_id: String,
@@ -400,6 +415,7 @@ impl InstanceActor {
 
     /// Delivers one correlated cancellation request. Its reply is only a
     /// receipt; authority still waits for the executor's terminal report.
+    /// 发送一个与请求关联的取消请求。其响应仅是送达回执；authority 仍需等待 executor 的终态报告。
     pub fn request_cancel(
         &mut self,
         target_request_id: String,
@@ -444,6 +460,7 @@ impl InstanceActor {
     }
 
     /// Launch the process inside the privileged sandbox.
+    /// 在特权 sandbox 中启动进程。
     pub fn start(&mut self) -> Result<&ProcessHandle, ProviderError> {
         if self.state == InstanceActorState::Quarantined {
             return Err(ProviderError::new(
@@ -493,6 +510,7 @@ impl InstanceActor {
 
     /// Returns the post-launch identity that must be durably journaled before
     /// the worker becomes visible outside this Kernel process.
+    /// 返回启动后的身份；在 worker 对 Kernel 进程外可见之前，必须先将该身份耐久写入日志。
     pub fn recovery_evidence(&self) -> Result<RuntimeProcessEvidence, ProviderError> {
         self.process
             .handle()
@@ -507,6 +525,8 @@ impl InstanceActor {
     }
     /// Validate that the caller's fence token matches the active instance lease fence token.
     /// Rejects stale requests per ADR-HARDWARE-ADAPTER-BOUNDARY and Kernel Semantic Contract v1.
+    /// 校验调用方的 fence token 是否与 active instance lease fence token 匹配。
+    /// 根据 ADR-HARDWARE-ADAPTER-BOUNDARY 和 Kernel Semantic Contract v1 拒绝过期请求。
     pub fn validate_fence_token(&self, token: u64) -> Result<(), ProviderError> {
         if token != self.fence_token {
             return Err(ProviderError::new(
@@ -522,6 +542,7 @@ impl InstanceActor {
     }
 
     /// Mark the instance as Draining (rejecting new work while active tasks finish).
+    /// 将实例标记为 Draining（拒绝新工作，同时等待 active task 完成）。
     pub fn drain(&mut self) {
         if self.state == InstanceActorState::Healthy || self.state == InstanceActorState::Degraded {
             self.state = InstanceActorState::Draining;
@@ -529,6 +550,7 @@ impl InstanceActor {
     }
 
     /// Record a received heartbeat from the worker.
+    /// 记录从 worker 收到的心跳。
     pub fn on_heartbeat_received(&mut self, now: Instant) -> InstanceHealthVerdict {
         if self.state == InstanceActorState::Quarantined {
             return InstanceHealthVerdict::Quarantined;
@@ -543,6 +565,7 @@ impl InstanceActor {
     }
 
     /// Check if the heartbeat deadline has expired.
+    /// 检查心跳 deadline 是否已过期。
     pub fn check_heartbeat_deadline(&mut self, now: Instant) -> InstanceHealthVerdict {
         if self.state == InstanceActorState::Quarantined {
             return InstanceHealthVerdict::Quarantined;
@@ -562,6 +585,7 @@ impl InstanceActor {
     }
 
     /// Record a crash and evaluate quarantine condition (>3 crashes in 60s).
+    /// 记录一次崩溃，并评估是否满足隔离条件（60 秒内崩溃次数超过 3 次）。
     pub fn record_crash(&mut self, now: Instant) -> bool {
         self.crash_timestamps.push(now);
         self.crash_timestamps
@@ -577,6 +601,7 @@ impl InstanceActor {
     }
 
     /// Gracefully stop the sandboxed instance.
+    /// 正常停止 sandbox 实例。
     pub fn stop(&mut self, request: &StopRequest) -> Result<&CleanupReport, ProviderError> {
         self.state = InstanceActorState::Stopping;
         self.transport_tx.take();
@@ -599,6 +624,7 @@ impl InstanceActor {
 }
 
 /// Test-only helper: construct a no-op `InstanceActor` for struct-level unit tests.
+/// 仅供测试使用的辅助函数：构造一个用于结构体级单元测试的空操作 InstanceActor。
 #[cfg(any(test, feature = "test-utils"))]
 impl InstanceActor {
     pub fn new_for_test() -> Self {
@@ -800,20 +826,24 @@ mod tests {
 
         let now = Instant::now();
         // Check deadline within 5s -> Healthy
+        // 在 5 秒内检查 deadline -> Healthy。
         let verdict = actor.check_heartbeat_deadline(now + Duration::from_secs(2));
         assert_eq!(verdict, InstanceHealthVerdict::Healthy);
 
         // Check deadline after 6s without heartbeat -> DeadlineExceeded & Degraded
+        // 6 秒未收到心跳后检查 deadline -> DeadlineExceeded 和 Degraded。
         let verdict = actor.check_heartbeat_deadline(now + Duration::from_secs(6));
         assert_eq!(verdict, InstanceHealthVerdict::DeadlineExceeded);
         assert_eq!(actor.state(), InstanceActorState::Degraded);
 
         // Receive heartbeat -> Recover to Healthy
+        // 收到心跳 -> 恢复到 Healthy。
         let verdict = actor.on_heartbeat_received(now + Duration::from_secs(7));
         assert_eq!(verdict, InstanceHealthVerdict::Healthy);
         assert_eq!(actor.state(), InstanceActorState::Healthy);
 
         // Stop actor
+        // 停止 actor。
         let stop_res = actor.stop(&StopRequest {
             grace_period: Duration::from_millis(500),
             immediate: false,
@@ -840,10 +870,12 @@ mod tests {
         assert!(!actor.record_crash(base_time + Duration::from_secs(10)));
         assert!(!actor.record_crash(base_time + Duration::from_secs(20)));
         // 4th crash -> Quarantine!
+        // 第 4 次崩溃 -> Quarantine！
         assert!(actor.record_crash(base_time + Duration::from_secs(30)));
         assert_eq!(actor.state(), InstanceActorState::Quarantined);
 
         // Subsequent start should fail closed
+        // 后续启动应失败关闭。
         let start_err = actor.start().unwrap_err();
         assert_eq!(start_err.reason_code, "INSTANCE_QUARANTINED");
     }
@@ -864,17 +896,21 @@ mod tests {
         actor.start().expect("start should succeed");
 
         // Valid fence token matches active lease
+        // 有效的 fence token 与 active lease 匹配。
         assert!(actor.validate_fence_token(100).is_ok());
 
         // Stale fence token is rejected
+        // 拒绝过期的 fence token。
         let err = actor.validate_fence_token(99).unwrap_err();
         assert_eq!(err.reason_code, "FENCE_TOKEN_MISMATCH");
 
         // Drain transitions state to Draining
+        // Drain 会将状态转换为 Draining。
         actor.drain();
         assert_eq!(actor.state(), InstanceActorState::Draining);
 
         // Stop cleanly transitions Draining -> Stopped
+        // 正常停止会将状态从 Draining 转换为 Stopped。
         let stop_res = actor.stop(&StopRequest {
             grace_period: Duration::from_millis(500),
             immediate: false,
@@ -907,14 +943,17 @@ mod tests {
         actor.attach_transport_channel(tx);
 
         // Spawn mock transport receiver that ignores requests (simulating timeout)
+        // 启动一个忽略请求的模拟 transport 接收端（模拟超时）。
         tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 // Do not reply, just drain command (e.g. Cancel)
+                // 不回复，只处理 drain 命令（例如 Cancel）。
                 let _ = cmd;
             }
         });
 
         // 1st timeout: fails with INVOKE_TIMEOUT, consecutive_timeouts = 1, transport STILL attached
+        // 第 1 次超时：以 INVOKE_TIMEOUT 失败，consecutive_timeouts = 1，transport 仍保持连接。
         let err1 = actor
             .invoke_raw(vec![1, 2, 3], Duration::from_millis(20))
             .await
@@ -927,6 +966,7 @@ mod tests {
         );
 
         // 2nd timeout: consecutive_timeouts = 2, transport STILL attached
+        // 第 2 次超时：consecutive_timeouts = 2，transport 仍保持连接。
         let err2 = actor
             .invoke_raw(vec![1, 2, 3], Duration::from_millis(20))
             .await
@@ -939,6 +979,7 @@ mod tests {
         );
 
         // 3rd timeout: threshold reached -> transport detached and crash recorded
+        // 第 3 次超时：达到阈值 -> 断开 transport 并记录崩溃。
         let err3 = actor
             .invoke_raw(vec![1, 2, 3], Duration::from_millis(20))
             .await

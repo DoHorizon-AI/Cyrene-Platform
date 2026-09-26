@@ -21,7 +21,7 @@ class RangeHandler(http.server.BaseHTTPRequestHandler):
     ticket_signature_file: pathlib.Path
     trace_lock = threading.Lock()
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+    def do_GET(self) -> None:  # noqa: N802 - stdlib callback name | 标准库回调名称约定。
         if self.path != "/artifact.bin":
             self.send_error(404)
             return

@@ -1,4 +1,7 @@
-"""Runtime bootstrap state, identity and evidence regressions."""
+"""Runtime bootstrap state, identity and evidence regressions.
+
+中文:Runtime bootstrap 状态、身份和证据的回归测试。
+"""
 
 from __future__ import annotations
 

@@ -18,6 +18,8 @@ sha2 = "0.10"
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+cy-observability = { path = "../cy-observability" }
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

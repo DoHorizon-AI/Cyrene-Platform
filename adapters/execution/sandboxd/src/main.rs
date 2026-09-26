@@ -25,7 +25,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
-    let args = Args::parse()?;
+    let log_format = std::env::var("CYRENE_LOG_FORMAT")
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(cy_observability::LogFormat::Json);
+    let log_level = std::env::var("CYRENE_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let obs_config = cy_observability::ObservabilityConfig::managed("cyrene-sandboxd")
+        .with_format(log_format)
+        .with_log_level(log_level);
+    let _guard = cy_observability::init_observability(obs_config).ok();
+
+    let args = match Args::parse() {
+        Ok(a) => a,
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.startup_failed",
+                error.code = cy_observability::PlatformErrorCode::SandboxCgroupInitFailed.as_str(),
+                message = "Sandbox host argument parsing failed",
+                error = %err,
+            );
+            return Err(err);
+        }
+    };
     let root = match args.cgroup_root {
         Some(root) => root,
         None => {
@@ -61,23 +84,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let listener = UnixListener::bind(&args.socket)?;
     fs::set_permissions(&args.socket, fs::Permissions::from_mode(0o660))?;
+    tracing::info!(
+        event.name = cy_observability::EVENT_SERVICE_STARTED,
+        message = "Starting Cyrene Sandbox Adapter Host",
+        adapter_id = %args.adapter_id,
+        socket = %args.socket.display(),
+    );
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 if let Err(error) =
                     verify_client_peer(&stream, args.allowed_client_uid, args.allowed_client_gid)
                 {
-                    eprintln!(
-                        "sandboxd rejected UDS peer: adapter_id={} error={error}",
-                        args.adapter_id
+                    tracing::warn!(
+                        event.name = "platform.sandbox.peer_rejected",
+                        adapter_id = %args.adapter_id,
+                        error = %error,
+                        message = "Sandbox rejected UDS peer credential",
                     );
                     continue;
                 }
                 if let Err(error) = serve_one(stream, runtime.as_ref(), &args.adapter_id) {
-                    eprintln!("sandboxd request failed: {error}");
+                    tracing::error!(
+                        event.name = "platform.sandbox.request_failed",
+                        error.code = cy_observability::PlatformErrorCode::SandboxKillFailed.as_str(),
+                        adapter_id = %args.adapter_id,
+                        error = %error,
+                        message = "Sandbox request processing failed",
+                    );
                 }
             }
-            Err(error) => eprintln!("sandboxd accept failed: {error}"),
+            Err(error) => {
+                tracing::error!(
+                    event.name = "platform.sandbox.accept_failed",
+                    error.code = cy_observability::PlatformErrorCode::SandboxCgroupInitFailed.as_str(),
+                    adapter_id = %args.adapter_id,
+                    error = %error,
+                    message = "Sandbox listener accept failed",
+                );
+            }
         }
     }
 
@@ -191,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
             // In dev mode, default allowed_client_uid to own UID if not specified
+            // 中文：开发模式下，如果未指定 allowed_client_uid，则默认使用当前进程的 UID。
             #[cfg(unix)]
             if dev_mode && allowed_client_uid.is_none() && allowed_client_gid.is_none() {
                 allowed_client_uid = Some(unsafe { libc::getuid() });
@@ -198,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Fail-closed: sandboxd must be configured with at least one trusted
             // Kernel peer UID/GID; otherwise UDS admission silently allows any
             // local user able to reach the socket.
+            // 中文：失败关闭：sandboxd 至少必须配置一个受信任的 Kernel 对端 UID/GID；否则，任何能够访问套接字的本地用户都会被 UDS 准入检查静默放行。
             if allowed_client_uid.is_none() && allowed_client_gid.is_none() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

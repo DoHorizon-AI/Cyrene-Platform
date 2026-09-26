@@ -37,19 +37,27 @@ static TEMP_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// return the exact raw bytes identified by `digest`; filesystem-backed
 /// implementations must reject symlinks instead of following them.  The
 /// materializer never receives a source locator or a provider-private path.
+/// Artifact Plane 或 execution adapter 所选择的只读字节来源。
+///
+/// 实现负责来源选择和授权。它必须返回由 digest 标识的精确原始字节；基于文件系统的实现必须拒绝符号链接，不能跟随链接。materializer 永远不会接收来源 locator 或 Provider 私有路径。
 pub trait ArtifactBlobSource {
     /// Open one raw CAS blob by its validated `sha256:` identity.
+    /// 按经过校验的 sha256: 身份打开一个 CAS 原始 blob。
     fn open(&self, digest: &str) -> Result<Box<dyn Read>, TransferError>;
 }
 
 /// Result of a successful directory materialization.
+/// 目录物化成功后的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortableDirectoryMaterializeResult {
     /// Whether an existing, fully verified destination was reused.
+    /// 是否复用了一个已经完整验证的目标目录。
     pub reused: bool,
     /// Number of files represented by the manifest.
+    /// manifest 中记录的文件数。
     pub file_count: usize,
     /// Logical sum of raw file bytes, excluding manifest bytes.
+    /// 原始文件字节数的逻辑总和，不包含 manifest 字节。
     pub size_bytes: u64,
 }
 
@@ -421,6 +429,7 @@ fn copy_and_digest(
         // Read at most the remaining expected bytes plus one byte.  This
         // detects an oversized source promptly without buffering or writing a
         // complete unexpected payload blob.
+        // 最多读取剩余预期字节数再加一个字节。这样可以快速检测来源超大，而无需缓存或写入完整的意外 payload blob。
         let remaining = expected_size.saturating_sub(size_bytes);
         let read_limit = remaining
             .saturating_add(1)
@@ -501,6 +510,9 @@ fn ensure_linux_materialization() -> Result<(), TransferError> {
 ///
 /// Linux `renameat2(RENAME_NOREPLACE)` is used through rustix so the final
 /// check and publish share one directory file descriptor.
+/// 发布临时同级目录，但不替换已存在的竞争目标。
+///
+/// Linux 通过 rustix 使用 renameat2(RENAME_NOREPLACE)，使最终检查和发布共用同一个目录文件描述符。
 fn publish_without_replacement(
     parent: &Path,
     temporary: &Path,

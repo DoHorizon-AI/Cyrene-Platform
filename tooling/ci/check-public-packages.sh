@@ -9,6 +9,7 @@ public_packages=(
   cy-kernel-contract
   cy-manifest
   cy-proto
+  cy-observability
   cy-artifact-transfer
   cy-execution-fabric
   cy-workspace-fabric
@@ -23,6 +24,7 @@ public_dependency_patches=(
   --config 'patch.crates-io.cy-kernel-contract.path="contracts/rust/cy-kernel-contract"'
   --config 'patch.crates-io.cy-manifest.path="contracts/rust/cy-manifest"'
   --config 'patch.crates-io.cy-proto.path="contracts/rust/cy-proto"'
+  --config 'patch.crates-io.cy-observability.path="framework/crates/cy-observability"'
   --config 'patch.crates-io.cy-artifact-transfer.path="sdk/rust/cy-artifact-transfer"'
 )
 

@@ -17,6 +17,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 // Tonic owns the concrete Status representation; service helpers keep the
 // canonical Result<T, Status> signature instead of boxing transport errors.
+// 中文：具体的 Status 表示由 Tonic 管理；服务辅助函数保留规范的 `Result<T, Status>` 签名，而不对传输错误装箱。
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod adapter;

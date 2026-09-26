@@ -213,9 +213,27 @@ impl FilesystemPackageRuntime {
             last_failure_message: None,
         };
         if let Err(error) = self.write_activation(&record) {
-            let _ = self.service_supervisor()?.deactivate(&request.binding_id);
+            if let Ok(mut sup) = self.service_supervisor()
+                && let Err(deact_err) = sup.deactivate(&request.binding_id)
+            {
+                tracing::error!(
+                    event.name = "platform.package.deactivation_failed",
+                    error.code = "PLATFORM.PACKAGE.DEACTIVATION_FAILED",
+                    binding_id = %request.binding_id,
+                    error = %deact_err,
+                    write_error = %error,
+                    message = "Failed to rollback service activation after write_activation failure",
+                );
+            }
             return Err(error);
         }
+        tracing::info!(
+            event.name = "platform.package.activated",
+            binding_id = %request.binding_id,
+            installation_id = %request.installation_id,
+            generation = generation.value(),
+            message = "Package binding activated successfully",
+        );
         Ok(RuntimeStatus {
             binding_id: request.binding_id,
             installation_id: request.installation_id,
@@ -256,6 +274,13 @@ impl FilesystemPackageRuntime {
         record.last_failure_code = None;
         record.last_failure_message = None;
         self.write_activation(&record)?;
+        tracing::info!(
+            event.name = "platform.package.deactivated",
+            binding_id = %binding_id,
+            installation_id = %record.installation_id,
+            generation = record.generation.value(),
+            message = "Package binding deactivated successfully",
+        );
         Ok(RuntimeStatus {
             binding_id: binding_id.clone(),
             installation_id: record.installation_id,
@@ -518,8 +543,17 @@ impl FilesystemPackageRuntime {
                 )),
             }
         })();
-        if result.is_err() && stage.exists() {
-            let _ = fs::remove_dir_all(&stage);
+        if result.is_err()
+            && stage.exists()
+            && let Err(err) = fs::remove_dir_all(&stage)
+        {
+            tracing::warn!(
+                event.name = "platform.package.staging_cleanup_warning",
+                error.code = "PLATFORM.PACKAGE.STAGE_FAILED",
+                stage_path = %stage.display(),
+                error = %err,
+                message = "Failed to clean up staging directory after installation failure",
+            );
         }
         result
     }
@@ -650,8 +684,17 @@ impl FilesystemPackageRuntime {
                 )),
             }
         })();
-        if result.is_err() && stage.exists() {
-            let _ = fs::remove_dir_all(&stage);
+        if result.is_err()
+            && stage.exists()
+            && let Err(err) = fs::remove_dir_all(&stage)
+        {
+            tracing::warn!(
+                event.name = "platform.package.staging_cleanup_warning",
+                error.code = "PLATFORM.PACKAGE.STAGE_FAILED",
+                stage_path = %stage.display(),
+                error = %err,
+                message = "Failed to clean up dependency staging directory after failure",
+            );
         }
         result
     }

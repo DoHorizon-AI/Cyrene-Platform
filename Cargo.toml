@@ -17,6 +17,7 @@ members = [
     "framework/crates/cy-installation-resolver",
     "framework/crates/cy-package-runtime",
     "framework/crates/cy-platform-api",
+    "framework/crates/cy-observability",
     "framework/crates/cy-execution-fabric",
     "framework/crates/cy-execution-control",
     "framework/crates/cy-workspace-fabric",

@@ -52,4 +52,32 @@ dedicated branch and do not push a protected default branch directly.
 
 遵循仓库治理与分支模型文档。改动应在独立任务分支上完成，不要直接推送受保护的
 默认分支。
+---
 
+<!-- Chinese Translation / 中文翻译 -->
+
+# 常见问题与排障
+
+## 为什么 Kernel 中没有 Product 逻辑？
+
+Kernel 必须保持可复用，并维持本地权威。Product 工作流、模型执行、训练策略和 UI 状态属于 Framework 或各 Product 仓库。
+
+## 新 capability 应该加在哪里？
+
+先从语义契约和 capability 索引开始，再添加最精简的 Framework 扩展；必要时添加进程外 Worker，并为新边界场景补充 TCK 向量。
+
+## 为什么硬件适配器故障不会导致 Kernel 崩溃？
+
+硬件事实和厂商交互隔离在 Adapter Host 中。适配器失联会改变准入/就绪证据，也可能使系统进入降级状态；这不构成把厂商代码加载进 Kernel 或终止 Kernel 的理由。
+
+## 本地 TCK 被跳过，算通过吗？
+
+不算。跳过集成测试或数据库测试代表证据不完整。应分别记录 pass、skip 和 block；验收需要外部边界时，应使用真实 fixture。
+
+## 如何调查意外拒绝？
+
+按身份、revision、authority、lease 和资源校验的顺序追踪请求。修改实现代码前，先对照传输投影与语义契约。
+
+## 哪个分支应该接收变更？
+
+遵循仓库治理与分支模型文档。将任务保留在专用分支上，不要直接推送到受保护的默认分支。

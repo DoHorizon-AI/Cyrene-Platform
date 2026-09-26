@@ -114,3 +114,110 @@ stateDiagram-v2
 4. **Deterministic Backoff**: Backoff delays follow $D_n = \min(D_{\text{initial}} \cdot \text{multiplier}^{n-1}, D_{\text{max}})$.
 5. **Retry Exhaustion & Quarantine**: Exceeding `max_retries` transitions the service to `Quarantined`, isolating crashing workloads without endless crash-loops.
 6. **Zero Zombie / Orphan Guarantee**: All child processes and cgroup allocations are tracked and cleaned up on termination.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene-Platform 规范 API 与基础设施契约
+
+Cyrene-Platform 是 Products 与 capability plugin 共用的执行基础设施。其公开接口与 Product 无关，涵盖 Kernel 执行、隔离、资源观测、capability 解析、Artifact 引用和版本化 wire 契约。
+
+## 仓库所有权
+
+Platform 拥有：
+
+- Kernel 进程执行、sandbox、资源核算、Lease/Fence 强制执行以及 worker 生命周期传输；
+- 规范 Node 资源观测与不可变 HardwareFacts 投影；
+- 通用 capability package 解析和语言无关的 worker/service runtime 选择；
+- Artifact 身份、CAS 机制与通用契约 TCK。
+
+Products 拥有自身的 run、attempt、retry、workflow、draft、result 与持久化状态。Plugins 拥有 capability 实现，以及通用 wire 对象到专属请求类型的转换。增加 Product 或 Plugin 不应要求修改 Platform 源码。
+
+原 Python/Kotlin ProductRun 控制平面已迁移到 Cyrene-Yield。原来位于 Platform 内的模型分析器与兼容性评估器已迁移到 Yield 所有的可替换端口之后；官方 Hugging Face analyzer 仍由 Cyrene-Plugins-Official 管理。它们不再是 Platform API。
+
+## Platform 公开对象
+
+| 对象 / 类型 | 契约 | 状态 | 职责 |
+|---|---|---|---|
+| WorkerControl | kernel_authority.proto | IMPLEMENTED | 通用受监管 worker 生命周期。 |
+| HardwareFacts | cyrene_preflight 与 Node 资源清单 | IMPLEMENTED | 不可变的 Platform 资源投影。 |
+| ArtifactRef | cyrene_artifacts 与 manifest schema | IMPLEMENTED | 不可变、按摘要寻址的制品引用。 |
+| CapabilityRequirement | plugin manifest schema | IMPLEMENTED | capability/interface 与执行模式需求。 |
+
+cyrene_preflight 暴露契约与资源事实。它不选择模型架构、不估算模型内存，也不决定 Product 准入。
+
+## 执行关系
+
+Product 解析 capability 需求，持久化自身生命周期状态，并将有界执行意图传递给 Platform Kernel。Kernel 监管所选 Plugin worker 或 service。Plugin 将有类型的结果或 ArtifactRef 返回给 Product。
+
+Platform 不会根据进程、worker、route 或 container 身份推断 Product run。
+
+## 实现状态
+
+| 子系统 | 状态 | 说明 |
+|---|---|---|
+| Rust Kernel 监管与隔离 | IMPLEMENTED | Workspace Cargo 门禁构建所有 target。 |
+| Node 资源观测 | IMPLEMENTED | Node Agent 是资源事实权威。 |
+| Artifact Plane | IMPLEMENTED | 通用 CAS 与 ArtifactRef 契约。 |
+| Preflight 契约 | IMPLEMENTED | 仅提供事实与可替换 capability 接口。 |
+| Capability package runtime | IMPLEMENTED | 语言无关的 worker/service 分发。 |
+| Product 生命周期 | EXTERNAL | 由各 Product 仓库拥有。 |
+| Capability 实现 | EXTERNAL | 由 plugin 或消费方仓库拥有。 |
+
+## 6. 通用 Service 与工作负载监管基础（IMPLEMENTED_STABLE）
+
+Platform Kernel 提供通用、与 Product 无关的进程托管与监管机制，可在任意 runtime（Python、Node.js、JVM、.NET、Rust、Go 或原生 C/C++ 二进制）上运行长驻 service 工作负载。
+
+> **架构不变量（ADR-010）**：ServiceSpec、ServiceState、ServiceStatus 和 ServiceSupervisor 属于 daemon/编排层结构。它们驱动已有 Kernel 基元（LaunchPlan、ProcessRuntime、SandboxBackend、CleanupReport 与 semantic::Endpoint），不会创建新的 Kernel 权威领域实体（不存在权威 ServiceId 资源、Service ledger/table 或独立 Service repository）。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Starting: spawn_process(LaunchPlan)
+    Starting --> Ready: 就绪探测通过（HTTP/TCP/Alive/WorkerControl）
+    Starting --> Failed: 探测超时 / 启动错误
+    Ready --> Running: 发布 Endpoint
+    Running --> Stopping: 收到 Stop / Cancel 请求
+    Running --> Restarting: 非预期崩溃（RestartPolicy::OnFailure / Always）
+    Restarting --> Starting: 确定性退避结束
+    Restarting --> Quarantined: 重试次数耗尽
+    Stopping --> Stopped: 正常退出 / 干净停止
+    Stopping --> Failed: 截止时间超时后强制终止
+    Failed --> [*]
+    Stopped --> [*]
+    Quarantined --> [*]
+```
+
+### A. 状态机与精确生命周期语义
+
+- **Starting**：进程已启动到 sandbox/OS runtime 中，supervisor 正在执行配置的就绪探测。service 尚未就绪，不能接收消费者流量，也不会发布 endpoint。
+- **Ready**：所有配置的就绪探测都成功（例如 TCP 端口已打开、HTTP 返回 2xx 或 WorkerControl handshake 完成）。语义 Endpoint 被发布到 registry。
+- **Running**：service 工作负载正在运行，并持续接受存活状态、崩溃和退出事件监管。
+- **Stopping**：已发起正常关闭。已发布 endpoint 会立即撤销。supervisor 在 graceful_stop_timeout 内等待进程干净退出。
+- **Stopped**：进程已干净终止（退出码为 0 或正常停止成功）。这是终态静止状态。
+- **Failed**：进程启动失败、就绪探测超时，或关闭期限过后仍需强制终止进程。
+- **Restarting**：在有效的重启策略（OnFailure 或 Always）下发生意外崩溃。supervisor 正在累计重启次数，并等待确定性退避时间后启动下一代。
+- **Quarantined**：连续重启上限 max_retries 已耗尽。自动重启暂停以避免无限崩溃循环，service 保持隔离以便调查。
+
+### B. 核心声明式类型（cy-kernel-api::service）
+
+- **LaunchPlan**：包含 executable、args、environment、cgroup_name、limits、working_dir: Option<PathBuf> 和可选的 transport_socket。
+- **ReadinessProbe**：
+  - ProcessAlive：**宽松的浅层就绪策略**。只确认 OS/sandbox 进程已启动且仍存活，**不**表示应用层、framework 层或网络层已就绪。
+  - TcpSocket { host, port }：验证 service 监听端口的 TCP 连通性。
+  - HttpGet { host, port, path, expected_status }：验证 HTTP endpoint 响应（例如 GET /health/ready 返回 200 OK）。
+  - WorkerControl：验证双向 framing handshake（Hello / HelloAck）。
+- **RestartPolicy**：
+  - Never：任何退出都进入终态。
+  - OnFailure { max_retries, backoff }：使用有界指数退避自动重启崩溃进程。干净退出（退出码 0）进入 Stopped。
+  - Always { max_retries, backoff }：干净退出和意外崩溃都会触发重启。
+- **BackoffConfig**：通过 initial_delay、max_delay、multiplier 和 reset_after 配置退避，以及健康运行一段时间后重置重试计数。
+- **ServiceEndpointSpec**：声明传输方式（如 http）、schema ID、端口、路径以及 service 进入 Ready 后发布到 Kernel registry 的公开属性。
+
+### C. 生命周期不变量、重启归属与失败语义
+
+1. **单一重启所有者**：每一代的重启策略、尝试计数器和退避时间只能由一个组件 ServiceSupervisor 管理。实际执行 actor（InstanceActor / SandboxedProcess）只检测并上报单代崩溃/退出事实，不负责重启。
+2. **跨代 endpoint 防陈旧**：Endpoint 严格绑定到活动 generation N。第 N 代崩溃或停止时，其 endpoint 立即撤销。在退避（Restarting）与启动（Starting）期间不暴露 endpoint。第 N+1 代通过就绪检查后，发布绑定到 N+1 的新 endpoint；绝不重新暴露旧的第 N 代 endpoint。
+3. **正常关闭与升级处置**：收到 stop 请求后向进程发送正常终止信号。如果进程在 graceful_stop_timeout 内未终止，则执行强制终止，并通过 CleanupReport 报告。
+4. **确定性退避**：退避延迟遵循 D_n = min(D_initial × multiplier^(n-1), D_max)。
+5. **重试耗尽与隔离**：超过 max_retries 后，service 进入 Quarantined，将持续崩溃的工作负载隔离，避免无休止地崩溃重启。
+6. **零僵尸 / 孤儿保证**：终止时跟踪并清理所有子进程与 cgroup 分配。

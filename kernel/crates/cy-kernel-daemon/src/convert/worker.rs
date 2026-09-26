@@ -96,7 +96,7 @@ pub(crate) fn to_plugin_instance(
         restart_count: process.restart_count,
         created_at: None,
         updated_at: Some(now_timestamp()),
-        last_heartbeat_at: process.last_heartbeat_at.clone(),
+        last_heartbeat_at: process.last_heartbeat_at,
     }
 }
 
@@ -105,6 +105,7 @@ pub(crate) fn managed_runtime_state(process: &ManagedProcess) -> i32 {
     // `Healthy` surfaces the worker-reported `runtime_state` (preserving prior
     // behavior); `Degraded` reuses the last worker-reported value because
     // `PluginRuntimeState` has no degraded variant.
+    // 中文：`InstanceActor` 是 Kernel 侧生命周期状态的唯一真实来源。`Healthy` 会暴露 Worker 报告的 `runtime_state`（保持原有行为）；`Degraded` 会沿用 Worker 最近一次报告的值，因为 `PluginRuntimeState` 没有 degraded 变体。
     match process.actor.state() {
         InstanceActorState::Starting => core_v1::PluginRuntimeState::Starting as i32,
         InstanceActorState::Healthy => process.runtime_state,
@@ -122,6 +123,7 @@ pub(crate) fn semantic_worker_from_proto(
     // (SO_PEERCRED), never taken from the caller body. The request may still
     // carry a `principal` field, but it is ignored: a client must not be able
     // to assert which authority Principal it acts as.
+    // 中文：权限 `Principal` 由可信传输层（SO_PEERCRED）提供，绝不能从调用方请求正文中读取。请求仍可能带有 `principal` 字段，但会被忽略：客户端不得自行声明它要以哪个权限主体身份操作。
     principal: semantic::Identity,
 ) -> Result<semantic::Worker, Status> {
     let state = semantic_v1::WorkerState::try_from(worker.state).map_err(|_| {
@@ -151,6 +153,7 @@ pub(crate) fn semantic_worker_from_proto(
         identity: semantic_identity_from_proto(worker.identity, "worker identity")?,
         // The connection Principal overrides any caller-asserted value. The
         // request body's `principal` field is deliberately not consulted.
+        // 中文：连接的 Principal 会覆盖调用方声明的值；不会读取请求正文中的 `principal` 字段。
         principal,
         provider: semantic_identity_from_proto(worker.provider, "worker provider")?,
         lease: semantic_identity_from_proto(worker.lease, "worker lease")?,

@@ -2,6 +2,7 @@
 //!
 //! These tests cover failure detection, incomplete cleanup, and recovery
 //! transitions before a lease becomes reusable.
+//! 中文：Watchdog、恢复、Lease 到期和清理生命周期测试。这些测试覆盖故障检测、未完成的清理，以及 Lease 可重新使用前的恢复状态转换。
 
 use super::*;
 
@@ -14,9 +15,11 @@ use super::*;
 // exposes RELEASED and never reallocates the resource, while a complete
 // cleanup releases the Lease and lets a replacement Lease advance the Fence.
 // ---------------------------------------------------------------------------
+// 中文：阶段 6：旧版 Lease 生命周期闭环（watchdog E2E）。绑定到运行中执行域的 Lease 只有在 ACTIVE -> RELEASING -> 确认物理清理后才能进入 RELEASED。heartbeat 超时 watchdog 是生产 Lease 生命周期路径：测试运行真实的 enforce_heartbeat_deadlines 扫描，并证明清理未完成时不会暴露 RELEASED，也不会重新分配资源；清理完成后会释放 Lease，并允许替代 Lease 使用更高的 Fence。
 
 /// Sandbox whose `stop()` reports an incomplete physical cleanup, simulating a
 /// worker that cannot be reaped after a heartbeat timeout.
+/// 中文：Sandbox 的 stop() 报告物理清理未完成，用于模拟 Worker 在 heartbeat 超时后无法被 reap。
 struct UninterruptibleSandbox;
 
 impl ProcessRuntime for UninterruptibleSandbox {
@@ -68,6 +71,7 @@ impl SandboxBackend for UninterruptibleSandbox {
 /// Builds an adapter holding one unique resource, an ACTIVE Lease bound to a
 /// started execution domain, and an overdue heartbeat so the next watchdog
 /// scan treats `instance_name` as timed out.
+/// 中文：构建一个 adapter，其中包含唯一 Resource、绑定到已启动执行域的 ACTIVE Lease，以及已超时的 heartbeat，使下一次 watchdog 扫描将 instance_name 判定为超时。
 fn watchdog_instance_scenario(
     runtime: Arc<dyn SandboxBackend>,
     instance_name: &str,
@@ -154,6 +158,7 @@ fn watchdog_instance_scenario(
         .insert(instance_name.to_string(), process);
     // Make the instance overdue: last heartbeat is far older than the 10ms
     // deadline configured on the actor.
+    // 中文：将该 instance 设为超时：相对于 actor 配置的 10ms deadline，最后一次 heartbeat 早已过期。
     adapter
         .instances
         .lock()
@@ -174,6 +179,7 @@ fn watchdog_incomplete_cleanup_never_releases_and_blocks_reacquire() {
     adapter.enforce_heartbeat_deadlines();
 
     // The Lease must never reach RELEASED: it fails closed instead.
+    // 中文：Lease 绝不能进入 RELEASED；遇到失败时必须 fail-closed。
     let after = adapter.daemon.lease(&lease.name).unwrap();
     assert_eq!(
         after.state,
@@ -187,6 +193,7 @@ fn watchdog_incomplete_cleanup_never_releases_and_blocks_reacquire() {
     );
 
     // The still-held allocation must block reacquisition.
+    // 中文：仍被占用的 allocation 必须阻止重新获取资源。
     let holder = semantic::Identity {
         id: "watchdog-holder-retry".to_string(),
         generation: 1,
@@ -227,6 +234,7 @@ fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
     adapter.enforce_heartbeat_deadlines();
 
     // Physical cleanup completed: the Lease is RELEASED.
+    // 中文：物理清理已完成：Lease 进入 RELEASED。
     let after = adapter.daemon.lease(&lease.name).unwrap();
     assert_eq!(
         after.state,
@@ -236,6 +244,7 @@ fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
 
     // The resource is allocatable again and a replacement Lease succeeds with
     // a strictly higher Fence token (monotonic fencing).
+    // 中文：资源重新变为可分配状态，替代 Lease 获取成功，且其 Fence token 严格增大（单调 fencing）。
     let holder = semantic::Identity {
         id: "watchdog-holder-replacement".to_string(),
         generation: 1,
@@ -278,11 +287,13 @@ fn watchdog_complete_cleanup_releases_and_replacement_fence_advances() {
 // visible authority, no fence reuse, no silently reusable resource, and no
 // corruption of authority state when observability fails.
 // ---------------------------------------------------------------------------
+// 中文：阶段 7：持久化与 Journal 故障策略。持久写入分为 A 类（先持久化再可见）、B 类（先持久化意图，再执行物理操作，最后持久化结果）和 C 类（尽力而为的 telemetry）。这些测试注入持久化失败并验证策略：authority 不会以不安全状态可见、Fence 不会复用、资源不会被静默地重新使用，而且 observability 故障不会破坏 authority 状态。
 
 // Class B intent: the watchdog must never begin a physical release without its
 // durable LEASE_RELEASE_STARTED record. A failing journal defers the release to
 // the next scan (fail-closed) instead of leaking the Lease as ACTIVE behind a
 // stopped Worker.
+// 中文：B 类意图：watchdog 在持久化 LEASE_RELEASE_STARTED 记录前绝不能开始物理释放。若 journal 写入失败，则本次释放延至下一次扫描（fail-closed），避免 Worker 已停止但 Lease 仍以 ACTIVE 状态泄漏。
 #[test]
 fn watchdog_release_intent_journal_failure_defers_fail_closed() {
     let adapter = semantic_worker_adapter_with_resources(vec![test_resource()])
@@ -371,9 +382,11 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
         .on_heartbeat_received(std::time::Instant::now() - Duration::from_secs(1));
 
     // The durable intent cannot be persisted: the watchdog must defer.
+    // 中文：durable intent 无法持久化：watchdog 必须推迟释放。
     adapter.enforce_heartbeat_deadlines();
 
     // Fail-closed: the physical release never began; the Lease stays ACTIVE.
+    // 中文：fail-closed：物理释放尚未开始，Lease 仍为 ACTIVE。
     let after = adapter.daemon.lease(&lease.name).unwrap();
     assert_eq!(
         after.state,
@@ -381,6 +394,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
         "the release must not begin without its durable intent"
     );
     // The Worker is not stopped/removed and the watchdog is re-armed.
+    // 中文：Worker 不会停止或删除，并且 watchdog 会重新安排检查。
     let instances = adapter.instances.lock().unwrap();
     let process = instances
         .get("watchdog-journal-w1")
@@ -391,6 +405,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
     );
     drop(instances);
     // The resource is not silently reusable.
+    // 中文：资源不会被静默地重新使用。
     let retry = resource_request(
         "watchdog-journal-retry",
         1,
@@ -411,6 +426,7 @@ fn watchdog_release_intent_journal_failure_defers_fail_closed() {
 // Class A/B launch evidence: a Worker must never become visible without its
 // durable InstanceLaunched record. The launch fails closed and the Lease stays
 // held, so the resource is not silently reusable.
+// 中文：A/B 类启动证据：没有 InstanceLaunched 持久记录时，Worker 绝不能变为可见。启动必须 fail-closed 失败并继续占用 Lease，避免资源被静默地重新使用。
 #[test]
 fn worker_launch_journal_failure_fails_closed_and_keeps_lease_held() {
     #[derive(Default)]
@@ -462,6 +478,7 @@ fn worker_launch_journal_failure_fails_closed_and_keeps_lease_held() {
     assert_eq!(lease.state, semantic::LeaseState::Active);
 
     // The InstanceLaunched durable evidence cannot be persisted.
+    // 中文：InstanceLaunched 的持久证据无法写入。
     let launch = authority.start_worker(
         &context,
         &principal,
@@ -488,6 +505,7 @@ fn worker_launch_journal_failure_fails_closed_and_keeps_lease_held() {
     );
 
     // The held Lease blocks reallocation: no silently reusable resource.
+    // 中文：被占用的 Lease 会阻止资源重新分配，避免资源被静默地重新使用。
     let retry = authority.acquire_lease(
         &context,
         &principal,
@@ -516,6 +534,7 @@ fn worker_launch_journal_failure_fails_closed_and_keeps_lease_held() {
 // Class C: semantic event projections are observability, not correctness
 // evidence. When the durable event store rejects an append the projection is
 // dropped without corrupting authority state or panicking.
+// 中文：C 类：语义事件投影属于 observability，不是正确性证据。durable event store 拒绝追加时，应丢弃该投影，不得破坏 authority 状态或触发 panic。
 #[test]
 fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
@@ -582,6 +601,7 @@ fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
 
     // The first normative event (worker.starting) append fails: the stream must
     // degrade rather than silently lose the fact.
+    // 中文：首个规范事件（worker.starting）追加失败：事件流必须降级，不能静默丢失该事实。
     authority
         .start_worker(
             &context,
@@ -609,6 +629,7 @@ fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
     // contiguous: an already-subscribed client must never silently miss the
     // failed fact while later events advance. The second publish is suppressed
     // by the degraded stream, so the store never sees another append attempt.
+    // 中文：即使 store 随后恢复，事件流也不得假装序列仍连续：已订阅客户端绝不能在后续事件推进时静默漏掉失败的事实。降级后的事件流会抑制第二次 publish，因此 store 不会再收到追加请求。
     authority.publish_semantic_event_in(
         &context.namespace,
         worker_identity.clone(),
@@ -624,6 +645,7 @@ fn semantic_event_append_failure_degrades_stream_without_silent_gap() {
 
     // The degraded stream is externally observable: replay surfaces Gap
     // (resnapshot required), never a silent Current-with-no-new-events stall.
+    // 中文：降级后的事件流可从外部观察：replay 会显示 Gap（需要重新获取 snapshot），不能静默停滞并返回没有新事件的 Current。
     let page = authority
         .read_events(
             &context,
@@ -670,6 +692,7 @@ fn worker_launch_persistence_failure_reaps_physical_process() {
 
     /// Records whether the physical sandbox process was launched and stopped,
     /// so the test can prove the spawned domain is synchronously reaped.
+    /// 中文：记录物理 sandbox 进程是否已启动和停止，以便测试证明生成的执行域已同步 reap。
     #[derive(Clone, Default)]
     struct RecordingSandbox {
         launched: Arc<AtomicBool>,
@@ -761,6 +784,7 @@ fn worker_launch_persistence_failure_reaps_physical_process() {
         .unwrap();
 
     // InstanceLaunched cannot be persisted after the physical spawn.
+    // 中文：物理 spawn 之后，InstanceLaunched 无法持久化。
     let launch = authority.start_worker(
         &context,
         &principal,
@@ -782,12 +806,14 @@ fn worker_launch_persistence_failure_reaps_physical_process() {
         "launch must fail closed when InstanceLaunched cannot be persisted"
     );
     // The physical domain WAS spawned...
+    // 中文：物理执行域确实已 spawn……
     assert!(
         sandbox.launched.load(AtomicOrdering::SeqCst),
         "the sandbox must have physically launched the process"
     );
     // ...and it was synchronously reaped before the failure was returned, so no
     // untracked physical execution domain remains alive.
+    // 中文：……并且在返回失败前已同步 reap，因此没有未跟踪的物理执行域继续存活。
     assert!(
         sandbox.stopped.load(AtomicOrdering::SeqCst),
         "the launched physical process must be reaped before returning the failure"
@@ -805,6 +831,7 @@ fn worker_launch_persistence_failure_reaps_physical_process() {
 // intent (InstanceLaunching) so restart Discover/Classify can recognize "launch
 // intended, outcome unknown" instead of treating the lease as a cleanly
 // reserved, never-bound resource.
+// 中文：最坏重启边界：物理 spawn 成功 -> InstanceLaunched 持久化失败 -> 同步 reap 未完成 -> InstanceCleanupFailed 持久化也失败。durable journal 仍必须保留启动前的意图（InstanceLaunching），使重启 Discover/Classify 能识别“已计划启动但结果未知”，而不是误判为已预留但从未绑定资源。
 #[test]
 fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
     #[derive(Default)]
@@ -872,6 +899,7 @@ fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
     // Spawn succeeds; InstanceLaunched fails; the synchronous reap is incomplete
     // (UninterruptibleSandbox) so InstanceCleanupFailed is attempted and ALSO
     // fails.
+    // 中文：spawn 成功；InstanceLaunched 持久化失败；由于 UninterruptibleSandbox，同步 reap 未完成，因此尝试写入 InstanceCleanupFailed，但该写入也失败。
     let launch = authority.start_worker(
         &context,
         &principal,
@@ -894,6 +922,7 @@ fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
     );
 
     // The durable journal still carries the pre-launch intent.
+    // 中文：durable journal 仍保留启动前的意图。
     let records = journal.records.lock().unwrap();
     assert!(
         records.iter().any(|record| {
@@ -925,10 +954,12 @@ fn worker_launch_double_persistence_failure_keeps_pre_launch_intent() {
 // independent Lease lifecycle. These tests prove legacy and canonical paths
 // reach identical semantic results for the same scenario.
 // ---------------------------------------------------------------------------
+// 中文：阶段 8：规范路径与旧版路径收敛一致性。旧版 RPC 必须是共享语义核心（resource-manager ledger 和共享 release helper）的兼容投影，不能拥有独立 Lease 生命周期。这些测试证明相同场景下，旧版和规范路径会得到相同语义结果。
 
 // Lease release parity: on incomplete physical cleanup, the legacy `release_lease`
 // RPC and the canonical `authority.release_lease` fail closed identically —
 // the Lease is FAILED (never RELEASED) and the resource cannot be reacquired.
+// 中文：Lease 释放一致性：物理清理未完成时，旧版 release_lease RPC 与规范 authority.release_lease 都以相同方式 fail-closed——Lease 进入 FAILED（绝不进入 RELEASED），资源不能重新获取。
 #[test]
 fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() {
     let resources = vec![test_resource(), test_resource_with_id("resource-2")];
@@ -946,6 +977,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     let adapter = KernelServiceAdapter::new(daemon, Arc::new(TestWorkerResolver));
     let authority = adapter.authority();
     // Distinct idempotency keys so the two acquires produce distinct Leases.
+    // 中文：使用不同的 idempotency key，确保两次 acquire 创建不同的 Lease。
     let context_canonical = scoped_authority_context("ns-parity", "parity-canonical");
     let context_legacy = scoped_authority_context("ns-parity", "parity-legacy");
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
@@ -1012,6 +1044,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     };
 
     // --- Canonical path ---
+    // 中文：规范路径。
     let canonical_worker = semantic::Identity {
         id: "worker-canonical".to_string(),
         generation: 1,
@@ -1060,6 +1093,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     // A FAILED lease cannot be released just because its actor disappeared.
     // The same-fence retry requires a still-managed actor whose stop call can
     // return a fresh physical cleanup report.
+    // 中文：actor 消失后，FAILED Lease 仍不能被释放。同一 Fence 的重试要求 actor 仍受管理，且其 stop 调用能返回新的物理清理报告。
     adapter.instances.lock().unwrap().remove("worker-canonical");
     let missing_actor_error = authority
         .release_lease(
@@ -1077,12 +1111,14 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
     );
 
     // --- Legacy path ---
+    // 中文：旧版路径。
     let legacy_worker = semantic::Identity {
         id: "worker-legacy".to_string(),
         generation: 1,
     };
     // Acquire through the legacy path (daemon.reserve) so the lease identity
     // is the daemon lease name the legacy release RPC resolves by.
+    // 中文：通过旧版路径（daemon.reserve）获取资源，使 Lease identity 成为旧版 release RPC 用来查找的 daemon lease 名称。
     let legacy_requirements = core_v1::ResourceRequirements {
         cpu: Some(core_v1::CpuRequirements {
             request_millicores: 500,
@@ -1143,6 +1179,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
 
     // Both paths leave the resource non-reacquirable (no silently reusable
     // resource) and neither exposes RELEASED.
+    // 中文：两条路径都会让资源保持不可重新获取状态（不会静默复用），并且都不会暴露 RELEASED。
     assert_ne!(canonical_after.state, cy_kernel_api::LeaseState::Released);
     assert_ne!(legacy_after.state, cy_kernel_api::LeaseState::Released);
     let retry = authority.acquire_lease(
@@ -1173,6 +1210,7 @@ fn legacy_and_canonical_release_fail_closed_identically_on_incomplete_cleanup() 
 // Process launch convergence: like canonical start_worker it now persists
 // the Class B pre-launch intent before the physical spawn, so restart recovery
 // can classify intent-without-outcome identically.
+// 中文：进程启动收敛：与规范 start_worker 一样，现在会在物理 spawn 前持久化 B 类启动意图，因此重启恢复能以相同方式识别“有意图但无结果”的状态。
 #[test]
 fn launch_process_records_pre_launch_intent_like_canonical_start_worker() {
     use core_v1::kernel_service_server::KernelService;
@@ -1352,12 +1390,14 @@ fn lease_expiry_actively_revokes_worker_advances_fence_and_cleans_up() {
     thread::sleep(Duration::from_millis(40));
 
     // Active lease expiry scan triggers worker revocation, fence advance, and cleanup
+    // 中文：活动 Lease 到期扫描会触发 Worker 撤销、Fence 前移和清理。
     let actions = authority.enforce_lease_expiry().unwrap();
     assert!(actions
         .iter()
         .any(|action| matches!(action, ProviderReconcileAction::MarkWorkerLost(id) if id == &worker.identity)));
 
     // Verify worker is Lost
+    // 中文：验证 Worker 已进入 Lost。
     let instances = authority.runtime.instances.lock().unwrap();
     let process = instances.get("worker-expiring");
     assert!(process
@@ -1366,6 +1406,7 @@ fn lease_expiry_actively_revokes_worker_advances_fence_and_cleans_up() {
     drop(instances);
 
     // Verify endpoint authority is purged
+    // 中文：验证 Endpoint authority 已清除。
     assert!(!authority
         .runtime
         .endpoints
@@ -1374,12 +1415,14 @@ fn lease_expiry_actively_revokes_worker_advances_fence_and_cleans_up() {
         .contains_key(&context.object_ref(endpoint.identity)));
 
     // Verify lease is revoked and resource can be re-allocated after cleanup
+    // 中文：验证 Lease 已撤销，并且清理完成后资源可以重新分配。
     assert_eq!(
         adapter.daemon.lease(&lease.identity.id).unwrap().state,
         cy_kernel_api::LeaseState::Revoked
     );
 
     // Replacement lease can now be acquired because cleanup succeeded
+    // 中文：清理成功，因此现在可以获取替代 Lease。
     let context_repl = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
         namespace: NamespaceId::default(),
@@ -1455,6 +1498,7 @@ fn renew_just_before_expiry_succeeds_and_extends_authority() {
         .unwrap();
 
     // Renew before expiry
+    // 中文：在到期前续租。
     let extended_expiry = now_unix_ms().saturating_add(60_000);
     let renewed = authority
         .renew_lease(
@@ -1469,12 +1513,15 @@ fn renew_just_before_expiry_succeeds_and_extends_authority() {
     assert_eq!(renewed.fence_token, lease.fence_token);
 
     // Sleep past the original 200ms deadline
+    // 中文：等待超过原始的 200ms deadline。
     thread::sleep(Duration::from_millis(220));
 
     // Active lease expiry scan must NOT expire the renewed lease
+    // 中文：活动 Lease 到期扫描不得使已续租的 Lease 过期。
     authority.enforce_lease_expiry().unwrap();
 
     // Heartbeat still succeeds on the renewed lease
+    // 中文：使用续租后的 Lease 发送 heartbeat 仍然成功。
     let hb = authority
         .report_heartbeat(
             &context,
@@ -1523,9 +1570,11 @@ fn renew_racing_with_or_after_expiry_is_rejected_and_fails_closed() {
     thread::sleep(Duration::from_millis(40));
 
     // Active expiry revokes the lease
+    // 中文：活动到期扫描会撤销 Lease。
     authority.enforce_lease_expiry().unwrap();
 
     // Renew with old fence token after expiry is rejected
+    // 中文：到期后使用旧 Fence token 续租会被拒绝。
     let err = authority
         .renew_lease(
             &context,
@@ -1587,6 +1636,7 @@ fn heartbeat_after_lease_expiry_is_rejected_and_fenced() {
     thread::sleep(Duration::from_millis(40));
 
     // Heartbeat after expiry is rejected
+    // 中文：Lease 到期后发送 heartbeat 会被拒绝。
     let err = authority
         .report_heartbeat(
             &context,
@@ -1599,6 +1649,7 @@ fn heartbeat_after_lease_expiry_is_rejected_and_fenced() {
     assert_eq!(err.reason_code, "FENCE_MISMATCH");
 
     // Active expiry marks worker lost
+    // 中文：活动到期扫描会将 Worker 标记为 lost。
     authority.enforce_lease_expiry().unwrap();
     let instances = authority.runtime.instances.lock().unwrap();
     assert_eq!(
@@ -1627,6 +1678,7 @@ fn expiry_with_incomplete_cleanup_blocks_resource_reallocation() {
     let principal = principal_from_peer_cred(&AUTHORITY_TEST_PEER);
 
     // Expire the lease in the resource manager
+    // 中文：在 resource manager 中使 Lease 到期。
     let _ = authority.runtime.daemon.renew_lease(
         &lease.name,
         lease.fence_token,
@@ -1635,10 +1687,12 @@ fn expiry_with_incomplete_cleanup_blocks_resource_reallocation() {
     thread::sleep(Duration::from_millis(40));
 
     // Active expiry runs on the uncleaned instance
+    // 中文：对尚未清理的 instance 执行活动到期扫描。
     authority.enforce_lease_expiry().unwrap();
 
     // Cleanup failed due to UninterruptibleSandbox -> complete_revocation must NOT have been called!
     // Attempting to re-acquire the resource must fail closed (INSUFFICIENT_RESOURCES)
+    // 中文：由于 UninterruptibleSandbox，清理失败，因此绝不能调用 complete_revocation！尝试重新获取资源必须 fail-closed，返回 INSUFFICIENT_RESOURCES。
     let reacquire = authority.acquire_lease(
         &context,
         &principal,
@@ -1708,6 +1762,7 @@ fn expired_lease_cannot_publish_or_authorize_endpoints() {
     thread::sleep(Duration::from_millis(40));
 
     // Publish endpoint after expiry is rejected
+    // 中文：到期后发布 Endpoint 会被拒绝。
     let endpoint = semantic_endpoint_for(&worker);
     let pub_err = authority
         .publish_endpoint(&context, &principal, endpoint.clone())
@@ -1715,6 +1770,7 @@ fn expired_lease_cannot_publish_or_authorize_endpoints() {
     assert_eq!(pub_err.reason_code, "LEASE_NOT_ACTIVE");
 
     // Authorize endpoint targeting expired grantee lease is rejected
+    // 中文：针对 grantee Lease 已过期的 Endpoint 授权会被拒绝。
     let grant = semantic::EndpointGrant {
         identity: semantic::Identity {
             id: "grant-1".to_string(),
@@ -1772,10 +1828,12 @@ fn expired_lease_advances_fence_and_replacement_lease_gets_newer_fence() {
     authority.enforce_lease_expiry().unwrap();
 
     // Check that the revoked lease fence advanced
+    // 中文：检查已撤销 Lease 的 Fence 是否已前移。
     let revoked_a = adapter.daemon.lease(&lease_a.identity.id).unwrap();
     assert!(revoked_a.fence_token > lease_a.fence_token);
 
     // Replacement lease B gets an even newer fence token
+    // 中文：替代 Lease B 会获得更新的 Fence token。
     let context_b = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
         namespace: NamespaceId::default(),
@@ -1849,6 +1907,7 @@ fn active_expiry_of_standalone_lease_revokes_and_reclaims_resource() {
         .any(|a| matches!(a, ProviderReconcileAction::RevokeLease(id) if id == &lease.identity)));
 
     // Standalone lease had no process -> cleanup is immediate, resource reusable
+    // 中文：独立 Lease 没有关联进程，因此清理会立即完成，资源可重新使用。
     let context_2 = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
         namespace: NamespaceId::default(),
@@ -1932,6 +1991,7 @@ fn expiry_durability_failure_fails_closed_and_retries_until_cleanup() {
     };
 
     // 1. ACTIVE Lease + running Worker
+    // 中文：1. ACTIVE Lease 与运行中的 Worker。
     let lease = authority
         .acquire_lease(
             &context,
@@ -1958,20 +2018,24 @@ fn expiry_durability_failure_fails_closed_and_retries_until_cleanup() {
         .unwrap();
 
     // 2. TTL expires
+    // 中文：2. TTL 到期。
     thread::sleep(Duration::from_millis(40));
 
     // 3. Inject failure in the first durability/revocation step after expiry detection
+    // 中文：3. 在到期检测后的第一个持久化/撤销步骤注入故障。
     journal
         .should_fail
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Watchdog / enforce_lease_expiry runs; first durability step fails
+    // 中文：运行 watchdog / enforce_lease_expiry；第一个持久化步骤失败。
     let actions = authority.enforce_lease_expiry().unwrap();
     assert!(!actions
         .iter()
         .any(|a| matches!(a, ProviderReconcileAction::RevokeLease(_))));
 
     // 4. Verify old authority remains rejected (fail-closed)
+    // 中文：4. 验证旧 authority 仍被拒绝（fail-closed）。
     let hb_err = authority
         .report_heartbeat(&context, &principal, &worker_identity, &lease.identity, 1)
         .unwrap_err();
@@ -1994,6 +2058,7 @@ fn expiry_durability_failure_fails_closed_and_retries_until_cleanup() {
     assert_eq!(pub_err.reason_code, "LEASE_NOT_ACTIVE");
 
     // 5. Verify Resource is NOT reusable (allocation held despite Expired state)
+    // 中文：5. 验证 Resource 仍不可重新使用（即使状态为 Expired，allocation 仍被占用）。
     let context_realloc = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
         namespace: NamespaceId::default(),
@@ -2019,29 +2084,34 @@ fn expiry_durability_failure_fails_closed_and_retries_until_cleanup() {
     );
 
     // 6. Verify watchdog/reconciliation retries rather than permanently ignoring the EXPIRED Lease
+    // 中文：6. 验证 watchdog/reconciliation 会重试，而不是永久忽略 EXPIRED Lease。
     let retry_actions = authority.enforce_lease_expiry().unwrap();
     assert!(!retry_actions
         .iter()
         .any(|a| matches!(a, ProviderReconcileAction::RevokeLease(_))));
 
     // 7. Remove failure
+    // 中文：7. 移除故障。
     journal
         .should_fail
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
     // 8. Cleanup / revocation completes on next cycle
+    // 中文：8. 下一轮完成清理/撤销。
     let final_actions = authority.enforce_lease_expiry().unwrap();
     assert!(final_actions.iter().any(
         |a| matches!(a, ProviderReconcileAction::MarkWorkerLost(id) if id == &worker.identity)
     ));
 
     // Verify lease is now Revoked in daemon
+    // 中文：验证 daemon 中的 Lease 现在已是 Revoked。
     assert_eq!(
         adapter.daemon.lease(&lease.identity.id).unwrap().state,
         cy_kernel_api::LeaseState::Revoked
     );
 
     // 9. Resource becomes reusable
+    // 中文：9. Resource 重新变为可使用。
     let repl_lease = authority
         .acquire_lease(
             &context_realloc,
@@ -2121,6 +2191,7 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
     };
 
     // 1. ACTIVE Lease + running Worker
+    // 中文：1. ACTIVE Lease 与运行中的 Worker。
     let lease = authority
         .acquire_lease(
             &context,
@@ -2147,23 +2218,28 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
         .unwrap();
 
     // 2. TTL expires
+    // 中文：2. TTL 到期。
     thread::sleep(Duration::from_millis(40));
 
     // 3. Inject failure in FenceAdvanced (AFTER daemon.revoke has already succeeded)
+    // 中文：3. 在 FenceAdvanced 处注入故障（此时 daemon.revoke 已成功）。
     journal
         .fail_fence_advanced
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Watchdog / enforce_lease_expiry runs:
     // WorkerLost succeeds -> daemon.revoke succeeds (Lease is now Revoked) -> FenceAdvanced fails!
+    // 中文：运行 watchdog / enforce_lease_expiry：WorkerLost 成功 -> daemon.revoke 成功（Lease 已 Revoked）-> FenceAdvanced 失败！
     let _ = authority.enforce_lease_expiry();
 
     // 4. Verify lease in daemon is indeed REVOKED and fence advanced
+    // 中文：4. 验证 daemon 中的 Lease 确实为 REVOKED，且 Fence 已前移。
     let revoked_lease = adapter.daemon.lease(&lease.identity.id).unwrap();
     assert_eq!(revoked_lease.state, cy_kernel_api::LeaseState::Revoked);
     assert!(revoked_lease.fence_token > lease.fence_token);
 
     // 5. Verify physical allocation remains held (fail-closed) because complete_revocation was not reached
+    // 中文：5. 验证物理 allocation 仍被占用（fail-closed），因为尚未执行 complete_revocation。
     assert!(adapter.daemon.is_allocated(&lease.identity.id));
     let context_realloc = AuthorityCallContext {
         contract: semantic::ContractRevision::current(),
@@ -2186,6 +2262,7 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
     assert_eq!(realloc_err.reason_code, "INSUFFICIENT_RESOURCES");
 
     // 6. Verify authority operations remain rejected
+    // 中文：6. 验证 authority 操作仍会被拒绝。
     let hb_err = authority
         .report_heartbeat(
             &context,
@@ -2199,6 +2276,7 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
 
     // 7. Verify watchdog continues to discover the REVOKED lease on subsequent cycles (retries)
     // Clear FenceAdvanced failure, but inject InstanceTerminated failure
+    // 中文：7. 验证后续周期中的 watchdog 仍会发现该 REVOKED Lease 并重试。清除 FenceAdvanced 故障，但注入 InstanceTerminated 故障。
     journal
         .fail_fence_advanced
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2208,9 +2286,11 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
 
     let _ = authority.enforce_lease_expiry();
     // Allocation remains held because InstanceTerminated failed before complete_revocation
+    // 中文：由于 InstanceTerminated 在 complete_revocation 前失败，allocation 仍被占用。
     assert!(adapter.daemon.is_allocated(&lease.identity.id));
 
     // 8. Clear all failures: next watchdog cycle finishes complete_revocation
+    // 中文：8. 清除所有故障：下一轮 watchdog 将完成 complete_revocation。
     journal
         .fail_instance_terminated
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2221,9 +2301,11 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
     ));
 
     // Allocation is released!
+    // 中文：allocation 已释放！
     assert!(!adapter.daemon.is_allocated(&lease.identity.id));
 
     // 9. Resource becomes reusable and replacement lease succeeds
+    // 中文：9. Resource 现在可重新使用，并且替代 Lease 获取成功。
     let repl_lease = authority
         .acquire_lease(
             &context_realloc,
@@ -2241,3 +2323,4 @@ fn post_revoke_durability_and_cleanup_failure_retries_until_convergence() {
 }
 
 // =========================================================================
+// 中文：结束分隔线。

@@ -1,7 +1,7 @@
 // ┌─────────────────────────────────────────────────────────────────────┐
 // │  📄 workspace_fabric.proto                                          │
 // │  Package: cyrene.workspace.v1                                       │
-// │  Role: Workspace discovery, connection, and relayed API projection. │
+// │  Role: Workspace discovery, connection, and API projection.         │
 // │                                                                     │
 // │  协议职责：Workspace 发现、连接描述符与中继 API 投影。                   │
 // │  · Relay 只转发请求，不拥有 Workspace/Product 状态。                   │
@@ -131,6 +131,17 @@ message WorkspaceApiResponse {
     WorkspaceOperationView operation = 10;
     google.rpc.Status error = 11;
   }
+}
+
+// An authenticated request sent directly to a private Workspace endpoint.
+message WorkspaceDirectRequest {
+  RelayHello frontend = 1;
+  WorkspaceApiRequest request = 2;
+}
+
+// The direct endpoint applies the same session and membership checks as Relay.
+service WorkspaceDirectService {
+  rpc Execute(WorkspaceDirectRequest) returns (WorkspaceApiResponse);
 }
 
 // Relay-only routing wrapper. The inner request remains Workspace API data.

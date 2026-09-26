@@ -141,3 +141,132 @@ Discovered -> Resolved -> Starting -> Handshaking -> Healthy -> Degraded -> Stop
 - Core stability is guaranteed against third-party plugin crashes or memory leaks.
 - Zero local port allocation removes port conflict risks on developer/production machines.
 - Protocol buffer generation tools ensure synchronized cross-language Rust, Python, and JVM SDKs.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# ADR-PLUGIN-RUNTIME：CYRENE 本地 Plugin Runtime 架构
+
+- **状态：**Superseded / Historical
+- **日期：**2026-07-24
+- **作者：**CYRENE Platform Team
+- **背景：**将 CYRENE 模块化为具备本地零端口进程隔离和编译期 Rust 扩展的平台架构。
+
+> 本 ADR 保留作历史背景。可安装业务 Plugin runtime 的决策已由 [ADR-PLUGIN-EXECUTION-BOUNDARY](ADR-PLUGIN-EXECUTION-BOUNDARY.md) 取代。进程内 Rust 只适用于经过审计、静态编译的 Core platform adapter，不是可安装 manifest runtime。
+
+> **最终处置：**在当前 consumer 全部迁移到 Plugins-owned direct endpoint 后，旧 stdio runner、worker SDK 和 Platform execution proxy 均已移除。Platform package lifecycle 只返回不透明的 `connection_ref`；Product 使用 Plugin-owned 协议打开该连接。
+
+---
+
+## 1. 背景与问题陈述
+
+CYRENE 正在演进为由精简 host 和进程外高级 Service 组成的模块化架构。系统需要：
+1. 在热路径（例如 HTTP Gateway、代理路由）上实现低延迟、高性能执行。
+2. 将第三方或 Python/JVM 逻辑进程外隔离（例如 vLLM engine、LLaMA-Factory training、hardware probe），使 Plugin 的 runtime 故障、依赖冲突或内存崩溃都不会导致 Rust 主机崩溃。
+3. 本地 Plugin 不使用 TCP 端口，避免端口耗尽、权限问题和本地防火墙阻挡。
+4. 明确版本控制、错误分类、取消和 crash-loop quarantine 规则。
+
+---
+
+## 2. 架构决策
+
+### 2.1 两种 Plugin 执行模式
+
+#### A. Rust 进程内 Plugin（`in-proc-rust`）
+- **编译方式：**通过 Cargo feature 和显式 composition root（`composition_root.rs`）静态链接。
+- **ABI：**使用纯 Rust trait（`Plugin`、`Probe`、`ExecutionEngine` 等）。不使用 C ABI、`.so`/`.dll` 动态加载或不安全的动态符号加载。
+- **用途：**高吞吐、热路径，不产生 vtable 开销（Gateway auth、rate limiter、本地存储）。
+- **生命周期：**随 binary 生命周期绑定；修改需要重新编译 binary。
+- **Open-Core 隔离：**Community build 在编译期排除 Pro feature crate（`#[cfg(feature = "pro")]`）。
+
+#### B. 外部子进程 Plugin（`subprocess-python`、`subprocess-jvm`）
+- **隔离方式：**由 Rust `PluginSupervisor` 启动为独立 OS 子进程。
+- **传输方式：**默认使用标准输入/输出（`stdio`）分帧：
+  - Rust Host 向子进程 `stdin` 写 request frame；
+  - 子进程向 `stdout` 写 response/stream frame；
+  - `stdout` 只用于二进制协议消息。日志必须写入 `stderr` 或结构化 log event。
+- **进程边界：**Windows Named Pipe 和 Linux/macOS Unix Domain Socket（UDS）是可选 transport；`stdio` 是必需的基线传输。
+- **网络边界：**TCP/gRPC 仅用于外部 API、远端 SSH Node Agent 和多节点集群。本地进程外 Plugin 绝不能监听 TCP 端口。
+
+---
+
+### 2.2 协议版本与 Host API 兼容性
+
+- **`protocol_version`（uint32，例如 `1`）：**规定 wire format 和 framing（`plugin_protocol.proto`），并在 `Hello` / `HelloAck` 握手中协商。
+- **`api_version`（string，例如 `"1.0"`）：**规定领域扩展点的语义契约。
+
+Host 和 Plugin 满足以下条件时才兼容：
+1. 双方都支持该 `protocol_version`；
+2. `api_version` 满足 Host 的 semver 约束。
+
+---
+
+### 2.3 Extension Point 调用策略
+
+10 个 extension point 均采用严格定义的调用策略：
+
+| Extension Point | 策略 | 说明 |
+|---|---|---|
+| `Probe` | `CollectAndRank` / `FirstAvailable` | 收集活动 probe 的硬件事实，并按证据可信度排序。 |
+| `ModelAnalyzer` | `CollectAndRank` | 根据 analyzer capability 评估模型需求，并将最佳估算排序。 |
+| `CompatRule` | `FanOut` + `Merge` | 并发执行规则评估，合并 `WhyReport` decision item。 |
+| `RuntimeBuilder` | `FirstMatch` | 选择第一个健康且覆盖目标 runtime stack 的 builder Plugin。 |
+| `ExecutionEngine` | `FirstMatch` | 将推理请求路由到覆盖目标 model/precision/quant 的活动健康 engine。 |
+| `TrainingBackend` | `FirstMatch` | 将训练任务路由到指定 backend Plugin。 |
+| `Quantization` | `FirstMatch` | 选择匹配的 quantization engine Plugin。 |
+| `GatewayFilter` | `OrderedChain` | 按配置优先级依次执行 middleware filter；拒绝时短路。 |
+| `Notification` | `FanOut` | 向所有已注册 notification Plugin 广播 alert message。 |
+| `Storage` | `NamedSingleOwner` | 将 Artifact storage 操作发送到明确声明的 storage Plugin provider。 |
+
+---
+
+### 2.4 生命周期、错误分类与隔离
+
+#### 生命周期状态
+
+```text
+Discovered -> Resolved -> Starting -> Handshaking -> Healthy -> Degraded -> Stopping -> Stopped
+                                                            \-> Unavailable / Incompatible / Crashed / Quarantined / Disabled
+```
+
+- **`Healthy`：**Plugin process 正在运行、握手成功且 health check 通过。
+- **`Quarantined`：**Plugin 反复崩溃（crash-loop）；Supervisor 会停止重启，直到人工处理或 backoff reset。
+
+#### 错误分类
+
+`PluginError` 包含 10 种类型：
+1. `Unavailable`：依赖的 binary 或 Service 缺失。
+2. `Incompatible`：protocol version 或 API version 不匹配。
+3. `InvalidInput`：payload 格式错误或校验失败。
+4. `PermissionDenied`：无权访问 capability。
+5. `Timeout`：Operation 超出 deadline。
+6. `Cancelled`：Host 取消 request。
+7. `Retryable`：临时性故障，可重试。
+8. `ExecutionFailed`：Plugin 内部逻辑异常。
+9. `ProtocolError`：frame 损坏、stdout 内容无效或 JSON/protobuf parse 错误。
+10. `Fatal`：子进程崩溃或异常退出。
+
+#### 子进程崩溃处理与重启策略
+- `never`：进程终止后不重启。
+- `on-failure`（默认）：按指数退避重启（`min=500ms`、`max=30s`、`factor=2.0`）。
+- `always`：无论 exit code 如何都重启。
+- **Crash Loop 检测：**若 Plugin 在 60 秒内崩溃超过 3 次，状态变为 `Quarantined`。
+
+---
+
+## 3. 必须明确的问答
+
+1. **谁启动外部 Plugin？**Rust `PluginSupervisor`，使用明确的 command/argument array，绝不使用 shell string。
+2. **谁进行版本协商？**Rust `PluginSupervisor`，在 stdio 上通过初始 `Hello` / `HelloAck` RPC handshake 执行。
+3. **允许将日志写入 stdout 吗？****不允许。**`stdout` 严格保留给二进制/分帧协议消息。任何未格式化的非协议输出都会立即引发 `ProtocolError` 和 quarantine。日志必须写入 `stderr`。
+4. **Plugin 崩溃时会怎样？**Host supervisor 捕获子进程 EOF / SIGCHLD，将活动 request 标为 `Fatal` / `Unavailable`，并应用重启策略；不会导致 Rust Core host 崩溃。
+5. **如何选择同一 extension point 的多个实现？**根据 extension point 的调用策略（§2.3），结合声明的 Plugin 优先级和 capability 匹配结果选择。
+6. **哪些通信可以占用 TCP 端口？**仅公开 OpenAPI REST gateway、供外部 client 访问的 gRPC server，以及到远端 Node Agent 的 SSH/gRPC。本地 Plugin 必须完全不占端口。
+
+---
+
+## 4. 后果与合规
+
+- Core 不会因第三方 Plugin 崩溃或内存泄漏而失去稳定性。
+- 本地不分配端口，可消除开发和生产机器上的端口冲突风险。
+- Protocol buffer 代码生成工具确保 Rust、Python 和 JVM SDK 跨语言同步。

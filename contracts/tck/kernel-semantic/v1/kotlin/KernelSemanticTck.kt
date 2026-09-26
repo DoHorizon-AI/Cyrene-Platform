@@ -1,6 +1,9 @@
 import java.io.File
 
-/** Dependency-free CYRENE Kernel Semantic Contract v1 runner. */
+/**
+ * Dependency-free CYRENE Kernel Semantic Contract v1 runner.
+ * 中文：不依赖外部库的 CYRENE Kernel Semantic Contract v1 一致性测试运行器。
+ */
 object KernelSemanticTck {
     private val limits = mapOf(
         "max_id_bytes" to 256L,

@@ -155,6 +155,7 @@ fn peer_credential_policy_rejects_a_mismatched_adapter_peer() {
 #[test]
 fn peer_credential_policy_covers_partial_and_empty_expectations() {
     // (expected_uid, expected_gid, actual_uid, actual_gid, accepted)
+    // 中文：（expected_uid、expected_gid、actual_uid、actual_gid、accepted）。
     let cases = [
         (Some(1000), None, 1000, 9999, true),
         (Some(1000), None, 1001, 1000, false),
@@ -286,6 +287,7 @@ fn registry_rejects_duplicate_device_ids_across_adapters() {
 /// Real Unix-domain-socket coverage for the Kernel-side peer-credential
 /// admission check. Gated to Linux because SO_PEERCRED is the supported
 /// credential source; these cases are compiled out on other hosts.
+/// 中文：对 Kernel 侧对端凭据准入检查进行真实 Unix 域套接字覆盖测试。该测试仅在 Linux 上启用，因为 SO_PEERCRED 是受支持的凭据来源；其他主机不会编译这些用例。
 #[cfg(target_os = "linux")]
 mod linux_uds {
     use std::{
@@ -306,6 +308,7 @@ mod linux_uds {
 
     /// SO_PEERCRED on a loopback socket pair reports this process, which is
     /// the ground truth the Kernel-side check compares against.
+    /// 中文：SO_PEERCRED 在 loopback 套接字对上会报告当前进程，这就是 Kernel 侧检查所比较的实际凭据。
     fn own_peer_credentials() -> PeerCredentialExpectation {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let credentials =
@@ -374,6 +377,7 @@ mod linux_uds {
         assert_eq!(error.reason_code, "ADAPTER_PEER_CREDENTIAL_MISMATCH");
         // The server must never observe a protocol frame from the rejected
         // client: its bounded read has to time out.
+        // 中文：服务器绝不能观察到被拒绝客户端发送的协议帧：对其进行的有界读取必须超时。
         let observed = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let error = observed.unwrap_err();
         assert!(
@@ -394,9 +398,11 @@ mod linux_uds {
     /// that differs from the trusted (root) expectation, so admission must
     /// fail closed. The directory backing `socket_path` must already be
     /// world-writable so `nobody` can create the socket inside it.
+    /// 中文：派生一个临时的“硬件适配器”进程，以无特权的 `nobody` 账户运行，绑定 `socket_path` 并接受一个连接。Kernel 侧客户端（即本测试的父进程）会核验连接对端。由于监听套接字属于 `nobody`，SO_PEERCRED 报告的 uid 与受信任的 root 预期不同，因此准入检查必须失败关闭。`socket_path` 所在目录必须已允许所有用户写入，以便 `nobody` 能在其中创建套接字。
     fn spawn_nobody_adapter(socket_path: &std::path::Path) -> nix::unistd::Pid {
         let path = socket_path.to_path_buf();
         // SAFETY: forking a throwaway single-threaded test process before dropping privileges
+        // 中文：安全性说明：在丢弃权限之前，派生一个临时的单线程测试进程。
         match unsafe { nix::unistd::fork() }.expect("fork") {
             nix::unistd::ForkResult::Child => {
                 let nobody = nix::unistd::User::from_name("nobody")
@@ -420,6 +426,7 @@ mod linux_uds {
     /// before any adapter frame is exchanged. Requires root and a `nobody`
     /// account; runs in the Linux acceptance environment via
     /// `cargo test -p cy-adapter-client -- --ignored`.
+    /// 中文：端到端多账户拒绝测试（Kernel → 硬件适配器／出站客户端方向）：Kernel 客户端配置为信任自身的 root uid，而另一个本地账户（`nobody`）冒充硬件适配器。对端凭据检查必须在交换任何适配器帧之前拒绝该连接。该测试需要 root 权限和 `nobody` 账户；在 Linux 验收环境中通过 `cargo test -p cy-adapter-client -- --ignored` 运行。
     #[test]
     #[ignore = "requires root and a second local account; run in the Linux acceptance environment"]
     fn peer_credentials_reject_a_different_local_account() {

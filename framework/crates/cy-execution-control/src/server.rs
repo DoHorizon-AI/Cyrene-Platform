@@ -2305,7 +2305,7 @@ impl NodeControlService for ExecutionControlService {
             .map(|certificates| {
                 certificates
                     .iter()
-                    .map(|certificate| certificate.get_ref().to_vec())
+                    .map(|certificate| certificate.as_ref().to_vec())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();

@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the package self-contained: Cargo packages cannot include files
     // outside the crate. `contracts/proto` is the repository source of truth;
     // the checked-in mirror under this crate is verified by CI.
+    // 中文：保持该 package 自包含：Cargo package 不能包含 crate 目录之外的文件。`contracts/proto` 是仓库的事实来源；此 crate 下签入的镜像由 CI 校验。
     let proto_dir = manifest_dir.join("proto");
     let core_proto = proto_dir.join("cyrene/core/v1/cyrene_core.proto");
     let authority_proto = proto_dir.join("cyrene/core/v1/kernel_authority.proto");
@@ -58,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .build_server(true)
         .build_transport(false)
-        .compile(
+        .compile_protos(
             &[
                 core_proto,
                 authority_proto,

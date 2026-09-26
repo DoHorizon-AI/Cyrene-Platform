@@ -38,6 +38,7 @@ for message in \
   DiscoverWorkspacesResponse \
   WorkspaceApiRequest \
   WorkspaceApiResponse \
+  WorkspaceDirectRequest \
   WorkspaceOperationView \
   RelayForwardedRequest \
   RelayForwardedResponse \
@@ -56,13 +57,15 @@ for mode in LOCAL LAN_DIRECT DIRECT OVERLAY RELAY; do
 done
 
 service_count=$(rg -c '^service ' "${workspace_proto}" || true)
-if [[ "${service_count}" != 1 ]]; then
-  printf 'Workspace wire contract must define exactly one service; found %s\n' \
+if [[ "${service_count}" != 2 ]]; then
+  printf 'Workspace wire contract must define Relay and Direct services; found %s\n' \
     "${service_count:-0}" >&2
   exit 1
 fi
 rg -q '^service WorkspaceRelayService' "${workspace_proto}"
 rg -q 'rpc Connect\(stream RelayFrame\) returns \(stream RelayFrame\)' "${workspace_proto}"
+rg -q '^service WorkspaceDirectService' "${workspace_proto}"
+rg -q 'rpc Execute\(WorkspaceDirectRequest\) returns \(WorkspaceApiResponse\)' "${workspace_proto}"
 rg -q 'trait WorkspaceDirectory' "${workspace_crate}/src/directory.rs"
 rg -q 'trait RelayAuthenticator' "${workspace_crate}/src/auth.rs"
 rg -q 'trait WorkspaceApi' "${workspace_crate}/src/api.rs"

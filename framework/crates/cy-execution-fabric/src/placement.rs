@@ -22,6 +22,7 @@ use crate::{
 };
 
 /// Policy facts that every selected execution and Artifact Peer must satisfy.
+/// 所选 execution 和 Artifact Peer 都必须满足的 policy fact。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlacementPolicy {
     pub allowed_residencies: BTreeSet<String>,
@@ -32,6 +33,7 @@ pub struct PlacementPolicy {
 }
 
 /// Network behavior required by one Product-neutral execution request.
+/// 单个 Product-neutral execution request 所要求的 network 行为。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NetworkRequirements {
     pub outbound_https: bool,
@@ -40,6 +42,7 @@ pub struct NetworkRequirements {
 }
 
 /// Product-neutral placement request compiled against canonical contracts.
+/// 基于规范 contract 编译出的 Product-neutral placement request。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionPlacementRequest {
     pub capability_requirements: Vec<CapabilityRequirement>,
@@ -57,6 +60,7 @@ pub struct ExecutionPlacementRequest {
 }
 
 /// Transfer metrics derived by the Artifact Plane from an authorized plan.
+/// Artifact Plane 根据已授权 plan 推导的 transfer metric。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactTransferQuote {
     pub bytes_to_transfer: u64,
@@ -67,6 +71,7 @@ pub struct ArtifactTransferQuote {
 }
 
 /// Artifact availability established outside the execution placement layer.
+/// 在 execution placement layer 之外确认的 Artifact availability。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactAvailability {
     VerifiedLocal { inventory_generation: u64 },
@@ -77,6 +82,7 @@ pub enum ArtifactAvailability {
 ///
 /// The quote does not expose replicas, tickets, or Peer-selection policy to
 /// the Framework. Its policy scope must exactly match the placement request.
+/// Execution placement 使用的、有时效的 Artifact Plane evidence。Quote 不向 Framework 暴露 Replica、ticket 或 Peer selection policy；其 policy scope 必须与 placement request 完全匹配。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactPlacementQuote {
     pub quote_id: String,
@@ -89,6 +95,7 @@ pub struct ArtifactPlacementQuote {
 }
 
 /// Scheduler input for one Node without cloud-vendor-specific behavior.
+/// 不带 cloud-vendor-specific 行为的单 Node scheduler input。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionTargetCandidate {
     pub node: NodeRef,
@@ -111,6 +118,7 @@ pub struct ExecutionTargetCandidate {
 }
 
 /// Stable, machine-readable explanation for an ineligible candidate.
+/// 候选项不符合资格时使用的稳定 machine-readable explanation。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementReason {
     pub reason_code: &'static str,
@@ -130,6 +138,7 @@ impl PlacementReason {
 ///
 /// This is not a lease acquisition or allocation. Only the canonical Kernel Lease
 /// authority can bind resources after placement selects a Node.
+/// 一个 ResourceQuery 对应的只读 ProviderSnapshot evidence。这不是 Lease acquisition 或 allocation；placement 选定 Node 后，只有规范 Kernel Lease authority 能绑定 resource。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceMatchEvidence {
     pub provider: Identity,
@@ -139,6 +148,7 @@ pub struct ResourceMatchEvidence {
 }
 
 /// Deterministic score derived only after every hard constraint passes.
+/// 只有通过所有 hard constraint 后才计算的确定性 score。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlacementScore {
     pub local_artifact_bytes: u64,
@@ -150,6 +160,7 @@ pub struct PlacementScore {
 }
 
 /// Explainable eligibility result for one input candidate.
+/// 单个输入 candidate 的可解释资格结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateEvaluation {
     pub node: NodeRef,
@@ -160,6 +171,7 @@ pub struct CandidateEvaluation {
 }
 
 /// Complete placement result, including rejected candidates and selected Node.
+/// 完整 placement result，包含被拒 candidate 和选中的 Node。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacementDecision {
     pub selected_node: Option<NodeRef>,
@@ -167,6 +179,7 @@ pub struct PlacementDecision {
 }
 
 /// Evaluate every target, preserve rejection evidence, and select deterministically.
+/// 评估每个 target、保留 rejection evidence，并确定性地选择结果。
 pub fn plan_execution_placement(
     request: &ExecutionPlacementRequest,
     candidates: &[ExecutionTargetCandidate],
@@ -197,6 +210,7 @@ pub fn plan_execution_placement(
 }
 
 /// Select one eligible target or fail closed when none satisfy the request.
+/// 选择一个符合条件的 target；若没有 target 满足 request，则 fail closed。
 pub fn place_execution_target<'a>(
     request: &ExecutionPlacementRequest,
     candidates: &'a [ExecutionTargetCandidate],

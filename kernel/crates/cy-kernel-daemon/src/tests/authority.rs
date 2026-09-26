@@ -2,6 +2,9 @@
 //!
 //! These tests cover the semantic authority boundary, durable event history,
 //! and snapshot/replay behavior.
+//! 中文：Kernel 守护进程的权限、事件与快照测试。
+//!
+//! 中文：这些测试覆盖语义权限边界、持久化事件历史以及快照与重放行为。
 
 use super::*;
 
@@ -22,7 +25,7 @@ fn canonical_start_worker_preserves_limits_and_runtime_owned_device_injection() 
             binding: &DeviceBinding,
         ) -> Result<ProcessHandle, ProviderError> {
             // Exercise the real sandbox binding boundary, which rejects a second injection.
-            // 设备变量必须到运行时才注入,不能被误认为插件覆盖。
+            // 中文：验证真实 sandbox binding 边界，该边界会拒绝第二次注入。设备变量只应在运行时注入，不能误判为 Plugin 覆盖。
             let environment = binding.merge_environment(&plan.environment)?;
             assert_eq!(
                 environment.get("TEST_DEVICE_SELECTION").unwrap(),
@@ -696,8 +699,8 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
         .into_inner();
     assert_eq!(renewed.fence_token, lease.fence_token);
     assert!(
-        unix_ms_from_timestamp(renewed.expires_at.clone().unwrap(), "renewed").unwrap()
-            > unix_ms_from_timestamp(lease.expires_at.clone().unwrap(), "lease").unwrap()
+        unix_ms_from_timestamp(renewed.expires_at.unwrap(), "renewed").unwrap()
+            > unix_ms_from_timestamp(lease.expires_at.unwrap(), "lease").unwrap()
     );
     let mut process = managed_test_process(
         "worker-1",
@@ -784,7 +787,7 @@ fn endpoint_authority_requires_the_worker_owner_principal() {
         grantee: renewed.holder.clone(),
         lease: renewed.identity.clone(),
         fence_token: renewed.fence_token,
-        expires_at: renewed.expires_at.clone(),
+        expires_at: renewed.expires_at,
     };
     let denied_authorize = runtime.block_on(adapter.authorize_endpoint(authority_request_for(
         non_owner,
@@ -900,6 +903,7 @@ fn authority_worker_operation_and_event_paths_do_not_use_plugin_or_lro_types() {
     assert_eq!(started.state, semantic_v1::OperationState::Running as i32);
     // Direction 2: the launched worker must be driven by the wired-up
     // InstanceActor, not a bare SandboxedProcess.
+    // 中文：方向 2：启动的 Worker 必须由已接入的 InstanceActor 驱动，不能只依赖裸 SandboxedProcess。
     assert_eq!(
         adapter
             .instances
@@ -1338,6 +1342,7 @@ fn cursor_from_an_older_epoch_returns_source_changed() {
 /// subjects in the durable history at or before C, the cursor equals the
 /// latest durable sequence, and replay from C is empty/Current when nothing
 /// changed after the snapshot.
+/// 中文：条目 3：快照游标与持久化事件顺序属于同一个一致性边界。在游标 C 处取得快照后调用 `read_events(C)`，必须能够还原实时权限状态：快照中的操作标识集合，等于持久化历史中序号不大于 C 的 `operation.created` 事件主题集合；游标等于最新的持久化序号；若快照后没有变化，从 C 重放应为空并返回 Current。
 #[test]
 fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
     let store = Arc::new(RecordingDurableEventStore::default());
@@ -1412,6 +1417,7 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
     assert!(snapshot.cursor.sequence > 0);
 
     // (a) The snapshot cursor equals the latest durable sequence.
+    // 中文：(a) 快照游标等于最新的持久化序号。
     let full = authority
         .read_events(
             &context,
@@ -1427,6 +1433,7 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
     assert_eq!(snapshot.cursor.sequence, full.latest_available_sequence);
     // The durable replay is contiguous 1..=latest, the exact ordering the
     // snapshot cursor is derived from.
+    // 中文：持久化重放序列从 1 到 latest 连续递增；快照游标正是据此顺序推导出来的。
     let sequences: Vec<u64> = full.events.iter().map(|event| event.sequence).collect();
     assert_eq!(
         sequences,
@@ -1436,6 +1443,7 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
     // (b) Replay from the snapshot cursor is empty and Current: nothing
     // changed after the snapshot, so Snapshot @ C is already complete and
     // read_events(C) contributes no further (and no lost) transition.
+    // 中文：(b) 从快照游标开始重放时结果为空且状态为 Current：快照之后没有变化，因此游标 C 处的快照已完整，`read_events(C)` 不会再补充任何状态迁移，也不会漏掉迁移。
     let after = authority
         .read_events(&context, &principal, &snapshot.cursor, 256)
         .unwrap();
@@ -1444,6 +1452,7 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
 
     // (c) The snapshot's operation set is identical to the set of operations
     // whose `operation.created` event is in the durable history at or before C.
+    // 中文：(c) 快照中的操作集合，必须与持久化历史中序号不大于 C 的 `operation.created` 事件所对应的操作集合完全相同。
     let mut created: Vec<String> = full
         .events
         .iter()
@@ -1468,6 +1477,7 @@ fn snapshot_cursor_and_durable_event_ordering_share_one_boundary() {
 /// the replay — never lost from both. The same-source replay from a fresh
 /// snapshot cursor can only be Current, and the latest available sequence can
 /// never fall behind the snapshot cursor.
+/// 中文：条目 4：即使状态迁移并发修改权限状态，快照与增量重放也必须保持一致。读取方持续获取快照并从其游标开始重放；由于快照现在会先捕获事件游标再读取状态，读取期间发布的每次迁移要么已反映在快照中，要么会由重放返回，绝不能两边都丢失。从新快照游标开始、且事件源相同的重放只能返回 Current；可用的最新序号也绝不能小于快照游标。
 #[test]
 fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1509,6 +1519,7 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
                 };
                 // A transition publishes its durable event only after mutating
                 // state; the reordered snapshot must never lose it.
+                // 中文：状态变更后才发布对应的持久化事件；调整顺序后的快照绝不能漏掉该事件。
                 let _ = authority.create_operation(&context, &principal, operation);
                 if !running.load(Ordering::SeqCst) {
                     break;
@@ -1523,10 +1534,16 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
     let reader_running = running.clone();
     let reader = thread::spawn(move || {
         let mut checked = 0;
-        while reader_running.load(Ordering::SeqCst) {
+        loop {
+            let keep_running = reader_running.load(Ordering::SeqCst);
             let snapshot = match reader_authority.snapshot(&reader_context, &reader_principal) {
                 Ok(snapshot) => snapshot,
-                Err(_) => continue,
+                Err(_) => {
+                    if !keep_running {
+                        break;
+                    }
+                    continue;
+                }
             };
             let page = reader_authority
                 .read_events(&reader_context, &reader_principal, &snapshot.cursor, 256)
@@ -1536,6 +1553,7 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
             // cursor. `Gap`/`SourceChanged` are valid outcomes: the client must
             // resnapshot. The invariant under test is that no event is lost or
             // corrupted, not that every poll is Current.
+            // 中文：并发期间，写入方可能在快照与本次重放之间完成提交，也可能使内存事件窗口越过快照游标。Gap 或 SourceChanged 都是有效结果，此时客户端必须重新获取快照。这里验证的不变量是没有事件丢失或损坏，而不是每次轮询都返回 Current。
             assert!(
                 matches!(
                     page.status,
@@ -1547,6 +1565,9 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
             );
             assert!(page.latest_available_sequence >= snapshot.cursor.sequence);
             checked += 1;
+            if !keep_running {
+                break;
+            }
         }
         checked
     });
@@ -1561,6 +1582,7 @@ fn snapshot_stays_consistent_while_operations_mutate_concurrently() {
     // Quiescent audit: every created operation is present in both the durable
     // event log and the snapshot. Nothing was lost between the state read and
     // the cursor read under concurrency.
+    // 中文：静止状态审计：每个已创建的操作都同时存在于持久化事件日志和快照中。并发期间状态读取与游标读取之间没有丢失任何操作。
     let snapshot = authority.snapshot(&context, &principal).unwrap();
     let full = authority
         .read_events(

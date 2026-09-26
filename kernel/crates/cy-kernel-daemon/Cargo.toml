@@ -20,10 +20,12 @@ cy-kernel-api = { path = "../cy-kernel-api" }
 cy-resource-manager = { path = "../cy-resource-manager" }
 cy-proto = { path = "../../../contracts/rust/cy-proto" }
 uuid = { version = "1", features = ["v4"] }
-prost-types = "0.12"
+prost-types = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
-tonic = "0.11"
+tonic = "0.12"
+tracing = "0.1"
+cy-observability = { path = "../../../framework/crates/cy-observability" }
 
 # SO_PEERCRED is a Unix-only facility, so nix is only compiled on Unix hosts.
 # Gating it behind a target clause keeps `cargo check -p cy-kernel-daemon`
@@ -36,4 +38,5 @@ tower = "0.4"
 tempfile = "3.8"
 
 [target.'cfg(unix)'.dev-dependencies]
+hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"

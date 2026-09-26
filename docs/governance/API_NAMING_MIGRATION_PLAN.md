@@ -73,3 +73,50 @@ freeze still requires the separate P0-05 decision if the two Lease
 representations are ever exposed as one public model, plus normal
 repository-level adoption checks; that open model decision does not make the
 canonical action vocabulary incomplete.
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# API 命名宪法迁移计划
+
+**状态：规范 action 命名已完成；P0-01 至 P0-04、P0-06 和 P0-07 已完成。P0-05 是单独的内部 model identity 决策，不构成 API action 命名阻塞项。**
+
+本计划记录命名迁移当前的证据。它与宪法分开维护：宪法定义稳定用语，本文件记录临时发现及其解决顺序。
+
+本计划记录命名迁移的当前证据。宪法定义长期稳定的语言，本文件只记录临时盘点结果、优先级和执行顺序；迁移完成后应更新本计划，而不是把临时状态伪装成规范。
+
+## P0 发现项
+
+| ID | 发现 | 证据 | 必要处理 |
+|---|---|---|---|
+| P0-01 | Authority request name 含有因 symbol collision 引入的 Semantic prefix。 | v1/v2 authority contract 现在使用与 RPC 匹配的直接 wrapper：AcquireLeaseRequest、ReleaseLeaseRequest 和 CancelOperationRequest；legacy KernelService projection 使用明确的 Legacy 名称隔离。 | 已完成：规范 authority 名称与 RPC 一致，不再加 adapter prefix。 |
+| P0-02 | Agent/Provider heartbeat 被命名为 worker action。 | v1/v2 authority service 现在暴露 ReportHeartbeat/ReportHeartbeatRequest；plugin lifecycle heartbeat 仍明确命名为 ReportPluginHeartbeat，以体现其区别。 | 已完成：authority fact submission 与 plugin liveness payload 使用不同名称和 owner。 |
+| P0-03 | 可 replay 的 stream 被称为 subscription。 | v1/v2 authority service 现在以 WatchEvents/WatchEventsRequest 提供 durable replay 与 live handoff；不会创建 durable subscription resource。 | 已完成：观测使用 Watch；Subscribe 专用于持久化 subscription entity。 |
+| P0-04 | 逻辑 plugin lifecycle 与具体 process control 使用 Launch/Terminate。 | 旧 KernelService projection 是唯一仍竞争具体进程词汇的部分；PluginLifecycleService 保留 StartPlugin/StopPlugin 表示逻辑生命周期。 | 已完成：KernelService 现在暴露 LaunchProcess/TerminateProcess；StartPlugin/StopPlugin 继续作为逻辑 lifecycle API。 |
+| P0-05 | 存在两个 Rust LeaseState model。 | kernel/crates/cy-kernel-api/src/lease.rs 有 ResourceLease 和 Quarantined；contracts/rust/cy-kernel-contract/src/lease.rs 是 cyrene.semantic.v1.Lease 使用的 semantic LeaseState。旧 Proto projection 还含 ATTACHED。 | 追踪 transition、caller、persistence、replay 和 fixture。保留 semantic LeaseState 为规范类型；仅在证明兼容/resource projection 是不同 model 后，才重命名或退役它。 |
+| P0-06 | 规范与镜像 Proto input 同时被跟踪。 | 相同的 contracts/proto/** input 也镜像在 contracts/rust/cy-proto/proto/** 下。 | 已完成：两份 input、descriptor、manifest 和 generated Rust consumer 均已更新并同步。 |
+| P0-07 | 旧 resource allocation 词汇仍可访问。 | 旧 direct resource RPC 与 ResourceLeaseManager::reserve 是剩余的 Platform 可达入口。 | 已完成：移除 direct resource command，改用 authority AcquireLease/ReleaseLease；Rust resource port/daemon 改用 acquire。 |
+
+P0 发现项并非同一种问题。P0-01 至 P0-04 是已完成的直接命名迁移；P0-05 是仍有意开放的 model identity 决策；P0-06 是已完成的 contract-source hygiene；P0-07 是已完成的 compatibility surface 与 semantic Rust rename。
+
+## 有序工作包
+
+| 任务 | Owner | 允许修改范围 | 验收条件 |
+|---|---|---|---|
+| NAMING-P0-01 | Platform contracts | contracts/proto/**、镜像 contracts/rust/cy-proto/proto/**、contract fixture/descriptor | 新的规范 contract 中不得出现因 collision 引入的 request prefix；buf lint、breaking check、mirror check 和 regenerated binding 结果一致。 |
+| NAMING-P0-02 | Platform kernel | kernel/**、framework/**、agents/** | Rust call site 使用直接 Proto 词汇；同拼写的无关 API 保持不变；cargo check、test 和 clippy 通过。 |
+| NAMING-P0-03 | Platform adapter 与 SDK | adapters/**、runtime/**、sdk/** | 具体执行使用 Launch/Terminate；逻辑生命周期使用 Start/Stop；generated SDK 与 fixture 可编译。 |
+| NAMING-P0-04 | Product 与 Plugin consumer | 各仓库的 contract、SDK 和 adapter 路径 | Yield/Reactor/Exchange/Plugins 使用 Platform 术语且不引入本地同义词；仓库 test 覆盖迁移 seam。 |
+| NAMING-P0-05 | Governance | tooling/architecture/api-naming.toml、gate 和 CI | 已完成：全源码模式通过，policy 在 all_source mode 执行；不能把跳过或模拟的结果报告为 PASS。 |
+
+每个工作包都应是独立且可审查的变更。不要在一次机械搜索替换 patch 中混入 Proto rename、state-machine merge 和无关 Product extraction。
+
+## 必需执行顺序
+
+宪法与 inventory → 将术语归类为同义词/区分/legacy/重复 → 规范 Proto input → 重新生成 binding 与 descriptor → Rust semantic refactoring → Python/JVM/SDK consumer → adapter protocol 和 state-machine 清理 → 有针对性的 test、相关完整 test、文档 → 全源码 forbidden-vocabulary gate。
+
+当前 Workspace IDE 可用 IDEA/RustRover semantic refactoring 查找和重命名 symbol。Checked-out IDE model 指向规范仓库，因此改动必须在隔离的任务 worktree 中进行；semantic operation 之后仍需在仓库层面验证 generated source、镜像 Proto input、descriptor 和 fixture。
+
+## 当前 gate 状态
+
+迁移 gate 已接入 Platform 的 architecture-governance workflow，并以 all_source mode 强制执行。已淘汰 API 词汇已无法从配置的 Platform source root 访问。Public API freeze 仍要求在未来若要将两种 Lease 表示公开为同一 model 时单独解决 P0-05，并完成常规的 repository adoption check；该未决 model 决策不意味着规范 action 词汇仍不完整。

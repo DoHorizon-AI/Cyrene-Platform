@@ -41,3 +41,33 @@ authority and must not be documented as one.
 目标 OS 事实和通用 CPU/RAM 资源投影；Hardware Adapter 拥有厂商 inventory、topology、
 binding 与 health。Kernel 校验并保存标准化观测，Node Agent 负责 typed control 和运行
 证据交换。Node Agent 不是驱动查询权威，文档不能再把它描述成唯一硬件发现源。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# ADR-006：HardwareFacts 权威方是 Node Agent（已取代 / 历史记录）
+
+- **状态**：SUPERSEDED / HISTORICAL
+- **日期**：2026-08-26
+- **取代文档**：`ADR-HARDWARE-ADAPTER-BOUNDARY.md` 和 `docs/architecture/system-adapter.md`
+
+> 本 ADR 记录早期以 Node Agent 为中心的设计，仅作为决策历史保留。它不是当前硬件事实权威模型。
+
+## 背景
+过去，不同组件各自运行 `nvidia-smi` 或 PyTorch CUDA 检查，导致遥测结果不一致，也遗漏了 NVIDIA 以外的加速器。
+
+## 历史决策
+早期决策指定 Platform `Node Agent` 为物理节点硬件发现（`HardwareFacts`）的单一事实来源。
+
+## 原因
+确保所有调度器、评估器和 preflight 检查使用一致、缓存且与厂商无关的硬件事实。
+
+## 考虑过的替代方案
+- *各 Plugin 独立探测硬件*：让每个 plugin 检查 `/dev` 或直接调用厂商工具。因权限问题和报告不一致而被拒绝。
+
+## 后果
+- preflight 与评估器在估算期间接收 `HardwareFacts` 作为输入参数。
+
+## 当前处置
+
+当前架构将主机系统事实和厂商事实交给不同的 Adapter Host。`SystemAdapter` 拥有目标操作系统事实及通用 CPU/RAM 资源投影；Hardware Adapter 拥有厂商 inventory、topology、binding 和 health。Kernel 校验并保存规范化观测，Node Agent 交换类型化控制与运行时证据。Node Agent 不是驱动查询权威，文档不得将其描述为此权威。

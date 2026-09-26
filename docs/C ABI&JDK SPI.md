@@ -1,6 +1,6 @@
 <!-- Status: non-normative design note. Normative semantic, wire, and ownership
      sources are linked below and in docs/README.md. -->
-# C ABI and JDK SPI Design Note
+# C ABI and JDK SPI Design Note（C ABI 与 JDK SPI 设计说明）
 
 > This document is a non-normative design note, not a current public API
 > commitment. The semantic contract and repository boundary documents are

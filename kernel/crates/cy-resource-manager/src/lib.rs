@@ -66,6 +66,7 @@ impl InMemoryResourceManager {
     /// fence sequence. Runtime composition supplies a value greater than every
     /// fence recorded before a Kernel restart; old release requests can never
     /// accidentally match a newly recreated lease name.
+    /// 创建新的内存 ledger，并为 fence 序列设置已持久化的下界。runtime 组合会提供一个大于 Kernel 重启前记录过的所有 fence 的值；旧的释放请求因此不会意外匹配重新创建的租约名称。
     pub fn with_next_fence_token(
         node_id: impl Into<String>,
         resources: Vec<Resource>,
@@ -378,6 +379,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
             // exact fence check above; it does not make the resource
             // reusable.  The subsequent physical cleanup report remains the
             // gate for `complete_release`.
+            // 清理失败时仍然占用该分配。只有调用方通过上面的精确 fence 检查后，才可安全地重新进入清理阶段；这不会让资源恢复为可用。后续仍须取得物理清理报告，才能调用 complete_release。
             LeaseState::Failed => lease.state = LeaseState::Releasing,
             LeaseState::Releasing | LeaseState::Released => {}
             _ => {
@@ -462,6 +464,7 @@ impl ResourceLeaseManager for InMemoryResourceManager {
     /// Forcefully removes a lease's authority when its holder can no longer be
     /// trusted or when its TTL has expired. Revoke advances the fence token and
     /// retains physical resource allocation until confirmed cleanup.
+    /// 当租约持有方不再可信或 TTL 已过期时，强制撤销其 authority。Revoke 会推进 fence token，并在清理得到确认前继续占用物理资源。
     fn revoke(&self, lease_name: &str, fence_token: u64) -> Result<ResourceLease, ProviderError> {
         let mut state = self.state.lock().expect("resource state lock poisoned");
         expire_due_leases(&mut state, now_unix_ms());
@@ -924,6 +927,7 @@ mod tests {
 
         // Clock expiry invalidates active lease state (Expired), but does not
         // silently free physical allocation before confirmed cleanup.
+        // 时钟过期会使 active 租约状态失效（Expired），但在清理得到确认之前，不会悄悄释放物理分配资源。
         assert_eq!(
             manager.get_lease(&lease.name).unwrap().state,
             LeaseState::Expired
@@ -931,12 +935,14 @@ mod tests {
         assert!(manager.is_allocated("resource-0"));
 
         // Revoking the expired lease advances the fence and transitions to Revoked.
+        // 撤销已过期租约会推进 fence，并将状态转换为 Revoked。
         let revoked = manager.revoke(&lease.name, lease.fence_token).unwrap();
         assert!(revoked.fence_token > lease.fence_token);
         assert_eq!(revoked.state, LeaseState::Revoked);
         assert!(manager.is_allocated("resource-0"));
 
         // Only after confirmed cleanup (complete_revocation) is the resource reusable.
+        // 只有确认清理完成（complete_revocation）后，资源才可再次使用。
         manager
             .complete_revocation(&revoked.name, revoked.fence_token)
             .unwrap();

@@ -471,7 +471,11 @@ impl KernelServiceAdapter {
 
     pub(crate) fn enforce_lease_expiry(&self) {
         if let Err(error) = self.authority.enforce_lease_expiry() {
-            eprintln!("lease expiry enforcement failed: {error:?}");
+            tracing::warn!(
+                event.name = "platform.lease.expiry_enforcement_failed",
+                error = ?error,
+                message = "Lease expiry enforcement failed",
+            );
         }
     }
 
@@ -526,7 +530,13 @@ impl KernelServiceAdapter {
                     // Class B fail-closed: the lost transition did not commit
                     // durably, so it is retried on the next scan. The Lease
                     // stays Active and is never silently released.
-                    eprintln!("worker lost authority transition failed: {error:?}");
+                    // 中文：B 类失败关闭：丢失的状态迁移没有持久提交，因此会在下一次扫描重试。租约保持 Active，绝不会被静默释放。
+                    tracing::warn!(
+                        event.name = "platform.worker.lost_authority_transition_failed",
+                        error = ?error,
+                        worker_id = %worker.identity.id,
+                        message = "worker lost authority transition failed; retrying on next scan",
+                    );
                 }
                 continue;
             }
@@ -583,8 +593,13 @@ impl KernelServiceAdapter {
                     // (the instance was marked triggered above) so the next
                     // scan retries the write; the Worker keeps running and the
                     // Lease stays Active (fail-closed, recovery-required).
-                    eprintln!(
-                        "runtime journal LeaseReleaseStarted write failed: {error}; deferred to next watchdog scan"
+                    // 中文：B 类持久化意图：没有先持久化意图就不得开始物理释放。重新启用 watchdog（前面已将实例标记为已触发），以便下次扫描重试写入；Worker 继续运行，租约保持 Active（失败关闭，需要恢复）。
+                    tracing::warn!(
+                        event.name = "platform.lease.release_deferred",
+                        error.code = "PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED",
+                        instance_name = %name,
+                        error = %error,
+                        message = "runtime journal LeaseReleaseStarted write failed; deferred to next watchdog scan",
                     );
                     self.instances
                         .lock()
@@ -626,7 +641,14 @@ impl KernelServiceAdapter {
                             // Class B outcome: without the durable termination
                             // record the Lease fails closed (FAILED) so the
                             // resource is never silently reusable.
-                            eprintln!("runtime journal InstanceTerminated write failed: {error}");
+                            // 中文：B 类结果：缺少持久化的终止记录时，租约会以 FAILED 状态失败关闭，资源绝不会被静默复用。
+                            tracing::error!(
+                                event.name = "platform.kernel.journal_write_failed",
+                                error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                                instance_name = %journal_instance_name,
+                                error = %error,
+                                message = "runtime journal InstanceTerminated write failed during watchdog reap; failing lease closed",
+                            );
                             let _ = self
                                 .daemon
                                 .fail_release(&lease.lease_name, lease.fence_token);
@@ -637,6 +659,7 @@ impl KernelServiceAdapter {
                         // RELEASED to be exposed. On either failure the branch
                         // below fails the Lease closed (FAILED) so the resource
                         // is never silently reusable.
+                        // 中文：B 类结果：必须同时成功写入持久化 LEASE_RELEASED 记录并调用账本的 complete_release，才能对外显示 RELEASED。任一步失败，下面的分支都会将租约置为 FAILED 并失败关闭，确保资源绝不会被静默复用。
                         let released = release_started
                             && self
                                 .record_runtime(
@@ -659,8 +682,21 @@ impl KernelServiceAdapter {
                             ) {
                                 // Class C: the Lease is already durably RELEASED;
                                 // this record is best-effort telemetry.
-                                eprintln!("runtime journal WatchdogReaped write failed: {error}");
+                                // 中文：C 类：租约已持久化为 RELEASED；此记录仅用于尽力写入的遥测。
+                                tracing::warn!(
+                                    event.name = "platform.kernel.journal_write_failed",
+                                    instance_name = %journal_instance_name,
+                                    error = %error,
+                                    message = "runtime journal WatchdogReaped write failed",
+                                );
                             }
+                            tracing::info!(
+                                event.name = "platform.worker.reaped",
+                                instance_name = %name,
+                                lease_name = %lease.lease_name,
+                                fence_token = lease.fence_token,
+                                message = "Worker process reaped by watchdog and lease released",
+                            );
                             self.instances
                                 .lock()
                                 .expect("instance lock poisoned")
@@ -692,7 +728,14 @@ impl KernelServiceAdapter {
                     ) {
                         // Class C: the Lease was already fail_released (FAILED)
                         // with the allocation held; this record is telemetry.
-                        eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                        // 中文：C 类：租约已处于 fail_released（FAILED）状态且仍保留资源分配；此记录仅用于遥测。
+                        tracing::error!(
+                            event.name = "platform.kernel.journal_write_failed",
+                            error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                            instance_name = %name,
+                            error = %error,
+                            message = "runtime journal InstanceCleanupFailed write failed; lease quarantined",
+                        );
                     }
                 }
             } else {
@@ -711,7 +754,14 @@ impl KernelServiceAdapter {
                 ) {
                     // Class C: the Lease was already fail_released (FAILED)
                     // with the allocation held; this record is telemetry.
-                    eprintln!("runtime journal InstanceCleanupFailed write failed: {error}");
+                    // 中文：C 类：租约已处于 fail_released（FAILED）状态且仍保留资源分配；此记录仅用于遥测。
+                    tracing::error!(
+                        event.name = "platform.kernel.journal_write_failed",
+                        error.code = "PLATFORM.KERNEL.JOURNAL_WRITE_FAILED",
+                        instance_name = %name,
+                        error = %error,
+                        message = "runtime journal InstanceCleanupFailed write failed on watchdog stop failure",
+                    );
                 }
             }
         }

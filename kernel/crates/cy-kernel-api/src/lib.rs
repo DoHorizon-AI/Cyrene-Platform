@@ -39,10 +39,12 @@ pub mod service;
 /// Canonical, transport-independent Kernel vocabulary. New public ports must
 /// use these nouns; the remaining device/process structs below are internal
 /// compatibility and adapter-port types during migration.
+/// 中文：与传输方式无关的规范 Kernel 词汇。新增公共端口必须使用这些术语；下方其余设备／进程结构体在迁移期间属于内部兼容类型和适配器端口类型。
 pub use cy_kernel_contract as semantic;
 
 // Internal crates retain the historical flat names. Third-party extensions
 // must use cy-kernel-contract and cy-proto instead.
+// 中文：内部 crate 继续保留历史上的扁平名称。第三方扩展必须改用 cy-kernel-contract 和 cy-proto。
 pub use authority::{
     AuthorityCallContext, AuthoritySnapshot, KernelAuthority, KernelProviderAuthority, NamespaceId,
     ObjectRef, ProviderReconcileAction, ProviderReconcileResult, DEFAULT_NAMESPACE,

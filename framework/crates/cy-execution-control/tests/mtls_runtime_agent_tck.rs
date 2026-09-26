@@ -79,6 +79,10 @@ const CONTROL_SERVER_NAME: &str = "control.test";
 /// process by default. Set CYRENE_RUNTIME_AGENT_TEST_BINARY to a freshly built
 /// Agent binary to exercise actual OS-process termination/restart and terminal
 /// replay instead. Neither mode proves Docker or a multi-container deployment.
+/// 中文：覆盖从证书认证的对端、经由 UDS 获取 Kernel 租约，到 Runtime Agent 子进程的真实 Linux 控制路径。
+///
+/// 中文：默认在同一测试进程中组合生产组件；设置 CYRENE_RUNTIME_AGENT_TEST_BINARY
+/// 可验证真实 Agent 操作系统进程的终止、重启和终态重放。两种模式均不证明 Docker 或多容器部署。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestResult {
     let temporary = tempdir()?;
@@ -370,6 +374,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     );
     assert!(second_runtime_config.resume_token.is_empty());
     // New execution requires a fresh generation, scoped certificate and proof.
+    // 中文：新执行需要新一代运行时身份、限定范围的证书与注册证明。
     let mut second_runtime_task = spawn_runtime_agent(second_runtime_config);
     wait_for_runtime_session(
         "reconnected Runtime session",
@@ -498,6 +503,7 @@ async fn mtls_runtime_agent_kernel_uds_and_durable_release_are_real() -> TestRes
     // A rejected assignment leaves the Agent connected so it can accept later
     // work. Dispatch one valid recovery assignment and await normal Agent exit;
     // aborting a spawn_blocking JoinHandle cannot cancel the running Agent.
+    // 中文：被拒绝的分配不会断开 Agent，因此它仍能接受后续工作。派发一个有效的恢复分配，并等待 Agent 正常退出；中止 spawn_blocking 的 JoinHandle 无法取消正在运行的 Agent。
     let recovery_receipt = dispatch_with_context(
         &restarted_controller,
         "recovery workload",
@@ -602,6 +608,9 @@ impl Certificates {
     /// `openssl` is an explicit acceptance prerequisite. Any missing binary,
     /// failed invocation, or malformed output returns an error and fails this
     /// test; there is deliberately no skip path.
+    /// 中文：生成有效期较短的本地 CA，并签发服务器端与客户端叶证书。
+    ///
+    /// 中文：`openssl` 是明确的验收前置条件。任何二进制缺失、命令执行失败或输出格式错误都会返回错误并使测试失败；这里有意不设置跳过路径。
     fn generate(directory: &Path) -> TestResult<Self> {
         let version = Command::new("openssl").arg("version").output();
         let version = version.map_err(|error| {
@@ -1168,6 +1177,7 @@ fn spawn_runtime_agent(
     // entered. This keeps cy-artifact-transfer's debug-only blocking client
     // guard outside an already-entered Tokio runtime while its async I/O and
     // spawned tasks still use the shared runtime.
+    // 中文：仅进入 Tokio handle 的阻塞线程池线程会轮询真实 Agent。这样可避免 cy-artifact-transfer 仅用于调试的阻塞客户端保护逻辑运行在已进入的 Tokio runtime 中，同时其异步 I/O 和派生任务仍使用共享 runtime。
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         let mut future = Box::pin(run_runtime_agent(config));
@@ -1237,6 +1247,7 @@ fn dispatch_request(
     // Placement consumes wall-clock evidence while the test's timeouts use a
     // monotonic clock. Leave a bounded skew margin so a host clock correction
     // cannot make freshly constructed evidence appear sampled in the future.
+    // 中文：放置逻辑使用墙上时钟证据，而测试超时使用单调时钟。保留有界偏差余量，避免主机时钟校正使刚构造的证据看起来像是在未来采样。
     let observed_at = now.saturating_sub(30_000);
     let valid_until = now.saturating_add(300_000);
     let workload_identity = service.workload_identity(

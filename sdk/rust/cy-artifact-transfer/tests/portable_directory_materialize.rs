@@ -185,6 +185,7 @@ fn materializes_python_fixture_with_unicode_and_zero_byte_file() {
     );
 
     // A verified target is idempotent and does not require the source again.
+    // 中文：目标已通过校验时，操作具有幂等性，且无需再次访问源目录。
     fs::remove_dir_all(&blob_root).unwrap();
     let result = materialize_portable_directory(
         &artifact,

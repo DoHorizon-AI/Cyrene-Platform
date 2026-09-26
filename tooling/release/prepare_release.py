@@ -3,6 +3,7 @@
 Cyrene Automated Component Release Preparation Tool
 Validates release version, verifies target commit on default branch, checks tag absence,
 runs release test suites, and orchestrates immutable tag creation only after all verification passes.
+中文:Cyrene 组件自动发布准备工具。验证发布版本、默认分支上的目标提交和标签是否已存在,运行发布测试套件,并且仅在所有验证通过后协调创建不可变标签。
 """
 
 import argparse
@@ -23,10 +24,12 @@ def normalize_version(version_str: str) -> str:
 
 def validate_release_safety(repo_path: Path, tag: str, allow_dirty: bool = False) -> tuple[bool, str]:
     # 1. SemVer syntax check
+    # 中文:1. 检查 SemVer 语法。
     if not SEMVER_REGEX.match(tag):
         return False, f"Tag '{tag}' is not valid SemVer format (must be vMAJOR.MINOR.PATCH)"
 
     # 2. Repository Policy check
+    # 中文:2. 检查仓库策略。
     policy_file = repo_path / "repository-policy.yaml"
     if policy_file.exists():
         try:
@@ -38,12 +41,15 @@ def validate_release_safety(repo_path: Path, tag: str, allow_dirty: bool = False
             return False, f"Failed to parse repository-policy.yaml: {e}"
 
     # 3. Tag absence check (Immutability rule)
+    # 中文:3. 检查标签不存在(不可变规则)
+    # 中文:3. 检查标签不存在(不可变规则)。
     if (repo_path / ".git").exists():
         existing_tags = subprocess.run(["git", "-C", str(repo_path), "tag", "-l"], capture_output=True, text=True).stdout.split()
         if tag in existing_tags:
             return False, f"Tag '{tag}' already exists! Published tags are immutable and must not move."
 
     # 4. Dirty check
+    # 中文:4. 检查工作树是否干净。
     if (repo_path / ".git").exists() and not allow_dirty:
         stat = subprocess.run(["git", "-C", str(repo_path), "status", "--short"], capture_output=True, text=True).stdout.strip()
         if stat:
@@ -53,7 +59,10 @@ def validate_release_safety(repo_path: Path, tag: str, allow_dirty: bool = False
 
 
 def resolve_head(repo_path: Path) -> str:
-    """Resolve the immutable checked-out commit used by every release step."""
+    """Resolve the immutable checked-out commit used by every release step.
+
+    中文:解析所有发布步骤共同使用的不可变检出提交。
+    """
 
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
@@ -88,10 +97,12 @@ def main():
     print(f"[OK] {msg}")
 
     # Determine target SHA
+    # 中文:确定目标 SHA。
     target_sha = resolve_head(rp) if (rp / ".git").exists() else "UNKNOWN"
     print(f"Target Release Commit SHA: {target_sha}")
 
     # Release Plan
+    # 中文:生成发布计划。
     tag_cmd = f"git tag -a {tag} {target_sha} -m 'Release {rp.name} {tag}'"
     push_tag_cmd = f"git push origin {tag}"
     gh_release_cmd = f"gh release create {tag} --draft --title '{rp.name} {tag}' --notes 'Automated component release for {rp.name} at commit {target_sha}'"
@@ -109,6 +120,8 @@ def main():
         sys.exit(0)
 
     # In execute mode (called at the very end after all tests and builds pass)
+    # 中文:在执行模式下运行(仅在所有测试和构建通过后,于最后一步调用)
+    # 中文:执行模式下仅在所有测试和构建通过后,于最后阶段调用。
     print("\nExecuting Final Tag Creation...")
     subprocess.run(["git", "-C", str(rp), "tag", "-a", tag, target_sha, "-m", f"Release {rp.name} {tag}"], check=True)
     print(f"[SUCCESS] Created immutable annotated tag {tag} after successful verification.")

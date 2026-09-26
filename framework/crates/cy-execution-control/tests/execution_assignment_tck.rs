@@ -464,7 +464,10 @@ async fn rollback_retries_exact_release_after_same_node_host_reconnect() {
     reject_tx.send(()).unwrap();
 
     let error = dispatch_task.await.unwrap().unwrap_err();
-    assert_eq!(error.reason_code, "ASSIGNMENT_REJECTED_BY_TEST");
+    assert_eq!(
+        error.reason_code, "ASSIGNMENT_REJECTED_BY_TEST",
+        "{error:?}"
+    );
     assert!(!error.reconciliation_required);
     assert_eq!(resources.leases().len(), 1);
     assert!(!ResourceLeaseManager::is_allocated(
@@ -679,8 +682,10 @@ async fn run_rejecting_runtime_protocol(
             })
             .await
             .unwrap();
-        return;
+        break;
     }
+    // Keep the request stream alive until the test has observed the ACK.
+    std::future::pending::<()>().await;
 }
 
 async fn run_runtime_protocol(endpoint: String, runtime: semantic::Identity) {

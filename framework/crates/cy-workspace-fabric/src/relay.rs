@@ -144,6 +144,13 @@ impl WorkspaceRelay {
         };
         let relay_session_id = self.next_session("frontend");
         send_ready(&sender, &relay_session_id, claims.expires_at_unix_ms).await?;
+        tracing::info!(
+            event.name = "platform.relay.connected",
+            session_id = %relay_session_id,
+            role = "frontend",
+            organization_id = %claims.organization_id,
+            message = "Relay accepted frontend connection",
+        );
         self.state
             .connections
             .lock()
@@ -211,6 +218,13 @@ impl WorkspaceRelay {
                             .await;
                     }
                     _ => {
+                        tracing::warn!(
+                            event.name = "platform.relay.frame_error",
+                            error.code = "PLATFORM.RELAY.FRAME_ERROR",
+                            session_id = %relay_session_id,
+                            frame_id = %frame.frame_id,
+                            message = "Frontend sent invalid or unexpected relay frame",
+                        );
                         let _ =
                             send_error(&sender, &frame.frame_id, 3, "FRONTEND_RELAY_FRAME_INVALID")
                                 .await;
@@ -220,6 +234,12 @@ impl WorkspaceRelay {
             if let Ok(mut connections) = relay.state.connections.lock() {
                 connections.frontends.remove(&relay_session_id);
             }
+            tracing::info!(
+                event.name = "platform.relay.disconnected",
+                session_id = %relay_session_id,
+                role = "frontend",
+                message = "Relay frontend connection terminated",
+            );
         });
         Ok(())
     }
@@ -261,6 +281,14 @@ impl WorkspaceRelay {
             }
         };
         let Some(workspace_sender) = workspace_sender else {
+            tracing::warn!(
+                event.name = "platform.relay.workspace_offline",
+                error.code = "PLATFORM.RELAY.STREAM_DISCONNECTED",
+                frontend_session_id = %frontend_session_id,
+                workspace_id = %request.workspace_id,
+                request_id = %request.request_id,
+                message = "Workspace connector is offline for requested workspace",
+            );
             let _ = send_workspace_error(
                 frontend_sender,
                 request.request_id,
@@ -300,6 +328,13 @@ impl WorkspaceRelay {
         }
         let relay_session_id = self.next_session("workspace");
         send_ready(&sender, &relay_session_id, claims.expires_at_unix_ms).await?;
+        tracing::info!(
+            event.name = "platform.relay.connected",
+            session_id = %relay_session_id,
+            role = "workspace",
+            workspace_id = %workspace_id,
+            message = "Relay accepted workspace connector connection",
+        );
         self.state
             .connections
             .lock()
@@ -318,6 +353,14 @@ impl WorkspaceRelay {
         tokio::spawn(async move {
             while let Ok(Some(frame)) = inbound.message().await {
                 let Some(relay_frame::Body::ForwardedResponse(forwarded)) = frame.body else {
+                    tracing::warn!(
+                        event.name = "platform.relay.frame_error",
+                        error.code = "PLATFORM.RELAY.FRAME_ERROR",
+                        session_id = %relay_session_id,
+                        workspace_id = %registered_workspace,
+                        frame_id = %frame.frame_id,
+                        message = "Workspace connector sent invalid or unexpected relay frame",
+                    );
                     let _ =
                         send_error(&sender, &frame.frame_id, 3, "WORKSPACE_RELAY_FRAME_INVALID")
                             .await;
@@ -358,6 +401,13 @@ impl WorkspaceRelay {
                     connections.workspaces.remove(&registered_workspace);
                 }
             }
+            tracing::info!(
+                event.name = "platform.relay.disconnected",
+                session_id = %relay_session_id,
+                role = "workspace",
+                workspace_id = %registered_workspace,
+                message = "Relay workspace connection terminated",
+            );
         });
         Ok(())
     }

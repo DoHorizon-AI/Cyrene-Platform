@@ -13,6 +13,7 @@ use cy_kernel_contract::Identity;
 use crate::FabricContractError;
 
 /// Account and Runtime scope bound to one workload identity.
+/// 绑定到单个 workload identity 的 Account 与 Runtime scope。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeScope {
     pub organization_id: String,
@@ -21,6 +22,7 @@ pub struct RuntimeScope {
 }
 
 /// Short-lived enrollment result. It contains no bootstrap credential.
+/// 短期 enrollment result，不包含 bootstrap credential。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrollmentGrant {
     pub workload_identity: Identity,
@@ -29,6 +31,7 @@ pub struct EnrollmentGrant {
 }
 
 /// Replaceable OIDC/device/SSO/development enrollment boundary.
+/// 可替换的 OIDC/device/SSO/development enrollment boundary。
 pub trait EnrollmentProvider: Send + Sync {
     fn enroll(
         &self,
@@ -39,6 +42,7 @@ pub trait EnrollmentProvider: Send + Sync {
 }
 
 /// Single-use in-memory development verifier. Never use in production.
+/// 仅供 development 使用的一次性内存 verifier。严禁用于生产。
 pub struct DevelopmentEnrollmentProvider {
     tokens: Mutex<BTreeSet<String>>,
     lifetime_ms: u64,
@@ -60,6 +64,8 @@ impl EnrollmentProvider for DevelopmentEnrollmentProvider {
         scope: RuntimeScope,
         now_unix_ms: u64,
     ) -> Result<EnrollmentGrant, FabricContractError> {
+        // The enrollment proof is credential material and is never recorded.
+        // Enrollment proof 属于 credential material，绝不记录。
         if proof.is_empty() {
             return Err(FabricContractError {
                 reason_code: "AUTHENTICATION_REQUIRED",

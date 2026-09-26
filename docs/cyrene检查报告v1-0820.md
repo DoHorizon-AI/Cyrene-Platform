@@ -685,3 +685,11 @@ Advance epoch/fence
 它能降低 stale fence reuse 风险，也避免随意 kill foreign process，但不能证明安全地重新建立全部现实状态。
 
 **最终成熟度判断：Recovery 为 Skeleton/Partial，尚不满足 Contract 的完整安全恢复闭环。**
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+### 抽象泄漏检查
+
+内核语义模型及其规范 authority RPC 并未引入 `Model`、`Dataset`、`Tokenizer`、`Docker`、`CudaStream`、`TrainingJob`、`InferenceServer`、`NvidiaGpu` 或 `VllmServer` 等持久化领域概念。
+
+上层 `cy-platform-api` 确实定义了 AI 专用的集中式 SPI 类型，包括 `ModelAnalyzer`、`TrainingBackend`、`ExecutionEngine` 和 `Quantization`。这部分位于 Kernel 之外，因此不属于 Kernel 抽象泄漏；但它属于实验性的上层分类体系，不应被提升为 Kernel 语义。

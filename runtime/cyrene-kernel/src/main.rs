@@ -41,16 +41,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::transport::Server;
 
-    let args = Args::parse()?;
+    let log_format = std::env::var("CYRENE_LOG_FORMAT")
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(cy_observability::LogFormat::Json);
+    let log_level = std::env::var("CYRENE_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let obs_config = cy_observability::ObservabilityConfig::managed("cyrene-kernel")
+        .with_format(log_format)
+        .with_log_level(log_level);
+    let _guard = cy_observability::init_observability(obs_config).ok();
+
+    let args = match Args::parse() {
+        Ok(args) => args,
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.startup_failed",
+                error.code = cy_observability::PlatformErrorCode::KernelStartupFailed.as_str(),
+                message = "Kernel daemon startup argument parsing failed",
+                error = %err,
+            );
+            return Err(err);
+        }
+    };
     // Persist and advance the epoch before accepting any Kernel request. The
     // journal is evidence only: it seeds fencing but is never used to adopt a
     // Worker left by an older sandboxd process.
+    // 中文：在接受任何 Kernel 请求之前，先持久化并推进 epoch。日志只作为证据用于初始化 fencing；绝不会用它接管旧 sandboxd 进程遗留的 Worker。
     let journal = Arc::new(FileRuntimeJournal::open(&args.runtime_journal)?);
     let recovery = journal.begin_epoch(&args.node_id)?;
     if !recovery.runtime_processes.is_empty() {
-        eprintln!(
-            "recovery discovered {} unclosed runtime record(s); they remain fenced and require provider reconciliation",
-            recovery.runtime_processes.len()
+        tracing::warn!(
+            event.name = "platform.kernel.recovery_discovered",
+            unclosed_records = recovery.runtime_processes.len(),
+            message = "Recovery discovered unclosed runtime record(s); they remain fenced and require provider reconciliation",
         );
     }
     let sandbox = Arc::new(UdsSandboxAdapterClient::from_endpoint(
@@ -59,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Do not bind any public or worker listener until sandboxd has classified
     // every leftover process against the local journal and reaped only exact,
     // stale Kernel evidence. Unknown and foreign state fail startup closed.
+    // 中文：在 sandboxd 根据本地日志核对所有遗留进程，并且只回收与过期 Kernel 证据完全匹配的进程之前，不绑定任何公共或 Worker 监听器。未知或外来的状态会使启动失败关闭。
     journal
         .recover_before_listeners(&args.node_id, &recovery, sandbox.as_ref())
         .map_err(|error| std::io::Error::other(format!("restart recovery failed: {error}")))?;
@@ -101,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_event_store(journal);
     // The Adapter owns the hardware Provider lifecycle. Sync before accepting
     // listeners so every configured adapter has a resource-only Provider view.
+    // 中文：硬件 Provider 生命周期由 Adapter 管理。在接受连接之前先同步，确保每个已配置适配器都提供仅含资源信息的 Provider 视图。
     adapter.sync_hardware_provider_facts().map_err(|error| {
         std::io::Error::other(format!(
             "failed to synchronize hardware provider facts: {error}"
@@ -132,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Worker socket exposes only the constrained control/liveness service.
     // It never registers KernelAuthorityService, so a Worker cannot call lease
     // or Endpoint authority actions merely because it can acknowledge shutdown.
+    // 中文：Worker 套接字仅暴露受限的控制与存活服务。它不会注册 KernelAuthorityService，因此 Worker 不能仅凭确认关闭请求，就调用租约或 Endpoint 权限操作。
     let worker_control_server = Server::builder()
         .add_service(adapter.worker_control_server())
         .add_service(adapter.lifecycle_server())
@@ -146,8 +174,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_incoming(PeerCredAccept::new(UnixListenerStream::new(
             provider_listener,
         )));
-    tokio::try_join!(authority_server, worker_control_server, provider_server)?;
-    Ok(())
+    tracing::info!(
+        event.name = cy_observability::EVENT_SERVICE_STARTED,
+        message = "Kernel daemon services initialized and listening",
+        node_id = %args.node_id,
+    );
+    let result = tokio::try_join!(authority_server, worker_control_server, provider_server);
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                event.name = cy_observability::EVENT_SERVICE_STOPPED,
+                message = "Kernel daemon servers shut down cleanly",
+            );
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!(
+                event.name = "platform.service.terminated_unexpectedly",
+                error.code = cy_observability::PlatformErrorCode::KernelUnknownError.as_str(),
+                message = "Kernel daemon server terminated with error",
+                error = %err,
+            );
+            Err(err.into())
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -302,6 +352,7 @@ impl Args {
         })?;
         // The single sandbox adapter has no routing ID ambiguity, so its peer
         // identity policy is configured as a bare UID/GID rather than ID=NUMBER.
+        // 中文：唯一的 sandbox 适配器不存在路由 ID 歧义，因此其对端身份策略配置为裸 UID/GID，而不是 ID=NUMBER 格式。
         sandbox_adapter.peer_credentials = cy_adapter_client::PeerCredentialExpectation {
             uid: sandbox_peer_uid,
             gid: sandbox_peer_gid,
@@ -310,6 +361,7 @@ impl Args {
         // with at least one trusted peer UID/GID. Without this, the library
         // default of `PeerCredentialExpectation::default()` (allow any peer)
         // would silently disable UDS admission for that endpoint in production.
+        // 中文：失败关闭的准入门槛：每个 Adapter Endpoint 至少必须配置一个受信任的对端 UID/GID。否则，库默认的 `PeerCredentialExpectation::default()`（允许任意对端）会在生产环境中悄然关闭该 Endpoint 的 UDS 准入检查。
         require_configured_adapter_peers(&adapters, &sandbox_adapter)?;
         Ok(Self {
             node_id,

@@ -40,6 +40,7 @@ use crate::sandboxed_process::SandboxedProcess;
 const EVENT_BUFFER_CAPACITY: usize = 128;
 
 /// Generic service workload supervisor driving process execution.
+/// 驱动进程执行的通用 service workload supervisor。
 pub struct ServiceSupervisor {
     spec: ServiceSpec,
     runtime: Arc<dyn SandboxBackend>,
@@ -57,6 +58,7 @@ pub struct ServiceSupervisor {
 
 impl ServiceSupervisor {
     /// Create a new generic ServiceSupervisor for the given specification and runtime backend.
+    /// 使用给定的规格和 runtime backend 创建通用 ServiceSupervisor。
     pub fn new(
         spec: ServiceSpec,
         runtime: Arc<dyn SandboxBackend>,
@@ -80,31 +82,37 @@ impl ServiceSupervisor {
     }
 
     /// Read current service specification.
+    /// 读取当前 service 规格。
     pub fn spec(&self) -> &ServiceSpec {
         &self.spec
     }
 
     /// Read current observable service state.
+    /// 读取当前可观测的 service 状态。
     pub fn state(&self) -> ServiceState {
         self.state
     }
 
     /// Read current restart count.
+    /// 读取当前重启次数。
     pub fn restart_count(&self) -> u32 {
         self.restart_count
     }
 
     /// Read current generation number.
+    /// 读取当前 generation 编号。
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
     /// Read current active process handle if running.
+    /// 如果进程正在运行，则读取当前 active 进程句柄。
     pub fn handle(&self) -> Option<&ProcessHandle> {
         self.process.as_ref().and_then(|p| p.handle())
     }
 
     /// Read current status snapshot.
+    /// 读取当前状态快照。
     pub fn status(&self) -> ServiceStatus {
         ServiceStatus {
             name: self.spec.name.clone(),
@@ -117,11 +125,13 @@ impl ServiceSupervisor {
     }
 
     /// Subscribe to structured service lifecycle events.
+    /// 订阅结构化 service 生命周期事件。
     pub fn subscribe_events(&self) -> broadcast::Receiver<ServiceEvent> {
         self.event_tx.subscribe()
     }
 
     /// Start the service process and execute readiness probing.
+    /// 启动 service 进程并执行就绪探测。
     pub async fn start(&mut self) -> Result<ServiceStatus, ProviderError> {
         if self.state.is_active() && self.state != ServiceState::Restarting {
             return Ok(self.status());
@@ -165,6 +175,7 @@ impl ServiceSupervisor {
                     &format!("Readiness probe failed: {err}"),
                 );
                 // Attempt cleanup of failed start
+                // 尝试清理启动失败的进程。
                 let _ = self.cleanup_current_process(Duration::from_secs(1));
                 self.handle_exit_policy(false).await;
                 Err(err)
@@ -173,6 +184,7 @@ impl ServiceSupervisor {
     }
 
     /// Request graceful stop and await process cleanup within configured timeout.
+    /// 请求正常停止，并在配置的超时时间内等待进程清理完成。
     pub async fn stop(&mut self) -> Result<ServiceStatus, ProviderError> {
         if self.state.is_terminal() && self.state != ServiceState::Restarting {
             return Ok(self.status());
@@ -205,6 +217,7 @@ impl ServiceSupervisor {
     }
 
     /// Immediately cancel / kill the service process.
+    /// 立即取消/终止 service 进程。
     pub async fn cancel(&mut self) -> Result<ServiceStatus, ProviderError> {
         self.transition_state(
             ServiceState::Stopping,
@@ -222,8 +235,10 @@ impl ServiceSupervisor {
     }
 
     /// Supervise the service continuously: handles crash detection and automatic restarts.
+    /// 持续监管 service：检测崩溃并自动重启。
     pub async fn step_supervision(&mut self) -> Result<ServiceStatus, ProviderError> {
         // 1. Reset restart counter if healthy window exceeded
+        // 1. 健康运行时间超过阈值后，重置重启计数器。
         if let Some(launch_at) = self.last_launch_at {
             if self.state == ServiceState::Running {
                 let reset_after = match &self.spec.restart_policy {
@@ -238,6 +253,7 @@ impl ServiceSupervisor {
         }
 
         // 2. If restarting in backoff, attempt next start
+        // 2. 如果正在退避等待重启，则尝试下一次启动。
         if self.state == ServiceState::Restarting {
             return self.start().await;
         }
@@ -246,6 +262,7 @@ impl ServiceSupervisor {
     }
 
     /// Explicitly notify the supervisor of an observed unexpected process exit.
+    /// 明确通知 supervisor 观察到了非预期的进程退出。
     pub async fn handle_observed_exit(&mut self, exit_report: CleanupReport) -> ServiceStatus {
         self.unpublish_endpoint();
         self.last_exit_report = Some(exit_report.clone());
@@ -273,6 +290,7 @@ impl ServiceSupervisor {
     }
 
     // --- Internal Helpers ---
+    // --- 内部辅助函数 ---
 
     fn spawn_process(&mut self) -> Result<(), ProviderError> {
         self.generation = self.generation.wrapping_add(1).max(1);
@@ -348,6 +366,7 @@ impl ServiceSupervisor {
                 } => Self::probe_http(host, *port, path, *expected_status, config.timeout).await,
                 ReadinessProbe::WorkerControl => {
                     // Handled via WorkerControl protocol
+                    // 通过 WorkerControl 协议处理。
                     Ok(())
                 }
             };
@@ -446,6 +465,7 @@ impl ServiceSupervisor {
         match policy {
             RestartPolicy::Never => {
                 // No restart
+                // 不重启。
             }
             RestartPolicy::OnFailure {
                 max_retries,

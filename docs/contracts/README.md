@@ -17,3 +17,19 @@ capability contracts and their TCKs are maintained in `Cyrene-Plugins-Official`.
 
 先读 Kernel 语义契约，再读组件边界。插件能力契约及其 TCK 位于
 `Cyrene-Plugins-Official`。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 契约
+
+本目录存放规范语义契约、线协议契约和跨仓契约文档。
+
+| 文件 | 职责 |
+|---|---|
+| `kernel-semantic-contract-v1.md` | Kernel 规范语义权威 |
+| `platform-component-boundary-v1.md` | Platform 组件归属 |
+
+## 推荐顺序
+
+先读 Kernel 语义契约，再读组件边界。Plugin capability 契约及其 TCK 由 `Cyrene-Plugins-Official` 维护。

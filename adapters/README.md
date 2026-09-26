@@ -21,3 +21,23 @@ Read `hardware/README.md` for System/Hardware Adapter ownership, then
 
 先读 `hardware/README.md` 了解 System/Hardware Adapter 归属，再读
 `execution/README.md` 了解 Sandbox Adapter 边界。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# adapters 目录指南
+
+## 目录职责
+
+本目录包含 Platform 所有的 Adapter Host 及其面向协议的实现指南。
+
+## 内容
+
+| 条目 | 职责 |
+|---|---|
+| `execution/` | 执行与沙箱适配器主机 |
+| `hardware/` | 系统与厂商硬件适配器主机 |
+
+## 推荐阅读与执行顺序
+
+先读 `hardware/README.md` 了解 System/Hardware Adapter 归属，再读 `execution/README.md` 了解 Sandbox Adapter 边界。

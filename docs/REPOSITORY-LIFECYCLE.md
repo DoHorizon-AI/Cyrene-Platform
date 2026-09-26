@@ -43,3 +43,30 @@ Multi-repository topology and compatibility pins belong to
 机器可读权威位于 [`repository-policy.yaml`](../repository-policy.yaml)，多仓拓扑与
 兼容性 pin 由 [Cyrene-Workspace](https://github.com/DoHorizon-AI/Cyrene-Workspace)
 维护。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# 仓库生命周期：Cyrene-Platform
+
+Cyrene-Platform 是公开可见的 PUBLIC_FOUNDATION，属于可独立构建的信任基础组件，而不是独立 Product。
+
+## 所有权
+
+本仓库拥有基础 Protobuf 与 schema 契约、Rust Kernel、进程隔离与资源机制、与 Product 无关的执行控制、Platform daemon unit 和仓库内 CI。不拥有 Product 生命周期状态、具体 AI 引擎、Product 基础设施、兼容性快照或跨仓目录。
+
+## 构建、分支与发布
+
+- **独立构建**：true。
+- **默认与集成分支**：develop（未保护）。
+- **Main 晋级**：绿色的 develop 通过 PR 晋级至受保护的 main。
+- **Release 晋级**：可构建且绿色的 main 通过 PR 晋级至受保护的 release。
+- **Release 角色**：COMPONENT_RELEASE。
+- **版本管理**：仓库范围的 SemVer，使用不可变的 v{version} 标签。
+- **托管 CI 权威**：github。
+- **部署权威**：consuming_repository。
+- **是否要求多仓构建**：false。
+
+Azure Pipelines 只消费成功 GitHub Actions run 生成的不可变制品，并执行 CD；不 checkout 源码、不构建、不测试。
+
+机器可读的权威政策位于 repository-policy.yaml。多仓拓扑与兼容性 pin 由 Cyrene-Workspace 维护。

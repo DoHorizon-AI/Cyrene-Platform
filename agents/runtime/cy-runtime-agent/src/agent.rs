@@ -45,6 +45,7 @@ use crate::{ChildSupervisor, RuntimeAgentConfig, WorkloadOutputStream};
 const PROTOCOL_VERSION: u32 = 2;
 
 /// Runtime Agent configuration, transport, integrity, or supervision failure.
+/// Runtime Agent 的 configuration、transport、integrity 或 supervision 失败。
 #[derive(Debug, Error)]
 pub enum RuntimeAgentError {
     #[error("Runtime Agent configuration is invalid: {0}")]
@@ -140,6 +141,7 @@ enum ControlAction {
 }
 
 /// Run one unprivileged Runtime Agent until its workload reaches a terminal state.
+/// 运行一个无特权 Runtime Agent，直到其 workload 进入终态。
 pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), RuntimeAgentError> {
     config.validate()?;
     fs::create_dir_all(&config.artifact_destination_root)
@@ -282,6 +284,7 @@ async fn connect_once(
                         if let ControlAction::Stop(grace) = action {
                             // Give tonic's request stream a scheduling turn so StopAck is
                             // observable before local child termination begins.
+                            // 让 tonic request stream 先获得一个调度机会，使 StopAck 能在本地 child termination 开始前被观测到。
                             time::sleep(Duration::from_millis(50)).await;
                             finish_control_stop(config, state, grace).await?;
                             flush_outbox(&outbound, state, &session_id, control_cursor.last_sequence()).await?;
@@ -701,6 +704,8 @@ async fn stage_artifacts(
     // Verify every local CAS input before reading transfer credentials or
     // starting any remote transfer. Local Artifact identity never comes from a
     // path on the wire; the digest is the only path component.
+    // 在读取 transfer credential 或开始任何远端传输前，先校验每个本地 CAS input。
+    // Local Artifact identity 不来自 wire path；digest 是唯一用于组成路径的部分。
     for input in &assignment.local_artifacts {
         verify_local_artifact(config, input)?;
     }
@@ -796,6 +801,9 @@ async fn stage_artifacts(
 /// than accepting a path from the control wire. A missing file, changed
 /// content, or declared-size mismatch is an Artifact error and is handled by
 /// `handle_assignment` as a rejected assignment with no running child.
+/// 在 workload 启动前重新读取并校验一个本地 CAS Artifact。
+/// CAS 布局有意由已验证的 digest 推导，不接受 control wire 提供的 path。文件缺失、内容变化或声明大小不匹配都属于 Artifact error；
+/// handle_assignment 会将其作为拒绝的 assignment 处理，并且不会留下运行中的 child。
 fn verify_local_artifact(
     config: &RuntimeAgentConfig,
     input: &core_v1::ArtifactLocalInput,

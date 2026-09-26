@@ -26,3 +26,32 @@ Read this guide first, then the direct files above in dependency order, and fina
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
+---
+
+<!-- Chinese Translation / 中文翻译 -->
+
+# sdk/python/cyrene_artifacts/tests 目录指南
+
+## 目录职责
+
+本目录承载 CYRENE Platform 源码、协议、fixture 或测试树中的一个边界。
+
+## 内容
+
+| 条目 | 职责 |
+| --- | --- |
+
+## 推荐阅读 / 执行顺序
+
+先读本指南，再按依赖顺序阅读上方直接文件，最后进入嵌套目录指南。
+
+## 内容快照
+
+| 条目 | 职责 |
+| --- | --- |
+| `conftest.py` | Python SDK、TCK 或测试模块。 |
+| `test_contracts.py` | Python SDK、TCK 或测试模块。 |
+| `test_portable_directory.py` | 跨语言 portable 目录契约与 provider 测试。 |
+| `fixtures/` | 嵌套源码或契约边界，下一步阅读其 README。 |
+
+本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

@@ -50,6 +50,32 @@ impl ConnectivityProvider for LocalConnectivityProvider {
     }
 }
 
+/// Direct cluster route; peers connect to the private endpoint without a relay hop.
+#[derive(Debug, Clone)]
+pub struct LanDirectConnectivityProvider {
+    route: ConnectivityRoute,
+}
+
+impl LanDirectConnectivityProvider {
+    pub fn new(control_endpoint: impl Into<String>, server_name: impl Into<String>) -> Self {
+        Self {
+            route: ConnectivityRoute {
+                mode: ConnectivityMode::LanDirect,
+                control_endpoint: control_endpoint.into(),
+                server_name: server_name.into(),
+                outbound_only: true,
+            },
+        }
+    }
+}
+
+impl ConnectivityProvider for LanDirectConnectivityProvider {
+    fn resolve(&self) -> Result<ConnectivityRoute, FabricContractError> {
+        validate_route(&self.route)?;
+        Ok(self.route.clone())
+    }
+}
+
 /// Relay-first route; the Agent still opens the authenticated connection.
 #[derive(Debug, Clone)]
 pub struct RelayConnectivityProvider {
@@ -79,15 +105,16 @@ impl ConnectivityProvider for RelayConnectivityProvider {
 fn validate_route(route: &ConnectivityRoute) -> Result<(), FabricContractError> {
     if !matches!(
         route.mode,
-        ConnectivityMode::Local | ConnectivityMode::Relay
+        ConnectivityMode::Local | ConnectivityMode::LanDirect | ConnectivityMode::Relay
     ) || !route.control_endpoint.starts_with("https://")
         || route.server_name.is_empty()
         || !route.outbound_only
     {
         return Err(FabricContractError {
             reason_code: "CONNECTIVITY_ROUTE_INVALID",
-            message: "MVP connectivity requires LOCAL/RELAY outbound HTTPS with a server name"
-                .to_string(),
+            message:
+                "connectivity requires LOCAL/LAN_DIRECT/RELAY outbound HTTPS with a server name"
+                    .to_string(),
         });
     }
     Ok(())
@@ -104,5 +131,21 @@ mod tests {
             .unwrap();
         assert_eq!(route.mode, ConnectivityMode::Relay);
         assert!(route.outbound_only);
+    }
+
+    #[test]
+    fn lan_direct_accepts_private_https_and_rejects_plaintext() {
+        let route =
+            LanDirectConnectivityProvider::new("https://workspace.internal", "workspace.internal")
+                .resolve()
+                .unwrap();
+        assert_eq!(route.mode, ConnectivityMode::LanDirect);
+        assert!(route.outbound_only);
+        assert!(LanDirectConnectivityProvider::new(
+            "http://workspace.internal",
+            "workspace.internal"
+        )
+        .resolve()
+        .is_err());
     }
 }

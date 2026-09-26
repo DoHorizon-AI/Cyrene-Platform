@@ -2,6 +2,7 @@
 //!
 //! These tests cover the public Kernel lifecycle actions and their provider
 //! and resource-manager boundaries.
+//! 中文：生命周期、Provider、Operation 和 Lease 状态转换测试。覆盖公开 Kernel 生命周期操作，以及它们与 Provider 和 resource manager 的边界。
 
 use super::*;
 
@@ -420,6 +421,7 @@ fn multi_adapter_bindings_reject_mixed_enforcement() {
 /// A lease must never become externally visible when the durable fence record
 /// cannot be persisted. The journal write is authoritative: on failure the
 /// in-memory acquisition is rolled back, leaving no active lease behind.
+/// 中文：如果 durable Fence 记录无法持久化，Lease 绝不能对外可见。Journal 写入具有权威性：失败时必须回滚内存中的获取操作，不留下活动 Lease。
 #[test]
 fn acquire_lease_is_rolled_back_when_journal_write_fails() {
     use crate::convert::authority_lease_name;
@@ -461,6 +463,7 @@ fn acquire_lease_is_rolled_back_when_journal_write_fails() {
     // Rollback must have released the in-memory lease, so it is not externally
     // visible as an Active lease (its resource is freed) even though the
     // durable fence record was never persisted.
+    // 中文：回滚必须释放内存中的 Lease；即使 durable Fence 记录没有持久化，它也不能作为 Active Lease 对外可见，且关联 Resource 已释放。
     let lease_name = authority_lease_name(&authority_context("rollback-journal-fail"));
     let rolled_back = adapter
         .daemon
@@ -477,6 +480,7 @@ fn acquire_lease_is_rolled_back_when_journal_write_fails() {
 /// persisted the in-memory lease is retained (we do not lose the evidence of
 /// the acquisition). This journal double allows `LeaseAcquired` but fails
 /// `LeaseReleased`, so a held lease survives a failed release attempt.
+/// 中文：释放必须 fail-closed：durable release 记录无法持久化时，保留内存中的 Lease，不能丢失获取证据。此 journal double 允许 LeaseAcquired 记录，但会让 LeaseReleased 写入失败，因此释放失败后 Lease 仍被占用。
 #[test]
 fn release_lease_fails_closed_when_journal_write_fails() {
     use core_v1::{
@@ -550,6 +554,7 @@ fn release_lease_fails_closed_when_journal_write_fails() {
     // Release authority is durable and cleanup is not yet confirmed, so the
     // lease must remain RELEASING and its resource unavailable. It must never
     // be reported as RELEASED when the terminal record cannot be persisted.
+    // 中文：释放 authority 已持久化，但尚未确认清理完成，因此 Lease 必须保持 RELEASING，且其 Resource 不可使用。如果无法持久化终态记录，绝不能将其报告为 RELEASED。
     let still_held = adapter
         .daemon
         .lease(&lease.identity.as_ref().unwrap().id)
@@ -1335,6 +1340,7 @@ fn owned_startup_failure_keeps_resource_unavailable_when_release_cannot_complete
 /// This exercises the real `release_lease` gRPC path (not just the port),
 /// driving it through the shared `release_lease_with_cleanup` helper that now
 /// gates every legacy release on confirmed physical cleanup.
+/// 中文：端到端证明两阶段 release 不变量：无法物理 reap 其 instance 的 Resource 绝不能进入 RELEASED。旧版 ReleaseLease RPC 必须以 CLEANUP_INCOMPLETE fail-closed，Lease 保持 FAILED（allocation 仍被占用），半清理的 Resource 不能交给替代 Lease。该测试调用真实 release_lease gRPC 路径，而不只是端口；通过共享的 release_lease_with_cleanup helper，确认所有旧版 release 都受物理清理结果约束。
 #[test]
 fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     use crate::watchdog::{InstanceActor, InstanceActorState};
@@ -1349,6 +1355,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     /// Sandbox whose `stop` reports an incomplete cleanup: the instance is
     /// stuck (e.g. an uninterruptible process) and must be quarantined, never
     /// silently released back to the pool.
+    /// 中文：Sandbox 的 stop 报告清理未完成：instance 卡住（例如不可中断进程）时必须进入 quarantine，绝不能静默释放回资源池。
     struct StuckSandbox;
 
     impl ProcessRuntime for StuckSandbox {
@@ -1402,6 +1409,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
         .unwrap();
 
     // Acquire the sole resource through the legacy KernelService RPC.
+    // 中文：通过旧版 KernelService RPC 获取唯一的 Resource。
     let lease = runtime
         .block_on(
             adapter.acquire_lease(Request::new(core_v1::LegacyAcquireLeaseRequest {
@@ -1450,6 +1458,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
 
     // Register a running instance bound to the acquired lease, backed by a
     // sandbox that reports an incomplete cleanup when stopped.
+    // 中文：注册一个绑定到已获取 Lease 的运行中 instance；其 sandbox 在停止时会报告清理未完成。
     let mut actor = InstanceActor::new(
         "stuck-instance",
         lease_identity.id.clone(),
@@ -1497,6 +1506,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
 
     // Release through the legacy RPC: because the instance cannot be reaped,
     // `release_lease_with_cleanup` must fail closed with CLEANUP_INCOMPLETE.
+    // 中文：通过旧版 RPC 释放：由于 instance 无法 reap，release_lease_with_cleanup 必须以 CLEANUP_INCOMPLETE fail-closed。
     let release = runtime.block_on(adapter.release_lease(Request::new(
         core_v1::LegacyReleaseLeaseRequest {
             mutation: None,
@@ -1520,6 +1530,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
 
     // The lease must be FAILED, never RELEASED: the allocation is still held
     // so it cannot be handed to a replacement while physically dirty.
+    // 中文：Lease 必须进入 FAILED，绝不能进入 RELEASED：allocation 仍被占用，不能在物理状态尚未清理时交给替代 Lease。
     let held = adapter.daemon.lease(&lease_identity.id).unwrap();
     assert_eq!(
         held.state,
@@ -1530,6 +1541,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     // A FAILED legacy lease cannot be released after its actor disappears:
     // without a managed actor, a same-fence retry has no physical cleanup
     // proof and must keep the allocation held.
+    // 中文：actor 消失后，FAILED 的旧版 Lease 不能被释放：没有受管理的 actor，同一 Fence 的重试无法提供物理清理证明，因此必须继续占用 allocation。
     adapter.instances.lock().unwrap().remove("stuck-instance");
     let missing_actor_retry = runtime.block_on(adapter.release_lease(Request::new(
         core_v1::LegacyReleaseLeaseRequest {
@@ -1554,6 +1566,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
     );
 
     // The half-cleaned resource must NOT be reacquired by another lease.
+    // 中文：半清理的 Resource 不得由其他 Lease 重新获取。
     let reacquire = runtime.block_on(adapter.acquire_lease(Request::new(
         core_v1::LegacyAcquireLeaseRequest {
             mutation: Some(core_v1::MutationContext {
@@ -1608,6 +1621,7 @@ fn uncleaned_resource_cannot_be_reacquired_after_failed_release() {
 /// A failed physical stop keeps the actor and its process handle bound to the
 /// same Lease. A later release with the same fence may retry that actor; only
 /// its complete cleanup report can transition the allocation to RELEASED.
+/// 中文：物理 stop 失败时，actor 及其进程句柄继续绑定到同一个 Lease。之后使用相同 Fence 发起的 release 可以重试该 actor；只有拿到完整清理报告后，allocation 才能转为 RELEASED。
 #[test]
 fn failed_canonical_release_retries_same_actor_and_fence() {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};

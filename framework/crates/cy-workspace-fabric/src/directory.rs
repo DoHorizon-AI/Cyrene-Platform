@@ -126,6 +126,8 @@ pub fn validate_descriptor(
         ));
     }
     let mut candidates = BTreeSet::new();
+    let mut direct_priority = None;
+    let mut relay_priority = None;
     for candidate in &descriptor.candidates {
         let mode = ConnectivityMode::try_from(candidate.mode).map_err(|_| {
             WorkspaceDirectoryError::Descriptor("unknown connectivity mode".to_string())
@@ -139,6 +141,13 @@ pub fn validate_descriptor(
                 "candidate mode, provider, URI, and server name are required".to_string(),
             ));
         }
+        if matches!(mode, ConnectivityMode::LanDirect | ConnectivityMode::Relay)
+            && !candidate.connection_uri.starts_with("https://")
+        {
+            return Err(WorkspaceDirectoryError::Descriptor(
+                "LAN_DIRECT and RELAY candidates require HTTPS".to_string(),
+            ));
+        }
         if !candidates.insert((
             candidate.mode,
             candidate.provider_id.clone(),
@@ -148,6 +157,29 @@ pub fn validate_descriptor(
                 "duplicate connectivity candidate".to_string(),
             ));
         }
+        match mode {
+            ConnectivityMode::LanDirect => {
+                direct_priority =
+                    Some(direct_priority.map_or(candidate.priority, |priority: u32| {
+                        priority.min(candidate.priority)
+                    }));
+            }
+            ConnectivityMode::Relay => {
+                relay_priority =
+                    Some(relay_priority.map_or(candidate.priority, |priority: u32| {
+                        priority.min(candidate.priority)
+                    }));
+            }
+            _ => {}
+        }
+    }
+    if direct_priority
+        .zip(relay_priority)
+        .is_some_and(|(direct, relay)| direct >= relay)
+    {
+        return Err(WorkspaceDirectoryError::Descriptor(
+            "LAN_DIRECT must precede RELAY".to_string(),
+        ));
     }
     Ok(())
 }
@@ -199,6 +231,13 @@ mod tests {
     #[test]
     fn descriptor_supports_all_contract_modes_without_relay_lock_in() {
         assert!(validate_descriptor(&descriptor(), 1).is_ok());
+    }
+
+    #[test]
+    fn direct_candidate_must_precede_relay_candidate() {
+        let mut invalid = descriptor();
+        invalid.candidates[1].priority = 5;
+        assert!(validate_descriptor(&invalid, 1).is_err());
     }
 
     #[test]
