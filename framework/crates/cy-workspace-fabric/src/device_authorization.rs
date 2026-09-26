@@ -65,18 +65,64 @@ impl DeviceRegistrationKeyDigest {
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthenticatedDeviceRotation {
     key: DeviceAuthorizationDeviceKey,
+    authorization_generation: u64,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+    certificate_sha256: [u8; 32],
+    serial_number: Vec<u8>,
+    not_after_unix_ms: u64,
 }
 
 impl AuthenticatedDeviceRotation {
     /// Trusted in-crate verifier seam; callers must pass the certificate's
     /// already-verified WorkspaceDevice identity, never request JSON data.
     #[allow(dead_code)] // Wired by the verified mTLS host adapter.
-    pub(crate) fn from_verified_mtls_peer(key: DeviceAuthorizationDeviceKey) -> Self {
-        Self { key }
+    pub(crate) fn from_verified_mtls_peer(
+        key: DeviceAuthorizationDeviceKey,
+        authorization_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+        certificate_sha256: [u8; 32],
+        serial_number: Vec<u8>,
+        not_after_unix_ms: u64,
+    ) -> Self {
+        Self {
+            key,
+            authorization_generation,
+            csr_sha256,
+            spki_sha256,
+            certificate_sha256,
+            serial_number,
+            not_after_unix_ms,
+        }
     }
 
     pub fn key(&self) -> &DeviceAuthorizationDeviceKey {
         &self.key
+    }
+
+    pub fn authorization_generation(&self) -> u64 {
+        self.authorization_generation
+    }
+
+    pub fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    pub fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    pub fn certificate_sha256(&self) -> &[u8; 32] {
+        &self.certificate_sha256
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        &self.serial_number
+    }
+
+    pub fn not_after_unix_ms(&self) -> u64 {
+        self.not_after_unix_ms
     }
 }
 
@@ -482,6 +528,7 @@ pub enum DeviceCertificateRetirementReason {
     MisboundCertificate,
     DeliveryDeadlineReached,
     CertificateExpiredBeforeDelivery,
+    RegistrationRotated,
 }
 
 /// A definitive failure before a usable certificate became deliverable.
@@ -547,6 +594,11 @@ pub enum DeviceAuthorizationState {
     Delivered {
         approval_id: DeviceAuthorizationId,
         receipt: DeviceCertificateDeliveryReceipt,
+        /// Missing only for legacy V3 rows created before ACK retained the
+        /// certificate needed to retire an active registration.
+        approver: Option<UserIdentityRef>,
+        /// Missing only for legacy V3 rows; such rows cannot be rotated.
+        certificate: Option<IssuedDeviceCertificate>,
     },
     RetirementPending {
         approval_id: DeviceAuthorizationId,
@@ -554,6 +606,9 @@ pub enum DeviceAuthorizationState {
         certificate: IssuedDeviceCertificate,
         certificate_sha256: [u8; 32],
         delivery_id: Option<DeviceAuthorizationId>,
+        /// Present when an already-acknowledged active certificate is being
+        /// retired during an authorized registration rotation.
+        delivered_receipt: Option<DeviceCertificateDeliveryReceipt>,
         reason: DeviceCertificateRetirementReason,
         entered_at_unix_ms: u64,
         last_failure: Option<DeviceCertificateRetirementError>,
@@ -580,7 +635,35 @@ pub enum DeviceAuthorizationState {
         decided_at_unix_ms: u64,
         consumed_at_unix_ms: u64,
     },
+    /// A pre-CA registration attempt was safely superseded by a new generation.
+    SupersededForRegistrationRotation {
+        approval_id: Option<DeviceAuthorizationId>,
+        superseded_at_unix_ms: u64,
+    },
+    /// Certificate retirement after a registration rotation was confirmed.
+    RegistrationRetired {
+        approval_id: DeviceAuthorizationId,
+        approver: UserIdentityRef,
+        receipt: Option<DeviceCertificateDeliveryReceipt>,
+        delivery_id: Option<DeviceAuthorizationId>,
+        certificate_sha256: [u8; 32],
+        retired_at_unix_ms: u64,
+    },
     Expired,
+}
+
+/// Pure predecessor transition returned to the atomic registration store.
+/// The adapter applies this state change together with Directory generation,
+/// recovery code, and new authorization writes in one database transaction.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Consumed by the atomic Directory/authorization adapter.
+pub(crate) enum DeviceAuthorizationRegistrationRotation {
+    /// No CA call could have started; supersede this attempt with a CAS.
+    Supersede(DeviceAuthorizationState),
+    /// Persist retirement intent and preserve the full certificate snapshot.
+    Retire(DeviceAuthorizationState),
+    /// Existing state is terminal and contains no active certificate material.
+    AlreadyTerminal,
 }
 
 /// Persistable authorization record. It contains code digests, never raw codes.
@@ -888,7 +971,9 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
                         &existing.state,
                         DeviceAuthorizationState::Issuing { .. }
                             | DeviceAuthorizationState::DeliveryPending { .. }
+                            | DeviceAuthorizationState::Delivered { .. }
                             | DeviceAuthorizationState::RetirementPending { .. }
+                            | DeviceAuthorizationState::Consumed { .. }
                     )
             })
         {
@@ -1030,6 +1115,14 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
             | DeviceAuthorizationState::DeliveryExpired {
                 approval_id: current,
                 ..
+            }
+            | DeviceAuthorizationState::RegistrationRetired {
+                approval_id: current,
+                ..
+            } => current == approval_id,
+            DeviceAuthorizationState::SupersededForRegistrationRotation {
+                approval_id: Some(current),
+                ..
             } => current == approval_id,
             _ => false,
         })
@@ -1170,6 +1263,8 @@ impl InMemoryDeviceAuthorizationStore {
                 (
                     DeviceAuthorizationState::DeliveryPending {
                         approval_id: current_approval_id,
+                        approver: current_approver,
+                        certificate: current_certificate,
                         delivery_id: current_delivery_id,
                         certificate_sha256: current_certificate_sha256,
                         delivery_deadline_unix_ms,
@@ -1178,9 +1273,13 @@ impl InMemoryDeviceAuthorizationStore {
                     DeviceAuthorizationState::Delivered {
                         approval_id: next_approval_id,
                         receipt,
+                        approver: Some(next_approver),
+                        certificate: Some(next_certificate),
                     },
                 ) => {
                     current_approval_id == next_approval_id
+                        && current_approver == next_approver
+                        && current_certificate == next_certificate
                         && receipt.authorization_id == replacement.id
                         && current_delivery_id == &receipt.delivery_id
                         && current_certificate_sha256 == &receipt.certificate_sha256
@@ -2297,6 +2396,7 @@ where
                     certificate,
                     certificate_sha256,
                     delivery_id: None,
+                    delivered_receipt: None,
                     reason: DeviceCertificateRetirementReason::MisboundCertificate,
                     entered_at_unix_ms: issued_at_unix_ms,
                     last_failure: None,
@@ -2321,6 +2421,7 @@ where
                     certificate,
                     certificate_sha256,
                     delivery_id: None,
+                    delivered_receipt: None,
                     reason: DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery,
                     entered_at_unix_ms: delivery_started_at_unix_ms,
                     last_failure: None,
@@ -2340,6 +2441,7 @@ where
                     certificate,
                     certificate_sha256,
                     delivery_id: None,
+                    delivered_receipt: None,
                     reason: DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery,
                     entered_at_unix_ms: delivery_started_at_unix_ms,
                     last_failure: None,
@@ -2370,6 +2472,7 @@ where
                             certificate_sha256: current_certificate_sha256,
                             ..
                         },
+                    ..
                 } if current_id == &approval_id
                     && current_certificate_sha256 == &certificate_sha256 =>
                 {
@@ -2500,26 +2603,35 @@ where
         record: DeviceAuthorizationRecord,
         retirement_port: &impl DeviceCertificateRetirementPort,
     ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
-        let (approval_id, approver, certificate, certificate_sha256, delivery_id, reason) =
-            match &record.state {
-                DeviceAuthorizationState::RetirementPending {
-                    approval_id,
-                    approver,
-                    certificate,
-                    certificate_sha256,
-                    delivery_id,
-                    reason,
-                    ..
-                } => (
-                    *approval_id,
-                    approver.clone(),
-                    certificate.clone(),
-                    *certificate_sha256,
-                    *delivery_id,
-                    *reason,
-                ),
-                _ => return Err(state_error(&record.state)),
-            };
+        let (
+            approval_id,
+            approver,
+            certificate,
+            certificate_sha256,
+            delivery_id,
+            delivered_receipt,
+            reason,
+        ) = match &record.state {
+            DeviceAuthorizationState::RetirementPending {
+                approval_id,
+                approver,
+                certificate,
+                certificate_sha256,
+                delivery_id,
+                delivered_receipt,
+                reason,
+                ..
+            } => (
+                *approval_id,
+                approver.clone(),
+                certificate.clone(),
+                *certificate_sha256,
+                *delivery_id,
+                delivered_receipt.clone(),
+                *reason,
+            ),
+            _ => return Err(state_error(&record.state)),
+        };
 
         match retirement_port.retire_or_confirm(
             &record.id,
@@ -2557,6 +2669,16 @@ where
                             certificate_sha256: Some(certificate_sha256),
                         }
                     }
+                    DeviceCertificateRetirementReason::RegistrationRotated => {
+                        DeviceAuthorizationState::RegistrationRetired {
+                            approval_id,
+                            approver,
+                            receipt: delivered_receipt,
+                            delivery_id,
+                            certificate_sha256,
+                            retired_at_unix_ms: retirement_entered_at(&record.state),
+                        }
+                    }
                 };
                 self.commit_retirement_terminal(record, approval_id, certificate_sha256, terminal)
             }
@@ -2588,6 +2710,13 @@ where
                 | DeviceAuthorizationState::IssuanceFailed {
                     approval_id: current_id,
                     certificate_sha256: Some(current_hash),
+                    ..
+                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
+                    return Ok(record)
+                }
+                DeviceAuthorizationState::RegistrationRetired {
+                    approval_id: current_id,
+                    certificate_sha256: current_hash,
                     ..
                 } if current_id == &approval_id && current_hash == &certificate_sha256 => {
                     return Ok(record)
@@ -2643,6 +2772,13 @@ where
                 | DeviceAuthorizationState::IssuanceFailed {
                     approval_id: current_id,
                     certificate_sha256: Some(current_hash),
+                    ..
+                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
+                    return Ok(record)
+                }
+                DeviceAuthorizationState::RegistrationRetired {
+                    approval_id: current_id,
+                    certificate_sha256: current_hash,
                     ..
                 } if current_id == &approval_id && current_hash == &certificate_sha256 => {
                     return Ok(record)
@@ -2759,6 +2895,7 @@ where
                         certificate: certificate.clone(),
                         certificate_sha256: *certificate_sha256,
                         delivery_id: Some(*delivery_id),
+                        delivered_receipt: None,
                         reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
                         entered_at_unix_ms: database_now_unix_ms,
                         last_failure: None,
@@ -2943,6 +3080,7 @@ where
                         certificate,
                         certificate_sha256,
                         delivery_id: Some(delivery_id),
+                        delivered_receipt: None,
                         reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
                         entered_at_unix_ms: database_now_unix_ms,
                         last_failure: None,
@@ -3037,6 +3175,10 @@ where
             DeviceAuthorizationState::Consumed { .. } => {
                 Err(DeviceAuthorizationError::AlreadyConsumed)
             }
+            DeviceAuthorizationState::SupersededForRegistrationRotation { .. }
+            | DeviceAuthorizationState::RegistrationRetired { .. } => {
+                Err(DeviceAuthorizationError::InvalidCode)
+            }
             DeviceAuthorizationState::Expired => Err(DeviceAuthorizationError::Expired),
         }
     }
@@ -3095,6 +3237,7 @@ where
                             certificate: certificate.clone(),
                             certificate_sha256: *certificate_sha256,
                             delivery_id: Some(*delivery_id),
+                            delivered_receipt: None,
                             reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
                             entered_at_unix_ms: current_time,
                             last_failure: None,
@@ -3147,6 +3290,8 @@ where
                     replacement.state = DeviceAuthorizationState::Delivered {
                         approval_id: *approval_id,
                         receipt: receipt.clone(),
+                        approver: Some(approver.clone()),
+                        certificate: Some(certificate.clone()),
                     };
                     let expected_revision = replacement.revision;
                     replacement.revision = expected_revision
@@ -3298,6 +3443,8 @@ where
                 | DeviceAuthorizationState::RetirementPending { .. }
                 | DeviceAuthorizationState::DeliveryExpired { .. }
                 | DeviceAuthorizationState::IssuanceFailed { .. }
+                | DeviceAuthorizationState::SupersededForRegistrationRotation { .. }
+                | DeviceAuthorizationState::RegistrationRetired { .. }
         ) {
             return Ok(());
         }
@@ -3323,6 +3470,10 @@ where
             | DeviceAuthorizationState::RetirementPending { .. }
             | DeviceAuthorizationState::DeliveryExpired { .. }
             | DeviceAuthorizationState::IssuanceFailed { .. } => Ok(()),
+            DeviceAuthorizationState::SupersededForRegistrationRotation { .. }
+            | DeviceAuthorizationState::RegistrationRetired { .. } => {
+                Err(DeviceAuthorizationError::InvalidCode)
+            }
             DeviceAuthorizationState::Expired => Err(DeviceAuthorizationError::Expired),
             DeviceAuthorizationState::Denied { .. } => Err(DeviceAuthorizationError::Denied),
             DeviceAuthorizationState::Consumed { .. } => {
@@ -3535,6 +3686,10 @@ fn state_error(state: &DeviceAuthorizationState) -> DeviceAuthorizationError {
         DeviceAuthorizationState::DeliveryExpired { .. } => {
             DeviceAuthorizationError::DeliveryExpired
         }
+        DeviceAuthorizationState::SupersededForRegistrationRotation { .. }
+        | DeviceAuthorizationState::RegistrationRetired { .. } => {
+            DeviceAuthorizationError::InvalidCode
+        }
         DeviceAuthorizationState::IssuanceFailed { failure, .. } => {
             issuance_failure_error(*failure)
         }
@@ -3565,7 +3720,11 @@ fn state_approval_id(state: &DeviceAuthorizationState) -> Option<DeviceAuthoriza
         | DeviceAuthorizationState::Delivered { approval_id, .. }
         | DeviceAuthorizationState::RetirementPending { approval_id, .. }
         | DeviceAuthorizationState::DeliveryExpired { approval_id, .. }
-        | DeviceAuthorizationState::IssuanceFailed { approval_id, .. } => Some(*approval_id),
+        | DeviceAuthorizationState::IssuanceFailed { approval_id, .. }
+        | DeviceAuthorizationState::RegistrationRetired { approval_id, .. } => Some(*approval_id),
+        DeviceAuthorizationState::SupersededForRegistrationRotation { approval_id, .. } => {
+            *approval_id
+        }
         DeviceAuthorizationState::Pending
         | DeviceAuthorizationState::Denied { .. }
         | DeviceAuthorizationState::Consumed { .. }
@@ -3582,6 +3741,150 @@ fn retirement_entered_at(state: &DeviceAuthorizationState) -> u64 {
     }
 }
 
+/// Computes the old authorization's required state transition for one
+/// registration rotation. The caller must apply this result with the Directory
+/// generation update and new authorization in the same locked transaction.
+#[allow(dead_code)] // Consumed by the atomic Directory/authorization adapter.
+pub(crate) fn registration_rotation_transition(
+    record: &DeviceAuthorizationRecord,
+    peer: &AuthenticatedDeviceRotation,
+    now_unix_ms: u64,
+) -> Result<DeviceAuthorizationRegistrationRotation, DeviceAuthorizationStoreError> {
+    let binding = &record.registration_binding;
+    if peer.key() != binding.key()
+        || peer.authorization_generation() != binding.authorization_generation()
+        || peer.csr_sha256() != &record.csr_sha256
+        || peer.csr_sha256() != binding.csr_sha256()
+        || peer.spki_sha256() != &record.spki_sha256
+        || peer.spki_sha256() != binding.spki_sha256()
+        || peer.certificate_sha256().iter().all(|byte| *byte == 0)
+        || peer.serial_number().is_empty()
+        || peer.not_after_unix_ms() <= now_unix_ms
+    {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+
+    match &record.state {
+        DeviceAuthorizationState::Pending
+        | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+        | DeviceAuthorizationState::VerifyingWebAuthn { .. } => {
+            Ok(DeviceAuthorizationRegistrationRotation::Supersede(
+                DeviceAuthorizationState::SupersededForRegistrationRotation {
+                    approval_id: state_approval_id(&record.state),
+                    superseded_at_unix_ms: now_unix_ms,
+                },
+            ))
+        }
+        DeviceAuthorizationState::DeliveryPending {
+            approval_id,
+            approver,
+            certificate,
+            delivery_id,
+            certificate_sha256,
+            ..
+        } => {
+            if !certificate_matches_rotation_peer(record, peer, certificate, certificate_sha256) {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+            Ok(DeviceAuthorizationRegistrationRotation::Retire(
+                DeviceAuthorizationState::RetirementPending {
+                    approval_id: *approval_id,
+                    approver: approver.clone(),
+                    certificate: certificate.clone(),
+                    certificate_sha256: *certificate_sha256,
+                    delivery_id: Some(*delivery_id),
+                    delivered_receipt: None,
+                    reason: DeviceCertificateRetirementReason::RegistrationRotated,
+                    entered_at_unix_ms: now_unix_ms,
+                    last_failure: None,
+                },
+            ))
+        }
+        DeviceAuthorizationState::Delivered {
+            approval_id,
+            receipt,
+            approver: Some(approver),
+            certificate: Some(certificate),
+        } => {
+            if !certificate_matches_rotation_peer(
+                record,
+                peer,
+                certificate,
+                &receipt.certificate_sha256,
+            ) || !delivery_receipt_matches_rotation(record, receipt, peer)
+            {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+            Ok(DeviceAuthorizationRegistrationRotation::Retire(
+                DeviceAuthorizationState::RetirementPending {
+                    approval_id: *approval_id,
+                    approver: approver.clone(),
+                    certificate: certificate.clone(),
+                    certificate_sha256: receipt.certificate_sha256,
+                    delivery_id: Some(receipt.delivery_id),
+                    delivered_receipt: Some(receipt.clone()),
+                    reason: DeviceCertificateRetirementReason::RegistrationRotated,
+                    entered_at_unix_ms: now_unix_ms,
+                    last_failure: None,
+                },
+            ))
+        }
+        DeviceAuthorizationState::Denied { .. }
+        | DeviceAuthorizationState::Expired
+        | DeviceAuthorizationState::DeliveryExpired { .. }
+        | DeviceAuthorizationState::IssuanceFailed { .. }
+        | DeviceAuthorizationState::SupersededForRegistrationRotation { .. }
+        | DeviceAuthorizationState::RegistrationRetired { .. } => {
+            Ok(DeviceAuthorizationRegistrationRotation::AlreadyTerminal)
+        }
+        DeviceAuthorizationState::Delivered { .. }
+        | DeviceAuthorizationState::Issuing { .. }
+        | DeviceAuthorizationState::RetirementPending { .. }
+        | DeviceAuthorizationState::Consumed { .. } => Err(DeviceAuthorizationStoreError::Conflict),
+    }
+}
+
+#[allow(dead_code)] // Used by the atomic registration rotation transition.
+fn certificate_matches_rotation_peer(
+    record: &DeviceAuthorizationRecord,
+    peer: &AuthenticatedDeviceRotation,
+    certificate: &IssuedDeviceCertificate,
+    certificate_sha256: &[u8; 32],
+) -> bool {
+    !certificate.certificate_der.is_empty()
+        && certificate.certificate_der.len() <= 16 * 1024
+        && !certificate.serial_number.is_empty()
+        && certificate.registration_binding_id == *record.registration_binding.binding_id()
+        && certificate.device_key == *record.registration_binding.key()
+        && certificate.device_key == *peer.key()
+        && certificate.authorization_generation
+            == record.registration_binding.authorization_generation()
+        && certificate.authorization_generation == peer.authorization_generation()
+        && certificate.scope == record.scope
+        && certificate.spki_sha256 == record.spki_sha256
+        && certificate.serial_number.as_slice() == peer.serial_number()
+        && certificate.not_after_unix_ms == peer.not_after_unix_ms()
+        && sha256(&certificate.certificate_der) == *certificate_sha256
+        && certificate_sha256 == peer.certificate_sha256()
+}
+
+#[allow(dead_code)] // Used by the atomic registration rotation transition.
+fn delivery_receipt_matches_rotation(
+    record: &DeviceAuthorizationRecord,
+    receipt: &DeviceCertificateDeliveryReceipt,
+    peer: &AuthenticatedDeviceRotation,
+) -> bool {
+    receipt.authorization_id == record.id
+        && receipt.delivery_id != [0; 16]
+        && receipt.device_id == record.registration_binding.key().device_id
+        && receipt.authorization_generation
+            == record.registration_binding.authorization_generation()
+        && receipt.certificate_sha256 == *peer.certificate_sha256()
+        && receipt.csr_sha256 == record.csr_sha256
+        && receipt.csr_spki_sha256 == record.spki_sha256
+        && receipt.acknowledged_at_unix_ms > 0
+}
+
 fn retirement_work_outcome(
     record: &DeviceAuthorizationRecord,
 ) -> DeviceCertificateRetirementWorkOutcome {
@@ -3593,6 +3896,7 @@ fn retirement_work_outcome(
             ))
         }
         DeviceAuthorizationState::DeliveryExpired { .. }
+        | DeviceAuthorizationState::RegistrationRetired { .. }
         | DeviceAuthorizationState::IssuanceFailed {
             certificate_sha256: Some(_),
             ..
@@ -3647,6 +3951,57 @@ fn retirement_transition_allowed(
                 && current_certificate_sha256 == target_certificate_sha256
                 && current_delivery_id == target_delivery_id
         }
+        (
+            DeviceAuthorizationState::Delivered {
+                approval_id: current_id,
+                receipt: current_receipt,
+                approver: Some(current_approver),
+                certificate: Some(current_certificate),
+            },
+            DeviceAuthorizationState::RetirementPending {
+                approval_id: target_id,
+                approver: target_approver,
+                certificate: target_certificate,
+                certificate_sha256: target_hash,
+                delivery_id: Some(target_delivery_id),
+                delivered_receipt: Some(target_receipt),
+                reason: DeviceCertificateRetirementReason::RegistrationRotated,
+                ..
+            },
+        ) => {
+            current_id == target_id
+                && current_approver == target_approver
+                && current_certificate == target_certificate
+                && current_receipt == target_receipt
+                && current_receipt.delivery_id == *target_delivery_id
+                && current_receipt.certificate_sha256 == *target_hash
+        }
+        (
+            DeviceAuthorizationState::DeliveryPending {
+                approval_id: current_id,
+                approver: current_approver,
+                certificate: current_certificate,
+                delivery_id: current_delivery_id,
+                certificate_sha256: current_hash,
+                ..
+            },
+            DeviceAuthorizationState::RetirementPending {
+                approval_id: target_id,
+                approver: target_approver,
+                certificate: target_certificate,
+                certificate_sha256: target_hash,
+                delivery_id: Some(target_delivery_id),
+                delivered_receipt: None,
+                reason: DeviceCertificateRetirementReason::RegistrationRotated,
+                ..
+            },
+        ) => {
+            current_id == target_id
+                && current_approver == target_approver
+                && current_certificate == target_certificate
+                && current_delivery_id == target_delivery_id
+                && current_hash == target_hash
+        }
         _ => false,
     }
 }
@@ -3660,6 +4015,7 @@ fn retirement_state_already_resolved(
         certificate,
         certificate_sha256: target_hash,
         delivery_id: target_delivery_id,
+        delivered_receipt: target_receipt,
         reason: target_reason,
         ..
     } = target
@@ -3714,11 +4070,25 @@ fn retirement_state_already_resolved(
         DeviceAuthorizationState::Delivered {
             approval_id: current_id,
             receipt,
+            ..
         } => {
             *target_reason == DeviceCertificateRetirementReason::DeliveryDeadlineReached
                 && current_id == target_id
                 && Some(&receipt.delivery_id) == target_delivery_id.as_ref()
                 && &receipt.certificate_sha256 == target_hash
+        }
+        DeviceAuthorizationState::RegistrationRetired {
+            approval_id: current_id,
+            receipt: current_receipt,
+            delivery_id: current_delivery_id,
+            certificate_sha256: current_hash,
+            ..
+        } => {
+            *target_reason == DeviceCertificateRetirementReason::RegistrationRotated
+                && current_id == target_id
+                && current_receipt == target_receipt
+                && current_delivery_id == target_delivery_id
+                && current_hash == target_hash
         }
         _ => false,
     }

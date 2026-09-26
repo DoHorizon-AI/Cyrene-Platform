@@ -74,6 +74,22 @@ pub struct DeviceEnrollmentAuthorizationSnapshot {
     poll_state: DeviceEnrollmentPollState,
 }
 
+#[cfg(test)]
+struct DeviceEnrollmentAuthorizationSnapshotFixture<'a> {
+    authorization_id: String,
+    binding_id: [u8; 16],
+    device_id: String,
+    scope: DeviceAuthorizationScope,
+    authorization_generation: u64,
+    device_code_generation: u64,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+    revision: u64,
+    expires_at_unix_ms: u64,
+    device_code: &'a str,
+    poll_state: DeviceEnrollmentPollState,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeviceEnrollmentPollState {
     Pending,
@@ -84,6 +100,8 @@ enum DeviceEnrollmentPollState {
     Denied,
     Expired,
     IssuanceFailed,
+    Superseded,
+    RegistrationRetired,
 }
 
 impl DeviceEnrollmentAuthorizationSnapshot {
@@ -140,34 +158,22 @@ impl DeviceEnrollmentAuthorizationSnapshot {
     }
 
     #[cfg(test)]
-    fn test_fixture(
-        authorization_id: String,
-        binding_id: [u8; 16],
-        device_id: String,
-        scope: DeviceAuthorizationScope,
-        authorization_generation: u64,
-        device_code_generation: u64,
-        csr_sha256: [u8; 32],
-        spki_sha256: [u8; 32],
-        revision: u64,
-        expires_at_unix_ms: u64,
-        device_code: &str,
-        poll_state: DeviceEnrollmentPollState,
-    ) -> Self {
+    fn test_fixture(fixture: DeviceEnrollmentAuthorizationSnapshotFixture<'_>) -> Self {
         Self {
-            authorization_id,
-            binding_id,
-            device_id,
-            scope,
-            authorization_generation,
-            device_code_generation,
-            csr_sha256,
-            spki_sha256,
-            revision,
-            expires_at_unix_ms,
-            device_code_hash: device_code_hash(device_code).expect("valid test device code"),
+            authorization_id: fixture.authorization_id,
+            binding_id: fixture.binding_id,
+            device_id: fixture.device_id,
+            scope: fixture.scope,
+            authorization_generation: fixture.authorization_generation,
+            device_code_generation: fixture.device_code_generation,
+            csr_sha256: fixture.csr_sha256,
+            spki_sha256: fixture.spki_sha256,
+            revision: fixture.revision,
+            expires_at_unix_ms: fixture.expires_at_unix_ms,
+            device_code_hash: device_code_hash(fixture.device_code)
+                .expect("valid test device code"),
             start_disposition: None,
-            poll_state,
+            poll_state: fixture.poll_state,
         }
     }
 
@@ -1311,6 +1317,12 @@ fn enrollment_poll_state(state: &DeviceAuthorizationState) -> DeviceEnrollmentPo
             DeviceEnrollmentPollState::IssuanceFailed
         }
         DeviceAuthorizationState::Consumed { .. } => DeviceEnrollmentPollState::Delivered,
+        DeviceAuthorizationState::SupersededForRegistrationRotation { .. } => {
+            DeviceEnrollmentPollState::Superseded
+        }
+        DeviceAuthorizationState::RegistrationRetired { .. } => {
+            DeviceEnrollmentPollState::RegistrationRetired
+        }
     }
 }
 
@@ -1573,18 +1585,20 @@ mod tests {
                 },
             };
             let committed_snapshot = DeviceEnrollmentAuthorizationSnapshot::test_fixture(
-                authorization_id,
-                binding.binding_id,
-                binding.device_id.clone(),
-                binding.scope.clone(),
-                binding.authorization_generation,
-                1,
-                binding.csr_sha256,
-                binding.spki_sha256,
-                0,
-                1,
-                &device_code,
-                DeviceEnrollmentPollState::Pending,
+                DeviceEnrollmentAuthorizationSnapshotFixture {
+                    authorization_id,
+                    binding_id: binding.binding_id,
+                    device_id: binding.device_id.clone(),
+                    scope: binding.scope.clone(),
+                    authorization_generation: binding.authorization_generation,
+                    device_code_generation: 1,
+                    csr_sha256: binding.csr_sha256,
+                    spki_sha256: binding.spki_sha256,
+                    revision: 0,
+                    expires_at_unix_ms: 1,
+                    device_code: &device_code,
+                    poll_state: DeviceEnrollmentPollState::Pending,
+                },
             );
             Ok(DeviceEnrollmentStartResult {
                 binding,
@@ -1653,21 +1667,23 @@ mod tests {
             status: PollHttpStatus::Approved,
             retry_after_seconds: None,
             committed_snapshot: DeviceEnrollmentAuthorizationSnapshot::test_fixture(
-                URL_SAFE_NO_PAD.encode([0x42; 16]),
-                [4; 16],
-                "directory-device-0123456789".into(),
-                DeviceAuthorizationScope {
-                    organization_id: "org-1".into(),
-                    workspace_id: "workspace-1".into(),
+                DeviceEnrollmentAuthorizationSnapshotFixture {
+                    authorization_id: URL_SAFE_NO_PAD.encode([0x42; 16]),
+                    binding_id: [4; 16],
+                    device_id: "directory-device-0123456789".into(),
+                    scope: DeviceAuthorizationScope {
+                        organization_id: "org-1".into(),
+                        workspace_id: "workspace-1".into(),
+                    },
+                    authorization_generation: 1,
+                    device_code_generation: 1,
+                    csr_sha256: [3; 32],
+                    spki_sha256: [1; 32],
+                    revision: 1,
+                    expires_at_unix_ms: 1,
+                    device_code: &"a".repeat(64),
+                    poll_state: DeviceEnrollmentPollState::DeliveryPending,
                 },
-                1,
-                1,
-                [3; 32],
-                [1; 32],
-                1,
-                1,
-                &"a".repeat(64),
-                DeviceEnrollmentPollState::DeliveryPending,
             ),
         }
     }
@@ -1752,21 +1768,23 @@ mod tests {
                 status: PollHttpStatus::ProtocolError,
                 retry_after_seconds: self.poll_retry_after,
                 committed_snapshot: DeviceEnrollmentAuthorizationSnapshot::test_fixture(
-                    URL_SAFE_NO_PAD.encode([0x42; 16]),
-                    [4; 16],
-                    "directory-device-0123456789".into(),
-                    DeviceAuthorizationScope {
-                        organization_id: "org-1".into(),
-                        workspace_id: "workspace-1".into(),
+                    DeviceEnrollmentAuthorizationSnapshotFixture {
+                        authorization_id: URL_SAFE_NO_PAD.encode([0x42; 16]),
+                        binding_id: [4; 16],
+                        device_id: "directory-device-0123456789".into(),
+                        scope: DeviceAuthorizationScope {
+                            organization_id: "org-1".into(),
+                            workspace_id: "workspace-1".into(),
+                        },
+                        authorization_generation: 1,
+                        device_code_generation: 1,
+                        csr_sha256: [3; 32],
+                        spki_sha256: [1; 32],
+                        revision: 1,
+                        expires_at_unix_ms: 1,
+                        device_code,
+                        poll_state: DeviceEnrollmentPollState::Pending,
                     },
-                    1,
-                    1,
-                    [3; 32],
-                    [1; 32],
-                    1,
-                    1,
-                    device_code,
-                    DeviceEnrollmentPollState::Pending,
                 ),
             })
         }
