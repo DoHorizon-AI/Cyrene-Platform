@@ -8,11 +8,15 @@ info:
     the caller's member Workspaces, and proxies a closed Product operation set.
     It owns no Workspace, Product, membership, or session state. Every JSON request
     and response body is capped at 4 MiB; BFF-owned RFC 9457 errors use a closed,
-    length-bounded schema.
+    length-bounded schema. Device approval routes expose only the interactive
+    begin, WebAuthn completion, and denial DTOs from the private Device Authorization
+    contract; device start, poll, and delivery acknowledgement remain unavailable
+    to browsers.
 
     浏览器 BFF 验证可信入口 principal，仅发现当前用户所属的 Workspace，并代理封闭的
     Product operation 集合。BFF 不拥有 Workspace、Product、membership 或 session 状态。所有 JSON 请求和响应 body
-    均限制为 4 MiB；BFF 自身 RFC 9457 error 使用封闭且有长度上限的 schema。
+    均限制为 4 MiB；BFF 自身 RFC 9457 error 使用封闭且有长度上限的 schema。设备审批路由仅暴露私有 Device Authorization
+    契约中的交互式 begin、WebAuthn complete 和 deny DTO；浏览器不能访问设备 start、poll 或 delivery acknowledgement。
   x-cyrene-json-bounds:
     request-max-bytes: 4194304
     response-max-bytes: 4194304
@@ -23,6 +27,7 @@ tags:
   - name: Session
   - name: Workspace
   - name: Product
+  - name: Device authorization
 paths:
   /api/workspace/v1/session:
     get:
@@ -61,6 +66,221 @@ paths:
         '406': { $ref: '#/components/responses/Problem406' }
         '500': { $ref: '#/components/responses/Problem500' }
         '503': { $ref: '#/components/responses/Problem503' }
+  /api/workspace/v1/device-authorizations/approval-challenges:
+    post:
+      operationId: beginBrowserDeviceApproval
+      tags: [Device authorization]
+      summary: Begin an authenticated member's device approval challenge.
+      description: |
+        This browser route uses the canonical `CreateDeviceApprovalChallengeRequest`
+        and `CreateDeviceApprovalChallengeResponse` schemas from
+        `contracts/http/device-enrollment/v1/openapi.yaml`. The request contains
+        only `userCode` and `scope`; it never carries issuer, subject, organization
+        identity, or roles. The BFF derives the approver from the verified web
+        session, requires `scope.organizationId` to equal its server-verified
+        organization, then checks current Workspace membership and the required
+        approval role before resolving the code and creating a challenge.
+
+        The durable approval challenge is bound to the verified principal and the
+        digest of the current verified access-token session. The BFF does not
+        substitute an in-memory session or challenge store. Unknown or inaccessible
+        authorization details are not disclosed. The route returns HTTP 200 with
+        the canonical begin response. If the Device Authorization, WebAuthn,
+        Directory, or durable storage provider is absent, it returns a fixed 503
+        problem without fabricating success.
+
+        The canonical `authorization` projection includes the exact target
+        scope, authorization and device IDs, CSR SPKI and CSR SHA-256 digests,
+        expiry, and authorization generation. It contains no device private key,
+        device code, or certificate.
+
+        此浏览器路由使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的
+        `CreateDeviceApprovalChallengeRequest` 与 `CreateDeviceApprovalChallengeResponse` schema。请求只含 `userCode` 和
+        `scope`，不携带 issuer、subject、organization identity 或 roles。BFF 从已验证 web session 派生审批人，要求
+        `scope.organizationId` 与服务端验证的 organization 相同，然后在解析 code、创建 challenge 前重新检查当前
+        Workspace membership 和所需审批角色。
+
+        持久化 approval challenge 绑定已验证 principal 和当前已验证 access-token session 的 digest。BFF 不使用内存 session
+        或 challenge store 替代持久存储。未知或不可访问的 authorization 详情不得泄漏。成功时返回 HTTP 200 和规范 begin
+        response。Device Authorization、WebAuthn、Directory 或持久存储 provider 缺失时，返回固定 503 problem，不得伪造成功。
+
+        规范的 `authorization` projection 包含精确目标 scope、authorization 与 device ID、CSR SPKI 和 CSR SHA-256 digest、过期时间及
+        authorization generation；不含 device private key、device code 或 certificate。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequiredCsrfToken'
+      requestBody:
+        required: true
+        description: Canonical Device Authorization JSON request; limited to 4 MiB.
+        content:
+          application/json:
+            schema:
+              $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CreateDeviceApprovalChallengeRequest'
+      responses:
+        '200':
+          description: One-time challenge created and bound to this verified principal and session digest.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CreateDeviceApprovalChallengeResponse'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+  /api/workspace/v1/device-authorizations/approval-challenges/{approvalId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    post:
+      operationId: completeBrowserDeviceApproval
+      tags: [Device authorization]
+      summary: Complete or recover an approval using its WebAuthn assertion.
+      description: |
+        The request and response use the canonical
+        `CompleteDeviceApprovalRequest` and `CompleteDeviceApprovalResponse`
+        schemas from `contracts/http/device-enrollment/v1/openapi.yaml`. The BFF
+        accepts no approver, role, organization, or session identity from JSON.
+        It requires the same verified principal and durable access-token session
+        digest that began this approval, and rechecks the current Directory role
+        and exact Workspace membership before completion.
+
+        The first completion requires `webauthnAssertion`. It returns HTTP 202
+        only after the ISSUING transition is durable. A retry bound to the same
+        verified session may omit the assertion only to recover an already
+        durable ISSUING transition; that recovery returns HTTP 200. The raw
+        assertion and CSRF token are never logged or persisted. A different
+        subject, organization, session digest, expired challenge, or invalid
+        assertion is rejected before certificate issuance. A missing Device
+        Authorization, WebAuthn, Directory, or durable storage provider returns
+        a fixed 503 problem.
+
+        请求和响应使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的
+        `CompleteDeviceApprovalRequest` 与 `CompleteDeviceApprovalResponse` schema。BFF 不接受 JSON 中的审批人、role、organization
+        或 session identity。完成操作必须使用开始审批时相同的已验证 principal 和持久 access-token session digest，并在完成前重新检查
+        当前 Directory role 与精确 Workspace membership。
+
+        首次完成必须携带 `webauthnAssertion`。只有在 ISSUING transition 已持久化后才返回 HTTP 202。绑定同一已验证 session 的重试可在
+        恢复已持久化 ISSUING transition 时省略 assertion，并返回 HTTP 200。raw assertion 和 CSRF token 绝不记录或持久化。不同 subject、
+        organization、session digest、已过期 challenge 或无效 assertion 必须在签发证书前拒绝。Device Authorization、WebAuthn、Directory
+        或持久存储 provider 缺失时返回固定 503 problem。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequiredCsrfToken'
+      requestBody:
+        required: true
+        description: Canonical Device Authorization JSON request; limited to 4 MiB.
+        content:
+          application/json:
+            schema:
+              $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CompleteDeviceApprovalRequest'
+      responses:
+        '202':
+          description: First completion; approval and ISSUING transition are durable.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CompleteDeviceApprovalResponse'
+        '200':
+          description: Existing durable ISSUING transition or issuance result recovered idempotently.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CompleteDeviceApprovalResponse'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '409': { $ref: '#/components/responses/Problem409' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+  /api/workspace/v1/device-authorizations/denials:
+    post:
+      operationId: denyBrowserDeviceAuthorization
+      tags: [Device authorization]
+      summary: Deny a device authorization as an authenticated Workspace member.
+      description: |
+        This route uses the canonical `DenyDeviceAuthorizationRequest` and
+        `DenyDeviceAuthorizationResponse` schemas from
+        `contracts/http/device-enrollment/v1/openapi.yaml`. Its JSON contains
+        only `userCode` and `scope`; the approver identity and organization come
+        from the verified web session and authoritative Directory mapping. The
+        BFF requires exact organization agreement, current Workspace membership,
+        and the required role. It returns HTTP 200 with the canonical denial
+        response and invalidates any active approval challenge for that
+        authorization. Unknown or inaccessible details are not disclosed.
+
+        此路由使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的 `DenyDeviceAuthorizationRequest` 和
+        `DenyDeviceAuthorizationResponse` schema。JSON 只含 `userCode` 与 `scope`；审批人 identity 和 organization 来自已验证
+        web session 及权威 Directory 映射。BFF 要求 organization 完全匹配、当前 Workspace membership 有效且角色获准。成功时返回
+        HTTP 200 和规范 denial response，并使该 authorization 的活动 approval challenge 失效。未知或不可访问的详情不得泄漏。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequiredCsrfToken'
+      requestBody:
+        required: true
+        description: Canonical Device Authorization JSON request; limited to 4 MiB.
+        content:
+          application/json:
+            schema:
+              $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/DenyDeviceAuthorizationRequest'
+      responses:
+        '200':
+          description: Denial is durable; any active approval challenge is invalidated.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/DenyDeviceAuthorizationResponse'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
   /api/workspace/v1/workspaces:
     get:
       operationId: listMemberWorkspaces
@@ -214,6 +434,12 @@ components:
         rewrites exactly one Authorization value from the Easy Auth token store.
         The BFF rejects duplicates, malformed values, and remaining X-MS-TOKEN-*.
   parameters:
+    ApprovalId:
+      name: approvalId
+      in: path
+      required: true
+      description: Opaque approval challenge identifier returned by the begin route.
+      schema: { type: string, minLength: 16, maxLength: 128 }
     WorkspaceId:
       name: workspaceId
       in: path
@@ -255,6 +481,12 @@ components:
       required: false
       description: Required for COMMAND; must byte-match the HttpOnly `__Secure-cyrene-csrf` cookie and verify against the current principal and access-token session.
       schema: { type: string, minLength: 32, maxLength: 256 }
+    RequiredCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Required for every device-authorization POST; must byte-match the HttpOnly `__Secure-cyrene-csrf` cookie and verify its MAC against the current verified issuer, subject, organization, access-token session, and expiry.
+      schema: { type: string, minLength: 32, maxLength: 256, pattern: '^v1\.[0-9]+\.[A-Za-z0-9_-]+$' }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -392,6 +624,7 @@ components:
             - invalid_upstream_response
             - upstream_unavailable
             - upstream_timeout
+            - state_conflict
         traceId: { type: string, pattern: '^[0-9a-f]{32}$', maxLength: 32 }
   responses:
     ProductJson:
@@ -437,8 +670,14 @@ components:
         Cache-Control: { $ref: '#/components/headers/NoStore' }
       content:
         application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem409:
+      description: Approval challenge is stale, already finalized, or in a state that cannot be transitioned. Details are generic.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
     Problem404:
-      description: Workspace is absent from the caller's current member-scoped discovery result.
+      description: Resource is absent from the caller's current authorized scope; used to avoid disclosing inaccessible authorizations.
       headers:
         Cache-Control: { $ref: '#/components/headers/NoStore' }
       content:
@@ -462,7 +701,7 @@ components:
       content:
         application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
     Problem422:
-      description: Unknown operation key or Product request shape not admitted by its owner contract.
+      description: Request JSON does not satisfy the closed route or owner request schema; no upstream action is performed.
       headers:
         Cache-Control: { $ref: '#/components/headers/NoStore' }
       content:
@@ -480,13 +719,13 @@ components:
       content:
         application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
     Problem502:
-      description: Workspace/Product returned an invalid or unsafe response.
+      description: Workspace, Product, or Device Authorization returned an invalid response that cannot be safely forwarded.
       headers:
         Cache-Control: { $ref: '#/components/headers/NoStore' }
       content:
         application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
     Problem503:
-      description: Trusted OIDC ingress, Workspace directory, or Workspace relay is unavailable; the request fails closed.
+      description: A trusted OIDC ingress, Workspace Directory, Device Authorization, WebAuthn, durable storage, or Workspace relay dependency is unavailable; the request fails closed.
       headers:
         Cache-Control: { $ref: '#/components/headers/NoStore' }
       content:

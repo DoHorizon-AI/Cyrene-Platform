@@ -11,8 +11,8 @@ OIDC 到 Workspace 的运行链路已可用。
 
 | File | Responsibility |
 |---|---|
-| `openapi.yaml` | OpenAPI 3.1.2 routes, request/response JSON, closed operation keys, CSRF, errors, and size limits. |
-| `../../tck/workspace-web/v1/scenarios.tsv` | Language-neutral acceptance matrix for the ingress, session, membership, projection, and proxy rules. |
+| `openapi.yaml` | OpenAPI 3.1.2 routes, request/response JSON, device approval, closed operation keys, CSRF, errors, and size limits. |
+| `../../tck/workspace-web/v1/scenarios.tsv` | Language-neutral acceptance matrix for ingress, session, membership, device approval, projection, and proxy rules. |
 
 ## Authority and dependency
 
@@ -148,6 +148,77 @@ document.
 这些 route 上的所有 JSON 请求和响应 body（包括 session、discovery、Product 和 error）均限制为 4 MiB。Product 响应超限时
 返回 `502` 且不转发 body。member discovery 结果无法装入限制时返回 `503`，不返回部分列表。BFF 自身 RFC 9457 error 使用
 OpenAPI 文档中的封闭 schema 与字段长度限制。
+
+## Browser device approval
+
+The browser surface is deliberately limited to these three same-origin routes:
+
+| Route | Success response | Meaning |
+|---|---|---|
+| `POST /api/workspace/v1/device-authorizations/approval-challenges` | `200 CreateDeviceApprovalChallengeResponse` | Resolve `userCode` and exact `scope`, check the verified member's current role, and create a one-time WebAuthn challenge. |
+| `POST /api/workspace/v1/device-authorizations/approval-challenges/{approvalId}/complete` | `202 CompleteDeviceApprovalResponse` on first durable ISSUING; `200` on recovery | Verify the one-time assertion and durably begin issuance. A same-session retry may omit the assertion only after ISSUING was committed. |
+| `POST /api/workspace/v1/device-authorizations/denials` | `200 DenyDeviceAuthorizationResponse` | Deny the exact scoped authorization and invalidate any active approval challenge. |
+
+The request and response schemas are external references to the canonical
+Platform private API components in
+`contracts/http/device-enrollment/v1/openapi.yaml`; this browser contract does
+not define a second copy of their DTOs. `scope` selects the target only. The BFF
+derives issuer and subject from the verified session, requires the scope's
+organization to match the server-side identity mapping, and rechecks current
+Directory membership and the required approval role. Request JSON never carries
+identity, organization authority, or roles. Begin binds the durable approval to
+the verified principal and the digest of the current access-token session;
+complete requires that same binding. It never accepts the user's bearer token as
+a device credential. The begin `authorization` projection carries the canonical
+scope, authorization/device IDs, CSR SPKI and CSR digests, expiry, and generation;
+it contains no private key, device code, or issued certificate. The Device
+Authorization durable store owns the approval/session binding; the BFF adds no
+session or challenge table, and the digest itself is never returned or logged.
+
+All three routes are commands: they require the exact configured `Origin`, a
+valid session-bound `X-CSRF-Token` matching the Secure HttpOnly
+`__Secure-cyrene-csrf` cookie, and the existing verified web session. CSRF
+validation and current role/membership checks happen before invoking Device
+Authorization. Raw WebAuthn assertions, CSRF tokens, device codes, and private
+device credentials are never logged. Every response carries a
+`Cache-Control: no-store` header, and every JSON body stays within 4 MiB.
+Errors use the BFF's closed RFC 9457 schema and do not expose private
+authorization details.
+
+Device start, poll, delivery, and ACK routes remain private to the device
+protocol and are not browser routes. If the durable Device Authorization,
+Directory, membership, WebAuthn, or other required provider is absent, the
+browser route fails closed with a fixed `503`; it must not use an in-memory or
+mock approval backend. These routes do not make the overall Web BFF deployment
+available while its independent OIDC, ingress, Relay, and Product gates remain
+closed.
+
+## 浏览器设备审批
+
+浏览器仅开放以下三个同源路由：
+
+| 路由 | 成功响应 | 语义 |
+|---|---|---|
+| `POST /api/workspace/v1/device-authorizations/approval-challenges` | `200 CreateDeviceApprovalChallengeResponse` | 解析 `userCode` 和精确 `scope`，检查已验证成员的当前角色，并创建一次性 WebAuthn challenge。 |
+| `POST /api/workspace/v1/device-authorizations/approval-challenges/{approvalId}/complete` | 首次持久化 ISSUING 时 `202 CompleteDeviceApprovalResponse`；恢复时 `200` | 验证一次性 assertion 并持久化启动签发。只有 ISSUING 已提交后，同 session 重试才可省略 assertion。 |
+| `POST /api/workspace/v1/device-authorizations/denials` | `200 DenyDeviceAuthorizationResponse` | 拒绝精确 scope 的 authorization，并使活动 approval challenge 失效。 |
+
+请求与响应 schema 通过 external reference 指向
+`contracts/http/device-enrollment/v1/openapi.yaml` 中 Platform 私有 API 的规范 components；本浏览器契约不再复制一份 DTO。
+`scope` 只选择目标。BFF 从已验证 session 派生 issuer 和 subject，要求 scope organization 与服务端 identity mapping 相同，并重新检查当前
+Directory membership 与所需审批角色。请求 JSON 不携带 identity、organization authority 或 roles。Begin 将持久 approval 绑定到已验证 principal
+和当前 access-token session digest；complete 必须通过相同绑定。Begin 的 `authorization` projection 包含规范 scope、authorization/device ID、
+CSR SPKI 与 CSR digest、过期时间和 generation；不包含私钥、device code 或签发证书。持久化 binding 由 Device Authorization store 所有；BFF 不新增
+session 或 challenge table，digest 本身绝不返回或记录。用户 bearer token 绝不作为 device credential 接受。
+
+三个路由均为 command：必须提供与配置完全一致的 `Origin`、通过 session 绑定验证且与 Secure HttpOnly
+`__Secure-cyrene-csrf` cookie 匹配的 `X-CSRF-Token`，以及现有已验证 web session。调用 Device Authorization 前先验证 CSRF 和当前角色/membership。
+Raw WebAuthn assertion、CSRF token、device code 和私有 device credential 绝不记录。所有响应设置 `Cache-Control: no-store`，所有 JSON body
+不超过 4 MiB。错误使用 BFF 封闭的 RFC 9457 schema，不泄漏私有 authorization 详情。
+
+Device start、poll、delivery 和 ACK 路由继续属于私有 device protocol，不是浏览器路由。若持久 Device Authorization、Directory、membership、
+WebAuthn 或其他必要 provider 缺失，浏览器路由以固定 `503` fail closed，不得使用内存或 mock approval backend。即使这些 route 定义完成，OIDC、
+ingress、Relay 与 Product 的独立门槛仍关闭时，也不能宣称整体 Web BFF 已可部署。
 
 ## Product proxy rules
 
