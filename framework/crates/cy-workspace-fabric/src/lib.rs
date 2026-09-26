@@ -41,6 +41,8 @@ mod web_relay_session;
 // then this reusable sweep service is deliberately not started by any host.
 #[allow(dead_code)]
 pub(crate) mod device_authorization_sweeper;
+pub mod webauthn_credential_store;
+pub mod webauthn_verifier;
 
 pub use aca_forwarded_certificate::{
     AcaForwardedCertificateAdapter, AcaForwardedCertificateConfigError,
@@ -111,6 +113,15 @@ pub use web_identity::{
 pub use web_relay_session::{
     WebRelaySessionCredentialIssuer, WebRelaySessionError, WebRelaySessionIssuer,
     WebRelaySessionVerifier,
+};
+pub use webauthn_credential_store::{WebAuthnCredentialStore, WebAuthnCredentialStoreError};
+pub use webauthn_verifier::{
+    SqliteWebAuthnCredentialStore, VerifiedWebAuthnPasskey, WebAuthnAuditAction,
+    WebAuthnAuditEvent, WebAuthnAuditFailure, WebAuthnAuthenticationVerifier,
+    WebAuthnBackupCredentialPolicy, WebAuthnCredentialEnrollmentAuthorizer,
+    WebAuthnCredentialEnrollmentService, WebAuthnCredentialManagementAction,
+    WebAuthnCredentialRegistrationChallenge, WebAuthnCredentialRevocationReason,
+    WebAuthnVerifierConfig, WebAuthnVerifierConfigError, WebAuthnVerifierSystemClock,
 };
 
 pub use cy_proto::workspace_v1;
