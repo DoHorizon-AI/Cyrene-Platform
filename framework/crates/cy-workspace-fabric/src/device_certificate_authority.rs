@@ -9,8 +9,10 @@
 //! This module is a contract, not a CA implementation. The repository has no
 //! configured production CA, trust roots, or signing-key service. The default
 //! implementation therefore fails closed. A future adapter must construct
-//! requests from a trusted Directory registration binding; these values must
-//! never be accepted from a browser or inferred from an authorization ID.
+//! requests from a trusted Directory registration binding in the same durable
+//! orchestration boundary as the authorization record; these values must never
+//! be accepted from a browser or inferred from an authorization ID. A separate
+//! Directory bind followed by an unrelated authorization insert is not enough.
 //!
 //! CA response metadata is not proof of a valid certificate path. A configured
 //! implementation must authenticate its CA service, verify the returned leaf
@@ -29,6 +31,7 @@ use crate::device_authorization::{
     DeviceCsrValidator,
 };
 use crate::device_registry::WorkspaceDeviceKey;
+use crate::durable_directory::DeviceRegistrationBinding;
 
 /// Largest CSR accepted by the Workspace device authorization flow.
 pub(crate) const MAX_DEVICE_CSR_DER_BYTES: usize = 16 * 1024;
@@ -69,33 +72,6 @@ impl fmt::Debug for DeviceCertificateIssuanceBinding {
 }
 
 impl DeviceCertificateIssuanceBinding {
-    /// Build the CA binding from the identity and digests supplied by the
-    /// trusted Directory binding transaction.
-    pub(crate) fn new(
-        authorization_id: DeviceAuthorizationId,
-        registration_binding_id: [u8; 16],
-        device_key: WorkspaceDeviceKey,
-        authorization_generation: u64,
-        csr_sha256: [u8; 32],
-        spki_sha256: [u8; 32],
-    ) -> Result<Self, DeviceCertificateAuthorityError> {
-        if device_key.organization_id.is_empty()
-            || device_key.workspace_id.is_empty()
-            || device_key.device_id.is_empty()
-        {
-            return Err(DeviceCertificateAuthorityError::InvalidRequest);
-        }
-
-        Ok(Self {
-            authorization_id,
-            registration_binding_id,
-            device_key,
-            authorization_generation,
-            csr_sha256,
-            spki_sha256,
-        })
-    }
-
     pub(crate) fn authorization_id(&self) -> &DeviceAuthorizationId {
         &self.authorization_id
     }
@@ -149,7 +125,41 @@ impl fmt::Debug for DeviceCertificateIssueRequest {
 }
 
 impl DeviceCertificateIssueRequest {
-    pub(crate) fn new(
+    /// Copy identity and digests only from the trusted Directory binding.
+    ///
+    /// No caller-provided device ID or scope is accepted here. The exact CSR
+    /// is checked against both Directory digests and the existing CSR
+    /// validator before the CA request can be constructed. The binding and
+    /// authorization ID must come from the transactionally composed enrollment
+    /// operation; do not call Directory binding and authorization insertion as
+    /// separate production steps.
+    pub(crate) fn from_directory_binding(
+        authorization_id: DeviceAuthorizationId,
+        directory_binding: &DeviceRegistrationBinding,
+        csr_der: Vec<u8>,
+        issued_at_unix_ms: u64,
+        csr_validator: &impl DeviceCsrValidator,
+    ) -> Result<Self, DeviceCertificateAuthorityError> {
+        let device_key = directory_binding.key().clone();
+        if device_key.organization_id.is_empty()
+            || device_key.workspace_id.is_empty()
+            || device_key.device_id.is_empty()
+        {
+            return Err(DeviceCertificateAuthorityError::InvalidRequest);
+        }
+
+        let binding = DeviceCertificateIssuanceBinding {
+            authorization_id,
+            registration_binding_id: *directory_binding.binding_id(),
+            device_key,
+            authorization_generation: directory_binding.authorization_generation(),
+            csr_sha256: *directory_binding.csr_sha256(),
+            spki_sha256: *directory_binding.spki_sha256(),
+        };
+        Self::new(binding, csr_der, issued_at_unix_ms, csr_validator)
+    }
+
+    fn new(
         binding: DeviceCertificateIssuanceBinding,
         csr_der: Vec<u8>,
         issued_at_unix_ms: u64,
@@ -589,11 +599,8 @@ mod tests {
         }
     }
 
-    fn request() -> DeviceCertificateIssueRequest {
-        let csr_der = vec![0x30, 0x00];
-        let spki_sha256 = [7; 32];
-        let binding = DeviceCertificateIssuanceBinding::new(
-            [1; 16],
+    fn directory_binding(csr_der: &[u8], spki_sha256: [u8; 32]) -> DeviceRegistrationBinding {
+        DeviceRegistrationBinding::test_fixture(
             [2; 16],
             WorkspaceDeviceKey {
                 organization_id: "org-a".into(),
@@ -601,12 +608,23 @@ mod tests {
                 device_id: "device-a".into(),
             },
             3,
-            sha256(&csr_der),
+            sha256(csr_der),
             spki_sha256,
         )
-        .expect("valid binding");
-        DeviceCertificateIssueRequest::new(binding, csr_der, 1_000, &TestCsrValidator(spki_sha256))
-            .expect("valid request")
+    }
+
+    fn request() -> DeviceCertificateIssueRequest {
+        let csr_der = vec![0x30, 0x00];
+        let spki_sha256 = [7; 32];
+        let binding = directory_binding(&csr_der, spki_sha256);
+        DeviceCertificateIssueRequest::from_directory_binding(
+            [1; 16],
+            &binding,
+            csr_der,
+            1_000,
+            &TestCsrValidator(spki_sha256),
+        )
+        .expect("valid request")
     }
 
     #[test]
@@ -617,6 +635,8 @@ mod tests {
         assert_eq!(scope.organization_id, "org-a");
         assert_eq!(scope.workspace_id, "workspace-a");
         assert_eq!(request.binding().device_key().device_id, "device-a");
+        assert_eq!(request.binding().authorization_id(), &[1; 16]);
+        assert_eq!(request.binding().registration_binding_id(), &[2; 16]);
         assert_eq!(request.binding().authorization_generation(), 3);
         assert!(!format!("{request:?}").contains("48, 0"));
         assert!(request.request_sha256() != &[0; 32]);
@@ -625,22 +645,16 @@ mod tests {
     #[test]
     fn issue_request_rejects_csr_digest_mismatch() {
         let csr_der = vec![0x30, 0x01, 0x00];
-        let binding = DeviceCertificateIssuanceBinding::new(
-            [1; 16],
-            [2; 16],
-            WorkspaceDeviceKey {
-                organization_id: "org-a".into(),
-                workspace_id: "workspace-a".into(),
-                device_id: "device-a".into(),
-            },
-            3,
-            [9; 32],
-            [7; 32],
-        )
-        .expect("valid binding");
+        let binding = directory_binding(&[0x30, 0x00], [7; 32]);
 
         assert_eq!(
-            DeviceCertificateIssueRequest::new(binding, csr_der, 1_000, &TestCsrValidator([7; 32]),),
+            DeviceCertificateIssueRequest::from_directory_binding(
+                [1; 16],
+                &binding,
+                csr_der,
+                1_000,
+                &TestCsrValidator([7; 32]),
+            ),
             Err(DeviceCertificateAuthorityError::BindingMismatch)
         );
     }
@@ -648,22 +662,16 @@ mod tests {
     #[test]
     fn issue_request_rejects_spki_binding_mismatch() {
         let csr_der = vec![0x30, 0x01, 0x00];
-        let binding = DeviceCertificateIssuanceBinding::new(
-            [1; 16],
-            [2; 16],
-            WorkspaceDeviceKey {
-                organization_id: "org-a".into(),
-                workspace_id: "workspace-a".into(),
-                device_id: "device-a".into(),
-            },
-            3,
-            sha256(&csr_der),
-            [8; 32],
-        )
-        .expect("valid binding");
+        let binding = directory_binding(&csr_der, [8; 32]);
 
         assert_eq!(
-            DeviceCertificateIssueRequest::new(binding, csr_der, 1_000, &TestCsrValidator([7; 32]),),
+            DeviceCertificateIssueRequest::from_directory_binding(
+                [1; 16],
+                &binding,
+                csr_der,
+                1_000,
+                &TestCsrValidator([7; 32]),
+            ),
             Err(DeviceCertificateAuthorityError::BindingMismatch)
         );
     }
