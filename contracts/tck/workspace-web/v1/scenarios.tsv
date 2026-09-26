@@ -1,11 +1,11 @@
 id	request	expected
 principal_verified	valid Azure AD access token with exact configured iss/aud, nonempty sub, current exp/nbf, required Workspace.Web.Access scp, and one server Directory organization mapping	ACCEPT_SESSION
-principal_missing	missing token-store access token on private BFF origin	REJECT_401
-principal_spoofed	public request supplies Authorization, X-MS-CLIENT-PRINCIPAL, X-MS-TOKEN-*, X-Cyrene-Verified-Principal, or X-Cyrene-Principal-*	INGRESS_STRIP_AND_REPLACE_WITH_TOKEN_STORE_VALUE
+principal_missing	missing Authorization Bearer access token on private BFF origin	REJECT_401
+principal_spoofed	public request supplies Authorization, X-MS-CLIENT-PRINCIPAL, X-MS-TOKEN-*, X-Cyrene-Verified-Principal, or X-Cyrene-Principal-*	INGRESS_STRIP_SPOOFED_HEADERS_AND_REWRITE_BEARER_FROM_TOKEN_STORE
 principal_unsigned_header	unsigned X-MS-CLIENT-PRINCIPAL or forwarded identity header is the only identity input	REJECT_401
 principal_invalid	wrong access-token signature, issuer, audience, subject, malformed claims, or invalid algorithm	REJECT_401
 principal_scope_missing	valid access token omits required Workspace.Web.Access in scp	REJECT_403
-principal_ambiguous	duplicate access-token headers, browser Authorization credential, or token-provided jku/x5u	REJECT_401
+principal_ambiguous	duplicate or malformed Authorization Bearer values, any remaining X-MS-TOKEN-* header, or token-provided jku/x5u	REJECT_401
 principal_expired	exp is elapsed or nbf is in the future	REJECT_401
 principal_directory_missing	verified iss+sub has no unique server-side organization mapping	REJECT_403
 principal_gate_closed	Easy Auth token store or Workspace.Web.Access API scope is not configured	FAIL_CLOSED_NO_ROUTE

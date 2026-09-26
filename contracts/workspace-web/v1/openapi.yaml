@@ -35,6 +35,7 @@ paths:
         - $ref: '#/components/parameters/Accept'
       security:
         - webSession: []
+          trustedIngressBearer: []
       responses:
         '200':
           description: Verified session identity; no bearer, device, or Product credentials are returned.
@@ -76,6 +77,7 @@ paths:
         Unknown query parameters are rejected.
       security:
         - webSession: []
+          trustedIngressBearer: []
       parameters:
         - $ref: '#/components/parameters/Traceparent'
         - $ref: '#/components/parameters/Accept'
@@ -153,6 +155,7 @@ paths:
         `Idempotency-Key` 时才转发；Product OpenAPI 标记为 required 时必须提供。
       security:
         - webSession: []
+          trustedIngressBearer: []
       parameters:
         - name: resourceId
           in: query
@@ -201,6 +204,15 @@ components:
       description: |
         Secure, HttpOnly, host-only cookie established by the configured OIDC ingress.
         It is never accepted as a Product or device credential.
+    trustedIngressBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Private-hop credential installed by the trusted same-origin ingress.
+        Ingress strips caller Authorization and X-MS-TOKEN-* headers, then
+        rewrites exactly one Authorization value from the Easy Auth token store.
+        The BFF rejects duplicates, malformed values, and remaining X-MS-TOKEN-*.
   parameters:
     WorkspaceId:
       name: workspaceId

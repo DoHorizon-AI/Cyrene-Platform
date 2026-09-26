@@ -61,11 +61,12 @@ OpenAPI 文档编译 request、path、response schema validator；缺少 operati
   GET /api/workspace/v1/workspaces, and
   POST /api/workspace/v1/workspaces/{workspaceId}/products/{operation}.
 - Each request accepts exactly one server-injected
-  X-MS-TOKEN-AAD-ACCESS-TOKEN header. Duplicate values and browser
-  Authorization headers are rejected. The access token is passed only to the
-  verifier and session-bound CSRF signer; it is never serialized or logged.
-  Ingress must strip spoofed Easy Auth and Cyrene identity headers and block
-  all public access that bypasses that ingress.
+  `Authorization: Bearer <access-token>` header. Duplicate or malformed
+  Authorization values and any `X-MS-TOKEN-*` header are rejected. Ingress
+  must discard caller-supplied Authorization, rebuild it from the Easy Auth
+  token-store value, strip Easy Auth and Cyrene identity headers, and block all
+  public access that bypasses that ingress. The access token is passed only to
+  the verifier and session-bound CSRF signer; it is never serialized or logged.
 - The router requires one exact configured HTTPS Client origin for every
   Product POST, including semantic READ operations. A COMMAND additionally
   requires exact header/cookie equality and a valid HMAC bound to issuer,

@@ -42,8 +42,11 @@ trace propagation 改动整合时，Workspace 契约必须在 `WorkspaceApiReque
 
 The browser sends only the host-only `__Host-cyrene-session` cookie. The
 same-origin Nginx ingress routes `/api/workspace/v1/` to a private ACA BFF. The
-configured Easy Auth token store supplies its server-side
-`X-MS-TOKEN-AAD-ACCESS-TOKEN` value to that private origin. The BFF validates
+ingress reads the configured Easy Auth token store's server-side
+`X-MS-TOKEN-AAD-ACCESS-TOKEN` value and rewrites it as exactly one
+`Authorization: Bearer <access-token>` header on the private hop. The BFF accepts
+exactly one well-formed Bearer value, rejects duplicate or malformed
+`Authorization` values and any remaining `X-MS-TOKEN-*` header, then validates
 the signed Azure AD access token itself using the configured issuer's fixed
 JWKS, an asymmetric algorithm allowlist, exact configured `iss` and `aud`,
 `exp`, `nbf`, and the required delegated scope `Workspace.Web.Access` in `scp`.
@@ -51,7 +54,9 @@ The configured API audience and scope must be provisioned before exposure.
 
 Ingress removes caller-supplied `Authorization`, `X-MS-CLIENT-PRINCIPAL`,
 `X-MS-TOKEN-*`, `X-Cyrene-Verified-Principal`, and `X-Cyrene-Principal-*`
-headers, then forwards only the token-store access token on the private hop.
+headers, then overwrites `Authorization` with the token-store access token on
+the private hop; the original `X-MS-TOKEN-*` headers are not forwarded to the
+BFF.
 The BFF never treats `X-MS-CLIENT-PRINCIPAL`, a plain forwarded identity
 header, or an unverified token-store header as a principal. It rejects
 `alg=none`, symmetric algorithms, unknown key IDs, token-supplied `jku`/`x5u`,
@@ -78,12 +83,15 @@ passes the TCK. Existing unsigned `X-MS-CLIENT-PRINCIPAL` data cannot substitute
 for this gate.
 
 浏览器只发送 host-only 的 `__Host-cyrene-session` cookie。同源 Nginx ingress 将 `/api/workspace/v1/` 路由到私有 ACA BFF。
-已配置的 Easy Auth token store 在服务端向该私有 origin 提供 `X-MS-TOKEN-AAD-ACCESS-TOKEN`。BFF 使用固定 issuer JWKS
+入口读取已配置 Easy Auth token store 的服务端 `X-MS-TOKEN-AAD-ACCESS-TOKEN`，并在私有 hop 上将其重写为唯一的
+`Authorization: Bearer <access-token>`。BFF 只接受一个格式正确的 Bearer 值；重复或格式错误的 `Authorization` 值以及任何残留的
+`X-MS-TOKEN-*` header 都会被拒绝，然后 BFF 使用固定 issuer JWKS
 及非对称算法 allowlist，自行验证 Azure AD access token 的签名、精确配置的 `iss` 和 `aud`、`exp`、`nbf`，并验证
 `scp` 中包含必要的 delegated scope `Workspace.Web.Access`。对外开放前必须先配置目标 API audience 和 scope。
 
 入口删除调用方提供的 `Authorization`、`X-MS-CLIENT-PRINCIPAL`、`X-MS-TOKEN-*`、`X-Cyrene-Verified-Principal` 和
-`X-Cyrene-Principal-*` header，然后只在私有 hop 上转发 token-store access token。BFF 不会把 `X-MS-CLIENT-PRINCIPAL`、
+`X-Cyrene-Principal-*` header，然后在私有 hop 上用 token-store access token 覆写 `Authorization`；原始 `X-MS-TOKEN-*`
+header 不会转发给 BFF。BFF 不会把 `X-MS-CLIENT-PRINCIPAL`、
 普通 forwarded identity header 或未验证的 token-store header 当作 principal。拒绝 `alg=none`、对称算法、未知 key ID、
 token 提供的 `jku`/`x5u`、重复 token header、无效签名/claim/scope 或缺失 token。BFF origin 只允许可信入口访问；公网路径和
 直接访问容器或应用 origin 的通路都必须阻断。

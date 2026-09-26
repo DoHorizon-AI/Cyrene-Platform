@@ -45,7 +45,7 @@ use crate::product::{
 pub const MAX_JSON_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ACCEPT_HEADER_BYTES: usize = 512;
 const MAX_QUERY_BYTES: usize = 2048;
-const ACCESS_TOKEN_HEADER: &str = "x-ms-token-aad-access-token";
+const UNTRUSTED_EASY_AUTH_HEADER_PREFIX: &str = "x-ms-token-";
 const TRACEPARENT_HEADER: &str = "traceparent";
 const CSRF_HEADER: &str = "x-csrf-token";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
@@ -304,11 +304,15 @@ async fn workspaces_route(
         Some(value) => value,
         None => return internal_error(Some(&trace.trace_id)),
     };
-    let descriptors = match state.directory.discover(
-        authenticated.principal.identity(),
-        authenticated.principal.organization_id(),
-        now.max(0) as u64,
-    ) {
+    let descriptors = match state
+        .directory
+        .discover(
+            authenticated.principal.identity(),
+            authenticated.principal.organization_id(),
+            now.max(0) as u64,
+        )
+        .await
+    {
         Ok(value) => value,
         Err(_) => return upstream_unavailable(Some(&trace.trace_id)),
     };
@@ -317,7 +321,9 @@ async fn workspaces_route(
         &authenticated.principal,
         descriptors,
         now.max(0) as u64,
-    ) {
+    )
+    .await
+    {
         Ok(value) => value,
         Err(_) => return upstream_unavailable(Some(&trace.trace_id)),
     };
@@ -438,22 +444,30 @@ async fn product_route(
             );
         }
     };
-    let descriptors = match state.directory.discover(
-        authenticated.principal.identity(),
-        authenticated.principal.organization_id(),
-        now.max(0) as u64,
-    ) {
+    let descriptors = match state
+        .directory
+        .discover(
+            authenticated.principal.identity(),
+            authenticated.principal.organization_id(),
+            now.max(0) as u64,
+        )
+        .await
+    {
         Ok(value) => value,
         Err(_) => return upstream_unavailable(Some(&trace.trace_id)),
     };
-    if !contains_member_workspace(
+    match contains_member_workspace(
         &state.directory,
         &authenticated.principal,
         &descriptors,
         &workspace_id,
         now.max(0) as u64,
-    ) {
-        return workspace_not_found(Some(&trace.trace_id));
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return workspace_not_found(Some(&trace.trace_id)),
+        Err(_) => return upstream_unavailable(Some(&trace.trace_id)),
     }
     let forwarded_idempotency_key = if contract.allows_idempotency_key {
         idempotency_key.as_deref()
@@ -696,7 +710,7 @@ impl RequestFailure {
     }
 }
 
-fn project_member_workspaces(
+async fn project_member_workspaces(
     directory: &Arc<dyn WorkspaceDirectory>,
     principal: &VerifiedWebPrincipal,
     descriptors: Vec<WorkspaceConnectionDescriptor>,
@@ -707,15 +721,22 @@ fn project_member_workspaces(
     for descriptor in &descriptors {
         validate_descriptor(descriptor, now_unix_ms)?;
         if descriptor.organization_id != principal.organization_id()
-            || !directory.is_member(
-                principal.identity(),
-                principal.organization_id(),
-                &descriptor.workspace_id,
-            )
             || !seen.insert(descriptor.workspace_id.as_str())
             || descriptor.workspace_id.len() > 200
             || descriptor.organization_id.len() > 200
             || descriptor.display_name.len() > 256
+        {
+            return Err(WorkspaceDirectoryError::Descriptor(
+                "member summary is inconsistent".to_owned(),
+            ));
+        }
+        if !directory
+            .is_member(
+                principal.identity(),
+                principal.organization_id(),
+                &descriptor.workspace_id,
+            )
+            .await?
         {
             return Err(WorkspaceDirectoryError::Descriptor(
                 "member summary is inconsistent".to_owned(),
@@ -730,53 +751,42 @@ fn project_member_workspaces(
     Ok(summaries)
 }
 
-fn contains_member_workspace(
+async fn contains_member_workspace(
     directory: &Arc<dyn WorkspaceDirectory>,
     principal: &VerifiedWebPrincipal,
     descriptors: &[WorkspaceConnectionDescriptor],
     workspace_id: &str,
     now_unix_ms: u64,
-) -> bool {
-    descriptors.iter().any(|descriptor| {
-        validate_descriptor(descriptor, now_unix_ms).is_ok()
+) -> Result<bool, WorkspaceDirectoryError> {
+    for descriptor in descriptors {
+        if validate_descriptor(descriptor, now_unix_ms).is_ok()
             && descriptor.workspace_id == workspace_id
             && descriptor.organization_id == principal.organization_id()
-            && directory.is_member(
-                principal.identity(),
-                principal.organization_id(),
-                workspace_id,
-            )
-    })
+            && directory
+                .is_member(
+                    principal.identity(),
+                    principal.organization_id(),
+                    workspace_id,
+                )
+                .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn authenticate(
     state: &WebBffState,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedRequest, (StatusCode, ProblemCode, &'static str)> {
-    if headers.contains_key(http::header::AUTHORIZATION) {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            ProblemCode::Unauthenticated,
-            "Unauthorized",
-        ));
-    }
-    let token = single_header(headers, ACCESS_TOKEN_HEADER).map_err(|_| {
+    let token = bearer_access_token(headers).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
             ProblemCode::Unauthenticated,
             "Unauthorized",
         )
     })?;
-    if token.is_empty()
-        || token.len() > 16 * 1024
-        || token.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            ProblemCode::Unauthenticated,
-            "Unauthorized",
-        ));
-    }
     let principal = state
         .principal_verifier
         .verify_access_token(token)
@@ -801,6 +811,25 @@ async fn authenticate(
         principal,
         access_token: token.to_owned(),
     })
+}
+
+fn bearer_access_token(headers: &HeaderMap) -> Result<&str, ()> {
+    if headers
+        .keys()
+        .any(|name| name.as_str().starts_with(UNTRUSTED_EASY_AUTH_HEADER_PREFIX))
+    {
+        return Err(());
+    }
+    let authorization = single_header(headers, http::header::AUTHORIZATION.as_str())?;
+    let (scheme, token) = authorization.split_once(' ').ok_or(())?;
+    if !scheme.eq_ignore_ascii_case("Bearer")
+        || token.is_empty()
+        || token.len() > 16 * 1024
+        || token.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(());
+    }
+    Ok(token)
 }
 
 fn identity_failure(error: WebIdentityError) -> (StatusCode, ProblemCode, &'static str) {
@@ -1203,8 +1232,9 @@ mod tests {
 
     struct EmptyWorkspaceDirectory;
 
+    #[async_trait]
     impl WorkspaceDirectory for EmptyWorkspaceDirectory {
-        fn discover(
+        async fn discover(
             &self,
             _user: &UserIdentityRef,
             _organization_id: &str,
@@ -1213,13 +1243,13 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn is_member(
+        async fn is_member(
             &self,
             _user: &UserIdentityRef,
             _organization_id: &str,
             _workspace_id: &str,
-        ) -> bool {
-            false
+        ) -> Result<bool, WorkspaceDirectoryError> {
+            Ok(false)
         }
     }
 
@@ -1333,6 +1363,22 @@ mod tests {
     }
 
     #[test]
+    fn one_well_formed_bearer_header_is_the_only_token_input() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer opaque-token"),
+        );
+        assert_eq!(bearer_access_token(&headers), Ok("opaque-token"));
+
+        headers.insert(
+            HeaderName::from_static("x-ms-token-aad-access-token"),
+            HeaderValue::from_static("legacy-token"),
+        );
+        assert!(bearer_access_token(&headers).is_err());
+    }
+
+    #[test]
     fn resource_query_is_single_and_bounded() {
         let uri: Uri = "/route?resourceId=opaque-1".parse().expect("valid uri");
         assert_eq!(
@@ -1375,7 +1421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_access_token_headers_are_rejected_before_verification() {
+    async fn duplicate_authorization_headers_are_rejected_before_verification() {
         let (state, verifier_calls, gateway_calls) = test_state();
         let mut request = Request::builder()
             .method(Method::GET)
@@ -1383,12 +1429,12 @@ mod tests {
             .body(Body::empty())
             .expect("request is valid");
         request.headers_mut().append(
-            HeaderName::from_static(ACCESS_TOKEN_HEADER),
-            HeaderValue::from_static("first-token"),
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer first-token"),
         );
         request.headers_mut().append(
-            HeaderName::from_static(ACCESS_TOKEN_HEADER),
-            HeaderValue::from_static("second-token"),
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer second-token"),
         );
         let response = router(state)
             .oneshot(request)
@@ -1398,6 +1444,39 @@ mod tests {
         assert_problem(response, StatusCode::UNAUTHORIZED, "unauthenticated").await;
         assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
         assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_bearer_and_legacy_easy_auth_token_headers_are_rejected() {
+        let cases = [
+            ("Basic opaque-token", false),
+            ("Bearer", false),
+            ("Bearer token with-space", false),
+            ("Bearer valid-shaped-token", true),
+        ];
+        for (authorization, add_legacy_header) in cases {
+            let (state, verifier_calls, gateway_calls) = test_state();
+            let mut request = Request::builder()
+                .method(Method::GET)
+                .uri("/api/workspace/v1/session")
+                .header(http::header::AUTHORIZATION, authorization)
+                .body(Body::empty())
+                .expect("request is valid");
+            if add_legacy_header {
+                request.headers_mut().insert(
+                    HeaderName::from_static("x-ms-token-aad-access-token"),
+                    HeaderValue::from_static("legacy-token"),
+                );
+            }
+            let response = router(state)
+                .oneshot(request)
+                .await
+                .expect("router responds");
+
+            assert_problem(response, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+            assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]
