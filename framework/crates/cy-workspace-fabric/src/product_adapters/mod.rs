@@ -65,6 +65,19 @@ impl ProductInvocationPort for ProductHttpApiAdapter {
         caller: &WorkspaceCallerContext,
         request: ProductInvocationRequest,
     ) -> Result<ProductInvocationResponse, ProductInvocationError> {
+        // These owners still map to legacy global Product routes. Keep every
+        // operation unavailable at the dispatch boundary until its private
+        // route and scope-bound service credential are integrated. Endpoint
+        // configuration alone must never re-enable a legacy request.
+        if matches!(
+            request.owner,
+            WorkspaceProductApiOwner::Reactor
+                | WorkspaceProductApiOwner::Exchange
+                | WorkspaceProductApiOwner::Navigator
+        ) {
+            return Err(ProductInvocationError::Unavailable);
+        }
+
         authorize_product_invocation(caller, caller.workspace_id(), &request)?;
         let target = match request.owner {
             WorkspaceProductApiOwner::Catalyst => catalyst::target(&request)?,
@@ -242,10 +255,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn product_reads_route_through_the_combined_owner_adapter() {
+    async fn enabled_private_product_reads_route_through_the_combined_owner_adapter() {
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = adapter(calls.clone());
-        let navigator_snapshot = br#"{"workspaceId":"workspace-1","reads":[{"product":"CATALYST","path":"/api/v1/datasets"}]}"#;
         let requests = [
             ProductInvocationRequest {
                 owner: Owner::Yield,
@@ -256,42 +268,10 @@ mod tests {
                 idempotency_key: None,
             },
             ProductInvocationRequest {
-                owner: Owner::Reactor,
-                operation: Operation::WorkspaceProductApiOperation05,
-                kind: Kind::Read,
-                resource_id: None,
-                json_body: Vec::new(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Exchange,
-                operation: Operation::WorkspaceProductApiOperation07,
-                kind: Kind::Read,
-                resource_id: None,
-                json_body: Vec::new(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
                 owner: Owner::Echo,
                 operation: Operation::WorkspaceProductApiOperation09,
                 kind: Kind::Read,
                 resource_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
-                json_body: Vec::new(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Navigator,
-                operation: Operation::WorkspaceProductApiOperation11,
-                kind: Kind::Read,
-                resource_id: None,
-                json_body: navigator_snapshot.to_vec(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Navigator,
-                operation: Operation::WorkspaceProductApiOperation12,
-                kind: Kind::Read,
-                resource_id: Some("session-1".to_string()),
                 json_body: Vec::new(),
                 idempotency_key: None,
             },
@@ -305,31 +285,79 @@ mod tests {
             assert_eq!(response.status_code, 200);
         }
 
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn navigator_append_remains_denied_by_the_combined_owner_adapter() {
+    async fn legacy_owner_operations_remain_unavailable_with_configured_endpoints() {
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = adapter(calls.clone());
-        let result = adapter
-            .invoke(
-                &member_caller(),
-                ProductInvocationRequest {
-                    owner: Owner::Navigator,
-                    operation: Operation::WorkspaceProductApiOperation13,
-                    kind: Kind::Command,
-                    resource_id: Some("session-1".to_string()),
-                    json_body: br#"{"events":[]}"#.to_vec(),
-                    idempotency_key: Some("append-1".to_string()),
-                },
-            )
-            .await;
+        let requests = [
+            ProductInvocationRequest {
+                owner: Owner::Reactor,
+                operation: Operation::WorkspaceProductApiOperation05,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Reactor,
+                operation: Operation::WorkspaceProductApiOperation06,
+                kind: Kind::Command,
+                resource_id: None,
+                json_body: br#"{"model":"test"}"#.to_vec(),
+                idempotency_key: Some("reactor-command-1".to_string()),
+            },
+            ProductInvocationRequest {
+                owner: Owner::Exchange,
+                operation: Operation::WorkspaceProductApiOperation07,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Exchange,
+                operation: Operation::WorkspaceProductApiOperation08,
+                kind: Kind::Command,
+                resource_id: None,
+                json_body: br#"{"name":"route"}"#.to_vec(),
+                idempotency_key: Some("exchange-command-1".to_string()),
+            },
+            ProductInvocationRequest {
+                owner: Owner::Navigator,
+                operation: Operation::WorkspaceProductApiOperation11,
+                kind: Kind::Read,
+                resource_id: None,
+                json_body: br#"{"workspaceId":"workspace-1","reads":[{"product":"CATALYST","path":"/api/v1/datasets"}]}"#.to_vec(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Navigator,
+                operation: Operation::WorkspaceProductApiOperation12,
+                kind: Kind::Read,
+                resource_id: Some("session-1".to_string()),
+                json_body: Vec::new(),
+                idempotency_key: None,
+            },
+            ProductInvocationRequest {
+                owner: Owner::Navigator,
+                operation: Operation::WorkspaceProductApiOperation13,
+                kind: Kind::Command,
+                resource_id: Some("session-1".to_string()),
+                json_body: br#"{"events":[]}"#.to_vec(),
+                idempotency_key: Some("append-1".to_string()),
+            },
+        ];
 
-        assert_eq!(
-            result.unwrap_err(),
-            ProductInvocationError::PermissionDenied
-        );
+        for request in requests {
+            assert_eq!(
+                adapter.invoke(&member_caller(), request).await.unwrap_err(),
+                ProductInvocationError::Unavailable
+            );
+        }
+
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
