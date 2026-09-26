@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::workspace_v1::relay_frame;
@@ -28,6 +28,12 @@ use crate::{RelayAuthenticator, RelaySessionClaims, SessionPrincipal, WorkspaceD
 
 type RelayStream = Pin<Box<dyn Stream<Item = Result<RelayFrame, Status>> + Send + 'static>>;
 type RelaySender = mpsc::Sender<Result<RelayFrame, Status>>;
+// Bound each participant's queued frames so a slow reader blocks its upstream peer.
+// 每条连接限制排队帧数，让慢速消费端向上游施加背压。
+const RELAY_QUEUE_FRAMES: usize = 8;
+const MAX_PENDING_REQUESTS: usize = 4096;
+const MAX_REQUEST_ID_BYTES: usize = 128;
+const PENDING_REQUEST_TTL: Duration = Duration::from_secs(35);
 
 #[derive(Clone)]
 struct RegisteredConnection {
@@ -35,10 +41,16 @@ struct RegisteredConnection {
     sender: RelaySender,
 }
 
+struct PendingRequest {
+    workspace_session_id: String,
+    expires_at: Instant,
+}
+
 #[derive(Default)]
 struct Connections {
     frontends: BTreeMap<String, RegisteredConnection>,
     workspaces: BTreeMap<String, RegisteredConnection>,
+    pending: BTreeMap<(String, String), PendingRequest>,
 }
 
 struct RelayState {
@@ -74,20 +86,71 @@ impl WorkspaceRelay {
         format!("{prefix}-{sequence}")
     }
 
-    fn workspace_sender(&self, workspace_id: &str) -> Result<Option<RelaySender>, ()> {
-        let connections = self.state.connections.lock().map_err(|_| ())?;
+    fn register_pending(
+        &self,
+        workspace_id: &str,
+        frontend_session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<RelaySender>, (i32, &'static str)> {
+        let mut connections = self
+            .state
+            .connections
+            .lock()
+            .map_err(|_| (13, "RELAY_CONNECTION_STATE_POISONED"))?;
+        connections
+            .pending
+            .retain(|_, pending| pending.expires_at > Instant::now());
+        let Some(workspace) = connections.workspaces.get(workspace_id).cloned() else {
+            return Ok(None);
+        };
+        if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
+            return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
+        }
+        let key = (frontend_session_id.to_string(), request_id.to_string());
+        if connections.pending.contains_key(&key) {
+            return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
+        }
+        if connections.pending.len() >= MAX_PENDING_REQUESTS {
+            return Err((8, "RELAY_PENDING_REQUEST_LIMIT"));
+        }
+        connections.pending.insert(
+            key,
+            PendingRequest {
+                workspace_session_id: workspace.relay_session_id,
+                expires_at: Instant::now() + PENDING_REQUEST_TTL,
+            },
+        );
+        Ok(Some(workspace.sender))
+    }
+
+    fn take_response_sender(
+        &self,
+        workspace_session_id: &str,
+        frontend_session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<RelaySender>, ()> {
+        let mut connections = self.state.connections.lock().map_err(|_| ())?;
+        let key = (frontend_session_id.to_string(), request_id.to_string());
+        let valid = connections.pending.get(&key).is_some_and(|pending| {
+            pending.workspace_session_id == workspace_session_id
+                && pending.expires_at > Instant::now()
+        });
+        if !valid {
+            return Ok(None);
+        }
+        connections.pending.remove(&key);
         Ok(connections
-            .workspaces
-            .get(workspace_id)
+            .frontends
+            .get(frontend_session_id)
             .map(|connection| connection.sender.clone()))
     }
 
-    fn frontend_sender(&self, relay_session_id: &str) -> Result<Option<RelaySender>, ()> {
-        let connections = self.state.connections.lock().map_err(|_| ())?;
-        Ok(connections
-            .frontends
-            .get(relay_session_id)
-            .map(|connection| connection.sender.clone()))
+    fn clear_pending(&self, frontend_session_id: &str, request_id: &str) {
+        if let Ok(mut connections) = self.state.connections.lock() {
+            connections
+                .pending
+                .remove(&(frontend_session_id.to_string(), request_id.to_string()));
+        }
     }
 }
 
@@ -114,7 +177,7 @@ impl WorkspaceRelayService for WorkspaceRelay {
             .map_err(|error| Status::unauthenticated(error.to_string()))?;
         let role = RelayParticipantRole::try_from(hello.role)
             .map_err(|_| Status::invalid_argument("unknown relay participant role"))?;
-        let (sender, receiver) = mpsc::channel(128);
+        let (sender, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
         match role {
             RelayParticipantRole::Frontend => {
                 self.open_frontend(claims, inbound, sender).await?;
@@ -165,8 +228,9 @@ impl WorkspaceRelay {
             );
 
         let relay = self.clone();
+        let session_deadline = session_deadline(claims.expires_at_unix_ms);
         tokio::spawn(async move {
-            while let Ok(Some(frame)) = inbound.message().await {
+            while let Some(frame) = next_authorized_frame(&mut inbound, session_deadline).await {
                 match frame.body {
                     Some(relay_frame::Body::DiscoverRequest(request)) => {
                         let valid_user = request
@@ -233,6 +297,9 @@ impl WorkspaceRelay {
             }
             if let Ok(mut connections) = relay.state.connections.lock() {
                 connections.frontends.remove(&relay_session_id);
+                connections
+                    .pending
+                    .retain(|(frontend_id, _), _| frontend_id != &relay_session_id);
             }
             tracing::info!(
                 event.name = "platform.relay.disconnected",
@@ -267,16 +334,15 @@ impl WorkspaceRelay {
             .await;
             return;
         }
-        let workspace_sender = match self.workspace_sender(&request.workspace_id) {
+        let workspace_sender = match self.register_pending(
+            &request.workspace_id,
+            frontend_session_id,
+            &request.request_id,
+        ) {
             Ok(sender) => sender,
-            Err(_) => {
-                let _ = send_workspace_error(
-                    frontend_sender,
-                    request.request_id,
-                    13,
-                    "RELAY_CONNECTION_STATE_POISONED",
-                )
-                .await;
+            Err((code, message)) => {
+                let _ =
+                    send_workspace_error(frontend_sender, request.request_id, code, message).await;
                 return;
             }
         };
@@ -298,7 +364,8 @@ impl WorkspaceRelay {
             .await;
             return;
         };
-        let _ = send_frame(
+        let request_id = request.request_id.clone();
+        if send_frame(
             &workspace_sender,
             RelayFrame {
                 frame_id: request.request_id.clone(),
@@ -308,7 +375,18 @@ impl WorkspaceRelay {
                 })),
             },
         )
-        .await;
+        .await
+        .is_err()
+        {
+            self.clear_pending(frontend_session_id, &request_id);
+            let _ = send_workspace_error(
+                frontend_sender,
+                request_id,
+                14,
+                "WORKSPACE_CONNECTOR_OFFLINE",
+            )
+            .await;
+        }
     }
 
     async fn open_workspace(
@@ -350,8 +428,9 @@ impl WorkspaceRelay {
 
         let relay = self.clone();
         let registered_workspace = workspace_id.clone();
+        let session_deadline = session_deadline(claims.expires_at_unix_ms);
         tokio::spawn(async move {
-            while let Ok(Some(frame)) = inbound.message().await {
+            while let Some(frame) = next_authorized_frame(&mut inbound, session_deadline).await {
                 let Some(relay_frame::Body::ForwardedResponse(forwarded)) = frame.body else {
                     tracing::warn!(
                         event.name = "platform.relay.frame_error",
@@ -366,7 +445,23 @@ impl WorkspaceRelay {
                             .await;
                     continue;
                 };
-                let frontend_sender = match relay.frontend_sender(&forwarded.frontend_session_id) {
+                let Some(response) = forwarded.response else {
+                    continue;
+                };
+                if frame.frame_id != response.request_id {
+                    tracing::warn!(
+                        event.name = "platform.relay.response_rejected",
+                        error.code = "PLATFORM.RELAY.RESPONSE_UNMATCHED",
+                        session_id = %relay_session_id,
+                        message = "Workspace response frame and request identities differ",
+                    );
+                    continue;
+                }
+                let frontend_sender = match relay.take_response_sender(
+                    &relay_session_id,
+                    &forwarded.frontend_session_id,
+                    &response.request_id,
+                ) {
                     Ok(sender) => sender,
                     Err(_) => {
                         let _ = send_error(
@@ -379,9 +474,7 @@ impl WorkspaceRelay {
                         continue;
                     }
                 };
-                if let (Some(frontend_sender), Some(response)) =
-                    (frontend_sender, forwarded.response)
-                {
+                if let Some(frontend_sender) = frontend_sender {
                     let _ = send_frame(
                         &frontend_sender,
                         RelayFrame {
@@ -390,6 +483,14 @@ impl WorkspaceRelay {
                         },
                     )
                     .await;
+                } else {
+                    tracing::warn!(
+                        event.name = "platform.relay.response_rejected",
+                        error.code = "PLATFORM.RELAY.RESPONSE_UNMATCHED",
+                        session_id = %relay_session_id,
+                        frame_id = %frame.frame_id,
+                        message = "Workspace response has no pending request",
+                    );
                 }
             }
             if let Ok(mut connections) = relay.state.connections.lock() {
@@ -400,6 +501,9 @@ impl WorkspaceRelay {
                 if remove {
                     connections.workspaces.remove(&registered_workspace);
                 }
+                connections
+                    .pending
+                    .retain(|_, pending| pending.workspace_session_id != relay_session_id);
             }
             tracing::info!(
                 event.name = "platform.relay.disconnected",
@@ -481,6 +585,24 @@ async fn send_frame(sender: &RelaySender, frame: RelayFrame) -> Result<(), Statu
         .map_err(|_| Status::unavailable("relay participant disconnected"))
 }
 
+async fn next_authorized_frame(
+    inbound: &mut Streaming<RelayFrame>,
+    session_deadline: Instant,
+) -> Option<RelayFrame> {
+    let remaining = session_deadline.checked_duration_since(Instant::now())?;
+    tokio::time::timeout(remaining, inbound.message())
+        .await
+        .ok()?
+        .ok()?
+}
+
+fn session_deadline(expires_at_unix_ms: u64) -> Instant {
+    // Use a monotonic deadline after authentication; cap one stream at 24 hours.
+    // 认证后改用单调时钟，并限制单条连接最长存活 24 小时。
+    let remaining_ms = expires_at_unix_ms.saturating_sub(now_unix_ms());
+    Instant::now() + Duration::from_millis(remaining_ms.min(24 * 60 * 60 * 1000))
+}
+
 fn now_unix_ms() -> u64 {
     u64::try_from(
         SystemTime::now()
@@ -495,5 +617,87 @@ fn timestamp_from_ms(value: u64) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: i64::try_from(value / 1000).unwrap_or(i64::MAX),
         nanos: i32::try_from((value % 1000) * 1_000_000).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{DevelopmentSessionVerifier, InMemoryWorkspaceDirectory};
+
+    use super::*;
+
+    fn relay_with_connections() -> WorkspaceRelay {
+        let directory = Arc::new(InMemoryWorkspaceDirectory::new(Vec::new(), Vec::new()).unwrap());
+        let relay = WorkspaceRelay::new(directory, Arc::new(DevelopmentSessionVerifier::default()));
+        let (frontend_sender, _) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let (workspace_sender, _) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let mut connections = relay.state.connections.lock().unwrap();
+        connections.frontends.insert(
+            "frontend-1".into(),
+            RegisteredConnection {
+                relay_session_id: "frontend-1".into(),
+                sender: frontend_sender,
+            },
+        );
+        connections.workspaces.insert(
+            "workspace-1".into(),
+            RegisteredConnection {
+                relay_session_id: "workspace-session-1".into(),
+                sender: workspace_sender,
+            },
+        );
+        drop(connections);
+        relay
+    }
+
+    #[test]
+    fn response_requires_the_registered_workspace_session_and_request() {
+        let relay = relay_with_connections();
+        assert!(relay
+            .register_pending("workspace-1", "frontend-1", "request-1")
+            .unwrap()
+            .is_some());
+        assert!(relay
+            .take_response_sender("workspace-session-2", "frontend-1", "request-1")
+            .unwrap()
+            .is_none());
+        assert!(relay
+            .take_response_sender("workspace-session-1", "frontend-1", "request-2")
+            .unwrap()
+            .is_none());
+        assert!(relay
+            .take_response_sender("workspace-session-1", "frontend-1", "request-1")
+            .unwrap()
+            .is_some());
+        assert!(relay
+            .take_response_sender("workspace-session-1", "frontend-1", "request-1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn duplicate_request_ids_do_not_overwrite_pending_routes() {
+        let relay = relay_with_connections();
+        relay
+            .register_pending("workspace-1", "frontend-1", "request-1")
+            .unwrap();
+        assert!(matches!(
+            relay.register_pending("workspace-1", "frontend-1", "request-1"),
+            Err((3, "WORKSPACE_REQUEST_ID_INVALID"))
+        ));
+        assert!(relay
+            .take_response_sender("workspace-session-1", "frontend-1", "request-1")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn request_ids_are_bounded_before_entering_the_pending_table() {
+        let relay = relay_with_connections();
+        assert!(matches!(
+            relay.register_pending("workspace-1", "frontend-1", &"x".repeat(129)),
+            Err((3, "WORKSPACE_REQUEST_ID_INVALID"))
+        ));
+        assert!(relay.state.connections.lock().unwrap().pending.is_empty());
     }
 }
