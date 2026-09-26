@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
 [dependencies]
+axum = { version = "0.7", features = ["json"] }
 base64 = "0.22"
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
 ed25519-dalek = "2.2"
@@ -45,6 +46,7 @@ sqlx = {
 [dev-dependencies]
 base64 = "0.22"
 tempfile = "3.8"
+tower = { version = "0.5", features = ["util"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 webauthn-authenticator-rs = { version = "0.5.5", features = ["softpasskey"] }
 

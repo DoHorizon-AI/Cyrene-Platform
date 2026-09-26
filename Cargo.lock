@@ -780,6 +780,7 @@ dependencies = [
 name = "cy-workspace-fabric"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
  "cy-observability",
  "cy-proto",
@@ -806,6 +807,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower 0.5.3",
  "tracing",
  "url",
  "uuid",

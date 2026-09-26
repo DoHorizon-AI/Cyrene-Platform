@@ -150,6 +150,19 @@ impl VerifiedWebPrincipal {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_principal(
+    identity: UserIdentityRef,
+    organization_id: impl Into<String>,
+    expires_at_unix_ms: i64,
+) -> VerifiedWebPrincipal {
+    VerifiedWebPrincipal {
+        identity,
+        organization_id: organization_id.into(),
+        expires_at_unix_ms,
+    }
+}
+
 /// Verifies a private-ingress access token and returns a Directory-bound web principal.
 ///
 /// Implementations must receive only the server-side Easy Auth access-token value. They must

@@ -43,6 +43,7 @@ mod web_relay_session;
 #[allow(dead_code)]
 pub(crate) mod device_authorization_sweeper;
 pub mod webauthn_credential_store;
+pub mod webauthn_http;
 mod webauthn_postgres_store;
 pub mod webauthn_verifier;
 
@@ -121,6 +122,13 @@ pub use web_relay_session::{
     WebRelaySessionVerifier,
 };
 pub use webauthn_credential_store::{WebAuthnCredentialStore, WebAuthnCredentialStoreError};
+pub use webauthn_http::{
+    authorize_verified_web_session_role, webauthn_http_router, VerifiedWebSessionContext,
+    WebAuthnHttpAuthorizationError, WebAuthnHttpCeremonyPurpose, WebAuthnHttpConfigurationError,
+    WebAuthnHttpSessionBindingError, WebAuthnHttpSessionBindingStore, WebAuthnHttpState,
+    WebAuthnSessionBindingDigest, WebAuthnSessionCeremonyBinding, WebAuthnSessionContextError,
+    WebAuthnSessionFinishReservation,
+};
 pub use webauthn_postgres_store::{PostgresWebAuthnCredentialStore, WebAuthnPostgresStoreError};
 pub use webauthn_verifier::{
     SqliteWebAuthnCredentialStore, VerifiedWebAuthnPasskey, WebAuthnAuditAction,
