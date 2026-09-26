@@ -23,6 +23,11 @@ use cy_proto::workspace_v1::{
 };
 use thiserror::Error;
 
+use crate::product_projection::{
+    authorize_product_invocation, validate_product_invocation, validate_product_request_body,
+    validate_product_response, ProductInvocationError, ProductInvocationPort,
+    UnconfiguredProductInvocationPort, MAX_WORKSPACE_ID_BYTES, MAX_WORKSPACE_REQUEST_ID_BYTES,
+};
 use crate::{WorkspaceApi, WorkspaceAuthorizationError, WorkspaceCallerContext};
 
 /// A product-neutral request that a composition root can route to a Product
@@ -109,6 +114,7 @@ pub struct WorkspaceControlPlane {
     workspace_id: String,
     authority_instance_id: String,
     dispatcher: Arc<dyn WorkspaceRequestDispatcher>,
+    product_invocation_port: Arc<dyn ProductInvocationPort>,
 }
 
 impl WorkspaceControlPlane {
@@ -135,7 +141,14 @@ impl WorkspaceControlPlane {
             workspace_id,
             authority_instance_id,
             dispatcher,
+            product_invocation_port: Arc::new(UnconfiguredProductInvocationPort),
         })
+    }
+
+    /// Replaces the fail-closed Product invocation port with an explicit owner adapter.
+    pub fn with_product_invocation_port(mut self, port: Arc<dyn ProductInvocationPort>) -> Self {
+        self.product_invocation_port = port;
+        self
     }
 
     fn error_response(
@@ -232,9 +245,15 @@ impl WorkspaceApi for WorkspaceControlPlane {
         if request_id.trim().is_empty() {
             return Self::error_response(request_id, 3, "WORKSPACE_REQUEST_ID_REQUIRED");
         }
+        if request_id.len() > MAX_WORKSPACE_REQUEST_ID_BYTES {
+            return Self::error_response(request_id, 3, "WORKSPACE_REQUEST_ID_INVALID");
+        }
 
         if request.workspace_id.trim().is_empty() {
             return Self::error_response(request_id, 3, "WORKSPACE_ID_REQUIRED");
+        }
+        if request.workspace_id.len() > MAX_WORKSPACE_ID_BYTES {
+            return Self::error_response(request_id, 3, "WORKSPACE_ID_INVALID");
         }
         if request.workspace_id != self.workspace_id {
             return Self::error_response(request_id, 7, "WORKSPACE_AUTHORITY_MISMATCH");
@@ -243,6 +262,39 @@ impl WorkspaceApi for WorkspaceControlPlane {
         let Some(request_payload) = request.request else {
             return Self::error_response(request_id, 3, "WORKSPACE_REQUEST_UNSUPPORTED");
         };
+        if let workspace_api_request::Request::ProductApi(product_request) = &request_payload {
+            let invocation = match validate_product_invocation(product_request.clone()) {
+                Ok(invocation) => invocation,
+                Err(error) => return Self::product_invocation_error_response(request_id, error),
+            };
+            if let Err(error) =
+                authorize_product_invocation(&caller, &request.workspace_id, &invocation)
+            {
+                return Self::product_invocation_error_response(request_id, error);
+            }
+            if let Err(error) = validate_product_request_body(&invocation) {
+                return Self::product_invocation_error_response(request_id, error);
+            }
+            let product_response = match self
+                .product_invocation_port
+                .invoke(&caller, invocation)
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => return Self::product_invocation_error_response(request_id, error),
+            };
+            let product_response = match validate_product_response(product_response) {
+                Ok(response) => response,
+                Err(error) => return Self::product_invocation_error_response(request_id, error),
+            };
+            return WorkspaceApiResponse {
+                request_id,
+                outcome: Some(workspace_api_response::Outcome::ProductApi(
+                    product_response,
+                )),
+            };
+        }
+
         let authorization = match &request_payload {
             workspace_api_request::Request::GetOperation(_) => {
                 caller.authorize_workspace_read(&request.workspace_id)
@@ -299,6 +351,14 @@ impl WorkspaceControlPlane {
         };
         Self::error_response(request_id, code, message)
     }
+
+    fn product_invocation_error_response(
+        request_id: String,
+        error: ProductInvocationError,
+    ) -> WorkspaceApiResponse {
+        let (code, message) = error.rpc_status();
+        Self::error_response(request_id, code, message)
+    }
 }
 
 #[cfg(test)]
@@ -309,9 +369,12 @@ mod tests {
     use crate::WorkspaceCallerPrincipal;
     use cy_proto::workspace_v1::{
         workspace_api_request, workspace_api_response, UserIdentityRef, WorkspaceOperationState,
+        WorkspaceProductApiContentType, WorkspaceProductApiOperation, WorkspaceProductApiOwner,
+        WorkspaceProductApiRequest, WorkspaceProductApiRequestKind,
     };
 
     use super::*;
+    use crate::product_projection::{ProductInvocationRequest, ProductInvocationResponse};
 
     struct RecordingDispatcher {
         response: Mutex<Option<Result<WorkspaceOperationProjection, WorkspaceDispatchError>>>,
@@ -340,6 +403,36 @@ mod tests {
                 .expect("response mutex")
                 .take()
                 .expect("dispatcher should be called once")
+        }
+    }
+
+    struct RecordingProductInvocationPort {
+        response: Mutex<Option<Result<ProductInvocationResponse, ProductInvocationError>>>,
+        request: Mutex<Option<ProductInvocationRequest>>,
+    }
+
+    impl RecordingProductInvocationPort {
+        fn new(response: Result<ProductInvocationResponse, ProductInvocationError>) -> Self {
+            Self {
+                response: Mutex::new(Some(response)),
+                request: Mutex::new(None),
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl ProductInvocationPort for RecordingProductInvocationPort {
+        async fn invoke(
+            &self,
+            _caller: &WorkspaceCallerContext,
+            request: ProductInvocationRequest,
+        ) -> Result<ProductInvocationResponse, ProductInvocationError> {
+            *self.request.lock().expect("product request mutex") = Some(request);
+            self.response
+                .lock()
+                .expect("product response mutex")
+                .take()
+                .expect("product invocation should occur once")
         }
     }
 
@@ -393,6 +486,31 @@ mod tests {
                 StartWorkspaceOperationRequest {
                     operation: Some(operation),
                     input_artifact_uris,
+                },
+            )),
+        }
+    }
+
+    fn product_api_request(
+        owner: WorkspaceProductApiOwner,
+        operation: WorkspaceProductApiOperation,
+        kind: WorkspaceProductApiRequestKind,
+        resource_id: &str,
+        json_body: &[u8],
+        idempotency_key: &str,
+    ) -> WorkspaceApiRequest {
+        WorkspaceApiRequest {
+            request_id: "request-product".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            traceparent: String::new(),
+            request: Some(workspace_api_request::Request::ProductApi(
+                WorkspaceProductApiRequest {
+                    owner: owner as i32,
+                    operation: operation as i32,
+                    kind: kind as i32,
+                    resource_id: resource_id.to_string(),
+                    json_body: json_body.to_vec(),
+                    idempotency_key: idempotency_key.to_string(),
                 },
             )),
         }
@@ -612,5 +730,176 @@ mod tests {
         assert_eq!(status.code, 7);
         assert_eq!(status.message, "WORKSPACE_MEMBERSHIP_DENIED");
         assert!(dispatcher.request.lock().expect("request mutex").is_none());
+    }
+
+    #[tokio::test]
+    async fn product_read_uses_injected_port_and_preserves_owner_response() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Err(
+            WorkspaceDispatchError::Unavailable,
+        )));
+        let product_port = Arc::new(RecordingProductInvocationPort::new(Ok(
+            ProductInvocationResponse {
+                status_code: 200,
+                json_body: br#"{"datasets":[]}"#.to_vec(),
+                content_type: WorkspaceProductApiContentType::ApplicationJson,
+            },
+        )));
+        let handler = handler(dispatcher).with_product_invocation_port(product_port.clone());
+
+        let response = handler
+            .handle_authenticated(
+                product_api_request(
+                    WorkspaceProductApiOwner::Catalyst,
+                    WorkspaceProductApiOperation::WorkspaceProductApiOperation01,
+                    WorkspaceProductApiRequestKind::Read,
+                    "",
+                    b"",
+                    "",
+                ),
+                member_caller(),
+            )
+            .await;
+
+        let Some(workspace_api_response::Outcome::ProductApi(projected)) = response.outcome else {
+            panic!("expected a Product API response");
+        };
+        assert_eq!(projected.status_code, 200);
+        assert_eq!(projected.json_body, br#"{"datasets":[]}"#);
+        assert!(matches!(
+            product_port
+                .request
+                .lock()
+                .expect("product request mutex")
+                .as_ref(),
+            Some(ProductInvocationRequest {
+                owner: WorkspaceProductApiOwner::Catalyst,
+                operation: WorkspaceProductApiOperation::WorkspaceProductApiOperation01,
+                kind: WorkspaceProductApiRequestKind::Read,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn product_api_is_fail_closed_without_an_injected_owner_adapter() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Err(
+            WorkspaceDispatchError::Unavailable,
+        )));
+        let handler = handler(dispatcher);
+
+        let status = error(
+            handler
+                .handle_authenticated(
+                    product_api_request(
+                        WorkspaceProductApiOwner::Catalyst,
+                        WorkspaceProductApiOperation::WorkspaceProductApiOperation01,
+                        WorkspaceProductApiRequestKind::Read,
+                        "",
+                        b"",
+                        "",
+                    ),
+                    member_caller(),
+                )
+                .await,
+        );
+
+        assert_eq!(status.code, 14);
+        assert_eq!(status.message, "WORKSPACE_PRODUCT_API_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn frontend_commands_and_navigator_append_are_denied_before_owner_routing() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Err(
+            WorkspaceDispatchError::Unavailable,
+        )));
+        let product_port = Arc::new(RecordingProductInvocationPort::new(Ok(
+            ProductInvocationResponse {
+                status_code: 200,
+                json_body: br#"{}"#.to_vec(),
+                content_type: WorkspaceProductApiContentType::ApplicationJson,
+            },
+        )));
+        let handler = handler(dispatcher).with_product_invocation_port(product_port.clone());
+
+        for (owner, operation, resource_id, idempotency_key) in [
+            (
+                WorkspaceProductApiOwner::Catalyst,
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation02,
+                "",
+                "",
+            ),
+            (
+                WorkspaceProductApiOwner::Yield,
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation04,
+                "draft-1",
+                "",
+            ),
+            (
+                WorkspaceProductApiOwner::Exchange,
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation08,
+                "",
+                "key-1",
+            ),
+            (
+                WorkspaceProductApiOwner::Navigator,
+                WorkspaceProductApiOperation::WorkspaceProductApiOperation13,
+                "session-1",
+                "",
+            ),
+        ] {
+            let status = error(
+                handler
+                    .handle_authenticated(
+                        product_api_request(
+                            owner,
+                            operation,
+                            WorkspaceProductApiRequestKind::Command,
+                            resource_id,
+                            b"{}",
+                            idempotency_key,
+                        ),
+                        member_caller(),
+                    )
+                    .await,
+            );
+            assert_eq!(status.code, 7);
+            assert_eq!(status.message, "WORKSPACE_PRODUCT_API_DENIED");
+        }
+        assert!(product_port
+            .request
+            .lock()
+            .expect("product request mutex")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn product_owner_failures_use_fixed_public_errors() {
+        let dispatcher = Arc::new(RecordingDispatcher::new(Err(
+            WorkspaceDispatchError::Unavailable,
+        )));
+        let product_port = Arc::new(RecordingProductInvocationPort::new(Err(
+            ProductInvocationError::Internal,
+        )));
+        let handler = handler(dispatcher).with_product_invocation_port(product_port);
+
+        let status = error(
+            handler
+                .handle_authenticated(
+                    product_api_request(
+                        WorkspaceProductApiOwner::Catalyst,
+                        WorkspaceProductApiOperation::WorkspaceProductApiOperation01,
+                        WorkspaceProductApiRequestKind::Read,
+                        "",
+                        b"",
+                        "",
+                    ),
+                    member_caller(),
+                )
+                .await,
+        );
+
+        assert_eq!(status.code, 13);
+        assert_eq!(status.message, "WORKSPACE_PRODUCT_API_FAILURE");
+        assert!(status.details.is_empty());
     }
 }

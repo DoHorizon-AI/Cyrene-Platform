@@ -10,9 +10,35 @@ use std::sync::Arc;
 
 use cy_observability::TraceContext;
 use cy_proto::google::rpc::Status as RpcStatus;
+use cy_proto::workspace_v1::workspace_direct_service_server::{
+    WorkspaceDirectService, WorkspaceDirectServiceServer,
+};
+use cy_proto::workspace_v1::workspace_relay_service_server::{
+    WorkspaceRelayService, WorkspaceRelayServiceServer,
+};
 use cy_proto::workspace_v1::{WorkspaceApiRequest, WorkspaceApiResponse};
 
 use crate::WorkspaceCallerContext;
+
+/// Builds a Relay gRPC server with enough room for a maximum Product JSON body
+/// and its enclosing protobuf/context fields.
+pub fn bounded_workspace_relay_server<T: WorkspaceRelayService>(
+    service: T,
+) -> WorkspaceRelayServiceServer<T> {
+    WorkspaceRelayServiceServer::new(service)
+        .max_decoding_message_size(crate::WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(crate::WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+}
+
+/// Builds a Direct gRPC server with enough room for a maximum Product JSON body
+/// and its enclosing protobuf/authentication fields.
+pub fn bounded_workspace_direct_server<T: WorkspaceDirectService>(
+    service: T,
+) -> WorkspaceDirectServiceServer<T> {
+    WorkspaceDirectServiceServer::new(service)
+        .max_decoding_message_size(crate::WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(crate::WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+}
 
 /// Workspace-owned request handler. Relay implementations only forward it.
 #[tonic::async_trait]

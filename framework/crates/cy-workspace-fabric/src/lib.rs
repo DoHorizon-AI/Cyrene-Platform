@@ -19,12 +19,15 @@ mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
+pub mod device_authorization;
+mod product_projection;
 mod relay;
 mod transport;
 
-pub mod device_authorization;
-
-pub use api::{LocalWorkspaceClient, WorkspaceApi};
+pub use api::{
+    bounded_workspace_direct_server, bounded_workspace_relay_server, LocalWorkspaceClient,
+    WorkspaceApi,
+};
 pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
 };
@@ -46,6 +49,10 @@ pub use directory::{
     WorkspaceMembership,
 };
 pub use persistent_directory::FileWorkspaceDirectory;
+pub use product_projection::{
+    ProductInvocationError, ProductInvocationPort, ProductInvocationRequest,
+    ProductInvocationResponse, PRODUCT_JSON_BODY_MAX_BYTES, WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES,
+};
 pub use relay::WorkspaceRelay;
 pub use transport::{
     connect_discovered_workspace, connect_relay_session, run_workspace_connector_session,

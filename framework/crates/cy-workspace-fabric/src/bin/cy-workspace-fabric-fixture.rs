@@ -33,8 +33,6 @@ use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::semantic_v1::Identity as OperationIdentity;
 use cy_proto::workspace_v1::workspace_api_request;
 use cy_proto::workspace_v1::workspace_api_response;
-use cy_proto::workspace_v1::workspace_direct_service_server::WorkspaceDirectServiceServer;
-use cy_proto::workspace_v1::workspace_relay_service_server::WorkspaceRelayServiceServer;
 use cy_proto::workspace_v1::{
     DeviceEnrollmentRef, GetWorkspaceOperationRequest, RelayHello, RelayParticipantRole,
     StartWorkspaceOperationRequest, UserIdentityRef, WorkspaceApiRequest, WorkspaceApiResponse,
@@ -42,10 +40,11 @@ use cy_proto::workspace_v1::{
     WorkspaceOperationState, WorkspaceOperationView,
 };
 use cy_workspace_fabric::{
-    connect_discovered_workspace, connect_relay_session, DevelopmentSessionVerifier,
-    DirectWorkspaceServer, InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims,
-    SessionPrincipal, WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal,
-    WorkspaceConnection, WorkspaceMembership, WorkspaceRelay,
+    bounded_workspace_direct_server, bounded_workspace_relay_server, connect_discovered_workspace,
+    connect_relay_session, DevelopmentSessionVerifier, DirectWorkspaceServer,
+    InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims, SessionPrincipal,
+    WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceConnection,
+    WorkspaceMembership, WorkspaceRelay,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::Code;
@@ -151,7 +150,7 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
         )?)?));
     Server::builder()
         .tls_config(tls)?
-        .add_service(WorkspaceRelayServiceServer::new(relay))
+        .add_service(bounded_workspace_relay_server(relay))
         .serve(bind)
         .await?;
     Ok(())
@@ -249,7 +248,7 @@ async fn run_direct_server(
     );
     Server::builder()
         .tls_config(tls)?
-        .add_service(WorkspaceDirectServiceServer::new(direct))
+        .add_service(bounded_workspace_direct_server(direct))
         .serve(bind)
         .await?;
     Ok(())

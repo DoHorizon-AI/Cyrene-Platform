@@ -24,7 +24,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::{Request, Streaming};
 
-use crate::{validate_descriptor, WorkspaceApi, WorkspaceCallerContext};
+use crate::{
+    validate_descriptor, WorkspaceApi, WorkspaceCallerContext, WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES,
+};
 
 const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -148,7 +150,9 @@ pub async fn connect_discovered_workspace(
                             message = "Workspace direct connection established",
                         );
                         return Ok(WorkspaceConnection::Direct {
-                            client: WorkspaceDirectServiceClient::new(channel),
+                            client: WorkspaceDirectServiceClient::new(channel)
+                                .max_decoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+                                .max_encoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES),
                             hello,
                             workspace_id: descriptor.workspace_id.clone(),
                         });
@@ -352,7 +356,9 @@ pub async fn connect_relay_session(
         RelayTransportError::Protocol("relay participant role is invalid".to_string())
     })?;
     let channel = connect_channel(config).await?;
-    let mut client = WorkspaceRelayServiceClient::new(channel);
+    let mut client = WorkspaceRelayServiceClient::new(channel)
+        .max_decoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES);
     let (outbound, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
     outbound
         .send(RelayFrame {
