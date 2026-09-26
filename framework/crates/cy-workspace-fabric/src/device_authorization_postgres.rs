@@ -509,17 +509,17 @@ async fn by_user_code_candidates(
 
     let mut query =
         QueryBuilder::<Postgres>::new(format!("SELECT {SELECT_COLUMNS} FROM {TABLE} WHERE "));
-    {
-        let mut clauses = query.separated(" OR ");
-        for candidate in candidates {
-            let (version, mac) = candidate.storage_parts();
-            clauses
-                .push("(user_code_key_version = ")
-                .push_bind(i64::from(version))
-                .push(" AND user_code_mac = ")
-                .push_bind(mac.to_vec())
-                .push(")");
+    for (index, candidate) in candidates.iter().enumerate() {
+        if index > 0 {
+            query.push(" OR ");
         }
+        let (version, mac) = candidate.storage_parts();
+        query
+            .push("(user_code_key_version = ")
+            .push_bind(i64::from(version))
+            .push(" AND user_code_mac = ")
+            .push_bind(mac.to_vec())
+            .push(")");
     }
     query.push(" LIMIT 2");
     let rows = query
@@ -1708,6 +1708,7 @@ impl StoredAuthorizationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn identity() -> UserIdentityRef {
         UserIdentityRef {
@@ -1732,6 +1733,91 @@ mod tests {
             spki_sha256: [4; 32],
             not_after_unix_ms: 9_000,
         }
+    }
+
+    fn current_unix_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_millis()
+            .try_into()
+            .expect("current time fits in u64")
+    }
+
+    fn random_bytes<const N: usize>() -> [u8; N] {
+        let mut value = [0; N];
+        getrandom::getrandom(&mut value).expect("test randomness");
+        value
+    }
+
+    fn pending_record(
+        id: DeviceAuthorizationId,
+        approval_id: DeviceAuthorizationId,
+        delivery_id: DeviceAuthorizationId,
+        user_code_mac: [u8; 32],
+        decided_at_unix_ms: u64,
+        delivery_deadline_unix_ms: u64,
+    ) -> DeviceAuthorizationRecord {
+        let csr_der = vec![1, 2, 3, 4];
+        let certificate = IssuedDeviceCertificate {
+            certificate_der: vec![0x30, 0x03, 0x05, id[0], id[1]],
+            ca_chain_der: vec![vec![0x30, 0x01, 0x00]],
+            serial_number: vec![id[0], id[1]],
+            scope: scope(),
+            spki_sha256: [4; 32],
+            not_after_unix_ms: delivery_deadline_unix_ms.saturating_add(1_000),
+        };
+        let certificate_sha256 = sha256(&certificate.certificate_der);
+        let now = current_unix_ms();
+        DeviceAuthorizationRecord {
+            id,
+            device_code_hash: sha256(&id),
+            user_code_digest: VersionedUserCodeDigest::from_storage_parts(1, user_code_mac)
+                .expect("versioned digest"),
+            scope: scope(),
+            csr_sha256: sha256(&csr_der),
+            csr_der,
+            spki_sha256: [4; 32],
+            created_at_unix_ms: now.saturating_sub(10_000),
+            expires_at_unix_ms: now.saturating_add(600_000),
+            poll_interval_ms: 5_000,
+            last_poll_at_unix_ms: None,
+            revision: 0,
+            state: DeviceAuthorizationState::DeliveryPending {
+                approval_id,
+                approver: identity(),
+                decided_at_unix_ms,
+                certificate,
+                delivery_id,
+                certificate_sha256,
+                delivery_deadline_unix_ms,
+            },
+        }
+    }
+
+    fn set_application_role_login(database_url: &str, login: bool) {
+        let options = PgConnectOptions::from_str(database_url).expect("valid admin URL");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("admin test runtime");
+        runtime.block_on(async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("connect as migration role");
+            let statement = if login {
+                "ALTER ROLE cyrene_workspace_device_authorization_app LOGIN"
+            } else {
+                "ALTER ROLE cyrene_workspace_device_authorization_app NOLOGIN"
+            };
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("toggle application login for local trust test");
+            pool.close().await;
+        });
     }
 
     #[test]
@@ -1978,5 +2064,181 @@ mod tests {
         assert!(delivery_migration.contains("WHERE state_kind = 'approved'"));
         assert!(!delivery_migration.contains("user_code TEXT"));
         assert!(!delivery_migration.contains("device_code TEXT"));
+    }
+
+    #[test]
+    #[ignore = "requires an ephemeral PostgreSQL 17 server with verify-full TLS"]
+    fn postgres_migrations_and_ack_deadline_are_transactional() {
+        let migration_url =
+            std::env::var("CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_TEST_MIGRATOR_URL")
+                .expect("test migrator URL configured");
+        let app_url = std::env::var("CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_TEST_APP_URL")
+            .expect("test app URL configured");
+
+        PostgresDeviceAuthorizationStore::migrate(&migration_url)
+            .expect("apply authorization migrations with verify-full TLS");
+        set_application_role_login(&migration_url, true);
+        let store = PostgresDeviceAuthorizationStore::connect(&app_url)
+            .expect("connect with the restricted runtime role");
+
+        let now = current_unix_ms();
+        let open_deadline = now.saturating_add(90_000);
+        let open_record = pending_record(
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            now,
+            open_deadline,
+        );
+        let open_hash = open_record.device_code_hash;
+        let open_user_digest = open_record.user_code_digest;
+        let open_delivery_id = match &open_record.state {
+            DeviceAuthorizationState::DeliveryPending { delivery_id, .. } => *delivery_id,
+            _ => unreachable!(),
+        };
+        store
+            .insert(open_record.clone())
+            .expect("insert pending delivery");
+        assert_eq!(
+            store.user_code_key_versions().expect("read HMAC versions"),
+            vec![1]
+        );
+        assert_eq!(
+            store
+                .by_device_code_hash(&open_hash)
+                .expect("read by device hash"),
+            Some(open_record.clone())
+        );
+        assert_eq!(
+            store
+                .by_user_code_candidates(&[open_user_digest])
+                .expect("read by user-code MAC"),
+            Some(open_record.clone())
+        );
+
+        let (open_approval_id, open_certificate_sha256) = match &open_record.state {
+            DeviceAuthorizationState::DeliveryPending {
+                approval_id,
+                certificate_sha256,
+                ..
+            } => (*approval_id, *certificate_sha256),
+            _ => unreachable!(),
+        };
+        let mut acknowledged = open_record.clone();
+        acknowledged.revision = 1;
+        acknowledged.state = DeviceAuthorizationState::Delivered {
+            approval_id: open_approval_id,
+            receipt: DeviceCertificateDeliveryReceipt {
+                authorization_id: open_record.id,
+                delivery_id: open_delivery_id,
+                certificate_sha256: open_certificate_sha256,
+                csr_sha256: open_record.csr_sha256,
+                csr_spki_sha256: open_record.spki_sha256,
+                acknowledged_at_unix_ms: now,
+            },
+        };
+        store
+            .compare_and_swap_delivery_ack(0, acknowledged.clone())
+            .expect("database-clock guarded ACK before the deadline");
+        assert_eq!(
+            store
+                .by_device_code_hash(&open_hash)
+                .expect("read acknowledged delivery"),
+            Some(acknowledged)
+        );
+
+        let expired_deadline = now.saturating_sub(1_000);
+        let expired_record = pending_record(
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            now.saturating_sub(5_000),
+            expired_deadline,
+        );
+        let expired_hash = expired_record.device_code_hash;
+        store
+            .insert(expired_record.clone())
+            .expect("insert expired pending delivery");
+        let mut late_ack = expired_record.clone();
+        late_ack.revision = 1;
+        let DeviceAuthorizationState::DeliveryPending {
+            approval_id,
+            delivery_id,
+            certificate_sha256,
+            ..
+        } = &expired_record.state
+        else {
+            unreachable!();
+        };
+        late_ack.state = DeviceAuthorizationState::Delivered {
+            approval_id: *approval_id,
+            receipt: DeviceCertificateDeliveryReceipt {
+                authorization_id: expired_record.id,
+                delivery_id: *delivery_id,
+                certificate_sha256: *certificate_sha256,
+                csr_sha256: expired_record.csr_sha256,
+                csr_spki_sha256: expired_record.spki_sha256,
+                acknowledged_at_unix_ms: expired_deadline.saturating_sub(1),
+            },
+        };
+        assert_eq!(
+            store.compare_and_swap(0, late_ack.clone()),
+            Err(DeviceAuthorizationStoreError::Conflict),
+            "generic CAS must not bypass the ACK path"
+        );
+        assert_eq!(
+            store.compare_and_swap_delivery_ack(0, late_ack),
+            Err(DeviceAuthorizationStoreError::Conflict),
+            "database time must reject an ACK after its persisted deadline"
+        );
+        assert!(store
+            .due_certificate_deliveries(now, 10)
+            .expect("scan expired delivery deadlines")
+            .contains(&expired_record));
+        assert_eq!(
+            store
+                .by_device_code_hash(&expired_hash)
+                .expect("read expired delivery"),
+            Some(expired_record)
+        );
+
+        let mut retirement_record = pending_record(
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            now.saturating_sub(2_000),
+            now.saturating_add(60_000),
+        );
+        let (approval_id, certificate, certificate_sha256) = match &retirement_record.state {
+            DeviceAuthorizationState::DeliveryPending {
+                approval_id,
+                certificate,
+                certificate_sha256,
+                ..
+            } => (*approval_id, certificate.clone(), *certificate_sha256),
+            _ => unreachable!(),
+        };
+        retirement_record.state = DeviceAuthorizationState::RetirementPending {
+            approval_id,
+            approver: identity(),
+            certificate,
+            certificate_sha256,
+            delivery_id: None,
+            reason: DeviceCertificateRetirementReason::MisboundCertificate,
+            entered_at_unix_ms: now,
+            last_failure: None,
+        };
+        store
+            .insert(retirement_record.clone())
+            .expect("insert recoverable retirement");
+        assert!(store
+            .recoverable_retirements(10)
+            .expect("scan retirement recovery")
+            .contains(&retirement_record));
+        drop(store);
+        set_application_role_login(&migration_url, false);
     }
 }

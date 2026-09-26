@@ -44,6 +44,6 @@ ALTER TABLE cyrene_workspace_device_authorization.authorizations
         )) = (approval_id IS NOT NULL))
     );
 
-CREATE INDEX cyrene_workspace_device_authorization.authorizations_expiration_scan_idx
+CREATE INDEX authorizations_expiration_scan_idx
     ON cyrene_workspace_device_authorization.authorizations (expires_at_unix_ms, id)
     WHERE state_kind IN ('pending', 'awaiting_webauthn', 'verifying_webauthn', 'approved');

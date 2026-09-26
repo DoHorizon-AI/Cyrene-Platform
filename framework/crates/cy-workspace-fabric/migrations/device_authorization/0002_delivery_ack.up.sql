@@ -47,15 +47,15 @@ COMMENT ON COLUMN cyrene_workspace_device_authorization.authorizations.state_dea
     'Derived delivery ACK deadline; set only while state_kind is delivery_pending.';
 
 DROP INDEX cyrene_workspace_device_authorization.authorizations_expiration_scan_idx;
-CREATE INDEX cyrene_workspace_device_authorization.authorizations_expiration_scan_idx
+CREATE INDEX authorizations_expiration_scan_idx
     ON cyrene_workspace_device_authorization.authorizations (expires_at_unix_ms, id)
     WHERE state_kind IN ('pending', 'awaiting_webauthn', 'verifying_webauthn');
 
-CREATE INDEX cyrene_workspace_device_authorization.authorizations_delivery_recovery_idx
+CREATE INDEX authorizations_delivery_recovery_idx
     ON cyrene_workspace_device_authorization.authorizations (state_deadline_unix_ms, id)
     WHERE state_kind = 'delivery_pending';
 
-CREATE INDEX cyrene_workspace_device_authorization.authorizations_retirement_recovery_idx
+CREATE INDEX authorizations_retirement_recovery_idx
     ON cyrene_workspace_device_authorization.authorizations (created_at_unix_ms, id)
     WHERE state_kind = 'retirement_pending';
 
