@@ -11,7 +11,7 @@ projection manifest and owner OpenAPI document.
 
 `scenarios.tsv` 是 Web BFF 契约的跨语言验收矩阵，覆盖已验证的 Azure AD access token claim/scope、服务端 identity-to-organization
 映射、member-scoped discovery、封闭 Product routing、
-CSRF、W3C trace 传播、有界 JSON/error、安全资源引用以及 fail-closed 部署行为。Product invocation 对 READ 和 COMMAND 类型
+CSRF（包括同一 session 并发刷新稳定性）、W3C trace 传播、有界 JSON/error、安全资源引用以及 fail-closed 部署行为。Product invocation 对 READ 和 COMMAND 类型
 统一使用 POST envelope；类型和上游 method 来自 closed projection manifest 与 owner OpenAPI 文档。
 
 The `operation_enum_parity` scenario reads the canonical
@@ -26,8 +26,10 @@ operation and matching `READ`/`COMMAND` kind.
 `contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv`。只有每个非零 enum key 恰好对应一行
 manifest，且每行都对应一个已接受的 owner OpenAPI operation 及匹配的 `READ`/`COMMAND` 类型时才通过。
 
-The matrix defines required evidence; it is not evidence that a runtime is
-deployed or has passed. This contract-only change records the matrix but does
-not report any runtime scenario as passed.
+The matrix defines required evidence; it is not evidence that a production
+runtime is deployed or has passed. The Platform app crate now supplies an
+injectable router, but production provider composition, ingress isolation, and
+the complete TCK remain deployment gates.
 
-此矩阵定义所需证据，不代表 runtime 已部署或通过。此次仅提交契约，不报告任何 runtime 场景为通过。
+此矩阵定义所需证据，不代表生产 runtime 已部署或通过。Platform app crate 已提供可注入 router，但生产 provider 接线、
+ingress 网络隔离与完整 TCK 仍是部署门槛。

@@ -41,9 +41,21 @@ paths:
           headers:
             Cache-Control:
               schema: { type: string, const: no-store }
+            Set-Cookie:
+              description: HttpOnly signed CSRF token bound to the verified access-token session.
+              schema: { type: string, maxLength: 512 }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WebSession' }
+          x-cyrene-csrf-cookie:
+            name: __Secure-cyrene-csrf
+            path: /api/workspace/v1
+            secure: true
+            httpOnly: true
+            sameSite: Strict
+            domain: forbidden
+            expiresAt: verified-principal-expiry
+            concurrentRefresh: stable-for-same-principal-and-access-token
         '401': { $ref: '#/components/responses/Problem401' }
         '406': { $ref: '#/components/responses/Problem406' }
         '500': { $ref: '#/components/responses/Problem500' }
@@ -114,9 +126,13 @@ paths:
 
         Every invocation requires `Origin` to exactly match the configured
         Client origin. For a manifest kind of COMMAND, the BFF also requires
-        `X-CSRF-Token` to match the readable `__Host-cyrene-csrf` cookie byte for
-        byte before any Workspace call. READ operations do not require a CSRF
-        token. `Idempotency-Key` is forwarded only when allowed by the owner
+        `X-CSRF-Token` to match the HttpOnly `__Secure-cyrene-csrf` cookie byte for
+        byte before any Workspace call. The cookie MAC binds the token to the
+        verified issuer, subject, organization, current access-token session,
+        and expiration. GET /session returns the opaque token in its JSON body
+        for same-origin JavaScript; the access token and its fingerprint are
+        never returned. READ operations do not require a CSRF token.
+        `Idempotency-Key` is forwarded only when allowed by the owner
         operation and is required when that Product operation's OpenAPI contract
         marks it required.
 
@@ -131,8 +147,10 @@ paths:
         path 参数或需要本契约未支持的 query/header 参数时，BFF 必须在调用 Workspace 前 fail closed。拒绝未知 BFF query 参数。
 
         每次 invocation 都要求 `Origin` 精确匹配配置的 Client origin。对于 manifest 中类型为 COMMAND 的 operation，BFF 还必须在
-        任何 Workspace 调用前检查 `X-CSRF-Token` 与页面可读 `__Host-cyrene-csrf` cookie 的字节值完全一致。READ operation 不要求
-        CSRF token。只有 owner operation 允许 `Idempotency-Key` 时才转发；Product OpenAPI 标记为 required 时必须提供。
+        任何 Workspace 调用前检查 `X-CSRF-Token` 与 HttpOnly `__Secure-cyrene-csrf` cookie 的字节值完全一致，并校验其 MAC、
+        当前 verified issuer、subject、organization、access-token session 与过期时间。GET /session 在 JSON body 返回同源 JavaScript
+        使用的不透明 token；access token 及其 fingerprint 绝不返回。READ operation 不要求 CSRF token。只有 owner operation 允许
+        `Idempotency-Key` 时才转发；Product OpenAPI 标记为 required 时必须提供。
       security:
         - webSession: []
       parameters:
@@ -223,7 +241,7 @@ components:
       name: X-CSRF-Token
       in: header
       required: false
-      description: Required when the closed projection manifest marks the operation COMMAND; must match the readable `__Host-cyrene-csrf` cookie byte for byte.
+      description: Required for COMMAND; must byte-match the HttpOnly `__Secure-cyrene-csrf` cookie and verify against the current principal and access-token session.
       schema: { type: string, minLength: 32, maxLength: 256 }
     IdempotencyKey:
       name: Idempotency-Key
@@ -235,7 +253,7 @@ components:
     WebSession:
       type: object
       additionalProperties: false
-      required: [issuer, subject, organizationId, expiresAt]
+      required: [issuer, subject, organizationId, expiresAt, csrfToken]
       properties:
         issuer:
           type: string
@@ -251,7 +269,19 @@ components:
           minLength: 1
           maxLength: 200
           description: Organization identifier established by a verified claim or server-side identity mapping.
-        expiresAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset; exact verified access-token expiry.
+        csrfToken:
+          type: string
+          minLength: 32
+          maxLength: 256
+          pattern: '^v1\.[0-9]+\.[A-Za-z0-9_-]+$'
+          description: |
+            Signed session-bound CSRF token; expiry equals expiresAt, making concurrent
+            session refreshes for the same principal and access-token session return the
+            same token and cookie. Never contains the access token or its fingerprint.
     WorkspaceList:
       type: object
       additionalProperties: false

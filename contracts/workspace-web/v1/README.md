@@ -217,15 +217,22 @@ OpenAPI 文档中的封闭 schema 与字段长度限制。
 ## CSRF and error behavior
 
 The OIDC ingress sets `__Host-cyrene-session` as `Secure`, `HttpOnly`,
-`SameSite=Lax`, `Path=/`, without `Domain`. It also sets a random readable
-`__Host-cyrene-csrf` cookie as `Secure`, `SameSite=Strict`, `Path=/`, without
-`Domain`. Every Product invocation requires `Origin` to exactly match the
-configured Client origin. The BFF also requires `X-CSRF-Token` to match that
-cookie byte for byte when the closed projection manifest marks the operation
-`COMMAND`; it rejects a missing/mismatched token or cross-origin request before
-contacting Workspace. Semantic `READ` operations do not require the CSRF token,
-even though they use the POST invocation envelope. No CSRF server-side session
-store is needed.
+`SameSite=Lax`, `Path=/`, without `Domain`. After validating the access-token session,
+`GET /api/workspace/v1/session` returns a signed CSRF token in its JSON body and sets it in an
+HttpOnly `__Secure-cyrene-csrf` cookie with `Secure`, `SameSite=Strict`,
+`Path=/api/workspace/v1`, and no `Domain`. The token is MAC-bound to the verified issuer,
+subject, organization, access-token session, and an expiration no later than the verified principal.
+The CSRF expiry equals the verified principal expiry, so concurrent session refreshes for the
+same principal and access-token session return the same JSON token and cookie value.
+The token contains neither the access token nor its fingerprint. The BFF has no server-side CSRF
+session store; its MAC key is injected by the trusted runtime.
+
+Every Product invocation, including semantic `READ`, requires `Origin` to exactly match
+the configured Client origin. When the canonical projection manifest marks an operation
+`COMMAND`, the BFF also requires `X-CSRF-Token` to byte-match the HttpOnly cookie and
+verify against the current principal and access-token session before contacting Workspace.
+Semantic `READ` operations use the same POST envelope and exact Origin check, but do not
+require a CSRF header or cookie.
 
 BFF-owned errors use `application/problem+json` (RFC 9457), with `status`
 equal to the HTTP status and a stable `code`. Product errors keep the owning
@@ -234,11 +241,17 @@ contents or claims, signing keys, device credentials, relay routing data, intern
 service addresses or upstream URLs.
 
 OIDC 入口设置 `__Host-cyrene-session` cookie，属性为 `Secure`、`HttpOnly`、`SameSite=Lax`、`Path=/` 且不设置
-`Domain`。入口还设置随机、可由页面读取的 `__Host-cyrene-csrf` cookie，属性为 `Secure`、`SameSite=Strict`、
-`Path=/` 且不设置 `Domain`。每次 Product invocation 都要求 `Origin` 精确匹配配置的 Client origin。只有 closed projection
-manifest 中类型为 `COMMAND` 的 operation 才要求 `X-CSRF-Token` 与 cookie 的字节值完全相同；缺少/不匹配 token 或跨域请求时，
-BFF 必须在访问 Workspace 前拒绝。语义类型为 `READ` 的 operation 使用 POST invocation envelope，但不要求 CSRF token。无需
-CSRF server-side session store。
+`Domain`。BFF 验证 access-token session 后，`GET /api/workspace/v1/session` 在 JSON body 返回签名 CSRF token，
+并将其写入 HttpOnly `__Secure-cyrene-csrf` cookie；属性为 `Secure`、`SameSite=Strict`、
+`Path=/api/workspace/v1` 且不设置 `Domain`。MAC 将 token 绑定 verified issuer、subject、organization、
+access-token session 与不晚于 principal 过期时间的 expiry。token 不含 access token 或其 fingerprint；MAC key 由可信 runtime 注入，
+不新增 CSRF server-side session store。
+CSRF expiry 与 verified principal expiry 相同，因此同一 principal 和 access-token session 的并发 session refresh 会返回相同的 JSON token 与 cookie 值。
+
+每次 Product invocation（包括语义类型 `READ`）均要求 `Origin` 精确匹配配置的 Client origin。只有 closed
+projection manifest 中类型为 `COMMAND` 的 operation 还要求 `X-CSRF-Token` 与 HttpOnly cookie 字节值完全一致，并通过
+当前 principal 与 access-token session 的 MAC 校验；缺少/不匹配 token 或跨域请求时，BFF 必须在访问 Workspace 前拒绝。
+语义类型为 `READ` 的 operation 使用相同 POST invocation envelope 与 exact Origin 检查，但不要求 CSRF header 或 cookie。
 
 BFF 自身错误使用 `application/problem+json`（RFC 9457），`status` 必须与 HTTP status 一致，并提供稳定的 `code`。
 Product 错误保留 owner 的 status 和 JSON response body。错误详情不得泄漏 access token 或 claim、签名密钥、device credential、

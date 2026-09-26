@@ -33,8 +33,16 @@ request_body_schema	body is valid JSON but does not match owner request schema	P
 request_body_limit	invocation body exceeds 4 MiB	PROBLEM_413_NO_UPSTREAM_CALL
 read_has_no_csrf	POST invocation for manifest READ operation has matching Origin and no CSRF token	ALLOW_IF_AUTHORIZED
 read_body_required	READ operation observeWorkspaceSnapshot omits its owner-required JSON body	PROBLEM_422_NO_UPSTREAM_CALL
-command_missing_csrf	POST invocation for manifest COMMAND lacks X-CSRF-Token or __Host-cyrene-csrf cookie	PROBLEM_403_NO_UPSTREAM_CALL
-command_csrf_mismatch	CSRF header differs from cookie	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_session_issue	GET session returns an opaque signed csrfToken and sets matching Secure HttpOnly SameSite=Strict Path=/api/workspace/v1 __Secure-cyrene-csrf cookie	RETURN_NO_STORE_AND_NO_BEARER
+csrf_refresh_stable	Concurrent GET session refreshes use the same verified principal and opaque access-token session	RETURN_IDENTICAL_CSRF_TOKEN_AND_COOKIE
+csrf_token_signed	CSRF token MAC is bound to verified iss, sub, organization, access-token session, and bounded expiry	ACCEPT_ONLY_CURRENT_SESSION
+csrf_subject_changed	A valid CSRF token is replayed with a different verified subject	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_organization_changed	A valid CSRF token is replayed with a different verified organization	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_session_changed	A valid CSRF token is replayed with a different access-token session	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_expired	A valid CSRF token or verified principal has expired	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_key_missing	CSRF MAC secret is not injected into router composition	FAIL_CLOSED_NO_ROUTER
+command_missing_csrf	POST invocation for manifest COMMAND lacks X-CSRF-Token or __Secure-cyrene-csrf cookie	PROBLEM_403_NO_UPSTREAM_CALL
+command_csrf_mismatch	CSRF header differs from cookie or fails the session MAC	PROBLEM_403_NO_UPSTREAM_CALL
 invocation_missing_origin	Product invocation omits Origin	PROBLEM_403_NO_UPSTREAM_CALL
 invocation_cross_origin	Product invocation Origin differs from exact configured Client origin	PROBLEM_403_NO_UPSTREAM_CALL
 command_idempotency	Exchange route-draft command omits Idempotency-Key	PROBLEM_400_NO_UPSTREAM_CALL
