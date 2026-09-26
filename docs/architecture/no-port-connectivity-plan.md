@@ -124,6 +124,14 @@ Key architectural mechanics:
 - **Relay stream backpressure.** The Relay enforces HTTP/2 and gRPC stream window flow control
   and bounded per-stream memory buffers. During long-running LLM SSE generation and chunked token streaming,
   slow consumers trigger upstream backpressure rather than causing memory bloat on the Relay.
+- **Azure Container Apps ingress boundary.** ACA HTTP ingress terminates client TLS at Envoy and
+  forwards client certificate information in `X-Forwarded-Client-Cert` when certificate mode is
+  enabled. The production Relay must require client certificates at ACA ingress, trust that header
+  only from the ACA proxy, verify its enrolled certificate fingerprint and authorized user or
+  device session,
+  and reconnect streams across ACA's HTTP request timeout. The reference Relay's in-process mTLS
+  listener is not an ACA deployment entrypoint. See [ACA client certificate authentication](https://learn.microsoft.com/en-us/azure/container-apps/client-certificate-authorization)
+  and [ACA ingress](https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview).
 
 ### 3.2 Artifact transfer and cloud storage gateway fallback
 
@@ -423,6 +431,12 @@ API 投影、Artifact 直连传输，以及必须最先完成的日志错误路�
   Sidecar 透明接管 mTLS Relay 会话维护、`LAN_DIRECT` 路由解析以及凭据轮换，避免在 Python 中重复实现底层网络与加密协议。
 - **Relay 流控背压机制。** Relay 实施 HTTP/2 和 gRPC 流控窗口（Flow control window）与每个流的有界内存缓冲。
   在长耗时 LLM SSE 生成和分块 Token 流式传输期间，慢速消费端会向上游触发背压阻尼，绝不导致 Relay 内存膨胀。
+- **Azure Container Apps 入口边界。** ACA HTTP ingress 在 Envoy 终止客户端 TLS；开启客户端证书模式后，
+  应用通过 `X-Forwarded-Client-Cert` 接收证书信息。生产 Relay 必须在 ACA 入口要求客户端证书、
+  仅信任来自 ACA 代理的该请求头、校验已登记的证书指纹及用户或设备会话权限，并在 ACA HTTP 请求超时后
+  重连流。参考 Relay 的进程内 mTLS 监听器不能原样作为 ACA 部署入口。参见
+  [ACA 客户端证书认证](https://learn.microsoft.com/en-us/azure/container-apps/client-certificate-authorization)
+  和 [ACA 入口说明](https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview)。
 
 ### 3.2 复用同一 fabric 的 Artifact 传输与云存储网关后备
 
