@@ -15,7 +15,7 @@ The master plan [`no-port-connectivity-plan.md`](no-port-connectivity-plan.md) d
 
 Executing that entire blueprint in a single step introduces high coordination complexity across 10 repositories. To validate the feasibility, usability, and developer experience with the smallest possible workload, this document defines the **first minimal vertical slice (Pilot POC)**:
 
-> **Wire the existing Web console from [`Cyrene-Client`](../../../Cyrene-Client) directly to the newly deployed Hong Kong Azure [`Cyrene-Exchange`](../../../Cyrene-Services/Cyrene-Exchange) gateway.**
+> **Wire the existing Web console from [`Cyrene-Client`](https://github.com/DoHorizon-AI/Cyrene-Client) directly to the newly deployed Hong Kong Azure [`Cyrene-Exchange`](https://github.com/DoHorizon-AI/Cyrene-Exchange) gateway.**
 
 This pilot proves the core principles of the No-Port plan in a real cloud environment without touching unfinished service surfaces.
 
@@ -23,7 +23,7 @@ This pilot proves the core principles of the No-Port plan in a real cloud enviro
 
 一次性全量落地该蓝图跨越 10 个仓库，协同复杂度较高。为了以**最小的工作量**验证架构可行性、实际可用性与端到端体验，本文档制定了**首个最小垂直切片（试验性 POC）**：
 
-> **将 [`Cyrene-Client`](../../../Cyrene-Client) 中现有的 Web 控制台直接打通至最新部署在 Azure 香港数据中心的 [`Cyrene-Exchange`](../../../Cyrene-Services/Cyrene-Exchange) 网关。**
+> **将 [`Cyrene-Client`](https://github.com/DoHorizon-AI/Cyrene-Client) 中现有的 Web 控制台直接打通至最新部署在 Azure 香港数据中心的 [`Cyrene-Exchange`](https://github.com/DoHorizon-AI/Cyrene-Exchange) 网关。**
 
 该试点在真实云环境中验证无端口计划的核心理念，同时无需提前变动尚未准备好的其他服务。
 
