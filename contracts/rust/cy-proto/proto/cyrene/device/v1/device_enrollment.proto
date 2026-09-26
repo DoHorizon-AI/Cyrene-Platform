@@ -37,7 +37,7 @@ message DeviceAuthorizationRef {
   // SHA-256 of the CSR SubjectPublicKeyInfo, exactly 32 bytes.
   bytes csr_spki_sha256 = 4;
   google.protobuf.Timestamp expires_at = 5;
-  // Monotonic attempt number for this device_id; clients ignore stale replies.
+  // Monotonic generation for each new authorization or certificate rotation.
   uint64 authorization_generation = 6;
   // SHA-256 of the exact DER CSR, exactly 32 bytes.
   bytes csr_sha256 = 7;
@@ -53,14 +53,18 @@ message StartDeviceAuthorizationRequest {
   bytes csr_der = 2;
   // SHA-256 of SubjectPublicKeyInfo extracted from csr_der; exactly 32 bytes.
   bytes csr_spki_sha256 = 3;
-  // Random client-side correlation key for a pending enrollment, not a credential.
-  // Directory binds it to one device identity, scope, and CSR digest tuple.
+  // 256-bit secret recovery credential. Directory binds its domain-separated
+  // digest to one exact device identity, scope, CSR digest tuple, and
+  // authorization. A repeated
+  // start may rotate device/user codes for that same authorization; this value
+  // is never a poll or approval credential and must never be logged or returned.
   bytes registration_key = 4;
 }
 
 // The two codes are separate bearer/lookup values. The device_code is a
-// high-entropy secret returned once and stored only as a digest; user_code is
-// rate-limited human input and never authorizes device polling.
+// high-entropy secret returned in the current start response; recovery rotates
+// it and stores only its digest. user_code is rate-limited human input and never
+// authorizes device polling.
 message DeviceAuthorizationCodes {
   string device_code = 1;
   string user_code = 2;
@@ -69,10 +73,15 @@ message DeviceAuthorizationCodes {
   string verification_uri_complete = 4;
   uint32 interval_seconds = 5;
   google.protobuf.Timestamp expires_at = 6;
+  // Monotonic code-recovery revision within this authorization. Replayed start
+  // requests rotate codes and increment this value without changing the
+  // authorization_id, authorization_generation, or CA idempotency key.
+  uint64 device_code_generation = 7;
 }
 
-// Returns identifiers and codes once. Repeating a start request creates a new
-// authorization; the server cannot recover a lost device_code from its digest.
+// Returns the current code generation. A matching recovery request may rotate
+// codes under the same authorization while preserving CA idempotency and any
+// issued certificate. The server stores only HMAC digests, never raw codes.
 message StartDeviceAuthorizationResponse {
   DeviceAuthorizationRef authorization = 1;
   DeviceAuthorizationCodes codes = 2;

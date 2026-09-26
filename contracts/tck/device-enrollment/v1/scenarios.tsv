@@ -1,10 +1,16 @@
 scenario	input	endpoint_or_boundary	expected
 server_generated_device_id	new scope+valid CSR+SPKI digest	POST /v1/device-authorizations	stable Directory device_id distinct from authorization_id
-registration_key_not_credential	registration_key without device_code	poll	REJECTED; registration_key never authenticates
-start_retry_same_registration_key	lost start response; same key+scope+CSR+SPKI	POST /v1/device-authorizations	same device_id; higher generation; new authorization_id/codes; prior attempt invalidated
-start_retry_stale_response	response generation lower than client’s newest	start response	client discards stale codes and authorization
-registration_key_binding_conflict	same key with changed scope or CSR digest	POST /v1/device-authorizations	CONFLICT; no rebinding
-registration_key_terminal_conflict	same key after denial or delivery ACK	POST /v1/device-authorizations	CONFLICT; no reopening completed or denied intent
+registration_key_recovery_only	registration_key without device_code	poll/approval/ACK	REJECTED; recovery credential cannot poll, approve, or acknowledge delivery
+start_retry_same_registration_key	lost start response; same key+scope+CSR+SPKI in recoverable state	POST /v1/device-authorizations	same device_id+authorization_id+authorization_generation+CA key; CAS rotates codes and increments device_code_generation
+start_retry_stale_response	response has lower device_code_generation than client’s newest	start response	client discards stale device/user codes
+registration_key_binding_conflict	same key with changed scope or CSR/SPKI digest	POST /v1/device-authorizations	CONFLICT; no rebinding
+registration_key_terminal_conflict	same key after denial, delivery ACK/expiry, or authorization expiry	POST /v1/device-authorizations	CONFLICT; no reopening terminal intent
+registration_recovery_rate_limit	too many same-key recoveries in the configured window/count	POST /v1/device-authorizations	RATE_LIMITED; prior authorization and codes remain unchanged
+registration_recovery_ttl	same key after authorization TTL	POST /v1/device-authorizations	CONFLICT/EXPIRED; no TTL extension or new CA issue
+recovery_generation_independent	valid same-authorization code recovery	start response	authorization_generation unchanged; device_code_generation increments exactly once per committed rotation
+recovery_cas_poll_race	old device_code poll or ACK races recovery CAS	poll/ACK response	old code cannot authorize after CAS; response re-reads revision before returning certificate or receipt
+lost_start_response_concurrent_approval_ca	lost start reply; exact-key retry races WebAuthn verification or CA acceptance	start + approval + CA recovery	same authorization_id and CA idempotency tuple; no second issuance; same DER/delivery_id or explicit pending; new code generation only
+registration_key_not_echoed	valid start or recovery request	start response/logs	registration_key never returned or logged; server stores only domain-separated digest
 superseded_device_code	poll with code from lower authorization_generation	poll	invalid_grant; only latest committed attempt remains active
 identifier_separation	device_id+authorization_id+authorization_generation+approval_id+device_code	start response	IDs/generation are non-secret; device_code is 256-bit bearer
 csr_digest_recomputed	CSR with matching declared SPKI digest	start authorization	persist recomputed CSR and SPKI digests

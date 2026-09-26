@@ -9,9 +9,9 @@ info:
     It does not issue an OAuth, Microsoft, or workload token to the device.
     Protobuf message definitions are mirrored from
     contracts/proto/cyrene/device/v1/device_enrollment.proto. This is the target
-    v1 contract only: the current manager foundation consumes a certificate
-    before returning it and has no Directory device mapping or delivery ACK
-    store. ACK-backed retries and stable device identity require runtime work.
+    v1 contract. The manager has a local ACK-backed state machine, but the HTTP
+    flow still requires production Directory identity/recovery binding, durable
+    cross-process storage, verifier, CA, retirement, and registry adapters.
 x-cyrene-runtime-status: contract-only
 servers:
   - url: https://{host}
@@ -28,17 +28,23 @@ paths:
       operationId: startDeviceAuthorization
       summary: Start a WorkspaceDevice enrollment
       description: >-
-        The server generates device_id and authorization_id. device_code is a
-        256-bit bearer secret returned once; user_code is only a rate-limited
-        human lookup value. Neither ID can poll. Directory resolves a repeated
-        registration_key and exact organization/workspace, CSR digest, and SPKI
-        digest tuple to the same stable device_id.
-        Each accepted retry creates a higher authorization_generation with a
-        fresh authorization_id and codes, and atomically invalidates the prior
-        attempt. Clients discard responses with a lower generation. Reusing the
-        key with a different scope or CSR digest, or after denial or delivery
-        ACK, is a conflict. Expired pending attempts may be retried with the
-        same key. Active devices must use the mTLS rotation route.
+    The server generates device_id and authorization_id. device_code is a
+    256-bit poll bearer returned in each start response; user_code is a
+    rate-limited human lookup value. The 256-bit registration_key is a separate
+    recovery credential used only to recover a lost start response. Directory
+    binds its domain-separated digest to the exact organization/workspace, CSR DER digest,
+    and SPKI digest tuple. A matching retry in a recoverable, unexpired state
+    keeps the same device_id, authorization_id, authorization_generation,
+    issuer idempotency key, and any already-issued certificate, while one CAS
+    rotates device_code and user_code and increments device_code_generation.
+    The prior codes immediately stop authorizing poll, approval lookup, or ACK.
+    Reusing the key with a changed tuple or a denied, consumed, delivery-expired,
+    or expired authorization is a conflict. If approval is concurrently
+    verifying or CA issuance is in progress, recovery must preserve that exact
+    authorization and resolve to the same certificate or explicit pending;
+    it must never create a second authorization or certificate. Clients discard
+    start responses with a lower device_code_generation. Active devices must
+    use the mTLS rotation route.
       requestBody:
         required: true
         content:
@@ -469,7 +475,7 @@ components:
           type: integer
           format: int64
           minimum: 1
-          description: Monotonic per-device attempt number; clients ignore stale responses.
+          description: Monotonic per-device generation for new authorization or certificate rotation; same-authorization code recovery does not change it.
     StartDeviceAuthorizationRequest:
       type: object
       additionalProperties: false
@@ -490,23 +496,25 @@ components:
         registrationKey:
           type: string
           format: byte
-          minLength: 24
-          maxLength: 24
+          minLength: 44
+          maxLength: 44
           description: >-
-            Client-generated 128-bit correlation value, not a credential. Retain
-            it while this WorkspaceDevice enrollment is pending and reuse only
-            with the exact same scope and CSR.
+            Base64-encoded 256-bit recovery credential. The server stores only
+            a domain-separated digest and never logs or returns it. It is not
+            accepted for polling, approval, or delivery acknowledgement. Retain it securely
+            and reuse only with the exact same scope and CSR.
     DeviceAuthorizationCodes:
       type: object
       additionalProperties: false
-      required: [deviceCode, userCode, verificationUri, intervalSeconds, expiresAt]
+      required: [deviceCode, userCode, verificationUri, intervalSeconds, expiresAt, deviceCodeGeneration]
       properties:
         deviceCode:
           type: string
           pattern: '^[0-9a-fA-F]{64}$'
           description: >-
-            256-bit bearer secret, returned once. Store only its digest; never
-            log it. It is the sole pre-certificate poll credential.
+            256-bit bearer secret in the current start response. Each successful
+            recovery rotates the code and invalidates the prior value. Store only
+            its digest; never log it. It is the sole pre-certificate poll credential.
         userCode:
           type: string
           pattern: '^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){2}$'
@@ -525,6 +533,11 @@ components:
         expiresAt:
           type: string
           format: date-time
+        deviceCodeGeneration:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonic recovery revision; increases when a start retry rotates the codes under the same authorization.
     StartDeviceAuthorizationResponse:
       type: object
       additionalProperties: false
