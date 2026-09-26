@@ -17,6 +17,7 @@ mod device_auth;
 mod device_registry;
 mod direct;
 mod directory;
+mod durable_directory;
 mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
 pub mod device_authorization;
@@ -60,6 +61,10 @@ pub use direct::DirectWorkspaceServer;
 pub use directory::{
     validate_descriptor, InMemoryWorkspaceDirectory, WorkspaceDirectory, WorkspaceDirectoryError,
     WorkspaceMembership,
+};
+pub use durable_directory::{
+    DirectoryMutation, DirectoryOperatorProvisioner, DurableDirectoryError,
+    PostgresWorkspaceDirectory, SUPPORTED_OPERATOR_ROLES,
 };
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_adapters::{

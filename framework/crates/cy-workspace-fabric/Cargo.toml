@@ -31,6 +31,11 @@ uuid = { version = "1.0", features = ["v4"] }
 getrandom = "0.2"
 x509-parser = "0.18.1"
 zeroize = "1.8"
+sqlx = {
+    version = "0.8.6",
+    default-features = false,
+    features = ["runtime-tokio-rustls", "postgres", "uuid", "migrate", "macros"],
+}
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -47,3 +52,7 @@ path = "src/bin/cy-workspace-relay-host.rs"
 [[bin]]
 name = "cy-workspace-sidecar"
 path = "src/bin/cy-workspace-sidecar.rs"
+
+[[bin]]
+name = "cy-workspace-directory-admin"
+path = "src/bin/cy-workspace-directory-admin.rs"

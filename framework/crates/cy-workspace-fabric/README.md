@@ -177,6 +177,56 @@ The Relay host transports Workspace requests only. Product, Kernel/Lease,
 Runtime, and Artifact authorities remain in their owning components; the host
 does not load fixture handlers or acquire their state.
 
+## PostgreSQL authority (standalone async port)
+
+`PostgresWorkspaceDirectory` provides async reads of memberships, assigned
+Product roles, and published descriptors. `organization_for_verified_identity`
+accepts only an issuer/subject pair supplied by a separate trusted OIDC
+verifier; it rejects both no mapping and mappings to multiple organizations.
+This store does not validate OIDC tokens or create memberships from identity
+claims. It deliberately does not implement the crate's current synchronous
+`WorkspaceDirectory` trait, so the existing Relay and Direct request paths still
+use their configured in-memory or private JSON store until a separate async
+caller integration is completed. There is no fallback from PostgreSQL errors
+to a snapshot.
+
+The migration creates `memberships`, `roles`, `descriptors`, and append-only
+`audit_events` tables. Operator grant/revoke operations write their changes and
+audit rows in one database transaction. Revoking a membership cascades its
+roles and records the removed roles in that transaction. Only the five current
+Product user-command roles can be assigned; membership and workload roles come
+from separate authorities. The audit table rejects UPDATE and DELETE, and the
+reader role has SELECT-only access.
+
+Configure three separate trusted process URLs:
+
+* `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`: runtime reader login, a member of
+  `cyrene_workspace_directory_reader` only.
+* `CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL`: local provisioning CLI
+  login, a member of `cyrene_workspace_directory_operator`.
+* `CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL`: deployment migration
+  login with the database privileges needed to create roles and schema.
+
+All connections require PostgreSQL TLS with certificate and hostname
+verification (`sslmode=verify-full`); configure `sslrootcert` when using a
+private database CA. `CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID` supplies the
+operator audit actor from trusted process configuration. The CLI does not accept
+an actor ID from command arguments. Keep the operator and migration URLs out of
+the service runtime. Database users, role memberships, secrets, TLS, backups,
+and deployment are provisioned outside this crate.
+
+Example local provisioning commands:
+
+```bash
+cy-workspace-directory-admin migrate
+cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role workspace.product.command.catalyst.create_dataset.v1 --reason TICKET
+cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TICKET
+```
+
+The down migration drops the Directory schema and its data. No PostgreSQL
+deployment, credentials, OIDC verifier, or async request-path integration is
+included here, so this is a persistence adapter, not a production cutover.
+
 Run:
 
 ```bash
@@ -281,6 +331,30 @@ session 后才能启用 readiness。不得将 fixture credential 或 `Developmen
 
 Relay host 只传输 Workspace request。Product、Kernel/Lease、Runtime 与 Artifact authority 仍属于
 各自的组件；host 不加载 fixture handler，也不获得 fixture 状态。
+
+## PostgreSQL 权威存储（独立异步接口）
+
+`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organization_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject；没有映射或映射到多个 organization 时都会拒绝。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它暂不实现当前同步的 `WorkspaceDirectory` trait；Relay 和 Direct 请求路径在后续异步接线完成前仍使用已配置的内存或私有 JSON 存储。PostgreSQL 查询失败时不会回退到快照。
+
+迁移创建 `memberships`、`roles`、`descriptors` 和只追加的 `audit_events` 表。Operator 授权/撤销与审计行在同一数据库事务中提交；撤销成员时级联删除其角色，并在同一事务记录被移除角色。仅允许分配当前五种 Product 用户命令角色；成员标记和 workload 角色由其他 authority 管理。审计表拒绝 UPDATE/DELETE，reader 角色仅有 SELECT 权限。
+
+使用三个独立的可信运行时 URL：
+
+* `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`：服务 reader 登录，只加入 `cyrene_workspace_directory_reader`。
+* `CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL`：本地 provisioning CLI 登录，只加入 `cyrene_workspace_directory_operator`。
+* `CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL`：部署迁移登录，需有创建角色和 schema 的数据库权限。
+
+所有连接均强制 PostgreSQL TLS 证书与主机名校验（`sslmode=verify-full`）；私有数据库 CA 需配置 `sslrootcert`。`CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID` 从可信进程配置提供审计 actor，CLI 参数不接受 actor ID。服务进程不得使用 operator 或 migration URL。数据库用户、角色成员授权、secret、TLS、备份和部署由 crate 外部管理。
+
+本地 provisioning 示例：
+
+```bash
+cy-workspace-directory-admin migrate
+cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role workspace.product.command.catalyst.create_dataset.v1 --reason TICKET
+cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TICKET
+```
+
+down migration 会删除 Directory schema 及其中数据。此改动不包含 PostgreSQL 部署、凭据、OIDC verifier 或异步请求路径接线，因此是持久化 adapter，尚未完成生产切换。
 
 运行：
 

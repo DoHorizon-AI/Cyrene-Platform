@@ -10,6 +10,7 @@
 | `device_registry.rs` | Import and revocation port for approved device certificates. | 已批准设备证书的导入与撤销接口。 |
 | `directory.rs` | Membership and descriptor validation. | 成员关系与 descriptor 校验。 |
 | `persistent_directory.rs` | Private, single-owner snapshot storage for Directory and device records. | Directory 与设备记录的私有单实例快照存储。 |
+| `durable_directory.rs` | Async PostgreSQL membership, role, descriptor, and audit store. | 异步 PostgreSQL 成员、角色、描述符和审计存储。 |
 | `api.rs` | Workspace-owned API port, LOCAL adapter, and bounded gRPC server builders. | Workspace 权威 API port、LOCAL adapter 与有界 gRPC server 构造器。 |
 | `control_plane.rs` | Workspace authority-pinned API handler and Product dispatch port. | 固定 Workspace 权威的 API handler 与 Product 分发 port。 |
 | `product_authorization.rs` | Versioned fail-closed Product read and command role matrix. | 版本化且默认拒绝的 Product 读取与命令角色矩阵。 |
@@ -19,7 +20,9 @@
 | `transport.rs` | Direct candidate selection and outbound mTLS transport. | 直连候选选择与出站 mTLS 传输。 |
 | `sidecar.rs` | External-credential consumer and authenticated local gRPC bridge. | 外部凭据 consumer 与本地认证 gRPC 代理。 |
 | `user_code_secret.rs` | Versioned HMAC key ring for user-code storage and verification. | user code 存储与校验使用的带版本 HMAC key ring。 |
-| `bin/` | Acceptance fixtures and the standalone Workspace sidecar. | Acceptance fixture 与独立 Workspace sidecar。 |
+| `bin/` | Acceptance fixtures, Workspace sidecar, and restricted Directory provisioning CLI. | Acceptance fixture、Workspace sidecar 与受限 Directory 配置 CLI。 |
+
+`cy-workspace-directory-admin` uses separate operator and migration database URLs. Membership/role/descriptor writes and audit records commit atomically; the runtime reader role is SELECT-only. OIDC verification, database users/secrets/deployment, and the production async caller wiring remain external work.
 
 Relay and Directory code must never become Product, execution, Lease/Event,
 or Artifact identity authorities. A Workspace connector is accepted only when
@@ -57,6 +60,7 @@ identity 权威。
 | `device_registry.rs` | 已批准设备证书的导入与撤销接口。 |
 | `directory.rs` | 成员关系和 descriptor 校验。 |
 | `persistent_directory.rs` | Directory 与设备记录的私有单实例持久化快照存储。 |
+| `durable_directory.rs` | 异步 PostgreSQL 成员、角色、描述符和审计存储。 |
 | `api.rs` | Workspace 所有的 API port、LOCAL adapter 与有界 gRPC server 构造器。 |
 | `control_plane.rs` | 固定 Workspace 权威的 API handler 与 Product 分发 port。 |
 | `product_authorization.rs` | 版本化且默认拒绝的 Product 读取与命令角色矩阵。 |
@@ -64,8 +68,10 @@ identity 权威。
 | `direct.rs` | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | 临时认证路由。 |
 | `transport.rs` | 直连候选选择与出站 mTLS 传输。 |
-| `bin/` | Acceptance fixture 与独立 Workspace sidecar。 |
 | `user_code_secret.rs` | user code 存储与校验使用的带版本 HMAC key ring。 |
+| `bin/` | Acceptance fixture、Workspace sidecar 与受限 Directory 配置 CLI。 |
+
+`cy-workspace-directory-admin` 使用分离的 operator 和 migration 数据库 URL。成员/角色/descriptor 变更与审计记录原子提交；服务 reader 角色仅能 SELECT。OIDC 验证、数据库用户/secret/部署，以及生产异步调用方接线仍属于外部工作。
 
 Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。Workspace Connector 仅在 Tonic TLS 对端证书匹配已批准且未撤销的设备记录时接受；frontend 直连仍校验用户会话和成员关系。
 
