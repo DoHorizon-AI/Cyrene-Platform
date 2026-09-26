@@ -21,6 +21,7 @@ members = [
     "framework/crates/cy-execution-fabric",
     "framework/crates/cy-execution-control",
     "framework/crates/cy-workspace-fabric",
+    "framework/crates/cy-workspace-web-bff",
     "sdk/rust/cy-artifact-transfer",
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）
