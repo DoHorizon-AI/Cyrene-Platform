@@ -17,7 +17,9 @@ use cy_proto::workspace_v1::UserIdentityRef;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// Opaque server-generated identifier for one enrollment.
+/// Opaque server-generated identifier for one authorization attempt.
+///
+/// This is the wire `authorization_id`; it is not a stable WorkspaceDevice ID.
 pub type DeviceAuthorizationId = [u8; 16];
 
 /// Opaque digest stored in place of a one-time device or user code.
@@ -49,12 +51,33 @@ pub struct DeviceAuthorizationStart {
     pub poll_interval_ms: u64,
 }
 
-/// A user-facing WebAuthn challenge bound to one pending enrollment.
+/// User-facing request options for one persisted WebAuthn approval attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceApprovalChallenge {
     pub approval_id: DeviceAuthorizationId,
-    /// Raw challenge bytes for the relying-party adapter to encode as needed.
-    pub challenge: [u8; 32],
+    /// Serialized `PublicKeyCredentialRequestOptions` produced by the WebAuthn port.
+    pub credential_request_options_json: Vec<u8>,
+}
+
+/// Immutable context binding one WebAuthn ceremony to its authorization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebAuthnAuthenticationContext {
+    pub approval_id: DeviceAuthorizationId,
+    pub authorization_id: DeviceAuthorizationId,
+    pub approver: UserIdentityRef,
+    pub scope: DeviceAuthorizationScope,
+    pub csr_sha256: [u8; 32],
+    pub spki_sha256: [u8; 32],
+    pub expires_at_unix_ms: u64,
+}
+
+/// Public request options and confidential server state returned by verifier start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebAuthnAuthenticationStart {
+    /// JSON bytes to return to the authenticated approver.
+    pub credential_request_options_json: Vec<u8>,
+    /// Opaque library state. Persist server-side; never return or log it.
+    pub opaque_state: Vec<u8>,
 }
 
 /// Certificate metadata returned by the configured CA signer.
@@ -78,7 +101,16 @@ pub enum DeviceAuthorizationState {
     AwaitingWebAuthn {
         approval_id: DeviceAuthorizationId,
         approver: UserIdentityRef,
-        challenge: [u8; 32],
+        credential_request_options_json: Vec<u8>,
+        opaque_state: Vec<u8>,
+    },
+    /// One assertion is reserved while the verifier checks and updates its
+    /// credential counter. Denial and expiry may still win before `Issuing`.
+    VerifyingWebAuthn {
+        approval_id: DeviceAuthorizationId,
+        approver: UserIdentityRef,
+        assertion_sha256: [u8; 32],
+        opaque_state: Vec<u8>,
     },
     /// Durable reservation written before the certificate issuer is called.
     /// Retries must use the enrollment ID as an issuer idempotency key.
@@ -113,6 +145,7 @@ pub struct DeviceAuthorizationRecord {
     pub user_code_hash: DeviceAuthorizationCodeHash,
     pub scope: DeviceAuthorizationScope,
     pub csr_der: Vec<u8>,
+    pub csr_sha256: [u8; 32],
     pub spki_sha256: [u8; 32],
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
@@ -265,6 +298,10 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
                 approval_id: current,
                 ..
             }
+            | DeviceAuthorizationState::VerifyingWebAuthn {
+                approval_id: current,
+                ..
+            }
             | DeviceAuthorizationState::Issuing {
                 approval_id: current,
                 ..
@@ -298,6 +335,7 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
             || current.user_code_hash != replacement.user_code_hash
             || current.scope != replacement.scope
             || current.csr_der != replacement.csr_der
+            || current.csr_sha256 != replacement.csr_sha256
             || current.spki_sha256 != replacement.spki_sha256
             || current.created_at_unix_ms != replacement.created_at_unix_ms
             || current.expires_at_unix_ms != replacement.expires_at_unix_ms
@@ -427,16 +465,29 @@ pub trait WorkspaceMembershipPort: Send + Sync {
     ) -> Result<bool, DeviceAuthorizationPortError>;
 }
 
-/// WebAuthn verifier for one approval assertion.
+/// Server-side WebAuthn authentication boundary.
 ///
-/// Production implementations must validate the signature, relying-party ID,
-/// origin, user handle, credential status, and counter policy against the
-/// trusted identity supplied here.
-pub trait WebAuthnAssertionVerifier: Send + Sync {
-    fn verify_approval_assertion(
+/// `start_authentication` must use credentials registered for the trusted
+/// identity in `context` and return standards-compliant request options plus
+/// opaque state that can be durably serialized by the caller. `finish_authentication`
+/// must bind the assertion to that exact state and context, validate signature,
+/// RP ID, origin, user handle, credential status and counter policy, then
+/// atomically consume the ceremony and update the credential counter.
+///
+/// Finishing is idempotent for the same approval ID and assertion digest so a
+/// caller can recover after an ambiguous timeout. A `Rejected` result must
+/// guarantee that neither the ceremony nor credential counter was consumed;
+/// `Unavailable` may have an unknown outcome and must be safe to retry.
+pub trait WebAuthnAuthenticationPort: Send + Sync {
+    fn start_authentication(
         &self,
-        approver: &UserIdentityRef,
-        challenge: &[u8; 32],
+        context: &WebAuthnAuthenticationContext,
+    ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError>;
+
+    fn finish_authentication(
+        &self,
+        context: &WebAuthnAuthenticationContext,
+        opaque_state: &[u8],
         assertion: &[u8],
         now_unix_ms: u64,
     ) -> Result<(), DeviceAuthorizationPortError>;
@@ -463,16 +514,18 @@ pub trait DeviceCertificateIssuer: Send + Sync {
 
 /// Aggregate implemented by the approval orchestration layer so a completion
 /// call can invoke all security checks through one explicit port bundle.
+pub trait DeviceApprovalStartPorts: WorkspaceMembershipPort + WebAuthnAuthenticationPort {}
+
+impl<T> DeviceApprovalStartPorts for T where T: WorkspaceMembershipPort + WebAuthnAuthenticationPort {}
+
+/// Aggregate required to complete and issue an approval.
 pub trait DeviceApprovalPorts:
-    WorkspaceMembershipPort + DeviceCsrValidator + WebAuthnAssertionVerifier + DeviceCertificateIssuer
+    DeviceApprovalStartPorts + DeviceCsrValidator + DeviceCertificateIssuer
 {
 }
 
 impl<T> DeviceApprovalPorts for T where
-    T: WorkspaceMembershipPort
-        + DeviceCsrValidator
-        + WebAuthnAssertionVerifier
-        + DeviceCertificateIssuer
+    T: DeviceApprovalStartPorts + DeviceCsrValidator + DeviceCertificateIssuer
 {
 }
 
@@ -533,6 +586,8 @@ pub enum DeviceAuthorizationError {
     CsrBindingMismatch,
     #[error("WebAuthn assertion is invalid")]
     InvalidWebAuthnAssertion,
+    #[error("no registered WebAuthn credential is available for approval")]
+    WebAuthnCredentialRequired,
     #[error("WebAuthn verifier unavailable")]
     WebAuthnUnavailable,
     #[error("certificate signer unavailable or rejected the request")]
@@ -602,6 +657,7 @@ where
                 return Err(DeviceAuthorizationError::CsrValidatorUnavailable)
             }
         };
+        let csr_sha256 = sha256(&request.csr_der);
 
         // A bounded retry handles the vanishingly unlikely random code collision.
         for _ in 0..3 {
@@ -616,6 +672,7 @@ where
                 user_code_hash: hash_code(b"user", normalize_user_code(&user_code).as_bytes()),
                 scope: request.scope.clone(),
                 csr_der: request.csr_der.clone(),
+                csr_sha256,
                 spki_sha256,
                 created_at_unix_ms: now_unix_ms,
                 expires_at_unix_ms,
@@ -649,7 +706,7 @@ where
         approver: &UserIdentityRef,
         abuse_key: &[u8; 32],
         now_unix_ms: u64,
-        membership: &impl WorkspaceMembershipPort,
+        ports: &impl DeviceApprovalStartPorts,
     ) -> Result<DeviceApprovalChallenge, DeviceAuthorizationError> {
         self.record_user_code_attempt(abuse_key, now_unix_ms)?;
         validate_scope(scope)?;
@@ -668,10 +725,7 @@ where
         if record.scope != *scope {
             return Err(DeviceAuthorizationError::ScopeMismatch);
         }
-        if !matches!(record.state, DeviceAuthorizationState::Pending) {
-            return Err(state_error(&record.state));
-        }
-        match membership.is_member(approver, scope) {
+        match ports.is_member(approver, scope) {
             Ok(true) => {}
             Ok(false) => return Err(DeviceAuthorizationError::MembershipRequired),
             Err(DeviceAuthorizationPortError::Rejected) => {
@@ -682,17 +736,96 @@ where
             }
         }
 
-        let challenge = DeviceApprovalChallenge {
-            approval_id: random_array::<16>()?,
-            challenge: random_array::<32>()?,
-        };
-        record.state = DeviceAuthorizationState::AwaitingWebAuthn {
-            approval_id: challenge.approval_id,
+        if let DeviceAuthorizationState::AwaitingWebAuthn {
+            approval_id,
+            approver: current_approver,
+            credential_request_options_json,
+            ..
+        } = &record.state
+        {
+            if current_approver == approver {
+                return Ok(DeviceApprovalChallenge {
+                    approval_id: *approval_id,
+                    credential_request_options_json: credential_request_options_json.clone(),
+                });
+            }
+            return Err(DeviceAuthorizationError::AlreadyFinal);
+        }
+        if !matches!(record.state, DeviceAuthorizationState::Pending) {
+            return Err(state_error(&record.state));
+        }
+
+        let approval_id = random_array::<16>()?;
+        let context = WebAuthnAuthenticationContext {
+            approval_id,
+            authorization_id: record.id,
             approver: approver.clone(),
-            challenge: challenge.challenge,
+            scope: record.scope.clone(),
+            csr_sha256: record.csr_sha256,
+            spki_sha256: record.spki_sha256,
+            expires_at_unix_ms: record.expires_at_unix_ms,
         };
-        self.replace(record)?;
-        Ok(challenge)
+        let start = match ports.start_authentication(&context) {
+            Ok(start)
+                if !start.credential_request_options_json.is_empty()
+                    && start.credential_request_options_json.len() <= 64 * 1024
+                    && !start.opaque_state.is_empty()
+                    && start.opaque_state.len() <= 64 * 1024 =>
+            {
+                start
+            }
+            Ok(_) | Err(DeviceAuthorizationPortError::Rejected) => {
+                return Err(DeviceAuthorizationError::WebAuthnCredentialRequired)
+            }
+            Err(DeviceAuthorizationPortError::Unavailable) => {
+                return Err(DeviceAuthorizationError::WebAuthnUnavailable)
+            }
+        };
+        let desired_state = DeviceAuthorizationState::AwaitingWebAuthn {
+            approval_id,
+            approver: approver.clone(),
+            credential_request_options_json: start.credential_request_options_json.clone(),
+            opaque_state: start.opaque_state,
+        };
+
+        // Polling may advance the record revision while verifier start runs.
+        // Re-read and retry only while the same enrollment is still pending.
+        for _ in 0..5 {
+            record.state = desired_state.clone();
+            match self.replace(record.clone()) {
+                Ok(()) => {
+                    return Ok(DeviceApprovalChallenge {
+                        approval_id,
+                        credential_request_options_json: start.credential_request_options_json,
+                    })
+                }
+                Err(DeviceAuthorizationError::ConcurrentTransition) => {
+                    record = self
+                        .store
+                        .by_user_code_hash(&code_hash)
+                        .map_err(map_store_error)?
+                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                    match &record.state {
+                        DeviceAuthorizationState::Pending => {}
+                        DeviceAuthorizationState::AwaitingWebAuthn {
+                            approval_id: current_id,
+                            approver: current_approver,
+                            credential_request_options_json,
+                            ..
+                        } if current_approver == approver => {
+                            return Ok(DeviceApprovalChallenge {
+                                approval_id: *current_id,
+                                credential_request_options_json: credential_request_options_json
+                                    .clone(),
+                            });
+                        }
+                        state => return Err(state_error(state)),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(DeviceAuthorizationError::ConcurrentTransition)
     }
 
     /// Completes an approval only after rechecking membership, CSR/SPKI
@@ -720,18 +853,32 @@ where
                 return self.issue_reserved_approval(record, ports)
             }
             DeviceAuthorizationState::Approved { .. } => return Ok(()),
-            DeviceAuthorizationState::AwaitingWebAuthn { .. } => {}
+            DeviceAuthorizationState::AwaitingWebAuthn { .. }
+            | DeviceAuthorizationState::VerifyingWebAuthn { .. } => {}
             state => return Err(state_error(state)),
         }
         if assertion.is_empty() || assertion.len() > 16 * 1024 {
             return Err(DeviceAuthorizationError::InvalidWebAuthnAssertion);
         }
-        let (approver, challenge) = match &record.state {
+        let assertion_sha256 = sha256(assertion);
+        let (approver, opaque_state) = match &record.state {
             DeviceAuthorizationState::AwaitingWebAuthn {
                 approval_id: current,
                 approver,
-                challenge,
-            } if current == approval_id => (approver.clone(), *challenge),
+                opaque_state,
+                ..
+            } if current == approval_id => (approver.clone(), opaque_state.clone()),
+            DeviceAuthorizationState::VerifyingWebAuthn {
+                approval_id: current,
+                approver,
+                assertion_sha256: current_assertion,
+                opaque_state,
+            } if current == approval_id && current_assertion == &assertion_sha256 => {
+                (approver.clone(), opaque_state.clone())
+            }
+            DeviceAuthorizationState::VerifyingWebAuthn { .. } => {
+                return Err(DeviceAuthorizationError::InvalidWebAuthnAssertion)
+            }
             _ => return Err(state_error(&record.state)),
         };
 
@@ -763,34 +910,168 @@ where
             return Err(DeviceAuthorizationError::CsrBindingMismatch);
         }
 
-        match ports.verify_approval_assertion(&approver, &challenge, assertion, now_unix_ms) {
+        if sha256(&record.csr_der) != record.csr_sha256 {
+            self.deny_reserved_approval(record, approval_id, &approver, now_unix_ms)?;
+            return Err(DeviceAuthorizationError::CsrBindingMismatch);
+        }
+
+        let context = WebAuthnAuthenticationContext {
+            approval_id: *approval_id,
+            authorization_id: record.id,
+            approver: approver.clone(),
+            scope: record.scope.clone(),
+            csr_sha256: record.csr_sha256,
+            spki_sha256: record.spki_sha256,
+            expires_at_unix_ms: record.expires_at_unix_ms,
+        };
+        record = self.reserve_verification(
+            record,
+            approval_id,
+            &approver,
+            &opaque_state,
+            &assertion_sha256,
+        )?;
+
+        match ports.finish_authentication(&context, &opaque_state, assertion, now_unix_ms) {
             Ok(()) => {}
             Err(DeviceAuthorizationPortError::Rejected) => {
                 self.release_approval(record, approval_id)?;
                 return Err(DeviceAuthorizationError::InvalidWebAuthnAssertion);
             }
             Err(DeviceAuthorizationPortError::Unavailable) => {
-                self.release_approval(record, approval_id)?;
+                // The verifier may have consumed the challenge and advanced
+                // the credential counter. Keep this exact assertion resumable.
                 return Err(DeviceAuthorizationError::WebAuthnUnavailable);
             }
         }
 
-        // Reserve the transition before the external CA side effect. If
-        // denial wins this CAS, no certificate can be issued. Once Issuing is
-        // durable, denial and expiry cannot cancel an ambiguous signer call.
-        let issued_at_unix_ms = now_unix_ms;
-        record.state = DeviceAuthorizationState::Issuing {
-            approval_id: *approval_id,
-            approver,
-            issued_at_unix_ms,
-        };
-        let next_revision = record
-            .revision
-            .checked_add(1)
-            .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
-        self.replace(record.clone())?;
-        record.revision = next_revision;
+        // This CAS is the approval linearization point. Denial or expiry may
+        // win while WebAuthn runs; in that case the signer is never invoked.
+        record = self.reserve_issuance(
+            record,
+            approval_id,
+            &approver,
+            &assertion_sha256,
+            now_unix_ms,
+        )?;
         self.issue_reserved_approval(record, ports)
+    }
+
+    fn reserve_verification(
+        &self,
+        mut record: DeviceAuthorizationRecord,
+        approval_id: &DeviceAuthorizationId,
+        approver: &UserIdentityRef,
+        opaque_state: &[u8],
+        assertion_sha256: &[u8; 32],
+    ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
+        for _ in 0..5 {
+            match &record.state {
+                DeviceAuthorizationState::AwaitingWebAuthn {
+                    approval_id: current,
+                    approver: current_approver,
+                    opaque_state: current_state,
+                    ..
+                } if current == approval_id
+                    && current_approver == approver
+                    && current_state == opaque_state =>
+                {
+                    record.state = DeviceAuthorizationState::VerifyingWebAuthn {
+                        approval_id: *approval_id,
+                        approver: approver.clone(),
+                        assertion_sha256: *assertion_sha256,
+                        opaque_state: opaque_state.to_vec(),
+                    };
+                }
+                DeviceAuthorizationState::VerifyingWebAuthn {
+                    approval_id: current,
+                    approver: current_approver,
+                    assertion_sha256: current_assertion,
+                    opaque_state: current_state,
+                } if current == approval_id
+                    && current_approver == approver
+                    && current_assertion == assertion_sha256
+                    && current_state == opaque_state =>
+                {
+                    return Ok(record)
+                }
+                state => return Err(state_error(state)),
+            }
+            match self.replace(record.clone()) {
+                Ok(()) => {
+                    record.revision = record
+                        .revision
+                        .checked_add(1)
+                        .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+                    return Ok(record);
+                }
+                Err(DeviceAuthorizationError::ConcurrentTransition) => {
+                    record = self
+                        .store
+                        .by_device_code_hash(&record.device_code_hash)
+                        .map_err(map_store_error)?
+                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(DeviceAuthorizationError::ConcurrentTransition)
+    }
+
+    fn reserve_issuance(
+        &self,
+        mut record: DeviceAuthorizationRecord,
+        approval_id: &DeviceAuthorizationId,
+        approver: &UserIdentityRef,
+        assertion_sha256: &[u8; 32],
+        issued_at_unix_ms: u64,
+    ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
+        for _ in 0..5 {
+            match &record.state {
+                DeviceAuthorizationState::VerifyingWebAuthn {
+                    approval_id: current,
+                    approver: current_approver,
+                    assertion_sha256: current_assertion,
+                    ..
+                } if current == approval_id
+                    && current_approver == approver
+                    && current_assertion == assertion_sha256 =>
+                {
+                    record.state = DeviceAuthorizationState::Issuing {
+                        approval_id: *approval_id,
+                        approver: approver.clone(),
+                        issued_at_unix_ms,
+                    };
+                }
+                DeviceAuthorizationState::Issuing {
+                    approval_id: current,
+                    ..
+                } if current == approval_id => return Ok(record),
+                DeviceAuthorizationState::Approved {
+                    approval_id: current,
+                    ..
+                } if current == approval_id => return Ok(record),
+                state => return Err(state_error(state)),
+            }
+            match self.replace(record.clone()) {
+                Ok(()) => {
+                    record.revision = record
+                        .revision
+                        .checked_add(1)
+                        .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+                    return Ok(record);
+                }
+                Err(DeviceAuthorizationError::ConcurrentTransition) => {
+                    record = self
+                        .store
+                        .by_device_code_hash(&record.device_code_hash)
+                        .map_err(map_store_error)?
+                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(DeviceAuthorizationError::ConcurrentTransition)
     }
 
     fn issue_reserved_approval(
@@ -925,7 +1206,9 @@ where
         }
         if !matches!(
             record.state,
-            DeviceAuthorizationState::Pending | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+            DeviceAuthorizationState::Pending
+                | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+                | DeviceAuthorizationState::VerifyingWebAuthn { .. }
         ) {
             return Err(state_error(&record.state));
         }
@@ -993,6 +1276,7 @@ where
         match record.state.clone() {
             DeviceAuthorizationState::Pending
             | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+            | DeviceAuthorizationState::VerifyingWebAuthn { .. }
             | DeviceAuthorizationState::Issuing { .. } => {
                 let interval_ms = record.poll_interval_ms;
                 self.replace(record)?;
@@ -1042,8 +1326,8 @@ where
         record: &mut DeviceAuthorizationRecord,
         now_unix_ms: u64,
     ) -> Result<(), DeviceAuthorizationError> {
-        // Issuance may already have succeeded at the CA. Keep its reservation
-        // recoverable even after the original user-code TTL has elapsed.
+        // An in-flight verifier may consume an assertion; issuance may already
+        // have committed at the CA. Keep only `Issuing` recoverable after TTL.
         if matches!(record.state, DeviceAuthorizationState::Issuing { .. }) {
             return Ok(());
         }
@@ -1053,6 +1337,7 @@ where
         match record.state {
             DeviceAuthorizationState::Pending
             | DeviceAuthorizationState::AwaitingWebAuthn { .. }
+            | DeviceAuthorizationState::VerifyingWebAuthn { .. }
             | DeviceAuthorizationState::Approved { .. } => {
                 record.state = DeviceAuthorizationState::Expired;
                 self.replace(record.clone())?;
@@ -1080,6 +1365,7 @@ where
         if !matches!(
             record.state,
             DeviceAuthorizationState::AwaitingWebAuthn { approval_id: current, .. }
+                | DeviceAuthorizationState::VerifyingWebAuthn { approval_id: current, .. }
                 if &current == approval_id
         ) {
             return Err(DeviceAuthorizationError::AlreadyFinal);
@@ -1098,6 +1384,7 @@ where
         if !matches!(
             record.state,
             DeviceAuthorizationState::AwaitingWebAuthn { approval_id: current, .. }
+                | DeviceAuthorizationState::VerifyingWebAuthn { approval_id: current, .. }
                 if &current == approval_id
         ) {
             return Err(DeviceAuthorizationError::AlreadyFinal);
@@ -1199,6 +1486,10 @@ fn hash_code(kind: &[u8], code: &[u8]) -> DeviceAuthorizationCodeHash {
     hasher.finalize().into()
 }
 
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 fn random_array<const N: usize>() -> Result<[u8; N], DeviceAuthorizationError> {
     let mut output = [0; N];
     getrandom::getrandom(&mut output).map_err(|_| DeviceAuthorizationError::RandomUnavailable)?;
@@ -1209,6 +1500,7 @@ fn state_error(state: &DeviceAuthorizationState) -> DeviceAuthorizationError {
     match state {
         DeviceAuthorizationState::Pending => DeviceAuthorizationError::Pending,
         DeviceAuthorizationState::AwaitingWebAuthn { .. }
+        | DeviceAuthorizationState::VerifyingWebAuthn { .. }
         | DeviceAuthorizationState::Issuing { .. }
         | DeviceAuthorizationState::Approved { .. } => DeviceAuthorizationError::AlreadyFinal,
         DeviceAuthorizationState::Denied { .. } => DeviceAuthorizationError::Denied,
@@ -1242,18 +1534,6 @@ mod tests {
         }
     }
 
-    struct TestMembership(bool);
-
-    impl WorkspaceMembershipPort for TestMembership {
-        fn is_member(
-            &self,
-            _approver: &UserIdentityRef,
-            _scope: &DeviceAuthorizationScope,
-        ) -> Result<bool, DeviceAuthorizationPortError> {
-            Ok(self.0)
-        }
-    }
-
     struct TestApprovalPorts;
 
     impl DeviceCsrValidator for TestApprovalPorts {
@@ -1275,15 +1555,23 @@ mod tests {
         }
     }
 
-    impl WebAuthnAssertionVerifier for TestApprovalPorts {
-        fn verify_approval_assertion(
+    impl WebAuthnAuthenticationPort for TestApprovalPorts {
+        fn start_authentication(
             &self,
-            _approver: &UserIdentityRef,
-            _challenge: &[u8; 32],
+            context: &WebAuthnAuthenticationContext,
+        ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError> {
+            test_webauthn_start(context)
+        }
+
+        fn finish_authentication(
+            &self,
+            context: &WebAuthnAuthenticationContext,
+            opaque_state: &[u8],
             assertion: &[u8],
             _now_unix_ms: u64,
         ) -> Result<(), DeviceAuthorizationPortError> {
-            if assertion == b"test-only-valid-assertion" {
+            if opaque_state == &context.approval_id[..] && assertion == b"test-only-valid-assertion"
+            {
                 Ok(())
             } else {
                 Err(DeviceAuthorizationPortError::Rejected)
@@ -1308,6 +1596,15 @@ mod tests {
                 not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
             })
         }
+    }
+
+    fn test_webauthn_start(
+        context: &WebAuthnAuthenticationContext,
+    ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError> {
+        Ok(WebAuthnAuthenticationStart {
+            credential_request_options_json: b"{}".to_vec(),
+            opaque_state: context.approval_id.to_vec(),
+        })
     }
 
     #[derive(Default)]
@@ -1375,15 +1672,23 @@ mod tests {
         }
     }
 
-    impl WebAuthnAssertionVerifier for BlockingApprovalPorts {
-        fn verify_approval_assertion(
+    impl WebAuthnAuthenticationPort for BlockingApprovalPorts {
+        fn start_authentication(
             &self,
-            _approver: &UserIdentityRef,
-            _challenge: &[u8; 32],
+            context: &WebAuthnAuthenticationContext,
+        ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError> {
+            test_webauthn_start(context)
+        }
+
+        fn finish_authentication(
+            &self,
+            context: &WebAuthnAuthenticationContext,
+            opaque_state: &[u8],
             assertion: &[u8],
             _now_unix_ms: u64,
         ) -> Result<(), DeviceAuthorizationPortError> {
-            if assertion == b"test-only-valid-assertion" {
+            if opaque_state == &context.approval_id[..] && assertion == b"test-only-valid-assertion"
+            {
                 Ok(())
             } else {
                 Err(DeviceAuthorizationPortError::Rejected)
@@ -1458,15 +1763,23 @@ mod tests {
         }
     }
 
-    impl WebAuthnAssertionVerifier for UncertainOnceApprovalPorts {
-        fn verify_approval_assertion(
+    impl WebAuthnAuthenticationPort for UncertainOnceApprovalPorts {
+        fn start_authentication(
             &self,
-            _approver: &UserIdentityRef,
-            _challenge: &[u8; 32],
+            context: &WebAuthnAuthenticationContext,
+        ) -> Result<WebAuthnAuthenticationStart, DeviceAuthorizationPortError> {
+            test_webauthn_start(context)
+        }
+
+        fn finish_authentication(
+            &self,
+            context: &WebAuthnAuthenticationContext,
+            opaque_state: &[u8],
             assertion: &[u8],
             _now_unix_ms: u64,
         ) -> Result<(), DeviceAuthorizationPortError> {
-            if assertion == b"test-only-valid-assertion" {
+            if opaque_state == &context.approval_id[..] && assertion == b"test-only-valid-assertion"
+            {
                 Ok(())
             } else {
                 Err(DeviceAuthorizationPortError::Rejected)
@@ -1576,7 +1889,7 @@ mod tests {
                 &user(),
                 &[4; 32],
                 200,
-                &TestMembership(true),
+                &TestApprovalPorts,
             )
             .expect("challenge");
         manager
@@ -1611,7 +1924,7 @@ mod tests {
                 &user(),
                 &[4; 32],
                 200,
-                &TestMembership(true),
+                &TestApprovalPorts,
             )
             .expect("challenge");
         let (ports, entered_rx) = BlockingApprovalPorts::new();
@@ -1641,7 +1954,7 @@ mod tests {
             reserved.state,
             DeviceAuthorizationState::Issuing { .. }
         ));
-        assert_eq!(reserved.revision, 2);
+        assert_eq!(reserved.revision, 3);
         assert_eq!(
             manager.deny(
                 &start.user_code,
@@ -1649,7 +1962,7 @@ mod tests {
                 &user(),
                 &[5; 32],
                 301,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::AlreadyFinal)
         );
@@ -1687,7 +2000,7 @@ mod tests {
                 &user(),
                 &[4; 32],
                 200,
-                &TestMembership(true),
+                &TestApprovalPorts,
             )
             .expect("challenge");
         let (ports, entered_rx) = BlockingApprovalPorts::new();
@@ -1739,7 +2052,7 @@ mod tests {
                 &user(),
                 &[4; 32],
                 200,
-                &TestMembership(true),
+                &TestApprovalPorts,
             )
             .expect("challenge");
         let ports = UncertainOnceApprovalPorts::default();
@@ -1794,7 +2107,7 @@ mod tests {
                 &user(),
                 &[8; 32],
                 200,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::ScopeMismatch)
         );
@@ -1806,7 +2119,7 @@ mod tests {
                 &user(),
                 &[9; 32],
                 201,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::InvalidCode)
         );
@@ -1817,7 +2130,7 @@ mod tests {
                 &user(),
                 &[9; 32],
                 202,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::InvalidCode)
         );
@@ -1828,7 +2141,7 @@ mod tests {
                 &user(),
                 &[9; 32],
                 203,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::InvalidCode)
         );
@@ -1839,7 +2152,7 @@ mod tests {
                 &user(),
                 &[9; 32],
                 204,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::TooManyAttempts)
         );
@@ -1881,7 +2194,7 @@ mod tests {
                 &user(),
                 &[6; 32],
                 200,
-                &TestMembership(true),
+                &TestApprovalPorts,
             )
             .expect("first denial");
 
@@ -1892,7 +2205,7 @@ mod tests {
                 &user(),
                 &[6; 32],
                 201,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::Denied)
         );
@@ -1903,7 +2216,7 @@ mod tests {
                 &user(),
                 &[7; 32],
                 202,
-                &TestMembership(true),
+                &TestApprovalPorts,
             ),
             Err(DeviceAuthorizationError::Denied)
         );
