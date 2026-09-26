@@ -79,6 +79,7 @@ issue_client_certificate() {
 issue_client_certificate frontend
 issue_client_certificate workspace
 issue_client_certificate runtime
+workspace_certificate_fingerprint=$(openssl x509 -in "${proof_root}/certs/workspace.crt" -outform DER | sha256sum | cut -d ' ' -f 1)
 openssl rand -hex 32 > "${proof_root}/certs/artifact-ticket.key"
 chmod 600 "${proof_root}/certs/"*.key
 
@@ -111,8 +112,9 @@ start_relay() {
   CYRENE_WORKSPACE_RELAY_SERVER_CERT="${proof_root}/certs/server.crt" \
   CYRENE_WORKSPACE_RELAY_SERVER_KEY="${proof_root}/certs/server.key" \
   CYRENE_WORKSPACE_RELAY_CLIENT_CA="${proof_root}/certs/ca.crt" \
+  CYRENE_WORKSPACE_RELAY_DIRECTORY="${proof_root}/state/relay-directory" \
+  CYRENE_WORKSPACE_DEVICE_CERTIFICATE_SHA256="${workspace_certificate_fingerprint}" \
   CYRENE_FRONTEND_SESSION_CREDENTIAL=development-frontend-session \
-  CYRENE_WORKSPACE_SESSION_CREDENTIAL=development-workspace-session \
   CYRENE_WORKSPACE_DEVICE_ID=device-fixture \
   CYRENE_WORKSPACE_ID=workspace-fixture \
   CYRENE_ORGANIZATION_ID=organization-fixture \
@@ -162,7 +164,6 @@ docker run -d --name "${container_name}" \
   -e "CYRENE_RUNTIME_CONTROL_PORT=${runtime_control_port}" \
   -e "CYRENE_WORKSPACE_DIRECT_PORT=${direct_port}" \
   -e CYRENE_FRONTEND_SESSION_CREDENTIAL=development-frontend-session \
-  -e CYRENE_WORKSPACE_SESSION_CREDENTIAL=development-workspace-session \
   -e CYRENE_WORKSPACE_DEVICE_ID=device-fixture \
   -e CYRENE_WORKSPACE_ID=workspace-fixture \
   -e CYRENE_ORGANIZATION_ID=organization-fixture \

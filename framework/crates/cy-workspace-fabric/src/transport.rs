@@ -43,8 +43,11 @@ const RELAY_QUEUE_FRAMES: usize = 8;
 #[derive(Clone)]
 pub struct RelayClientConfig {
     pub control_endpoint: String,
+    /// Expected TLS server name, such as the Relay service identity.
     pub server_name: String,
+    /// Roots used to authenticate the remote TLS server, independently of the client certificate.
     pub ca_certificate_pem: Vec<u8>,
+    /// Client identity presented to the endpoint; a Workspace device cert does not identify Relay.
     pub client_certificate_pem: Vec<u8>,
     pub client_key_pem: Vec<u8>,
 }

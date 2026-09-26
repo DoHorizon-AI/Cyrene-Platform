@@ -12,6 +12,7 @@ mod api;
 mod auth;
 mod caller;
 mod control_plane;
+mod device_auth;
 mod device_registry;
 mod direct;
 mod directory;
@@ -29,7 +30,11 @@ pub use api::{
     WorkspaceApi,
 };
 pub use auth::{
-    DevelopmentSessionVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
+    DevelopmentSessionVerifier, RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims,
+    SessionPrincipal,
+};
+pub use device_auth::{
+    RegistryWorkspaceDeviceVerifier, VerifiedClientCertificate, WorkspaceDeviceAuthenticationError,
 };
 pub use caller::{
     WorkspaceAuthorizationError, WorkspaceCallerContext, WorkspaceCallerPrincipal,

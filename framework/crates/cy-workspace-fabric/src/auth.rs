@@ -13,6 +13,12 @@ use cy_proto::workspace_v1::{RelayHello, RelayParticipantRole, UserIdentityRef};
 use thiserror::Error;
 
 /// Principal kind carried by one short-lived relay session.
+///
+/// `WorkspaceDevice` is the identity of an inbound connector as seen by the
+/// Relay. It must not be treated as the Relay service identity when a
+/// Workspace receiver decides whether to trust forwarded caller roles.
+///
+/// `WorkspaceDevice` 表示 Relay 所见的入站 Connector 身份，不能作为 Workspace 接收端信任转发 caller role 时的 Relay 服务身份。
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionPrincipal {
     User(UserIdentityRef),
@@ -43,7 +49,7 @@ pub enum RelayAuthenticationError {
     PrincipalMismatch,
 }
 
-/// Replaceable verifier for OIDC, device authorization, or development tokens.
+/// Replaceable verifier for Frontend OIDC or development session tokens.
 pub trait RelayAuthenticator: Send + Sync {
     fn authenticate(
         &self,
@@ -98,18 +104,6 @@ impl RelayAuthenticator for DevelopmentSessionVerifier {
                         .as_ref()
                         .is_some_and(|actual| same_user(expected, actual))
             }
-            (
-                SessionPrincipal::WorkspaceDevice {
-                    workspace_id,
-                    device_id,
-                },
-                RelayParticipantRole::WorkspaceConnector,
-            ) => {
-                workspace_id == &hello.workspace_id
-                    && hello.device.as_ref().is_some_and(|device| {
-                        device.workspace_id == *workspace_id && device.device_id == *device_id
-                    })
-            }
             _ => false,
         };
         matches
@@ -129,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_and_workspace_device_credentials_are_not_interchangeable() {
+    fn development_user_verifier_does_not_authenticate_workspace_connectors() {
         let claims = RelaySessionClaims {
             principal: SessionPrincipal::User(UserIdentityRef {
                 issuer: "https://identity.test".to_string(),

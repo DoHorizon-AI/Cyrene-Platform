@@ -25,7 +25,9 @@ use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::{
-    RelayAuthenticator, RelaySessionClaims, SessionPrincipal, WorkspaceCallerContext,
+    RegistryWorkspaceDeviceVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
+    VerifiedClientCertificate, WorkspaceDeviceAuthenticationError, WorkspaceDeviceRegistry,
+    WorkspaceCallerContext,
     WorkspaceDirectory,
 };
 
@@ -59,6 +61,7 @@ struct Connections {
 struct RelayState {
     directory: Arc<dyn WorkspaceDirectory>,
     authenticator: Arc<dyn RelayAuthenticator>,
+    workspace_device_verifier: Option<Arc<RegistryWorkspaceDeviceVerifier>>,
     connections: Mutex<Connections>,
     next_session: AtomicU64,
 }
@@ -70,17 +73,80 @@ pub struct WorkspaceRelay {
 }
 
 impl WorkspaceRelay {
+    /// Build a Relay that authenticates Frontend sessions and denies Workspace connectors.
     pub fn new(
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,
+    ) -> Self {
+        Self::build(directory, authenticator, None)
+    }
+
+    /// Construct a Relay whose Workspace connectors authenticate with the
+    /// Tonic TLS peer certificate and the supplied device registry.
+    ///
+    /// `new` deliberately leaves connector authentication disabled. A Relay
+    /// without a trusted device registry therefore cannot accept connectors.
+    pub fn with_workspace_device_registry(
+        directory: Arc<dyn WorkspaceDirectory>,
+        authenticator: Arc<dyn RelayAuthenticator>,
+        registry: Arc<dyn WorkspaceDeviceRegistry>,
+    ) -> Self {
+        Self::build(
+            directory,
+            authenticator,
+            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+        )
+    }
+
+    fn build(
+        directory: Arc<dyn WorkspaceDirectory>,
+        authenticator: Arc<dyn RelayAuthenticator>,
+        workspace_device_verifier: Option<Arc<RegistryWorkspaceDeviceVerifier>>,
     ) -> Self {
         Self {
             state: Arc::new(RelayState {
                 directory,
                 authenticator,
+                workspace_device_verifier,
                 connections: Mutex::new(Connections::default()),
                 next_session: AtomicU64::new(1),
             }),
+        }
+    }
+
+    /// Route user sessions and device certificates through separate authorities.
+    fn authenticate_participant(
+        &self,
+        role: RelayParticipantRole,
+        hello: &RelayHello,
+        peer_certificate: Result<VerifiedClientCertificate, WorkspaceDeviceAuthenticationError>,
+        now_unix_ms: u64,
+    ) -> Result<RelaySessionClaims, Box<Status>> {
+        match role {
+            RelayParticipantRole::Frontend => self
+                .state
+                .authenticator
+                .authenticate(hello, now_unix_ms)
+                .map_err(|error| Box::new(Status::unauthenticated(error.to_string()))),
+            RelayParticipantRole::WorkspaceConnector => {
+                let certificate = peer_certificate
+                    .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
+                let verifier = self
+                    .state
+                    .workspace_device_verifier
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Box::new(Status::unauthenticated(
+                            "WORKSPACE_DEVICE_CERTIFICATE_AUTHENTICATION_NOT_CONFIGURED",
+                        ))
+                    })?;
+                verifier
+                    .authenticate(hello, &certificate, now_unix_ms)
+                    .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))
+            }
+            RelayParticipantRole::Unspecified => Err(Box::new(Status::invalid_argument(
+                "relay participant role is required",
+            ))),
         }
     }
 
@@ -165,6 +231,7 @@ impl WorkspaceRelayService for WorkspaceRelay {
         &self,
         request: Request<Streaming<RelayFrame>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
+        let peer_certificate = VerifiedClientCertificate::from_tonic_request(&request);
         let mut inbound = request.into_inner();
         let first = tokio::time::timeout(Duration::from_secs(5), inbound.message())
             .await
@@ -173,13 +240,11 @@ impl WorkspaceRelayService for WorkspaceRelay {
         let Some(relay_frame::Body::Hello(hello)) = first.body else {
             return Err(Status::invalid_argument("first relay frame must be hello"));
         };
-        let claims = self
-            .state
-            .authenticator
-            .authenticate(&hello, now_unix_ms())
-            .map_err(|error| Status::unauthenticated(error.to_string()))?;
         let role = RelayParticipantRole::try_from(hello.role)
             .map_err(|_| Status::invalid_argument("unknown relay participant role"))?;
+        let claims = self
+            .authenticate_participant(role, &hello, peer_certificate, now_unix_ms())
+            .map_err(|status| *status)?;
         let (sender, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
         match role {
             RelayParticipantRole::Frontend => {
@@ -435,12 +500,20 @@ impl WorkspaceRelay {
         mut inbound: Streaming<RelayFrame>,
         sender: RelaySender,
     ) -> Result<(), Status> {
-        let SessionPrincipal::WorkspaceDevice { workspace_id, .. } = &claims.principal else {
+        let SessionPrincipal::WorkspaceDevice {
+            workspace_id,
+            device_id,
+        } = &claims.principal
+        else {
             return Err(Status::permission_denied(
                 "Workspace connector requires device identity",
             ));
         };
-        if workspace_id != &hello.workspace_id {
+        if workspace_id != &hello.workspace_id
+            || hello.device.as_ref().is_none_or(|device| {
+                device.workspace_id != *workspace_id || device.device_id != *device_id
+            })
+        {
             return Err(Status::permission_denied("Workspace identity mismatch"));
         }
         let relay_session_id = self.next_session("workspace");
@@ -695,6 +768,36 @@ mod tests {
         );
         drop(connections);
         relay
+    }
+
+    #[test]
+    fn relay_rejects_workspace_connector_without_tls_peer_certificate() {
+        let directory = Arc::new(InMemoryWorkspaceDirectory::new(Vec::new(), Vec::new()).unwrap());
+        let relay = WorkspaceRelay::new(directory, Arc::new(DevelopmentSessionVerifier::default()));
+        let hello = RelayHello {
+            role: RelayParticipantRole::WorkspaceConnector as i32,
+            session_credential: "spoofed-session".into(),
+            user: None,
+            organization_id: "organization-1".into(),
+            workspace_id: "workspace-1".into(),
+            device: Some(cy_proto::workspace_v1::DeviceEnrollmentRef {
+                device_id: "device-1".into(),
+                workspace_id: "workspace-1".into(),
+                enrollment_state: "approved".into(),
+            }),
+        };
+
+        let error = relay
+            .authenticate_participant(
+                RelayParticipantRole::WorkspaceConnector,
+                &hello,
+                Err(WorkspaceDeviceAuthenticationError::MissingClientCertificate),
+                now_unix_ms(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+        assert_eq!(error.message(), "WORKSPACE_DEVICE_TLS_CERTIFICATE_REQUIRED");
     }
 
     #[test]

@@ -41,10 +41,11 @@ use cy_proto::workspace_v1::{
 };
 use cy_workspace_fabric::{
     bounded_workspace_direct_server, bounded_workspace_relay_server, connect_discovered_workspace,
-    connect_relay_session, DevelopmentSessionVerifier, DirectWorkspaceServer,
+    connect_relay_session, ApprovedWorkspaceDeviceCertificate, DevelopmentSessionVerifier,
+    DeviceAuthorizationStatus, DirectWorkspaceServer, FileWorkspaceDirectory,
     InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims, SessionPrincipal,
     WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceConnection,
-    WorkspaceMembership, WorkspaceRelay,
+    WorkspaceDeviceKey, WorkspaceDeviceRegistry, WorkspaceMembership, WorkspaceRelay,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::Code;
@@ -103,7 +104,8 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
         ],
         expires_at: Some(timestamp_from_ms(expires_at_unix_ms)),
     };
-    let directory = Arc::new(InMemoryWorkspaceDirectory::new(
+    let directory = FileWorkspaceDirectory::open(required("CYRENE_WORKSPACE_RELAY_DIRECTORY")?)?;
+    directory.replace(
         vec![WorkspaceMembership {
             user: user.clone(),
             organization_id: organization_id.clone(),
@@ -111,31 +113,37 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
             roles: BTreeSet::from(["workspace.member".to_string()]),
         }],
         vec![descriptor],
-    )?);
-    let authenticator = Arc::new(DevelopmentSessionVerifier::new([
-        (
-            required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
-            RelaySessionClaims {
-                principal: SessionPrincipal::User(user),
-                organization_id: organization_id.clone(),
-                workspace_id: String::new(),
-                expires_at_unix_ms,
-            },
-        ),
-        (
-            required("CYRENE_WORKSPACE_SESSION_CREDENTIAL")?,
-            RelaySessionClaims {
-                principal: SessionPrincipal::WorkspaceDevice {
-                    workspace_id,
-                    device_id: required("CYRENE_WORKSPACE_DEVICE_ID")?,
-                },
-                organization_id,
-                workspace_id: required("CYRENE_WORKSPACE_ID")?,
-                expires_at_unix_ms,
-            },
-        ),
-    ]));
-    let relay = WorkspaceRelay::new(directory, authenticator);
+    )?;
+    let device_key = WorkspaceDeviceKey {
+        organization_id: organization_id.clone(),
+        workspace_id: workspace_id.clone(),
+        device_id: required("CYRENE_WORKSPACE_DEVICE_ID")?,
+    };
+    let device_fingerprint = required("CYRENE_WORKSPACE_DEVICE_CERTIFICATE_SHA256")?;
+    if let Some(record) = directory.find_device(&device_key)? {
+        if record.authorization_status != DeviceAuthorizationStatus::Approved
+            || record.certificate_fingerprint_sha256 != device_fingerprint
+        {
+            return Err("fixture Workspace device record does not match its certificate".into());
+        }
+    } else {
+        directory.import_approved_device_certificate(ApprovedWorkspaceDeviceCertificate {
+            key: device_key,
+            certificate_fingerprint_sha256: device_fingerprint,
+        })?;
+    }
+    let authenticator = Arc::new(DevelopmentSessionVerifier::new([(
+        required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
+        RelaySessionClaims {
+            principal: SessionPrincipal::User(user),
+            organization_id: organization_id.clone(),
+            workspace_id: String::new(),
+            expires_at_unix_ms,
+        },
+    )]));
+    let directory = Arc::new(directory);
+    let registry: Arc<dyn WorkspaceDeviceRegistry> = directory.clone();
+    let relay = WorkspaceRelay::with_workspace_device_registry(directory, authenticator, registry);
     trace(
         Path::new(&required("CYRENE_WORKSPACE_RELAY_TRACE")?),
         &format!("RELAY_STARTED bind={bind}"),
@@ -171,14 +179,14 @@ async fn run_connector() -> Result<(), Box<dyn std::error::Error>> {
     let config = relay_client_config()?;
     let hello = RelayHello {
         role: RelayParticipantRole::WorkspaceConnector as i32,
-        session_credential: required("CYRENE_WORKSPACE_SESSION_CREDENTIAL")?,
+        session_credential: String::new(),
         user: None,
         organization_id,
         workspace_id: workspace_id.clone(),
         device: Some(DeviceEnrollmentRef {
             device_id: required("CYRENE_WORKSPACE_DEVICE_ID")?,
             workspace_id,
-            enrollment_state: "approved".to_string(),
+            enrollment_state: String::new(),
         }),
     };
     let direct_server = run_direct_server(api.clone(), trace_path.clone());

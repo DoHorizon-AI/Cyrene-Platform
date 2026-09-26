@@ -235,4 +235,16 @@ mod tests {
             .await;
         assert_eq!(denied.unwrap_err().code(), Code::Unauthenticated);
     }
+
+    #[tokio::test]
+    async fn direct_endpoint_rejects_workspace_connector_identity() {
+        let mut request = direct_request();
+        request.get_mut().frontend.as_mut().unwrap().role =
+            RelayParticipantRole::WorkspaceConnector as i32;
+
+        let rejected = server(true, now_unix_ms().saturating_add(60_000))
+            .execute(request)
+            .await;
+        assert_eq!(rejected.unwrap_err().code(), Code::PermissionDenied);
+    }
 }
