@@ -26,9 +26,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::{
     RegistryWorkspaceDeviceVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
-    VerifiedClientCertificate, WorkspaceDeviceAuthenticationError, WorkspaceDeviceRegistry,
-    WorkspaceCallerContext,
-    WorkspaceDirectory,
+    VerifiedClientCertificate, WorkspaceCallerContext, WorkspaceDeviceAuthenticationError,
+    WorkspaceDeviceRegistry, WorkspaceDirectory,
 };
 
 type RelayStream = Pin<Box<dyn Stream<Item = Result<RelayFrame, Status>> + Send + 'static>>;

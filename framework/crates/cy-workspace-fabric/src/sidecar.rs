@@ -408,7 +408,7 @@ fn operation_is_allowed(
         Some(workspace_api_request::Request::GetOperation(_)) => {
             WorkspaceOperationPermission::GetOperation
         }
-        None => return false,
+        Some(workspace_api_request::Request::ProductApi(_)) | None => return false,
     };
     allowed_operations.contains(&permission)
 }
@@ -660,9 +660,13 @@ mod tests {
                 input_artifact_uris: Vec::new(),
             },
         );
+        let product_api = workspace_api_request::Request::ProductApi(
+            cy_proto::workspace_v1::WorkspaceProductApiRequest::default(),
+        );
 
         assert!(operation_is_allowed(Some(&get_operation), &allowed));
         assert!(!operation_is_allowed(Some(&start_operation), &allowed));
+        assert!(!operation_is_allowed(Some(&product_api), &allowed));
         assert!(!operation_is_allowed(None, &allowed));
     }
 }

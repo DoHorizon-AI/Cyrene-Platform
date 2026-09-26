@@ -18,9 +18,9 @@ mod direct;
 mod directory;
 mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
+pub mod device_authorization;
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
-pub mod device_authorization;
 mod product_projection;
 mod relay;
 mod sidecar;
@@ -34,9 +34,6 @@ pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims,
     SessionPrincipal,
 };
-pub use device_auth::{
-    RegistryWorkspaceDeviceVerifier, VerifiedClientCertificate, WorkspaceDeviceAuthenticationError,
-};
 pub use caller::{
     WorkspaceAuthorizationError, WorkspaceCallerContext, WorkspaceCallerPrincipal,
     WorkspaceDeviceIdentity, NAVIGATOR_SERVICE_WRITER_ROLE, WORKSPACE_MEMBER_ROLE,
@@ -44,6 +41,9 @@ pub use caller::{
 pub use control_plane::{
     WorkspaceControlPlane, WorkspaceControlPlaneConfigError, WorkspaceDispatchError,
     WorkspaceOperationProjection, WorkspaceProductRequest, WorkspaceRequestDispatcher,
+};
+pub use device_auth::{
+    RegistryWorkspaceDeviceVerifier, VerifiedClientCertificate, WorkspaceDeviceAuthenticationError,
 };
 pub use device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,
