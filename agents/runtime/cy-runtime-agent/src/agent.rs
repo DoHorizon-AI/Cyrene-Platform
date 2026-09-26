@@ -38,6 +38,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::Request;
 
+use crate::journal::Journal;
 use crate::outbox::AgentOutbox;
 use crate::{ChildSupervisor, RuntimeAgentConfig, WorkloadOutputStream};
 
@@ -72,12 +73,15 @@ pub enum RuntimeAgentError {
 
 struct ActiveAssignment {
     assignment_id: String,
+    attempt_id: String,
     lease: SemanticLease,
     lease_proto: semantic_v1::Lease,
     pending_renewal: Option<String>,
 }
 
 struct AgentState {
+    journal: Journal,
+    recovery_uncertain: bool,
     outbox: AgentOutbox,
     child: ChildSupervisor,
     assignment: Option<ActiveAssignment>,
@@ -90,18 +94,39 @@ struct AgentState {
 }
 
 impl AgentState {
-    fn new(workload: Vec<String>) -> Self {
-        Self {
+    fn open(config: &RuntimeAgentConfig) -> Result<Self, RuntimeAgentError> {
+        let journal = Journal::open(config)?;
+        let terminal = journal.terminal()?;
+        let recovery_uncertain =
+            journal.admission().is_some_and(|a| !a.rejected) && terminal.is_none();
+        let observed_state = terminal
+            .as_ref()
+            .and_then(|t| RuntimeObservedState::try_from(t.observed_state).ok())
+            .unwrap_or(if recovery_uncertain {
+                RuntimeObservedState::Lost
+            } else {
+                RuntimeObservedState::Enrolled
+            });
+        let mut state = Self {
+            journal,
+            recovery_uncertain,
             outbox: AgentOutbox::default(),
-            child: ChildSupervisor::new(workload),
+            child: ChildSupervisor::new(config.workload.clone()),
             assignment: None,
-            observed_state: RuntimeObservedState::Enrolled,
+            observed_state,
             accepted_assignments: BTreeSet::new(),
             accepted_stops: BTreeSet::new(),
             renewal_counter: 0,
             event_counter: 0,
             log_reference_published: false,
+        };
+        if let Some(terminal) = terminal {
+            state.outbox.enqueue(
+                &config.runtime.id,
+                node_to_control_plane::Body::RuntimeObservation(terminal),
+            )?;
         }
+        Ok(state)
     }
 }
 
@@ -119,24 +144,15 @@ enum ControlAction {
 /// 运行一个无特权 Runtime Agent，直到其 workload 进入终态。
 pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), RuntimeAgentError> {
     config.validate()?;
-    let state_directory = config.prepare_state_directory()?;
     fs::create_dir_all(&config.artifact_destination_root)
         .map_err(|error| RuntimeAgentError::Configuration(error.to_string()))?;
-    let mut state = AgentState::new(config.workload.clone());
-    let mut resume_token = config.resolve_resume_token(&state_directory)?;
+    let mut state = AgentState::open(&config)?;
+    let mut resume_token = config.resolve_resume_token(&state.journal.directory)?;
     let mut delay = config.reconnect_min;
     let mut terminate = termination_signal()?;
 
     loop {
-        match connect_once(
-            &config,
-            &state_directory,
-            &mut state,
-            &mut resume_token,
-            &mut terminate,
-        )
-        .await
-        {
+        match connect_once(&config, &mut state, &mut resume_token, &mut terminate).await {
             Ok(ConnectionOutcome::Reconnect(token)) => {
                 resume_token = token;
                 delay = config.reconnect_min;
@@ -154,13 +170,16 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
                 {
                     return Err(error);
                 }
-                tokio::select! {
-                    _ = time::sleep(delay) => delay = backoff(delay, config.reconnect_max),
-                    _ = terminate.recv() => {
-                        stop_for_local_signal(&config, &mut state).await?;
-                        return Ok(());
-                    }
+                if await_with_supervision(&config, &mut state, &mut terminate, async {
+                    time::sleep(delay).await;
+                    Ok(())
+                })
+                .await?
+                .is_none()
+                {
+                    return Ok(());
                 }
+                delay = backoff(delay, config.reconnect_max);
             }
         }
     }
@@ -168,37 +187,28 @@ pub async fn run_runtime_agent(config: RuntimeAgentConfig) -> Result<(), Runtime
 
 async fn connect_once(
     config: &RuntimeAgentConfig,
-    state_directory: &crate::config::StateDirectory,
     state: &mut AgentState,
     resume_token: &mut String,
     terminate: &mut tokio::signal::unix::Signal,
 ) -> Result<ConnectionOutcome, RuntimeAgentError> {
-    let channel = control_plane_channel(config).await?;
-    let mut client = NodeControlServiceClient::new(channel);
-    let (outbound, inbound) = mpsc::channel::<NodeToControlPlane>(64);
-    outbound
-        .send(hello_frame(config, resume_token))
-        .await
-        .map_err(|_| {
-            RuntimeAgentError::Transport("control-plane request stream closed".to_string())
-        })?;
-    let mut inbound = client
-        .connect(Request::new(ReceiverStream::new(inbound)))
-        .await
-        .map_err(transport_status)?
-        .into_inner();
-    let welcome_frame = inbound
-        .message()
-        .await
-        .map_err(transport_status)?
-        .ok_or_else(|| {
-            RuntimeAgentError::Transport("control plane closed before welcome".to_string())
-        })?;
+    let Some((outbound, mut inbound, welcome_frame)) =
+        await_with_supervision(config, state, terminate, async {
+            time::timeout(
+                config.reconnect_max,
+                open_control_stream(config, resume_token),
+            )
+            .await
+            .map_err(|_| RuntimeAgentError::Transport("control handshake timed out".into()))?
+        })
+        .await?
+    else {
+        return Ok(ConnectionOutcome::Completed);
+    };
     let welcome = accept_welcome(&welcome_frame)?;
     // A Welcome consumes a single-use enrollment proof. Preserve its resume
     // token before any local staging work can fail and force a reconnect.
     // Welcome 会消耗一次性 enrollment proof；本地 staging 前先保存 resume token。
-    config.persist_resume_token(state_directory, &welcome.resume_token)?;
+    config.persist_resume_token(&state.journal.directory, &welcome.resume_token)?;
     *resume_token = welcome.resume_token.clone();
     let session_id = welcome.session_id.clone();
     let mut control_cursor = ObservationCursor::default();
@@ -207,12 +217,22 @@ async fn connect_once(
         .outbox
         .acknowledge(welcome.acknowledged_agent_sequence);
     state.outbox.begin_session();
-    enqueue_observation(
-        config,
-        state,
-        "SESSION_ESTABLISHED",
-        "execution session established",
-    )?;
+    if state.journal.terminal()?.is_none() {
+        enqueue_observation(
+            config,
+            state,
+            if state.recovery_uncertain {
+                "RECOVERY_REQUIRES_RECONCILIATION"
+            } else {
+                "SESSION_ESTABLISHED"
+            },
+            if state.recovery_uncertain {
+                "previous workload outcome is unknown; no automatic restart"
+            } else {
+                "execution session established"
+            },
+        )?;
+    }
     state.outbox.enqueue(
         &config.runtime.id,
         node_to_control_plane::Body::ExecutionInventory(core_v1::ExecutionInventory {
@@ -230,6 +250,12 @@ async fn connect_once(
         control_cursor.last_sequence(),
     )
     .await?;
+
+    if state.journal.terminal()?.is_some() {
+        // Replay durable evidence only; never run a workload after terminal recovery.
+        time::sleep(Duration::from_millis(100)).await;
+        return Ok(ConnectionOutcome::Completed);
+    }
 
     let heartbeat_every = proto_duration(welcome.heartbeat_interval.as_ref())
         .unwrap_or_else(|| Duration::from_secs(2));
@@ -292,6 +318,68 @@ async fn connect_once(
             }
         }
     }
+}
+
+/// Connection establishment/backoff must not suspend local Lease enforcement.
+async fn await_with_supervision<T>(
+    config: &RuntimeAgentConfig,
+    state: &mut AgentState,
+    terminate: &mut tokio::signal::unix::Signal,
+    future: impl std::future::Future<Output = Result<T, RuntimeAgentError>>,
+) -> Result<Option<T>, RuntimeAgentError> {
+    tokio::pin!(future);
+    let mut poll = time::interval(Duration::from_millis(100));
+    poll.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut future => return result.map(Some),
+            _ = terminate.recv() => {
+                stop_for_local_signal(config, state).await?;
+                return Ok(None);
+            }
+            _ = poll.tick() => {
+                if !state.recovery_uncertain && state.journal.terminal()?.is_none() {
+                    // Enforce expiry even if logs/observations cannot currently be sent.
+                    let terminal = check_process_and_lease(config, state).await?;
+                    forward_workload_output(config, state)?;
+                    if terminal { publish_log_reference(config, state)?; }
+                }
+            }
+        }
+    }
+}
+
+async fn open_control_stream(
+    config: &RuntimeAgentConfig,
+    resume_token: &str,
+) -> Result<
+    (
+        mpsc::Sender<NodeToControlPlane>,
+        tonic::Streaming<ControlPlaneToNode>,
+        ControlPlaneToNode,
+    ),
+    RuntimeAgentError,
+> {
+    let channel = control_plane_channel(config).await?;
+    let mut client = NodeControlServiceClient::new(channel);
+    let (outbound, inbound) = mpsc::channel::<NodeToControlPlane>(64);
+    outbound
+        .send(hello_frame(config, resume_token))
+        .await
+        .map_err(|_| RuntimeAgentError::Transport("control-plane request stream closed".into()))?;
+    let mut inbound = client
+        .connect(Request::new(ReceiverStream::new(inbound)))
+        .await
+        .map_err(transport_status)?
+        .into_inner();
+    let welcome = inbound
+        .message()
+        .await
+        .map_err(transport_status)?
+        .ok_or_else(|| {
+            RuntimeAgentError::Transport("control plane closed before welcome".into())
+        })?;
+    Ok((outbound, inbound, welcome))
 }
 
 fn hello_frame(config: &RuntimeAgentConfig, resume_token: &str) -> NodeToControlPlane {
@@ -394,6 +482,52 @@ async fn handle_assignment(
     state: &mut AgentState,
     assignment: core_v1::RuntimeAssignment,
 ) -> Result<(), RuntimeAgentError> {
+    if let Some(admission) = state.journal.admission() {
+        if admission.id == assignment.assignment_id {
+            if admission.fingerprint != Journal::fingerprint(&assignment) {
+                return Err(RuntimeAgentError::Transport(
+                    "assignment id reused with a different payload".into(),
+                ));
+            }
+            if state.recovery_uncertain {
+                // A rejection could authorize rollback of the original Lease.
+                return Err(RuntimeAgentError::Transport(
+                    "original workload requires reconciliation".into(),
+                ));
+            }
+            if admission.rejected {
+                return enqueue_assignment_ack(
+                    config,
+                    state,
+                    &assignment,
+                    AssignmentAckDisposition::Rejected,
+                    Some(&FabricContractError {
+                        reason_code: "WORKLOAD_START_FAILED",
+                        message: "persisted spawn rejection".into(),
+                    }),
+                );
+            }
+            return enqueue_assignment_ack(
+                config,
+                state,
+                &assignment,
+                AssignmentAckDisposition::Duplicate,
+                None,
+            );
+        }
+    }
+    if state.journal.admission().is_some() || state.journal.terminal()?.is_some() {
+        return enqueue_assignment_ack(
+            config,
+            state,
+            &assignment,
+            AssignmentAckDisposition::Rejected,
+            Some(&FabricContractError {
+                reason_code: "RUNTIME_BUSY",
+                message: "Runtime generation already has execution evidence".into(),
+            }),
+        );
+    }
     if state
         .accepted_assignments
         .contains(&assignment.assignment_id)
@@ -408,7 +542,7 @@ async fn handle_assignment(
         return Ok(());
     }
     let now = now_unix_ms();
-    let lease = match validate_assignment(&config.runtime, &assignment, now) {
+    let _lease = match validate_assignment(&config.runtime, &assignment, now) {
         Ok(lease) => lease,
         Err(error) => {
             enqueue_assignment_ack(
@@ -476,7 +610,11 @@ async fn handle_assignment(
         fs::remove_file(&log_path).map_err(|error| RuntimeAgentError::Child(error.to_string()))?;
     }
     state.log_reference_published = false;
+    // Staging can outlive the Lease. Revalidate before persisting spawn intent.
+    let lease = validate_assignment(&config.runtime, &assignment, now_unix_ms())?;
+    state.journal.begin(&assignment)?;
     if let Err(error) = state.child.start(None, &Default::default()).await {
+        state.journal.mark_started(false)?;
         reject_assignment_preparation(
             config,
             state,
@@ -486,11 +624,13 @@ async fn handle_assignment(
         )?;
         return Ok(());
     }
+    state.journal.mark_started(true)?;
     state
         .accepted_assignments
         .insert(assignment.assignment_id.clone());
     state.assignment = Some(ActiveAssignment {
         assignment_id: assignment.assignment_id.clone(),
+        attempt_id: assignment.attempt_id.clone(),
         lease,
         lease_proto: assignment
             .lease
@@ -817,16 +957,23 @@ fn prepare_control_stop(
     if !runtime_matches(config, command.runtime.as_ref()) {
         return Ok(ControlAction::Continue);
     }
-    if state.accepted_stops.insert(command.command_id.clone()) {
-        state.outbox.enqueue(
-            &config.runtime.id,
-            node_to_control_plane::Body::StopAck(StopAck {
-                command_id: command.command_id,
-                runtime: Some(runtime_ref(config)),
-                accepted_at: Some(now_timestamp()),
-            }),
-        )?;
+    if state.recovery_uncertain {
+        return Err(RuntimeAgentError::Transport(
+            "cannot confirm termination of a recovered unknown workload".into(),
+        ));
     }
+    if state.assignment.is_none() {
+        return Ok(ControlAction::Continue);
+    }
+    state.accepted_stops.insert(command.command_id.clone());
+    state.outbox.enqueue(
+        &config.runtime.id,
+        node_to_control_plane::Body::StopAck(StopAck {
+            command_id: command.command_id,
+            runtime: Some(runtime_ref(config)),
+            accepted_at: Some(now_timestamp()),
+        }),
+    )?;
     state.observed_state = RuntimeObservedState::Stopping;
     enqueue_observation(config, state, "STOP_ACCEPTED", "graceful stop accepted")?;
     let grace =
@@ -967,6 +1114,11 @@ async fn stop_for_local_signal(
     config: &RuntimeAgentConfig,
     state: &mut AgentState,
 ) -> Result<(), RuntimeAgentError> {
+    if state.recovery_uncertain || state.journal.terminal()?.is_some() || state.assignment.is_none()
+    {
+        // No child handle after restart is not evidence that the old task stopped.
+        return Ok(());
+    }
     state.observed_state = RuntimeObservedState::Stopping;
     enqueue_observation(
         config,
@@ -1001,6 +1153,11 @@ fn enqueue_observation(
     reason: &str,
     summary: &str,
 ) -> Result<(), RuntimeAgentError> {
+    let (assignment_id, attempt_id) = state
+        .assignment
+        .as_ref()
+        .map(|active| (active.assignment_id.clone(), active.attempt_id.clone()))
+        .unwrap_or_default();
     state.outbox.enqueue(
         &config.runtime.id,
         node_to_control_plane::Body::RuntimeObservation(RuntimeObservation {
@@ -1012,6 +1169,8 @@ fn enqueue_observation(
             observed_at: Some(now_timestamp()),
             worker: None,
             operation: None,
+            assignment_id,
+            attempt_id,
         }),
     )
 }
@@ -1023,18 +1182,25 @@ fn enqueue_terminal(
     reason: &str,
     summary: &str,
 ) -> Result<(), RuntimeAgentError> {
+    let active = state.assignment.as_ref().ok_or_else(|| {
+        RuntimeAgentError::State("terminal evidence requires an active assignment".to_string())
+    })?;
+    let observation = RuntimeObservation {
+        runtime: Some(runtime_ref(config)),
+        observed_state: state.observed_state as i32,
+        termination: termination as i32,
+        reason_code: reason.to_string(),
+        summary: summary.to_string(),
+        observed_at: Some(now_timestamp()),
+        worker: None,
+        operation: None,
+        assignment_id: active.assignment_id.clone(),
+        attempt_id: active.attempt_id.clone(),
+    };
+    state.journal.finish(&observation)?;
     state.outbox.enqueue(
         &config.runtime.id,
-        node_to_control_plane::Body::RuntimeObservation(RuntimeObservation {
-            runtime: Some(runtime_ref(config)),
-            observed_state: state.observed_state as i32,
-            termination: termination as i32,
-            reason_code: reason.to_string(),
-            summary: summary.to_string(),
-            observed_at: Some(now_timestamp()),
-            worker: None,
-            operation: None,
-        }),
+        node_to_control_plane::Body::RuntimeObservation(observation),
     )
 }
 
@@ -1335,13 +1501,188 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn terminal_survives_restart_without_executing_assignment_twice() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("executions");
+        let config = test_config(
+            directory.path(),
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("echo executed >> '{}'", marker.display()),
+            ],
+        );
+        let assignment = test_assignment(Vec::new());
+        let mut state = AgentState::open(&config).unwrap();
+        handle_assignment(&config, &mut state, assignment.clone())
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if check_process_and_lease(&config, &mut state).await.unwrap() {
+                break;
+            }
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        let terminal = state.journal.terminal().unwrap().unwrap();
+        assert_eq!(terminal.reason_code, "WORKLOAD_EXITED");
+        assert_eq!(terminal.assignment_id, assignment.assignment_id);
+        assert_eq!(terminal.attempt_id, assignment.attempt_id);
+        drop(state);
+        let mut recovered = AgentState::open(&config).unwrap();
+        assert_eq!(recovered.journal.terminal().unwrap().unwrap(), terminal);
+        handle_assignment(&config, &mut recovered, assignment.clone())
+            .await
+            .unwrap();
+        assert!(!recovered.child.is_running());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "executed\n");
+        recovered.outbox.begin_session();
+        assert!(recovered.outbox.unsent_frames("restarted", 1).iter().any(|f|
+            matches!(&f.body, Some(node_to_control_plane::Body::RuntimeObservation(o)) if o == &terminal)));
+        let mut changed = assignment;
+        changed.attempt_id = "different-attempt".into();
+        assert!(handle_assignment(&config, &mut recovered, changed)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn interrupted_spawn_intent_requires_reconciliation_and_cannot_claim_stopped() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".into()]);
+        let assignment = test_assignment(Vec::new());
+        let mut state = AgentState::open(&config).unwrap();
+        state.journal.begin(&assignment).unwrap();
+        drop(state);
+        let mut recovered = AgentState::open(&config).unwrap();
+        assert!(recovered.recovery_uncertain);
+        assert_eq!(recovered.observed_state, RuntimeObservedState::Lost);
+        assert!(handle_assignment(&config, &mut recovered, assignment)
+            .await
+            .is_err());
+        assert!(!recovered.child.is_running());
+        assert!(prepare_control_stop(
+            &config,
+            &mut recovered,
+            core_v1::StopCommand {
+                command_id: "stop-recovered".into(),
+                runtime: Some(runtime_ref(&config)),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        stop_for_local_signal(&config, &mut recovered)
+            .await
+            .unwrap();
+        assert!(recovered.journal.terminal().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn journal_write_failure_prevents_workload_start() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("should-not-exist");
+        let config = test_config(
+            directory.path(),
+            vec!["/usr/bin/touch".into(), marker.display().to_string()],
+        );
+        let mut state = AgentState::open(&config).unwrap();
+        let path = config.state_dir.join(
+            config
+                .resume_token_state_name()
+                .replace("runtime-resume-token-", "runtime-execution-"),
+        );
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            handle_assignment(&config, &mut state, test_assignment(Vec::new())).await,
+            Err(RuntimeAgentError::State(_))
+        ));
+        assert!(!state.child.is_running());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn journal_rejects_changed_launch_config_corruption_and_legacy_resume_only_state() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".into()]);
+        drop(AgentState::open(&config).unwrap());
+        let mut changed = config.clone();
+        changed.workload = vec!["/bin/false".into()];
+        assert!(AgentState::open(&changed).is_err());
+        let path = config.state_dir.join(
+            config
+                .resume_token_state_name()
+                .replace("runtime-resume-token-", "runtime-execution-"),
+        );
+        fs::write(&path, b"{broken").unwrap();
+        assert!(AgentState::open(&config).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{broken");
+        fs::remove_file(&path).unwrap();
+        let state_directory = config.prepare_state_directory().unwrap();
+        config
+            .persist_resume_token(&state_directory, "legacy-token")
+            .unwrap();
+        drop(state_directory);
+        assert!(AgentState::open(&config).is_err());
+        changed = config;
+        changed.runtime.generation += 1;
+        assert!(AgentState::open(&changed).is_ok());
+    }
+
+    #[test]
+    fn journal_rejects_symlinks_and_shared_permissions_without_overwriting_evidence() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/true".into()]);
+        drop(AgentState::open(&config).unwrap());
+        let path = config.state_dir.join(
+            config
+                .resume_token_state_name()
+                .replace("runtime-resume-token-", "runtime-execution-"),
+        );
+        let evidence = fs::read(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(AgentState::open(&config).is_err());
+        assert_eq!(fs::read(&path).unwrap(), evidence);
+        let target = directory.path().join("preserved-journal");
+        fs::rename(&path, &target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(AgentState::open(&config).is_err());
+        assert_eq!(fs::read(&target).unwrap(), evidence);
+    }
+
+    #[tokio::test]
+    async fn disconnected_handshake_wait_still_enforces_original_lease_expiry() {
+        let directory = tempdir().unwrap();
+        let config = test_config(directory.path(), vec!["/bin/sleep".into(), "30".into()]);
+        let mut state = AgentState::open(&config).unwrap();
+        let mut assignment = test_assignment(Vec::new());
+        assignment.lease.as_mut().unwrap().expires_at =
+            Some(timestamp_from_ms(now_unix_ms() + 250));
+        handle_assignment(&config, &mut state, assignment)
+            .await
+            .unwrap();
+        let mut terminate = termination_signal().unwrap();
+        await_with_supervision(&config, &mut state, &mut terminate, async {
+            time::sleep(Duration::from_millis(650)).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!state.child.is_running());
+        assert_eq!(
+            state.journal.terminal().unwrap().unwrap().reason_code,
+            "LEASE_EXPIRED"
+        );
+    }
+
+    #[tokio::test]
     async fn child_start_failure_rejects_without_accepting_assignment() {
         let directory = tempdir().unwrap();
         let config = test_config(
             directory.path(),
             vec!["/definitely/not/a/cyrene-workload".to_string()],
         );
-        let mut state = AgentState::new(config.workload.clone());
+        let mut state = AgentState::open(&config).unwrap();
         let assignment = test_assignment(Vec::new());
 
         handle_assignment(&config, &mut state, assignment)
@@ -1361,7 +1702,7 @@ mod tests {
     async fn artifact_staging_failure_rejects_without_starting_workload() {
         let directory = tempdir().unwrap();
         let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
-        let mut state = AgentState::new(config.workload.clone());
+        let mut state = AgentState::open(&config).unwrap();
         let assignment = test_assignment(vec![authorized_transfer_spec()]);
 
         handle_assignment(&config, &mut state, assignment)
@@ -1399,7 +1740,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = test_config(directory.path(), vec!["/bin/true".to_string()]);
         let (spec, _) = local_artifact_spec(b"local-cas");
-        let mut state = AgentState::new(config.workload.clone());
+        let mut state = AgentState::open(&config).unwrap();
 
         handle_assignment(
             &config,
@@ -1429,7 +1770,7 @@ mod tests {
             b"tampered",
         )
         .unwrap();
-        let mut state = AgentState::new(config.workload.clone());
+        let mut state = AgentState::open(&config).unwrap();
 
         handle_assignment(
             &config,
@@ -1457,7 +1798,7 @@ mod tests {
         let (mut spec, digest_hex) = local_artifact_spec(content);
         spec.size_bytes += 1;
         fs::write(config.artifact_destination_root.join(digest_hex), content).unwrap();
-        let mut state = AgentState::new(config.workload.clone());
+        let mut state = AgentState::open(&config).unwrap();
 
         handle_assignment(
             &config,

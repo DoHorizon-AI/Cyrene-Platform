@@ -37,6 +37,7 @@ async fn higher_node_epoch_evicts_lower_sessions_and_bindings() {
         "assignment-test".to_string(),
         AssignmentBinding {
             assignment_id: "assignment-test".to_string(),
+            attempt_id: "attempt-test".to_string(),
             runtime: runtime(),
             node: old.clone(),
             lease: LeaseKey {
@@ -225,7 +226,9 @@ async fn pending_bootstrap_replays_same_token_until_first_agent_frame() {
         .pending_runtime_enrollments
         .contains_key(&runtime_key));
 
-    service.confirm_runtime_enrollment(&retry_identity, &retry_handle.session_id);
+    service
+        .confirm_runtime_enrollment(&retry_identity, &retry_handle.session_id)
+        .unwrap();
     assert!(!service
         .inner
         .registry
@@ -342,6 +345,258 @@ fn pending_binding_includes_session_and_node_identity() {
     assert_ne!(first, different_node);
 }
 
+#[test]
+fn terminal_observation_is_correlated_and_immutable() {
+    let service = ExecutionControlService::new(
+        Arc::new(
+            crate::authentication::CertificateFingerprintAuthenticator::new([(
+                b"test-certificate".to_vec(),
+                AuthenticatedAgent::Runtime {
+                    runtime: runtime(),
+                    node: node(1).to_proto(),
+                },
+            )])
+            .unwrap(),
+        ),
+        Arc::new(cy_execution_fabric::DevelopmentEnrollmentProvider::new(
+            ["unused-proof".to_string()],
+            60_000,
+        )),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let identity = SessionIdentity::Runtime(runtime(), node(1));
+    {
+        let mut registry = service.inner.registry.lock().unwrap();
+        registry.accepted_assignments.insert(
+            "assignment-test".to_string(),
+            AssignmentBinding {
+                assignment_id: "assignment-test".to_string(),
+                attempt_id: "attempt-test".to_string(),
+                runtime: runtime(),
+                node: node(1),
+                lease: LeaseKey {
+                    identity: semantic::Identity {
+                        id: "lease-test".to_string(),
+                        generation: 1,
+                    },
+                    fence_token: 1,
+                },
+                digest: [0; 32],
+            },
+        );
+    }
+    let terminal = core_v1::RuntimeObservation {
+        runtime: Some(core_v1::RuntimeRef {
+            identity: Some(identity_to_proto(&runtime())),
+        }),
+        observed_state: core_v1::RuntimeObservedState::Stopped as i32,
+        termination: core_v1::TerminationClassification::External as i32,
+        reason_code: "WORKLOAD_EXITED".to_string(),
+        assignment_id: "assignment-test".to_string(),
+        attempt_id: "attempt-test".to_string(),
+        ..Default::default()
+    };
+
+    service
+        .persist_terminal_observation(&identity, &terminal)
+        .unwrap();
+    service
+        .persist_terminal_observation(&identity, &terminal)
+        .unwrap();
+    assert_eq!(
+        service.terminal_observation("assignment-test").unwrap(),
+        Some(terminal.clone())
+    );
+
+    let mut conflicting = terminal;
+    conflicting.summary = "different terminal fact".to_string();
+    assert_eq!(
+        service
+            .persist_terminal_observation(&identity, &conflicting)
+            .unwrap_err()
+            .reason_code,
+        "RUNTIME_TERMINAL_CONFLICT"
+    );
+}
+
+#[tokio::test]
+async fn terminal_wait_reads_durable_evidence_without_a_live_broadcast() {
+    let service = ExecutionControlService::new(
+        Arc::new(
+            crate::authentication::CertificateFingerprintAuthenticator::new([(
+                b"test-certificate".to_vec(),
+                AuthenticatedAgent::Runtime {
+                    runtime: runtime(),
+                    node: node(1).to_proto(),
+                },
+            )])
+            .unwrap(),
+        ),
+        Arc::new(cy_execution_fabric::DevelopmentEnrollmentProvider::new(
+            ["unused-proof".to_string()],
+            60_000,
+        )),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let terminal = core_v1::RuntimeObservation {
+        assignment_id: "assignment-test".to_string(),
+        attempt_id: "attempt-test".to_string(),
+        observed_state: core_v1::RuntimeObservedState::Stopped as i32,
+        termination: core_v1::TerminationClassification::External as i32,
+        ..Default::default()
+    };
+    service
+        .inner
+        .registry
+        .lock()
+        .unwrap()
+        .terminal_observations
+        .insert("assignment-test".to_string(), terminal.encode_to_vec());
+
+    assert_eq!(
+        service
+            .wait_terminal_observation("assignment-test", Duration::from_millis(10))
+            .await
+            .unwrap(),
+        terminal
+    );
+}
+
+#[test]
+fn terminal_tombstone_blocks_assignment_id_reuse_after_binding_cleanup() {
+    let service = ExecutionControlService::new(
+        Arc::new(
+            crate::authentication::CertificateFingerprintAuthenticator::new([(
+                b"test-certificate".to_vec(),
+                AuthenticatedAgent::Runtime {
+                    runtime: runtime(),
+                    node: node(1).to_proto(),
+                },
+            )])
+            .unwrap(),
+        ),
+        Arc::new(cy_execution_fabric::DevelopmentEnrollmentProvider::new(
+            ["unused-proof".to_string()],
+            60_000,
+        )),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    service
+        .inner
+        .registry
+        .lock()
+        .unwrap()
+        .terminal_observations
+        .insert("assignment-test".to_string(), vec![1]);
+    let assignment = core_v1::RuntimeAssignment {
+        assignment_id: "assignment-test".to_string(),
+        attempt_id: "attempt-test".to_string(),
+        ..Default::default()
+    };
+    let route = RuntimeRouteSnapshot {
+        runtime: runtime(),
+        node: node(1),
+        session_id: "runtime-session".to_string(),
+        handle: Arc::new(SessionHandle::new(
+            "runtime-session".to_string(),
+            mpsc::channel(1).0,
+        )),
+    };
+
+    assert_eq!(
+        service
+            .assignment_binding(&route, &assignment)
+            .unwrap_err()
+            .reason_code,
+        "ASSIGNMENT_ALREADY_TERMINAL"
+    );
+}
+
+#[test]
+fn terminal_observation_survives_control_service_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("control-state");
+    let build_service = || {
+        ExecutionControlService::new(
+            Arc::new(
+                crate::authentication::CertificateFingerprintAuthenticator::new([(
+                    b"test-certificate".to_vec(),
+                    AuthenticatedAgent::Runtime {
+                        runtime: runtime(),
+                        node: node(1).to_proto(),
+                    },
+                )])
+                .unwrap(),
+            ),
+            Arc::new(cy_execution_fabric::DevelopmentEnrollmentProvider::new(
+                ["unused-proof".to_string()],
+                60_000,
+            )),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap()
+    };
+    let terminal = core_v1::RuntimeObservation {
+        runtime: Some(core_v1::RuntimeRef {
+            identity: Some(identity_to_proto(&runtime())),
+        }),
+        observed_state: core_v1::RuntimeObservedState::Stopped as i32,
+        termination: core_v1::TerminationClassification::External as i32,
+        assignment_id: "assignment-test".to_string(),
+        attempt_id: "attempt-test".to_string(),
+        ..Default::default()
+    };
+    {
+        let store = Arc::new(crate::FileExecutionSessionStore::open(&state).unwrap());
+        let service = build_service().with_session_store(store).unwrap();
+        {
+            let mut registry = service.inner.registry.lock().unwrap();
+            registry.accepted_assignments.insert(
+                "assignment-test".to_string(),
+                AssignmentBinding {
+                    assignment_id: "assignment-test".to_string(),
+                    attempt_id: "attempt-test".to_string(),
+                    runtime: runtime(),
+                    node: node(1),
+                    lease: LeaseKey {
+                        identity: semantic::Identity {
+                            id: "lease-test".to_string(),
+                            generation: 1,
+                        },
+                        fence_token: 1,
+                    },
+                    digest: [0; 32],
+                },
+            );
+            registry
+                .highest_node_epochs
+                .insert("node-test".to_string(), 1);
+            registry.runtime_node_bindings.insert(runtime(), node(1));
+            service.persist_registry(&registry).unwrap();
+        }
+        service
+            .persist_terminal_observation(&SessionIdentity::Runtime(runtime(), node(1)), &terminal)
+            .unwrap();
+    }
+
+    let reopened = build_service()
+        .with_session_store(Arc::new(
+            crate::FileExecutionSessionStore::open(&state).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        reopened.terminal_observation("assignment-test").unwrap(),
+        Some(terminal)
+    );
+}
+
 fn runtime_resume_hello(
     runtime: &semantic::Identity,
     node: &NodeKey,
@@ -435,4 +690,170 @@ fn mismatched_command_result_does_not_consume_waiter() {
         .unwrap()
         .contains_key("command-test"));
     assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn mismatched_stop_ack_does_not_consume_waiter() {
+    let service = ExecutionControlService::new(
+        Arc::new(
+            crate::authentication::CertificateFingerprintAuthenticator::new([(
+                b"test-certificate".to_vec(),
+                AuthenticatedAgent::Runtime {
+                    runtime: runtime(),
+                    node: node(1).to_proto(),
+                },
+            )])
+            .unwrap(),
+        ),
+        Arc::new(cy_execution_fabric::DevelopmentEnrollmentProvider::new(
+            ["unused-proof".to_string()],
+            60_000,
+        )),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let (sender, mut receiver) = oneshot::channel();
+    service.inner.pending_stops.lock().unwrap().insert(
+        "stop-test".to_string(),
+        PendingStop {
+            binding: SessionBinding::Runtime {
+                runtime: runtime(),
+                node: node(1),
+                session_id: "session-one".to_string(),
+            },
+            assignment_id: "assignment-test".to_string(),
+            sender,
+        },
+    );
+
+    let error = service
+        .complete_stop_ack(
+            &SessionIdentity::Runtime(runtime(), node(2)),
+            "session-two",
+            &StopAck {
+                command_id: "stop-test".to_string(),
+                runtime: Some(core_v1::RuntimeRef {
+                    identity: Some(identity_to_proto(&runtime())),
+                }),
+                accepted_at: Some(prost_types::Timestamp {
+                    seconds: 1,
+                    nanos: 0,
+                }),
+            },
+        )
+        .unwrap_err();
+
+    assert_eq!(error.reason_code, "PENDING_STOP_SESSION_MISMATCH");
+    assert!(service
+        .inner
+        .pending_stops
+        .lock()
+        .unwrap()
+        .contains_key("stop-test"));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn stop_routes_to_runtime_while_host_session_is_offline() {
+    let service = ExecutionControlService::new(
+        Arc::new(
+            crate::authentication::CertificateFingerprintAuthenticator::new([(
+                b"test-certificate".to_vec(),
+                AuthenticatedAgent::Runtime {
+                    runtime: runtime(),
+                    node: node(1).to_proto(),
+                },
+            )])
+            .unwrap(),
+        ),
+        Arc::new(cy_execution_fabric::DevelopmentEnrollmentProvider::new(
+            ["unused-proof".to_string()],
+            60_000,
+        )),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let runtime = runtime();
+    let node = node(1);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let handle = Arc::new(SessionHandle::new("runtime-session".to_string(), sender));
+    handle.mark_ready_for_test();
+    {
+        let mut registry = service.inner.registry.lock().unwrap();
+        registry.highest_node_epochs.insert(node.node_id.clone(), 1);
+        registry.runtimes.insert(
+            RuntimeKey {
+                runtime: runtime.clone(),
+                node: node.clone(),
+            },
+            RuntimeSession {
+                node: node.clone(),
+                organization_id: "organization-test".to_string(),
+                workspace_id: "workspace-test".to_string(),
+                workload_identity: semantic::Identity {
+                    id: "workload-test".to_string(),
+                    generation: 1,
+                },
+                workload_identity_expires_at_unix_ms: now_unix_ms() + 60_000,
+                handle,
+            },
+        );
+        registry.accepted_assignments.insert(
+            "assignment-test".to_string(),
+            AssignmentBinding {
+                assignment_id: "assignment-test".to_string(),
+                attempt_id: "attempt-test".to_string(),
+                runtime: runtime.clone(),
+                node: node.clone(),
+                lease: LeaseKey {
+                    identity: semantic::Identity {
+                        id: "lease-test".to_string(),
+                        generation: 1,
+                    },
+                    fence_token: 1,
+                },
+                digest: [0; 32],
+            },
+        );
+    }
+
+    let stop_service = service.clone();
+    let stop = tokio::spawn(async move {
+        stop_service
+            .stop_assignment(
+                "assignment-test",
+                "stop-test",
+                Duration::from_secs(1),
+                "PRODUCT_CANCELLED",
+                Duration::from_secs(1),
+            )
+            .await
+    });
+    let frame = receiver.recv().await.unwrap().unwrap();
+    assert!(matches!(
+        frame.body,
+        Some(control_plane_to_node::Body::StopCommand(StopCommand {
+            ref command_id,
+            ..
+        })) if command_id == "stop-test"
+    ));
+    service
+        .complete_stop_ack(
+            &SessionIdentity::Runtime(runtime.clone(), node),
+            "runtime-session",
+            &StopAck {
+                command_id: "stop-test".to_string(),
+                runtime: Some(core_v1::RuntimeRef {
+                    identity: Some(identity_to_proto(&runtime)),
+                }),
+                accepted_at: Some(prost_types::Timestamp {
+                    seconds: 1,
+                    nanos: 0,
+                }),
+            },
+        )
+        .unwrap();
+    assert_eq!(stop.await.unwrap().unwrap().command_id, "stop-test");
 }

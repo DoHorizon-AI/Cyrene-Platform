@@ -275,6 +275,7 @@ fn legal_transition(current: IntentDisposition, next: IntentDisposition) -> bool
             AssignmentDispatching,
             Completed | Failed | UnknownRequiresReconciliation
         ) | (Completed, Released | UnknownRequiresReconciliation)
+            | (UnknownRequiresReconciliation, AssignmentDispatching)
     )
 }
 

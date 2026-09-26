@@ -532,6 +532,7 @@ dependencies = [
  "cy-observability",
  "cy-proto",
  "nix",
+ "prost",
  "prost-types",
  "rustix",
  "serde",

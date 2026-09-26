@@ -1,5 +1,6 @@
 //! Container-oriented `cy-runtime-agent run -- <workload command>` entry point.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -100,9 +101,20 @@ impl Args {
         if workload.is_empty() {
             return Err(usage().into());
         }
+        let bootstrap = flag_value(&arguments[1..separator], "--bootstrap-file")
+            .map(|path| load_bootstrap(&PathBuf::from(path)))
+            .transpose()?
+            .unwrap_or_default();
+        let setting = |key: &str| {
+            bootstrap
+                .get(key)
+                .cloned()
+                .or_else(|| env::var(key).ok())
+                .filter(|value| !value.is_empty())
+        };
         let value = |name: &str, environment: &str| -> Result<String, std::io::Error> {
             flag_value(&arguments[1..separator], name)
-                .or_else(|| env::var(environment).ok().filter(|value| !value.is_empty()))
+                .or_else(|| setting(environment))
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -123,7 +135,7 @@ impl Args {
             client_key: value("--client-key", "CYRENE_AGENT_CLIENT_KEY").map(PathBuf::from)?,
             artifact_ca: value("--artifact-ca", "CYRENE_ARTIFACT_CA").map(PathBuf::from)?,
             artifact_ticket_key: flag_value(&arguments[1..separator], "--artifact-ticket-key")
-                .or_else(|| env::var("CYRENE_ARTIFACT_TICKET_KEY").ok())
+                .or_else(|| setting("CYRENE_ARTIFACT_TICKET_KEY"))
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from),
             organization_id: value("--organization-id", "CYRENE_ORGANIZATION_ID")?,
@@ -136,17 +148,17 @@ impl Args {
             runtime_generation: value("--runtime-generation", "CYRENE_RUNTIME_GENERATION")?
                 .parse()?,
             enrollment_proof: flag_value(&arguments[1..separator], "--enrollment-proof")
-                .or_else(|| env::var("CYRENE_ENROLLMENT_PROOF").ok())
+                .or_else(|| setting("CYRENE_ENROLLMENT_PROOF"))
                 .unwrap_or_default(),
             resume_token: flag_value(&arguments[1..separator], "--resume-token")
-                .or_else(|| env::var("CYRENE_AGENT_RESUME_TOKEN").ok())
+                .or_else(|| setting("CYRENE_AGENT_RESUME_TOKEN"))
                 .unwrap_or_default(),
             state_dir: flag_value(&arguments[1..separator], "--state-dir")
-                .or_else(|| env::var("CYRENE_AGENT_STATE_DIR").ok())
+                .or_else(|| setting("CYRENE_AGENT_STATE_DIR"))
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/var/lib/cyrene/runtime-agent")),
             artifact_root: flag_value(&arguments[1..separator], "--artifact-root")
-                .or_else(|| env::var("CYRENE_ARTIFACT_ROOT").ok())
+                .or_else(|| setting("CYRENE_ARTIFACT_ROOT"))
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/var/lib/cyrene/artifacts")),
             workload,
@@ -188,6 +200,59 @@ impl Args {
     }
 }
 
+// Plain KEY=value, never sourced by a shell or copied to the process environment.
+// Bootstrap secrets can be mounted read-only without appearing in Docker inspect.
+fn load_bootstrap(path: &std::path::Path) -> Result<BTreeMap<String, String>, std::io::Error> {
+    use std::io::{Error, ErrorKind};
+    let invalid = || Error::new(ErrorKind::InvalidInput, "invalid Runtime bootstrap file");
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 65536 {
+        return Err(invalid());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(invalid());
+        }
+    }
+    let mut values = BTreeMap::new();
+    for line in std::fs::read_to_string(path)?.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or_else(invalid)?;
+        if ![
+            "CYRENE_CONTROL_PLANE_ENDPOINT",
+            "CYRENE_CONTROL_PLANE_SERVER_NAME",
+            "CYRENE_CONTROL_PLANE_CA",
+            "CYRENE_AGENT_CLIENT_CERT",
+            "CYRENE_AGENT_CLIENT_KEY",
+            "CYRENE_ARTIFACT_CA",
+            "CYRENE_ARTIFACT_TICKET_KEY",
+            "CYRENE_ORGANIZATION_ID",
+            "CYRENE_WORKSPACE_ID",
+            "CYRENE_NODE_ID",
+            "CYRENE_NODE_EPOCH",
+            "CYRENE_NODE_TYPE",
+            "CYRENE_NODE_PERSISTENT",
+            "CYRENE_RUNTIME_ID",
+            "CYRENE_RUNTIME_GENERATION",
+            "CYRENE_ENROLLMENT_PROOF",
+            "CYRENE_AGENT_RESUME_TOKEN",
+            "CYRENE_AGENT_STATE_DIR",
+            "CYRENE_ARTIFACT_ROOT",
+        ]
+        .contains(&key)
+            || value.contains('\0')
+            || values.insert(key.into(), value.into()).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(values)
+}
+
 fn flag_value(arguments: &[String], name: &str) -> Option<String> {
     arguments
         .windows(2)
@@ -209,4 +274,33 @@ fn usage() -> std::io::Error {
     std::io::Error::other(
         "usage: cy-runtime-agent run [control and identity options] -- <fixed workload command>",
     )
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    #[test]
+    fn reads_literals_without_shell_expansion_and_rejects_ambiguous_or_public_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bootstrap.env");
+        std::fs::write(
+            &path,
+            "CYRENE_ENROLLMENT_PROOF=$(do-not-execute)=secret\nCYRENE_NODE_TYPE=container\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(load_bootstrap(&path).is_err());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            load_bootstrap(&path).unwrap()["CYRENE_ENROLLMENT_PROOF"],
+            "$(do-not-execute)=secret"
+        );
+        std::fs::write(&path, "CYRENE_NODE_TYPE=container\nCYRENE_NODE_TYPE=host\n").unwrap();
+        assert!(load_bootstrap(&path).is_err());
+        std::fs::write(&path, "LD_PRELOAD=untrusted\n").unwrap();
+        assert!(load_bootstrap(&path).is_err());
+    }
 }

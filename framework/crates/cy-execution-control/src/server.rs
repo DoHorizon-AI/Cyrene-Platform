@@ -23,7 +23,7 @@ use cy_proto::core_v1::{
     node_control_service_server::NodeControlService, node_to_control_plane, AssignmentAck,
     AssignmentAckDisposition, ExecutionAgentHello, ExecutionAgentWelcome, KernelAuthorityCommand,
     KernelCommand, KernelCommandResult, LeaseRenewalRequest, LeaseRenewalResult, NodeHello,
-    NodeToControlPlane,
+    NodeToControlPlane, StopAck, StopCommand,
 };
 use cy_proto::semantic_v1;
 use prost::Message;
@@ -37,6 +37,7 @@ use crate::authentication::{AuthenticatedAgent, PeerAuthenticator};
 use crate::session::{HostSession, NodeKey, OutboundItem, RuntimeSession, SessionHandle};
 use crate::DispatchError;
 
+mod persistence;
 mod protocol;
 use protocol::*;
 
@@ -83,6 +84,7 @@ struct Registry {
     runtime_node_bindings: BTreeMap<semantic::Identity, NodeKey>,
     highest_node_epochs: BTreeMap<String, u64>,
     accepted_assignments: BTreeMap<String, AssignmentBinding>,
+    terminal_observations: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,6 +144,7 @@ struct LeaseKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AssignmentBinding {
     assignment_id: String,
+    attempt_id: String,
     runtime: semantic::Identity,
     node: NodeKey,
     lease: LeaseKey,
@@ -251,6 +254,12 @@ struct PendingAssignment {
     sender: oneshot::Sender<AssignmentAck>,
 }
 
+struct PendingStop {
+    binding: SessionBinding,
+    assignment_id: String,
+    sender: oneshot::Sender<StopAck>,
+}
+
 #[derive(Clone)]
 pub(crate) struct HostRouteSnapshot {
     node: NodeKey,
@@ -281,16 +290,18 @@ struct Inner {
     authority_response_timeout: Duration,
     session_admission_gate: AsyncMutex<()>,
     registry: Mutex<Registry>,
+    session_store: Option<Arc<dyn crate::ExecutionSessionStore>>,
     pending_commands: Mutex<BTreeMap<String, PendingCommand>>,
     pending_assignments: Mutex<BTreeMap<String, PendingAssignment>>,
+    pending_stops: Mutex<BTreeMap<String, PendingStop>>,
     observations: broadcast::Sender<ControlObservation>,
 }
 
 /// Canonical Rust implementation of the existing NodeControl protocol seam.
 ///
-/// The service stores only authenticated session/correlation state. It never
-/// stores Resource allocations, Leases, fences, Provider facts, or Product
-/// Run/Attempt state.
+/// The service stores authenticated session/correlation state and immutable
+/// Runtime terminal evidence. It never stores Resource allocations, Leases,
+/// fences, Provider facts, or Product Run/Attempt state.
 #[derive(Clone)]
 pub struct ExecutionControlService {
     inner: Arc<Inner>,
@@ -318,8 +329,10 @@ impl ExecutionControlService {
                 authority_response_timeout,
                 session_admission_gate: AsyncMutex::new(()),
                 registry: Mutex::new(Registry::default()),
+                session_store: None,
                 pending_commands: Mutex::new(BTreeMap::new()),
                 pending_assignments: Mutex::new(BTreeMap::new()),
+                pending_stops: Mutex::new(BTreeMap::new()),
                 observations,
             }),
         })
@@ -327,6 +340,114 @@ impl ExecutionControlService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ControlObservation> {
         self.inner.observations.subscribe()
+    }
+
+    /// Return the immutable terminal observation already made durable for an
+    /// accepted assignment. This is execution evidence, not Product state.
+    pub fn terminal_observation(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<core_v1::RuntimeObservation>, DispatchError> {
+        let registry = self
+            .inner
+            .registry
+            .lock()
+            .expect("execution session registry lock poisoned");
+        registry
+            .terminal_observations
+            .get(assignment_id)
+            .map(|bytes| {
+                core_v1::RuntimeObservation::decode(bytes.as_slice()).map_err(|_| {
+                    DispatchError::input(
+                        "SESSION_SNAPSHOT_INVALID",
+                        "persisted Runtime terminal evidence is invalid",
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    /// Wait for one assignment's durable terminal evidence without relying on
+    /// broadcast delivery. Subscription is established before the first store
+    /// read so a concurrent terminal write cannot be missed.
+    pub async fn wait_terminal_observation(
+        &self,
+        assignment_id: &str,
+        timeout: Duration,
+    ) -> Result<core_v1::RuntimeObservation, DispatchError> {
+        if assignment_id.is_empty() || timeout.is_zero() {
+            return Err(DispatchError::input(
+                "TERMINAL_WAIT_INVALID",
+                "terminal wait requires an assignment id and positive timeout",
+            ));
+        }
+        let mut observations = self.subscribe();
+        if let Some(observation) = self.terminal_observation(assignment_id)? {
+            return Ok(observation);
+        }
+        tokio::time::timeout(timeout, async {
+            loop {
+                match observations.recv().await {
+                    Ok(observation) => {
+                        if matches!(
+                            observation.frame.body.as_ref(),
+                            Some(node_to_control_plane::Body::RuntimeObservation(value))
+                                if value.assignment_id == assignment_id
+                        ) {
+                            if let Some(value) = self.terminal_observation(assignment_id)? {
+                                return Ok(value);
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some(value) = self.terminal_observation(assignment_id)? {
+                            return Ok(value);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(DispatchError::transient(
+                            "TERMINAL_OBSERVATION_UNAVAILABLE",
+                            "Runtime observation stream closed before a terminal fact arrived",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            DispatchError::transient(
+                "TERMINAL_OBSERVATION_TIMEOUT",
+                "no durable Runtime terminal evidence arrived before the deadline",
+            )
+        })?
+    }
+
+    /// Attach before serving requests. Restores correlation only; fresh mTLS
+    /// sessions and current Kernel Lease/Fence checks are still required.
+    pub fn with_session_store(
+        mut self,
+        store: Arc<dyn crate::ExecutionSessionStore>,
+    ) -> Result<Self, DispatchError> {
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            DispatchError::input(
+                "SESSION_STORE_ALREADY_SERVING",
+                "configure durable storage before cloning or serving",
+            )
+        })?;
+        let registry = match store.load()? {
+            Some(bytes) => Registry::restore(&bytes)?,
+            None => Registry::default(),
+        };
+        inner.registry = Mutex::new(registry);
+        inner.session_store = Some(store);
+        Ok(self)
+    }
+
+    fn persist_registry(&self, registry: &Registry) -> Result<(), DispatchError> {
+        if let Some(store) = &self.inner.session_store {
+            store.save(&registry.snapshot()?)?;
+        }
+        Ok(())
     }
 
     pub fn has_host_session(&self, node: &core_v1::NodeRef) -> bool {
@@ -354,6 +475,108 @@ impl ExecutionControlService {
             key.runtime == *runtime
                 && registry.highest_node_epochs.get(&key.node.node_id) == Some(&key.node.node_epoch)
                 && session.handle.is_usable()
+        })
+    }
+
+    /// Reserve an enrollment grant before launching a Runtime. The same proof
+    /// is accepted by its first authenticated Hello; it never creates a second
+    /// grant. Persisting the reservation precedes returning workload identity.
+    pub fn prepare_runtime_workload(
+        &self,
+        node: &core_v1::NodeRef,
+        scope: RuntimeScope,
+        proof: &str,
+        user_id: impl Into<String>,
+        allowed_actions: Vec<String>,
+    ) -> Result<core_v1::WorkloadIdentity, DispatchError> {
+        let user_id = user_id.into();
+        validate_user_and_actions(&user_id, &allowed_actions)?;
+        self.snapshot_host_route(node)?;
+        if proof.is_empty()
+            || proof.len() > 16384
+            || scope.organization_id.is_empty()
+            || scope.workspace_id.is_empty()
+            || scope.runtime.id.is_empty()
+            || scope.runtime.generation == 0
+        {
+            return Err(DispatchError::input(
+                "ENROLLMENT_INPUT_INVALID",
+                "bounded proof and complete Runtime scope are required",
+            ));
+        }
+        let key = RuntimeKey {
+            runtime: scope.runtime.clone(),
+            node: NodeKey::from(node),
+        };
+        let proof_digest: [u8; 32] = Sha256::digest(proof.as_bytes()).into();
+        let mut registry = self
+            .inner
+            .registry
+            .lock()
+            .expect("execution session registry lock poisoned");
+        registry.validate_runtime_attachment(&scope.runtime, &key.node)?;
+        let grant = if let Some(pending) = registry.pending_runtime_enrollments.get(&key) {
+            if pending.proof_digest != proof_digest || pending.grant.scope != scope {
+                return Err(DispatchError::input(
+                    "ENROLLMENT_IDENTITY_MISMATCH",
+                    "Runtime reservation is bound to another proof or scope",
+                ));
+            }
+            pending.grant.clone()
+        } else {
+            if registry.runtime_resume_tokens.contains_key(&key) {
+                return Err(DispatchError::input(
+                    "RESUME_TOKEN_REQUIRED",
+                    "Runtime was already enrolled; use its retained identity",
+                ));
+            }
+            let grant = self
+                .inner
+                .enrollment
+                .enroll(proof, scope.clone(), now_unix_ms())?;
+            if grant.scope != scope || grant.expires_at_unix_ms <= now_unix_ms() {
+                return Err(DispatchError::input(
+                    "ENROLLMENT_GRANT_INVALID",
+                    "Enrollment returned a mismatched or expired grant",
+                ));
+            }
+            let resume_token = Uuid::new_v4().to_string();
+            registry
+                .runtime_node_bindings
+                .insert(scope.runtime.clone(), key.node.clone());
+            registry.pending_runtime_enrollments.insert(
+                key.clone(),
+                PendingRuntimeEnrollment {
+                    proof_digest,
+                    grant: grant.clone(),
+                    resume_token: resume_token.clone(),
+                },
+            );
+            registry
+                .runtime_resume_tokens
+                .insert(key.clone(), resume_token);
+            registry.runtime_grants.insert(key, grant.clone());
+            grant
+        };
+        if grant.expires_at_unix_ms <= now_unix_ms() {
+            return Err(DispatchError::input(
+                "ENROLLMENT_EXPIRED",
+                "Prepared Runtime identity expired; reconcile the generation before replacing it",
+            ));
+        }
+        self.persist_registry(&registry)?;
+        Ok(core_v1::WorkloadIdentity {
+            identity: Some(identity_to_proto(&grant.workload_identity)),
+            scope: Some(core_v1::AccountScope {
+                user_id,
+                organization_id: scope.organization_id,
+                workspace_id: scope.workspace_id,
+            }),
+            runtime: Some(core_v1::RuntimeRef {
+                identity: Some(identity_to_proto(&scope.runtime)),
+            }),
+            allowed_actions,
+            expires_at: Some(timestamp_from_unix_ms(grant.expires_at_unix_ms)),
         })
     }
 
@@ -502,6 +725,50 @@ impl ExecutionControlService {
         })
     }
 
+    /// Capture one exact Runtime route without requiring the Host Agent to be
+    /// online. A running task container must remain stoppable during a
+    /// transient Host control-session outage.
+    fn snapshot_runtime_route(
+        &self,
+        node: &core_v1::NodeRef,
+        runtime: &semantic::Identity,
+    ) -> Result<RuntimeRouteSnapshot, DispatchError> {
+        let node = NodeKey::from(node);
+        let registry = self
+            .inner
+            .registry
+            .lock()
+            .expect("execution session registry lock poisoned");
+        if registry.highest_node_epochs.get(&node.node_id) != Some(&node.node_epoch) {
+            return Err(DispatchError::input(
+                "STALE_NODE_GENERATION",
+                "assignment NodeRef is not the highest accepted Node generation",
+            ));
+        }
+        let key = RuntimeKey {
+            runtime: runtime.clone(),
+            node: node.clone(),
+        };
+        let session = registry.runtimes.get(&key).ok_or_else(|| {
+            DispatchError::transient(
+                "RUNTIME_SESSION_UNAVAILABLE",
+                "Runtime generation has no authenticated session on the assignment Node",
+            )
+        })?;
+        if !session.handle.is_usable() {
+            return Err(DispatchError::transient(
+                "RUNTIME_SESSION_UNAVAILABLE",
+                "selected Runtime Agent session has been fenced",
+            ));
+        }
+        Ok(RuntimeRouteSnapshot {
+            runtime: runtime.clone(),
+            node,
+            session_id: session.handle.session_id.clone(),
+            handle: session.handle.clone(),
+        })
+    }
+
     pub(crate) fn runtime_session_on_route(
         &self,
         route: &RouteSnapshot,
@@ -611,6 +878,23 @@ impl ExecutionControlService {
                 "Lease acquisition does not match its captured Host/Runtime route",
             ));
         }
+        self.acquire_lease_on_host_route(&route.host, acquisition)
+            .await
+    }
+
+    /// The holder identity is reserved by the durable Product intent. It does
+    /// not need a live Runtime connection until after provider launch.
+    pub(crate) async fn acquire_lease_on_host_route(
+        &self,
+        route: &HostRouteSnapshot,
+        acquisition: LeaseAcquisition<'_>,
+    ) -> Result<semantic_v1::Lease, DispatchError> {
+        if !self.host_route_is_current(route) || route.node != NodeKey::from(acquisition.node) {
+            return Err(DispatchError::input(
+                "ROUTE_IDENTITY_MISMATCH",
+                "Lease acquisition does not match its captured Host route",
+            ));
+        }
         let command = KernelCommand {
             command_id: acquisition.command_id.to_string(),
             request: Some(kernel_command::Request::Authority(KernelAuthorityCommand {
@@ -625,7 +909,7 @@ impl ExecutionControlService {
             })),
         };
         let result = self
-            .send_kernel_command_on_route(&route.host, command, acquisition.response_timeout)
+            .send_kernel_command_on_route(route, command, acquisition.response_timeout)
             .await?;
         authority_lease_result(result)
     }
@@ -710,7 +994,7 @@ impl ExecutionControlService {
         self.remove_assignment_bindings(&LeaseKey {
             identity: lease.identity.clone(),
             fence_token: lease.fence_token,
-        });
+        })?;
         Ok(())
     }
 
@@ -876,6 +1160,93 @@ impl ExecutionControlService {
         }
     }
 
+    pub(crate) async fn stop_assignment(
+        &self,
+        assignment_id: &str,
+        command_id: &str,
+        grace_period: Duration,
+        reason_code: &str,
+        response_timeout: Duration,
+    ) -> Result<StopAck, DispatchError> {
+        let assignment = {
+            let registry = self
+                .inner
+                .registry
+                .lock()
+                .expect("execution session registry lock poisoned");
+            registry
+                .accepted_assignments
+                .get(assignment_id)
+                .cloned()
+                .ok_or_else(|| {
+                    DispatchError::unknown(
+                        "accepted assignment route is unavailable; reconcile terminal and Lease evidence",
+                    )
+                })?
+        };
+        let route =
+            self.snapshot_runtime_route(&assignment.node.to_proto(), &assignment.runtime)?;
+        let expected = SessionBinding::Runtime {
+            runtime: route.runtime.clone(),
+            node: route.node.clone(),
+            session_id: route.session_id.clone(),
+        };
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut pending = self
+                .inner
+                .pending_stops
+                .lock()
+                .expect("pending stop lock poisoned");
+            if pending.contains_key(command_id) {
+                return Err(DispatchError::input(
+                    "STOP_CORRELATION_DUPLICATE",
+                    "stop command id already has a pending delivery",
+                ));
+            }
+            pending.insert(
+                command_id.to_string(),
+                PendingStop {
+                    binding: expected.clone(),
+                    assignment_id: assignment_id.to_string(),
+                    sender,
+                },
+            );
+        }
+        if !self.runtime_route_is_current(&route) {
+            self.remove_pending_stop(command_id, &expected);
+            return Err(DispatchError::input(
+                "SESSION_FENCED",
+                "Runtime route changed before stop delivery",
+            ));
+        }
+        let command = StopCommand {
+            command_id: command_id.to_string(),
+            runtime: Some(core_v1::RuntimeRef {
+                identity: Some(identity_to_proto(&assignment.runtime)),
+            }),
+            grace_period: Some(duration_to_proto(grace_period)?),
+            reason_code: reason_code.to_string(),
+        };
+        if let Err(error) = route
+            .handle
+            .send(control_plane_to_node::Body::StopCommand(command))
+            .await
+        {
+            self.remove_pending_stop(command_id, &expected);
+            return Err(error);
+        }
+        match tokio::time::timeout(response_timeout, receiver).await {
+            Ok(Ok(ack)) => Ok(ack),
+            Ok(Err(_)) | Err(_) => {
+                self.remove_pending_stop(command_id, &expected);
+                Err(DispatchError::unknown(format!(
+                    "no definitive StopAck for command {command_id} on assignment {assignment_id}"
+                )))
+            }
+        }
+    }
+
     async fn send_kernel_command_on_route(
         &self,
         route: &HostRouteSnapshot,
@@ -968,6 +1339,20 @@ impl ExecutionControlService {
         }
     }
 
+    fn remove_pending_stop(&self, command_id: &str, expected: &SessionBinding) {
+        let mut pending = self
+            .inner
+            .pending_stops
+            .lock()
+            .expect("pending stop lock poisoned");
+        if pending
+            .get(command_id)
+            .is_some_and(|entry| &entry.binding == expected)
+        {
+            pending.remove(command_id);
+        }
+    }
+
     fn assignment_binding(
         &self,
         route: &RuntimeRouteSnapshot,
@@ -977,6 +1362,19 @@ impl ExecutionControlService {
             return Err(DispatchError::input(
                 "ASSIGNMENT_ID_REQUIRED",
                 "Runtime assignment id is required",
+            ));
+        }
+        if self
+            .inner
+            .registry
+            .lock()
+            .expect("execution session registry lock poisoned")
+            .terminal_observations
+            .contains_key(&assignment.assignment_id)
+        {
+            return Err(DispatchError::input(
+                "ASSIGNMENT_ALREADY_TERMINAL",
+                "assignment id already has immutable terminal evidence",
             ));
         }
         let assignment_runtime = assignment
@@ -1052,6 +1450,7 @@ impl ExecutionControlService {
         }
         let binding = AssignmentBinding {
             assignment_id: assignment.assignment_id.clone(),
+            attempt_id: assignment.attempt_id.clone(),
             runtime: route.runtime.clone(),
             node: route.node.clone(),
             lease: LeaseKey {
@@ -1159,6 +1558,7 @@ impl ExecutionControlService {
             registry
                 .accepted_assignments
                 .insert(binding.assignment_id.clone(), binding);
+            self.persist_registry(&registry)?;
         }
         let sender = pending
             .remove(&ack.assignment_id)
@@ -1166,6 +1566,127 @@ impl ExecutionControlService {
             .sender;
         let _ = sender.send(ack.clone());
         Ok(())
+    }
+
+    fn complete_stop_ack(
+        &self,
+        identity: &SessionIdentity,
+        session_id: &str,
+        ack: &StopAck,
+    ) -> Result<(), DispatchError> {
+        let expected = SessionBinding::for_identity(identity, session_id);
+        let sender = {
+            let mut pending = self
+                .inner
+                .pending_stops
+                .lock()
+                .expect("pending stop lock poisoned");
+            let Some(entry) = pending.get(&ack.command_id) else {
+                return Ok(());
+            };
+            if entry.binding != expected {
+                return Err(DispatchError::input(
+                    "PENDING_STOP_SESSION_MISMATCH",
+                    "stop acknowledgement came from the wrong authenticated session",
+                ));
+            }
+            if entry.assignment_id.is_empty() {
+                return Err(DispatchError::input(
+                    "PENDING_STOP_ASSIGNMENT_INVALID",
+                    "stop acknowledgement has an invalid assignment correlation",
+                ));
+            }
+            pending
+                .remove(&ack.command_id)
+                .expect("pending stop entry disappeared while locked")
+                .sender
+        };
+        let _ = sender.send(ack.clone());
+        Ok(())
+    }
+
+    fn persist_terminal_observation(
+        &self,
+        identity: &SessionIdentity,
+        observation: &core_v1::RuntimeObservation,
+    ) -> Result<(), DispatchError> {
+        let state =
+            core_v1::RuntimeObservedState::try_from(observation.observed_state).map_err(|_| {
+                DispatchError::input("RUNTIME_OBSERVATION_INVALID", "unknown Runtime state")
+            })?;
+        if !matches!(
+            state,
+            core_v1::RuntimeObservedState::Stopped
+                | core_v1::RuntimeObservedState::Failed
+                | core_v1::RuntimeObservedState::Lost
+        ) {
+            return Ok(());
+        }
+        let termination = core_v1::TerminationClassification::try_from(observation.termination)
+            .map_err(|_| {
+                DispatchError::input(
+                    "RUNTIME_OBSERVATION_INVALID",
+                    "unknown Runtime termination classification",
+                )
+            })?;
+        // Preparation failures may use a terminal-looking observed state while
+        // the Assignment is still being rejected. Only a classified
+        // termination is immutable execution evidence.
+        if termination == core_v1::TerminationClassification::Unspecified {
+            return Ok(());
+        }
+        if observation.assignment_id.is_empty() || observation.attempt_id.is_empty() {
+            return Err(DispatchError::input(
+                "RUNTIME_TERMINAL_CORRELATION_REQUIRED",
+                "terminal Runtime evidence requires assignment, attempt, and termination",
+            ));
+        }
+        let SessionIdentity::Runtime(runtime, node) = identity else {
+            return Err(DispatchError::input(
+                "RUNTIME_FRAME_INVALID",
+                "Host session cannot report Runtime terminal evidence",
+            ));
+        };
+        let bytes = observation.encode_to_vec();
+        let mut registry = self
+            .inner
+            .registry
+            .lock()
+            .expect("execution session registry lock poisoned");
+        let binding = registry
+            .accepted_assignments
+            .get(&observation.assignment_id)
+            .ok_or_else(|| {
+                DispatchError::input(
+                    "RUNTIME_TERMINAL_ASSIGNMENT_UNKNOWN",
+                    "terminal Runtime evidence has no accepted assignment binding",
+                )
+            })?;
+        if &binding.runtime != runtime
+            || &binding.node != node
+            || binding.attempt_id != observation.attempt_id
+        {
+            return Err(DispatchError::input(
+                "RUNTIME_TERMINAL_ASSIGNMENT_MISMATCH",
+                "terminal Runtime evidence does not match its accepted assignment",
+            ));
+        }
+        if let Some(existing) = registry
+            .terminal_observations
+            .get(&observation.assignment_id)
+        {
+            if existing == &bytes {
+                return Ok(());
+            }
+            return Err(DispatchError::input(
+                "RUNTIME_TERMINAL_CONFLICT",
+                "terminal Runtime evidence is immutable",
+            ));
+        }
+        registry
+            .terminal_observations
+            .insert(observation.assignment_id.clone(), bytes);
+        self.persist_registry(&registry)
     }
 
     fn require_assignment_lease_binding(
@@ -1198,13 +1719,16 @@ impl ExecutionControlService {
         Ok(())
     }
 
-    fn remove_assignment_bindings(&self, lease: &LeaseKey) {
-        self.inner
+    fn remove_assignment_bindings(&self, lease: &LeaseKey) -> Result<(), DispatchError> {
+        let mut registry = self
+            .inner
             .registry
             .lock()
-            .expect("execution session registry lock poisoned")
+            .expect("execution session registry lock poisoned");
+        registry
             .accepted_assignments
             .retain(|_, binding| &binding.lease != lease);
+        self.persist_registry(&registry)
     }
 
     async fn fence_sessions(&self, sessions: Vec<Arc<SessionHandle>>, reason: &'static str) {
@@ -1229,6 +1753,11 @@ impl ExecutionControlService {
             .pending_assignments
             .lock()
             .expect("pending assignment lock poisoned")
+            .retain(|_, pending| !session_ids.contains(pending.binding.session_id()));
+        self.inner
+            .pending_stops
+            .lock()
+            .expect("pending stop lock poisoned")
             .retain(|_, pending| !session_ids.contains(pending.binding.session_id()));
     }
 
@@ -1317,6 +1846,7 @@ impl ExecutionControlService {
             registry
                 .host_resume_tokens
                 .insert(key.clone(), resume_token.clone());
+            self.persist_registry(&registry)?;
             (evicted, registry.hosts.insert(key.clone(), session))
         };
         if let Some(replaced) = replaced {
@@ -1468,6 +1998,7 @@ impl ExecutionControlService {
             registry
                 .runtime_grants
                 .insert(runtime_key.clone(), grant.clone());
+            self.persist_registry(&registry)?;
             (grant, resume_token)
         };
         if grant.scope != expected_scope || grant.expires_at_unix_ms <= now_unix_ms() {
@@ -1528,6 +2059,7 @@ impl ExecutionControlService {
                 .runtime_grants
                 .insert(runtime_key.clone(), grant.clone());
             let replaced = registry.runtimes.insert(runtime_key.clone(), session);
+            self.persist_registry(&registry)?;
             if let Some(replaced) = replaced {
                 let mut evicted = evicted;
                 evicted.push(replaced.handle);
@@ -1604,15 +2136,17 @@ impl ExecutionControlService {
         {
             return Ok(());
         }
-        handle.acknowledge_agent_sequence(frame.sequence_number);
         validate_frame_identity(identity, &frame)?;
-        self.confirm_runtime_enrollment(identity, &handle.session_id);
+        self.confirm_runtime_enrollment(identity, &handle.session_id)?;
         match frame.body.as_ref() {
             Some(node_to_control_plane::Body::CommandResult(result)) => {
                 self.complete_command_result(identity, &handle.session_id, result)?;
             }
             Some(node_to_control_plane::Body::AssignmentAck(ack)) => {
                 self.complete_assignment_ack(identity, &handle.session_id, ack)?;
+            }
+            Some(node_to_control_plane::Body::StopAck(ack)) => {
+                self.complete_stop_ack(identity, &handle.session_id, ack)?;
             }
             Some(node_to_control_plane::Body::LeaseRenewal(request)) => {
                 let SessionIdentity::Runtime(runtime, node) = identity else {
@@ -1640,8 +2174,13 @@ impl ExecutionControlService {
                     ))
                     .await?;
             }
+            Some(node_to_control_plane::Body::RuntimeObservation(observation)) => {
+                self.persist_terminal_observation(identity, observation)?;
+            }
             _ => {}
         }
+        // ACK only after every durable-before-visible side effect succeeds.
+        handle.acknowledge_agent_sequence(frame.sequence_number);
         let _ = self.inner.observations.send(ControlObservation {
             agent: peer.clone(),
             session_id: handle.session_id.clone(),
@@ -1650,9 +2189,13 @@ impl ExecutionControlService {
         Ok(())
     }
 
-    fn confirm_runtime_enrollment(&self, identity: &SessionIdentity, session_id: &str) {
+    fn confirm_runtime_enrollment(
+        &self,
+        identity: &SessionIdentity,
+        session_id: &str,
+    ) -> Result<(), DispatchError> {
         let SessionIdentity::Runtime(runtime, node) = identity else {
-            return;
+            return Ok(());
         };
         let key = RuntimeKey {
             runtime: runtime.clone(),
@@ -1666,9 +2209,10 @@ impl ExecutionControlService {
         let current = registry.runtimes.get(&key).is_some_and(|session| {
             session.handle.session_id == session_id && session.handle.is_usable()
         });
-        if current {
-            registry.pending_runtime_enrollments.remove(&key);
+        if current && registry.pending_runtime_enrollments.remove(&key).is_some() {
+            self.persist_registry(&registry)?;
         }
+        Ok(())
     }
 
     fn is_current(&self, identity: &SessionIdentity, session_id: &str) -> bool {

@@ -11,17 +11,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_execution_control::{
-    AuthenticatedAgent, ExecutionControlService, ExecutionController, ExecutionDispatchRequest,
-    ExecutionReleaseRequest, InMemoryExecutionIntentStore, IntentDisposition, PeerAuthenticator,
+    AuthenticatedAgent, DispatchError, ExecutionControlService, ExecutionController,
+    ExecutionDispatchRequest, ExecutionReleaseRequest, InMemoryExecutionIntentStore,
+    IntentDisposition, PeerAuthenticator, RuntimeLauncher,
 };
 use cy_execution_fabric::{
     execution_capability, validate_assignment, DevelopmentEnrollmentProvider,
     ExecutionPlacementRequest, ExecutionTargetCandidate, NetworkRequirements, PlacementPolicy,
-    RuntimeAssignmentBuilder,
+    RuntimeAssignmentBuilder, RuntimeScope,
 };
 use cy_kernel_api::{
     AuthorityCallContext, CleanupReport, DeviceBinding, EnforcementMode, HostInventoryProvider,
@@ -55,6 +56,87 @@ const NODE_EPOCH: u64 = 1;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_node_acquires_one_real_kernel_lease_and_dispatches_once() {
+    exercise_dispatch(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offline_runtime_launches_after_one_durable_kernel_lease() {
+    exercise_dispatch(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_launch_reconciles_without_a_second_lease() {
+    exercise_dispatch(true, true).await;
+}
+
+struct ProtocolLauncher {
+    endpoint: String,
+    runtime: semantic::Identity,
+    resources: Arc<InMemoryResourceManager>,
+    controller: ExecutionController,
+    unknown: bool,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    lease: Mutex<Option<semantic::Lease>>,
+}
+
+impl RuntimeLauncher for ProtocolLauncher {
+    fn launch<'a>(
+        &'a self,
+        _node: &'a core_v1::NodeRef,
+        assignment: &'a core_v1::RuntimeAssignment,
+        lease: &'a semantic::Lease,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DispatchError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            assert_eq!(self.resources.leases().len(), 1);
+            assert_eq!(lease.holder, self.runtime);
+            assert_eq!(
+                self.controller
+                    .intent_disposition(&assignment.assignment_id)
+                    .unwrap(),
+                Some(IntentDisposition::LeaseAcquired)
+            );
+            *self.lease.lock().unwrap() = Some(lease.clone());
+            *self.task.lock().unwrap() = Some(tokio::spawn(run_runtime_protocol(
+                self.endpoint.clone(),
+                self.runtime.clone(),
+            )));
+            if self.unknown {
+                Err(DispatchError {
+                    reason_code: "UNKNOWN_REQUIRES_RECONCILIATION".to_string(),
+                    message: "launch reply lost".to_string(),
+                    reconciliation_required: true,
+                })
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn reconcile<'a>(
+        &'a self,
+        _node: &'a core_v1::NodeRef,
+        _assignment: &'a core_v1::RuntimeAssignment,
+        lease: &'a semantic::Lease,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DispatchError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            assert_eq!(self.lease.lock().unwrap().as_ref(), Some(lease));
+            assert!(self.task.lock().unwrap().is_some());
+            Ok(())
+        })
+    }
+}
+
+impl Drop for ProtocolLauncher {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.lock().unwrap().take() {
+            task.abort();
+        }
+    }
+}
+
+async fn exercise_dispatch(offline: bool, unknown_launch: bool) {
     let temporary = tempdir().unwrap();
     let kernel_socket = temporary.path().join("kernel.sock");
     let resource = test_resource();
@@ -89,19 +171,63 @@ async fn selected_node_acquires_one_real_kernel_lease_and_dispatches_once() {
         })
     })
     .await;
-    let runtime_task = tokio::spawn(run_runtime_protocol(control_endpoint, runtime.clone()));
+    let runtime_task = if offline {
+        None
+    } else {
+        Some(tokio::spawn(run_runtime_protocol(
+            control_endpoint.clone(),
+            runtime.clone(),
+        )))
+    };
 
-    wait_for(|| {
-        service.has_host_session(&core_v1::NodeRef {
+    if !offline {
+        wait_for(|| {
+            service.has_host_session(&core_v1::NodeRef {
+                node_id: NODE_ID.to_string(),
+                node_epoch: NODE_EPOCH,
+            }) && service.has_runtime_session(&runtime)
+        })
+        .await;
+    }
+
+    let workload_identity = if offline {
+        assert!(!service.has_runtime_session(&runtime));
+        let scope = RuntimeScope {
+            runtime: runtime.clone(),
+            organization_id: "organization-alpha".to_string(),
+            workspace_id: "workspace-alpha".to_string(),
+        };
+        let node = core_v1::NodeRef {
             node_id: NODE_ID.to_string(),
             node_epoch: NODE_EPOCH,
-        }) && service.has_runtime_session(&runtime)
-    })
-    .await;
-
-    let workload_identity = service
-        .workload_identity(&runtime, "user-alpha", vec!["operation.report".to_string()])
-        .unwrap();
+        };
+        let identity = service
+            .prepare_runtime_workload(
+                &node,
+                scope.clone(),
+                "single-use-enrollment",
+                "user-alpha",
+                vec!["operation.report".to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            identity,
+            service
+                .prepare_runtime_workload(
+                    &node,
+                    scope,
+                    "single-use-enrollment",
+                    "user-alpha",
+                    vec!["operation.report".to_string()]
+                )
+                .unwrap()
+        );
+        identity
+    } else {
+        service
+            .workload_identity(&runtime, "user-alpha", vec!["operation.report".to_string()])
+            .unwrap()
+    };
     let now = now_unix_ms();
     let candidate = candidate(resource, now);
     let request = ExecutionDispatchRequest {
@@ -135,7 +261,56 @@ async fn selected_node_acquires_one_real_kernel_lease_and_dispatches_once() {
         Arc::new(InMemoryExecutionIntentStore::default()),
     )
     .unwrap();
-    let receipt = controller.dispatch(request.clone()).await.unwrap();
+    let launcher = ProtocolLauncher {
+        endpoint: control_endpoint,
+        runtime: runtime.clone(),
+        resources: resources.clone(),
+        controller: controller.clone(),
+        unknown: unknown_launch,
+        task: Mutex::new(None),
+        lease: Mutex::new(None),
+    };
+    let dispatched = if offline {
+        controller
+            .dispatch_with_launcher(request.clone(), &launcher)
+            .await
+    } else {
+        controller.dispatch(request.clone()).await
+    };
+    if unknown_launch {
+        assert!(dispatched.unwrap_err().reconciliation_required);
+        assert_eq!(
+            controller.intent_disposition("assignment-alpha").unwrap(),
+            Some(IntentDisposition::UnknownRequiresReconciliation)
+        );
+        let observed_lease = launcher.lease.lock().unwrap().clone().unwrap();
+        let receipt = controller
+            .reconcile_with_launcher(request.clone(), observed_lease, &launcher)
+            .await
+            .unwrap();
+        assert!(matches!(
+            receipt.ack_disposition,
+            AssignmentAckDisposition::Accepted | AssignmentAckDisposition::Duplicate
+        ));
+        assert_eq!(
+            controller.intent_disposition("assignment-alpha").unwrap(),
+            Some(IntentDisposition::Completed)
+        );
+        assert_eq!(
+            controller
+                .dispatch_with_launcher(request, &launcher)
+                .await
+                .unwrap_err()
+                .reason_code,
+            "EXECUTION_INTENT_ALREADY_RECORDED"
+        );
+        assert_eq!(resources.leases().len(), 1);
+        host_task.abort();
+        control_task.abort();
+        kernel_task.abort();
+        return;
+    }
+    let receipt = dispatched.unwrap();
 
     assert_eq!(receipt.node.node_id, NODE_ID);
     assert_eq!(receipt.lease.state, semantic::LeaseState::Active);
@@ -177,7 +352,9 @@ async fn selected_node_acquires_one_real_kernel_lease_and_dispatches_once() {
     );
 
     host_task.abort();
-    runtime_task.abort();
+    if let Some(task) = runtime_task {
+        task.abort();
+    }
     control_task.abort();
     kernel_task.abort();
 }

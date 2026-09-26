@@ -50,6 +50,75 @@ pub(crate) struct StateDirectory {
     _runtime_lock: File,
 }
 
+impl Drop for StateDirectory {
+    fn drop(&mut self) {
+        // A concurrent fork may briefly inherit the descriptor before exec.
+        // Explicit unlock releases ownership without waiting for that exec.
+        let _ = flock(&self._runtime_lock, FlockOperation::Unlock);
+    }
+}
+
+impl StateDirectory {
+    /// Descriptor-relative private records under the existing Runtime lock.
+    pub(crate) fn read_record(&self, name: &str) -> Result<Option<Vec<u8>>, RuntimeAgentError> {
+        let fd = match openat(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(rustix_state_error(Path::new(name), error)),
+        };
+        let file = File::from(fd);
+        validate_private_regular_file(Path::new(name), &file, "execution journal")?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.take(1_048_577)
+            .read_to_end(&mut bytes)
+            .map_err(|error| state_io_error(Path::new(name), error))?;
+        if bytes.len() > 1_048_576 {
+            return Err(RuntimeAgentError::State(
+                "execution journal exceeds size limit".into(),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn write_record(&self, name: &str, bytes: &[u8]) -> Result<(), RuntimeAgentError> {
+        if bytes.len() > 1_048_576 {
+            return Err(RuntimeAgentError::State(
+                "execution journal exceeds size limit".into(),
+            ));
+        }
+        let temporary = format!(".{name}.{}.tmp", Uuid::new_v4());
+        let result = (|| {
+            let fd = openat(
+                &self.directory,
+                temporary.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|error| rustix_state_error(Path::new(name), error))?;
+            let mut file = File::from(fd);
+            fchmod(&file, Mode::from_bits_truncate(0o600))
+                .map_err(|error| rustix_state_error(Path::new(name), error))?;
+            validate_private_regular_file(Path::new(name), &file, "execution journal")?;
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| state_io_error(Path::new(name), error))?;
+            renameat(&self.directory, temporary.as_str(), &self.directory, name)
+                .map_err(|error| rustix_state_error(Path::new(name), error))?;
+            fsync(&self.directory).map_err(|error| rustix_state_error(Path::new(name), error))
+        })();
+        if result.is_err() {
+            let _ = unlinkat(&self.directory, temporary.as_str(), AtFlags::empty());
+        }
+        result
+    }
+}
+
 /// Immutable launch-time configuration. Control messages cannot replace the command.
 #[derive(Debug, Clone)]
 pub struct RuntimeAgentConfig {
@@ -332,7 +401,7 @@ impl RuntimeAgentConfig {
         self.state_dir.join(self.resume_token_state_name())
     }
 
-    fn resume_token_state_name(&self) -> String {
+    pub(crate) fn resume_token_state_name(&self) -> String {
         format!(
             "{RESUME_TOKEN_STATE_FILE_PREFIX}{}.json",
             resume_token_namespace(&self.runtime, &self.node)
