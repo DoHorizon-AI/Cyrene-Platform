@@ -20,10 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cy_observability::{init_observability, ObservabilityConfig};
-use cy_proto::workspace_v1::workspace_relay_service_server::WorkspaceRelayServiceServer;
 use cy_workspace_fabric::{
-    FileWorkspaceDirectory, RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims,
-    WorkspaceRelay,
+    bounded_workspace_relay_server, FileWorkspaceDirectory, RelayAuthenticationError,
+    RelayAuthenticator, RelaySessionClaims, WorkspaceRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -172,7 +171,7 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
     let relay_shutdown = shutdown_rx.clone();
     let health_shutdown = shutdown_rx;
     let relay_server = Server::builder()
-        .add_service(WorkspaceRelayServiceServer::new(relay))
+        .add_service(bounded_workspace_relay_server(relay))
         .serve_with_shutdown(config.relay_bind, wait_for_shutdown(relay_shutdown));
     let health_server = serve_health(health_listener, wait_for_shutdown(health_shutdown));
     tokio::pin!(relay_server);
