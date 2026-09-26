@@ -17,6 +17,7 @@ adapters cooperate without moving product semantics into the Kernel.
 | `execution-lifecycle.md` | Lifecycle from admission to completion. | 从准入到完成的生命周期 |
 | `distributed-execution-fabric-v1.md` | Frozen host, container-only, and provider-managed execution contract plus implementation map. | 冻结的主机、纯容器和 Provider-managed 执行契约及实现映射 |
 | `distributed-workspace-fabric-v1.md` | Identity discovery, transport-neutral connection descriptors, and relay-first Workspace access. | 身份发现、transport-neutral 连接描述符与 relay-first Workspace 访问 |
+| `no-port-connectivity-plan.md` | Plan: account and device-code identity, LAN_DIRECT in-cluster, relay fallback, direct Artifact transfer, and the logging close-out. Status: PROPOSED. | 计划：账号与设备码身份、集群内 LAN_DIRECT、relay 回退、Artifact 直连传输与日志收口。状态：提案中 |
 | `artifact-and-environment.md` | Artifact and environment authority. | 产物与环境权威 |
 | `product-controller-adapter.md` | Product controller and adapter placement. | 产品控制器与适配器归属 |
 | `public-private-boundary.md` | Public Core versus private service boundary. | 公共 Core 与私有服务边界 |
@@ -53,6 +54,7 @@ before opening implementation crates.
 | `execution-lifecycle.md` | 从准入到完成的生命周期。 |
 | `distributed-execution-fabric-v1.md` | 冻结的 host、纯容器和 Provider-managed 执行契约及实现映射。 |
 | `distributed-workspace-fabric-v1.md` | 身份发现、transport-neutral 连接描述符和 relay-first Workspace 访问。 |
+| `no-port-connectivity-plan.md` | 计划：账号与设备码身份、集群内 LAN_DIRECT、relay 回退、Artifact 直连传输和日志收口。状态：提案中。 |
 | `artifact-and-environment.md` | Artifact 与环境 authority。 |
 | `product-controller-adapter.md` | Product controller 与 adapter 的放置。 |
 | `public-private-boundary.md` | Public Core 与 private Service 的边界。 |
