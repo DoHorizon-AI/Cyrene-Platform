@@ -9,6 +9,32 @@ applies timeouts, and caps JSON request and response bodies at 4 MiB. It does
 not persist Product resources or allow callers to select an endpoint, path, or
 HTTP method.
 
+Startup can load these entries with `load_product_endpoint_configs` from a
+server-owned JSON manifest and a private secret directory. The manifest names
+only credential basenames; bearer values stay in separate files and are never
+included in diagnostics. The manifest must be canonical and regular, and the
+secret directory and files must be owned by the same service identity with
+private permissions (directory `0700`, credential files `0600`). Each bearer
+must be 32–4096 printable ASCII bytes, unique across configured scopes, and
+must not include a newline. ACA Key Vault volume mounts may use symlinks or
+broader file modes, so copy the needed values into a service-owned private
+directory before starting this loader.
+
+```json
+{
+  "version": 1,
+  "endpoints": [
+    {
+      "owner": "CATALYST",
+      "organizationId": "org-1",
+      "workspaceId": "workspace-1",
+      "baseUrl": "https://catalyst.internal/",
+      "credentialFile": "catalyst-workspace-1"
+    }
+  ]
+}
+```
+
 The dispatcher enables Catalyst, Yield, Echo, Exchange, and Reactor through
 fixed owner routes and caller-scoped endpoint credentials. Catalyst, Yield,
 Echo, and Reactor use `/internal/workspace/v1/...`; Exchange uses protected
@@ -29,9 +55,16 @@ resolver 根据可信调用者上下文精确匹配范围，organization 或 Wor
 它禁用重定向、设置超时，并将 JSON 请求与响应限制为 4 MiB；不会持久化 Product 资源，
 也不允许调用方选择端点、路径或 HTTP method。
 
+启动时可通过 `load_product_endpoint_configs` 从服务端 JSON manifest 与私有 secret 目录加载配置。
+manifest 只包含 credential 文件名，bearer 值保存在单独文件中，不会进入诊断输出。manifest 必须是
+规范路径上的普通文件；secret 目录与文件必须由同一服务身份拥有且权限私有（目录 `0700`、文件 `0600`）。
+每个 bearer 长度为 32–4096 个可打印 ASCII 字节，在不同 scope 间唯一，且不得带换行。ACA Key Vault
+volume mount 可能使用符号链接或更宽权限；启动 loader 前须将所需值复制到服务拥有的私有目录。
+
 | File | Responsibility |
 | --- | --- |
 | `http.rs` | Private endpoint resolution, injected transport, bounded HTTP and JSON handling. |
+| `endpoint_manifest.rs` | Strict private-file loader for scoped endpoint and bearer configuration. |
 | `catalyst.rs` | Fixed Catalyst dataset route mappings. |
 | `yield_api.rs` | Fixed Yield draft and run route mappings. |
 | `reactor.rs` | Fixed Reactor model import route mappings. |

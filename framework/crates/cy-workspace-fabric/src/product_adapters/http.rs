@@ -4,6 +4,7 @@
 //! targets. Product credentials, request bodies, and response bodies are never
 //! included in adapter diagnostics. / 本模块仅接受服务端配置的 HTTPS 端点与类型化路由。
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use std::time::Duration;
 use cy_proto::workspace_v1::{WorkspaceProductApiContentType, WorkspaceProductApiOwner};
 use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method, StatusCode, Url};
+use sha2::{Digest, Sha256};
 
 use crate::{
     product_projection::validate_product_response, ProductInvocationError,
@@ -23,8 +25,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_IDEMPOTENCY_KEY_CHARS: usize = 200;
 const MAX_PATH_SEGMENT_BYTES: usize = 512;
 const MAX_SERVICE_CREDENTIAL_BYTES: usize = 4096;
+const MIN_SERVICE_CREDENTIAL_BYTES: usize = 32;
 const MAX_SCOPE_ID_BYTES: usize = 512;
 const JSON_ACCEPT: &str = "application/json, application/problem+json";
+
+#[cfg(test)]
+pub(super) const TEST_SERVICE_CREDENTIAL: &str = "test-workspace-service-credential-0123456789";
 
 /// HTTP verb selected by an internal Product operation mapping.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -313,9 +319,12 @@ impl ProductEndpoint {
             || base_url.path() != "/"
             || base_url.query().is_some()
             || base_url.fragment().is_some()
-            || config.service_credential.is_empty()
+            || config.service_credential.len() < MIN_SERVICE_CREDENTIAL_BYTES
             || config.service_credential.len() > MAX_SERVICE_CREDENTIAL_BYTES
-            || config.service_credential.trim() != config.service_credential
+            || !config
+                .service_credential
+                .bytes()
+                .all(|byte| (b'!'..=b'~').contains(&byte))
         {
             return Err(ProductInvocationError::Unavailable);
         }
@@ -365,19 +374,9 @@ pub(super) struct ConfiguredProductEndpointResolver {
 
 impl ConfiguredProductEndpointResolver {
     pub(super) fn new(configs: Vec<ProductEndpointConfig>) -> Result<Self, ProductInvocationError> {
+        validate_product_endpoint_configs(&configs)?;
         let mut endpoints = Vec::with_capacity(configs.len());
         for config in configs {
-            if !allowlisted_owner(config.owner)
-                || !valid_scope_id(&config.organization_id)
-                || !valid_scope_id(&config.workspace_id)
-                || endpoints.iter().any(|configured: &ScopedProductEndpoint| {
-                    configured.owner == config.owner
-                        && configured.organization_id == config.organization_id
-                        && configured.workspace_id == config.workspace_id
-                })
-            {
-                return Err(ProductInvocationError::Unavailable);
-            }
             let endpoint = ProductEndpoint::from_config(&config)?;
             endpoints.push(ScopedProductEndpoint {
                 owner: config.owner,
@@ -388,6 +387,33 @@ impl ConfiguredProductEndpointResolver {
         }
         Ok(Self { endpoints })
     }
+}
+
+/// Checks each endpoint's owner, exact scope key, URL, and bearer shape before
+/// either manifest loading or resolver construction accepts it.
+pub(super) fn validate_product_endpoint_configs(
+    configs: &[ProductEndpointConfig],
+) -> Result<(), ProductInvocationError> {
+    let mut credential_digests = HashSet::with_capacity(configs.len());
+    for (index, config) in configs.iter().enumerate() {
+        if !allowlisted_owner(config.owner)
+            || !valid_scope_id(&config.organization_id)
+            || !valid_scope_id(&config.workspace_id)
+            || configs[..index].iter().any(|configured| {
+                configured.owner == config.owner
+                    && configured.organization_id == config.organization_id
+                    && configured.workspace_id == config.workspace_id
+            })
+        {
+            return Err(ProductInvocationError::Unavailable);
+        }
+        ProductEndpoint::from_config(config)?;
+        let digest: [u8; 32] = Sha256::digest(config.service_credential.as_bytes()).into();
+        if !credential_digests.insert(digest) {
+            return Err(ProductInvocationError::Unavailable);
+        }
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -769,7 +795,7 @@ mod tests {
             "organization-1",
             "workspace-1",
             "https://product.example.test/",
-            "test-service-credential",
+            TEST_SERVICE_CREDENTIAL,
         )])
         .unwrap();
         let transport = Arc::new(RecordingTransport {
@@ -925,7 +951,7 @@ mod tests {
                 "organization-1",
                 "workspace-1",
                 "http://product.example.test/",
-                "test-secret",
+                TEST_SERVICE_CREDENTIAL,
             )])
             .is_err()
         );
@@ -935,7 +961,7 @@ mod tests {
                 "organization-1",
                 "workspace-1",
                 "https://user:password@product.example.test/",
-                "test-secret",
+                TEST_SERVICE_CREDENTIAL,
             )])
             .is_err()
         );
@@ -1044,9 +1070,44 @@ mod tests {
             "organization-1",
             "workspace-1",
             "https://echo.example.test/",
-            "distinctive-secret-value",
+            "distinctive-workspace-service-credential-0123456789",
         );
-        assert!(!format!("{config:?}").contains("distinctive-secret-value"));
+        assert!(
+            !format!("{config:?}").contains("distinctive-workspace-service-credential-0123456789")
+        );
+    }
+
+    #[test]
+    fn endpoint_config_requires_a_bounded_printable_bearer() {
+        let invalid_credentials = [
+            "short".to_string(),
+            "0123456789012345678901234567890".to_string(),
+            "01234567890123456789012345678901\n".to_string(),
+            "01234567890123456789012345678901 with-space".to_string(),
+            "x".repeat(MAX_SERVICE_CREDENTIAL_BYTES + 1),
+        ];
+        for credential in &invalid_credentials {
+            let config = ProductEndpointConfig::new(
+                WorkspaceProductApiOwner::Catalyst,
+                "organization-1",
+                "workspace-1",
+                "https://product.example.test/",
+                credential,
+            );
+            assert_eq!(
+                ProductEndpoint::from_config(&config).unwrap_err(),
+                ProductInvocationError::Unavailable
+            );
+        }
+
+        let valid = ProductEndpointConfig::new(
+            WorkspaceProductApiOwner::Catalyst,
+            "organization-1",
+            "workspace-1",
+            "https://product.example.test/",
+            TEST_SERVICE_CREDENTIAL,
+        );
+        assert!(ProductEndpoint::from_config(&valid).is_ok());
     }
 
     #[tokio::test]
@@ -1057,21 +1118,21 @@ mod tests {
                 "organization-1",
                 "workspace-1",
                 "https://workspace-one.example.test/",
-                "workspace-one-secret",
+                "workspace-one-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 WorkspaceProductApiOwner::Catalyst,
                 "organization-1",
                 "workspace-2",
                 "https://workspace-two.example.test/",
-                "workspace-two-secret",
+                "workspace-two-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 WorkspaceProductApiOwner::Catalyst,
                 "organization-2",
                 "workspace-1",
                 "https://organization-two.example.test/",
-                "organization-two-secret",
+                "organization-two-service-credential-0123456789",
             ),
         ])
         .unwrap();
@@ -1140,7 +1201,7 @@ mod tests {
                 "organization-1",
                 "workspace-1",
                 "https://product.example.test/",
-                "test-secret",
+                TEST_SERVICE_CREDENTIAL,
             )
         };
         assert!(ConfiguredProductEndpointResolver::new(vec![endpoint(), endpoint()]).is_err());
@@ -1158,7 +1219,7 @@ mod tests {
                     organization_id,
                     workspace_id,
                     "https://product.example.test/",
-                    "test-secret",
+                    TEST_SERVICE_CREDENTIAL,
                 )])
                 .is_err()
             );

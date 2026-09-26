@@ -78,7 +78,8 @@ pub use durable_directory::{
 };
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_adapters::{
-    CatalystEchoProductApiAdapter, ProductEndpointConfig, ProductHttpApiAdapter, ProductHttpClient,
+    load_product_endpoint_configs, CatalystEchoProductApiAdapter, ProductEndpointConfig,
+    ProductEndpointManifestError, ProductHttpApiAdapter, ProductHttpClient,
 };
 pub use product_projection::{
     ProductInvocationError, ProductInvocationPort, ProductInvocationRequest,

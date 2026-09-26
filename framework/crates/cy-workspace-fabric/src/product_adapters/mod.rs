@@ -5,6 +5,7 @@
 
 mod catalyst;
 mod echo;
+mod endpoint_manifest;
 mod exchange;
 mod http;
 mod navigator;
@@ -19,6 +20,7 @@ use crate::{
     WorkspaceCallerContext,
 };
 
+pub use endpoint_manifest::{load_product_endpoint_configs, ProductEndpointManifestError};
 pub use http::{ProductEndpointConfig, ProductHttpClient};
 
 #[cfg(test)]
@@ -171,42 +173,42 @@ mod tests {
                 "organization-1",
                 "workspace-1",
                 "https://catalyst.test/",
-                "secret-1",
+                "catalyst-workspace-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 Owner::Yield,
                 "organization-1",
                 "workspace-1",
                 "https://yield.test/",
-                "secret-2",
+                "yield-workspace-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 Owner::Reactor,
                 "organization-1",
                 "workspace-1",
                 "https://reactor.test/",
-                "secret-3",
+                "reactor-workspace-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 Owner::Exchange,
                 "organization-1",
                 "workspace-1",
                 "https://exchange.test/",
-                "secret-4",
+                "exchange-workspace-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 Owner::Echo,
                 "organization-1",
                 "workspace-1",
                 "https://echo.test/",
-                "secret-5",
+                "echo-workspace-service-credential-0123456789",
             ),
             ProductEndpointConfig::new(
                 Owner::Navigator,
                 "organization-1",
                 "workspace-1",
                 "https://navigator.test/",
-                "secret-6",
+                "navigator-workspace-service-credential-0123456789",
             ),
         ])
         .unwrap();
@@ -530,7 +532,7 @@ mod tests {
             "organization-2",
             "workspace-1",
             "https://exchange.test/",
-            "private-test-credential",
+            "exchange-workspace-service-credential-0123456789",
         )])
         .unwrap();
         let client = ProductHttpClient::with_transport(

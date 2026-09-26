@@ -91,7 +91,7 @@ mod tests {
     use super::*;
     use crate::product_adapters::http::{
         ConfiguredProductEndpointResolver, ProductHttpRequest, ProductHttpResponse,
-        ProductHttpTransport,
+        ProductHttpTransport, TEST_SERVICE_CREDENTIAL,
     };
     use crate::product_adapters::{ProductEndpointConfig, ProductHttpClient};
 
@@ -124,7 +124,7 @@ mod tests {
             "organization-1",
             "workspace-1",
             "https://exchange.test/",
-            "private-test-credential",
+            TEST_SERVICE_CREDENTIAL,
         )])
         .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));

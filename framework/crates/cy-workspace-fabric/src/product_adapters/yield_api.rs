@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use crate::product_adapters::http::{
         ConfiguredProductEndpointResolver, ProductEndpointConfig, ProductHttpClient,
-        ProductHttpRequest, ProductHttpResponse, ProductHttpTransport,
+        ProductHttpRequest, ProductHttpResponse, ProductHttpTransport, TEST_SERVICE_CREDENTIAL,
     };
 
     struct ObservedRequest {
@@ -159,7 +159,7 @@ mod tests {
             "organization-1",
             "workspace-1",
             "https://yield.test/",
-            "private-yield-bearer",
+            TEST_SERVICE_CREDENTIAL,
         )])
         .expect("fixed test endpoint should be valid");
         let transport = Arc::new(RecordingTransport::new(ProductHttpResponse::new(
@@ -225,7 +225,7 @@ mod tests {
         );
         assert!(observed.body.is_empty());
         assert_eq!(observed.idempotency_key, None);
-        assert!(!observed.debug.contains("private-yield-bearer"));
+        assert!(!observed.debug.contains(TEST_SERVICE_CREDENTIAL));
     }
 
     #[tokio::test]
@@ -265,7 +265,7 @@ mod tests {
         );
         assert!(observed.body.is_empty());
         assert_eq!(observed.idempotency_key, None);
-        assert!(!observed.debug.contains("private-yield-bearer"));
+        assert!(!observed.debug.contains(TEST_SERVICE_CREDENTIAL));
     }
 
     #[test]
