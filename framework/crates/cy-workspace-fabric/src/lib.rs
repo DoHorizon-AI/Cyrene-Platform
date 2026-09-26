@@ -21,6 +21,7 @@ mod persistent_directory;
 pub mod device_authorization;
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
+mod product_adapters;
 mod product_projection;
 mod relay;
 mod sidecar;
@@ -55,6 +56,9 @@ pub use directory::{
     WorkspaceMembership,
 };
 pub use persistent_directory::FileWorkspaceDirectory;
+pub use product_adapters::{
+    CatalystEchoProductApiAdapter, ProductEndpointConfig, ProductHttpClient,
+};
 pub use product_projection::{
     ProductInvocationError, ProductInvocationPort, ProductInvocationRequest,
     ProductInvocationResponse, PRODUCT_JSON_BODY_MAX_BYTES, WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES,
