@@ -333,6 +333,7 @@ mod tests {
         WorkspaceApiRequest {
             request_id: "request-1".to_string(),
             workspace_id: workspace_id.to_string(),
+            traceparent: String::new(),
             request: Some(workspace_api_request::Request::GetOperation(
                 GetWorkspaceOperationRequest {
                     operation: Some(operation),
@@ -349,6 +350,7 @@ mod tests {
         WorkspaceApiRequest {
             request_id: "request-start".to_string(),
             workspace_id: workspace_id.to_string(),
+            traceparent: String::new(),
             request: Some(workspace_api_request::Request::StartOperation(
                 StartWorkspaceOperationRequest {
                     operation: Some(operation),
