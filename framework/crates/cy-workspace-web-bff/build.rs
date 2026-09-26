@@ -11,6 +11,8 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
+
 const OWNER_NAMES: &[&str] = &[
     "CATALYST",
     "YIELD",
@@ -40,6 +42,11 @@ fn main() {
             tck_path.display()
         )
     });
+    let tck_bytes = fs::read(&tck_path).expect("read canonical Product projection TCK bytes");
+    let tck_sha256 = Sha256::digest(tck_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let entries = parse_manifest(&source);
     let canonical_enum = read_operation_enum(&canonical_proto);
     let generated_enum = read_operation_enum(&generated_proto);
@@ -55,7 +62,7 @@ fn main() {
         manifest_operations, canonical_enum,
         "Product projection TCK keys must exactly match the WorkspaceProductApiOperation enum"
     );
-    let generated = render_manifest(&entries);
+    let generated = render_manifest(&entries, &tck_sha256);
     let output = PathBuf::from(env::var("OUT_DIR").expect("Cargo sets OUT_DIR"))
         .join("product_projection_manifest.rs");
     fs::write(output, generated).expect("write generated Product projection view");
@@ -166,9 +173,10 @@ fn parse_manifest(source: &str) -> Vec<Entry> {
     entries
 }
 
-fn render_manifest(entries: &[Entry]) -> String {
-    let mut output =
-        String::from("const GENERATED_PRODUCT_PROJECTION_ROWS: &[GeneratedProjectionRow] = &[\n");
+fn render_manifest(entries: &[Entry], tck_sha256: &str) -> String {
+    let mut output = format!(
+        "const GENERATED_PRODUCT_PROJECTION_TCK_SHA256: &str = {tck_sha256:?};\nconst GENERATED_PRODUCT_PROJECTION_ROWS: &[GeneratedProjectionRow] = &[\n"
+    );
     for entry in entries {
         output.push_str(&format!(
             "    GeneratedProjectionRow {{ owner: {:?}, wire_operation: {:?}, product_operation_id: {:?}, kind: {:?}, product_contract: {:?} }},\n",

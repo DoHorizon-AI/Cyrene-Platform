@@ -375,6 +375,9 @@ async fn product_route(
             );
         }
     };
+    if state.product_operations.is_deny_only(operation) {
+        return forbidden(Some(&trace.trace_id));
+    }
     let Some(contract) = state.product_operations.get(operation) else {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -393,6 +396,17 @@ async fn product_route(
     };
     if contract.requires_idempotency_key && idempotency_key.is_none() {
         return invalid_request(Some(&trace.trace_id));
+    }
+    if idempotency_key.is_some() && !contract.allows_idempotency_key {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    if let Some(value) = idempotency_key.as_ref() {
+        let Some(schema) = contract.idempotency_key_schema.as_ref() else {
+            return internal_error(Some(&trace.trace_id));
+        };
+        if !schema.validate(&Value::String(value.clone())) {
+            return invalid_request(Some(&trace.trace_id));
+        }
     }
     let authenticated = match authenticate(&state, request.headers()).await {
         Ok(value) => value,
@@ -503,7 +517,7 @@ async fn product_route(
         Ok(value) => value,
         Err(_) => return invalid_upstream_response(Some(&trace.trace_id)),
     };
-    if validate_product_response(contract, status, &value).is_err() {
+    if validate_product_response(contract, status, content_type, &value).is_err() {
         return invalid_upstream_response(Some(&trace.trace_id));
     }
     raw_product_response(status, content_type, response_body, Some(&trace.trace_id))
@@ -576,11 +590,20 @@ fn map_path_parameters(
 fn validate_product_response(
     contract: &ProductOperationContract,
     status: u16,
+    content_type: &str,
     value: &Value,
 ) -> Result<(), ()> {
     let schema = contract.response.schema.as_ref().ok_or(())?;
     if !schema.validate_response(status, value) {
         return Err(());
+    }
+    if status >= 400 {
+        if content_type == "application/problem+json" {
+            validate_public_problem_details(status, value)?;
+        }
+        if contains_unsafe_error_address(value) {
+            return Err(());
+        }
     }
     let fields = contract
         .response
@@ -588,6 +611,7 @@ fn validate_product_response(
         .as_ref()
         .ok_or(())?;
     let manifest = product_projection_manifest().map_err(|_| ())?;
+    validate_nested_resource_references(value, &manifest)?;
     for field in fields {
         if !field.json_pointer.starts_with('/') {
             return Err(());
@@ -619,10 +643,107 @@ fn validate_resource_reference(
         return Err(());
     }
     let resource_id = object.get("resourceId").and_then(Value::as_str).ok_or(())?;
-    if resource_id.is_empty() || resource_id.len() > 512 {
+    if !is_safe_opaque_resource_id(resource_id) {
         return Err(());
     }
     Ok(())
+}
+
+fn validate_nested_resource_references(
+    value: &Value,
+    manifest: &[crate::ProductProjectionEntry],
+) -> Result<(), ()> {
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("operation") && object.contains_key("resourceId") {
+                validate_resource_reference(value, manifest)?;
+            }
+            for child in object.values() {
+                validate_nested_resource_references(child, manifest)?;
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                validate_nested_resource_references(child, manifest)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn is_safe_opaque_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value != "."
+        && value != ".."
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+}
+
+fn validate_public_problem_details(status: u16, value: &Value) -> Result<(), ()> {
+    let object = value.as_object().ok_or(())?;
+    let allowed = [
+        "type",
+        "title",
+        "status",
+        "detail",
+        "instance",
+        "code",
+        "retryable",
+        "traceId",
+        "resourceRef",
+    ];
+    if object.keys().any(|key| !allowed.contains(&key.as_str()))
+        || object.contains_key("resourceRef")
+        || object.get("type").and_then(Value::as_str) != Some("about:blank")
+        || object.get("instance").and_then(Value::as_str) != Some("about:blank")
+        || object.get("status").and_then(Value::as_u64) != Some(u64::from(status))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn contains_unsafe_error_address(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            let normalized = text.to_ascii_lowercase();
+            text.contains('/')
+                || text.contains('\\')
+                || normalized.contains("://")
+                || normalized.contains(".internal")
+                || normalized.contains(".svc")
+                || normalized.contains(".cluster.local")
+                || normalized.contains("localhost")
+                || contains_private_ipv4_address(text)
+        }
+        Value::Array(items) => items.iter().any(contains_unsafe_error_address),
+        Value::Object(object) => object.values().any(contains_unsafe_error_address),
+        _ => false,
+    }
+}
+
+fn contains_private_ipv4_address(text: &str) -> bool {
+    text.split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .filter(|candidate| candidate.contains('.'))
+        .filter_map(|candidate| {
+            let octets = candidate
+                .split('.')
+                .map(str::parse::<u8>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            (octets.len() == 4).then_some(octets)
+        })
+        .any(|octets| {
+            octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+                || (octets[0] == 127)
+                || (octets[0] == 169 && octets[1] == 254)
+        })
 }
 
 async fn read_request_json(
@@ -1272,9 +1393,10 @@ mod tests {
 
     fn test_catalog() -> ProductOperationCatalog {
         let manifest = product_projection_manifest().expect("manifest should parse");
-        let contracts = manifest
-            .into_iter()
-            .map(|projection| ProductOperationContract {
+        let contracts = manifest.into_iter().map(|projection| {
+            let deny_only = projection.operation
+                == WorkspaceProductApiOperation::WorkspaceProductApiOperation13;
+            ProductOperationContract {
                 projection,
                 upstream_method: Method::POST,
                 path_parameters: Vec::new(),
@@ -1287,11 +1409,15 @@ mod tests {
                 },
                 allows_idempotency_key: false,
                 requires_idempotency_key: false,
+                idempotency_key_schema: None,
                 response: ProductResponseContract {
-                    schema: Some(Arc::new(AnyJsonSchema)),
-                    resource_reference_fields: Some(Vec::<ProductResourceReferenceField>::new()),
+                    schema: (!deny_only)
+                        .then(|| Arc::new(AnyJsonSchema) as Arc<dyn ProductJsonSchema>),
+                    resource_reference_fields: (!deny_only)
+                        .then(Vec::<ProductResourceReferenceField>::new),
                 },
-            });
+            }
+        });
         ProductOperationCatalog::new(contracts).expect("complete catalog should validate")
     }
 

@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod catalog_loader;
 mod csrf;
 mod fabric_gateway;
 mod http;
@@ -16,6 +17,10 @@ mod manifest;
 mod problem;
 mod product;
 
+pub use catalog_loader::{
+    load_product_operation_catalog, load_product_operation_catalog_from_environment,
+    CONTRACT_BUNDLE_MANIFEST_FILENAME, PRODUCT_CONTRACT_ROOT_ENV,
+};
 pub use csrf::{csrf_cookie_name, csrf_cookie_path};
 pub use fabric_gateway::{
     FabricWorkspaceProductGateway, WorkspaceApiBinding, WorkspaceApiResolutionError,

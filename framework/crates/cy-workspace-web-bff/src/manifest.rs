@@ -22,6 +22,13 @@ struct GeneratedProjectionRow {
 
 include!(concat!(env!("OUT_DIR"), "/product_projection_manifest.rs"));
 
+/// SHA-256 of the canonical TCK bytes used by this build.
+///
+/// 返回本次构建使用的规范 TCK 原始字节 SHA-256。
+pub(crate) const fn product_projection_tck_sha256() -> &'static str {
+    GENERATED_PRODUCT_PROJECTION_TCK_SHA256
+}
+
 /// One immutable operation mapping read from the canonical Product TCK.
 ///
 /// 从规范 Product TCK 读取的一条不可变 operation 映射。

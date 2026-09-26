@@ -7,7 +7,7 @@
 // ║ 职责：校验封闭 Product operation 合同并承载 Workspace I/O。          ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -137,6 +137,8 @@ pub struct ProductOperationContract {
     pub allows_idempotency_key: bool,
     /// Whether the owner marks Idempotency-Key as required.
     pub requires_idempotency_key: bool,
+    /// Compiled owner schema for an optional or required Idempotency-Key value.
+    pub idempotency_key_schema: Option<Arc<dyn ProductJsonSchema>>,
     /// Owner response schema and any declared relative resource references.
     pub response: ProductResponseContract,
 }
@@ -156,6 +158,10 @@ impl std::fmt::Debug for ProductOperationContract {
             .field("request_body", &self.request_body)
             .field("allows_idempotency_key", &self.allows_idempotency_key)
             .field("requires_idempotency_key", &self.requires_idempotency_key)
+            .field(
+                "idempotency_key_schema_configured",
+                &self.idempotency_key_schema.is_some(),
+            )
             .field("response", &self.response)
             .finish()
     }
@@ -181,6 +187,21 @@ pub enum ProductCatalogError {
     /// The owner method cannot be represented as a Product API operation.
     #[error("owner Product operation uses an unsupported HTTP method")]
     UpstreamMethod,
+    /// The mounted, provenance-pinned Product OpenAPI bundle is invalid or incomplete.
+    #[error("trusted Product contract bundle is invalid or incomplete")]
+    ContractBundle,
+    /// A selected response exposes an unsafe absolute link instead of a closed Product reference.
+    #[error("owner Product response schema declares an unsafe external resource link")]
+    UnsafeResourceReference,
+    /// A selected response contains an open object whose undeclared fields cannot be inspected.
+    #[error("owner Product response schema contains an open object")]
+    UnsafeResponseSchema,
+    /// A projected request contains a caller-controlled URL or navigable reference.
+    #[error("owner Product request schema accepts a caller-controlled resource link")]
+    UnsafeRequestSchema,
+    /// A deny-only TCK operation was accidentally given callable schemas or routing data.
+    #[error("deny-only Product operation must not carry callable schemas or routing data")]
+    DenyOnlyOperationSchema,
 }
 
 /// Validated closed Product projection catalog with no browser-controlled routing fields.
@@ -189,6 +210,7 @@ pub enum ProductCatalogError {
 #[derive(Clone)]
 pub struct ProductOperationCatalog {
     entries: BTreeMap<i32, ProductOperationContract>,
+    deny_only: BTreeSet<i32>,
 }
 
 impl ProductOperationCatalog {
@@ -200,6 +222,8 @@ impl ProductOperationCatalog {
     ) -> Result<Self, ProductCatalogError> {
         let manifest = product_projection_manifest().map_err(|_| ProductCatalogError::Manifest)?;
         let mut entries = BTreeMap::new();
+        let mut deny_only = BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for contract in contracts {
             let canonical = manifest
                 .iter()
@@ -211,27 +235,48 @@ impl ProductOperationCatalog {
             if !is_supported_method(&contract.upstream_method) {
                 return Err(ProductCatalogError::UpstreamMethod);
             }
+            let operation_key = contract.projection.operation as i32;
+            if !seen.insert(operation_key) {
+                return Err(ProductCatalogError::OperationSet);
+            }
+            if is_navigator_append(contract.projection.operation) {
+                if contract.request_body.allowed
+                    || contract.request_body.required
+                    || contract.request_body.schema.is_some()
+                    || contract.path_schema.is_some()
+                    || !contract.path_parameters.is_empty()
+                    || contract.allows_idempotency_key
+                    || contract.requires_idempotency_key
+                    || contract.idempotency_key_schema.is_some()
+                    || contract.response.schema.is_some()
+                    || contract.response.resource_reference_fields.is_some()
+                {
+                    return Err(ProductCatalogError::DenyOnlyOperationSchema);
+                }
+                deny_only.insert(operation_key);
+                continue;
+            }
             if (contract.request_body.required && !contract.request_body.allowed)
                 || (contract.request_body.allowed && contract.request_body.schema.is_none())
                 || (contract.requires_idempotency_key && !contract.allows_idempotency_key)
+                || (contract.allows_idempotency_key && contract.idempotency_key_schema.is_none())
+                || (!contract.allows_idempotency_key && contract.idempotency_key_schema.is_some())
             {
                 return Err(ProductCatalogError::RequestBodySchema);
             }
-            if entries
-                .insert(contract.projection.operation as i32, contract)
-                .is_some()
-            {
+            if entries.insert(operation_key, contract).is_some() {
                 return Err(ProductCatalogError::OperationSet);
             }
         }
-        if entries.len() != manifest.len()
-            || manifest
-                .iter()
-                .any(|entry| !entries.contains_key(&(entry.operation as i32)))
+        if seen.len() != manifest.len()
+            || manifest.iter().any(|entry| {
+                let key = entry.operation as i32;
+                !entries.contains_key(&key) && !deny_only.contains(&key)
+            })
         {
             return Err(ProductCatalogError::OperationSet);
         }
-        Ok(Self { entries })
+        Ok(Self { entries, deny_only })
     }
 
     /// Return a server-resolved contract for one closed Workspace operation key.
@@ -244,17 +289,28 @@ impl ProductOperationCatalog {
         self.entries.get(&(operation as i32))
     }
 
+    /// Return whether the canonical operation is recorded only for provenance and denied.
+    ///
+    /// 返回规范 operation 是否仅用于来源记录并保持拒绝。
+    pub fn is_deny_only(&self, operation: WorkspaceProductApiOperation) -> bool {
+        self.deny_only.contains(&(operation as i32))
+    }
+
     /// Return the count of validated canonical Product operations.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + self.deny_only.len()
     }
 
     /// Returns whether the catalog contains no Product operations.
     ///
     /// 返回目录是否不包含任何 Product 操作。
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.deny_only.is_empty()
     }
+}
+
+fn is_navigator_append(operation: WorkspaceProductApiOperation) -> bool {
+    operation == WorkspaceProductApiOperation::WorkspaceProductApiOperation13
 }
 
 fn is_supported_method(method: &Method) -> bool {

@@ -249,7 +249,12 @@ ingress、Relay 与 Product 的独立门槛仍关闭时，也不能宣称整体 
   owning Product OpenAPI schema, then returns the original response bytes. If
   that schema is absent or a declared reference is absolute, has an authority,
   or uses a network-path prefix, the BFF fails closed with `502`.
-- The Product HTTP status and JSON bytes are preserved. `Location`,
+- The Product HTTP status and JSON bytes are preserved only after the selected
+  owner response schema and runtime safety checks pass. RFC 9457 errors must
+  use the closed shared problem schema, `type` and `instance` equal to
+  `about:blank`, a body status matching HTTP, and no `resourceRef` or extension
+  fields. Unsafe error text, paths, internal addresses, or an unsafe problem
+  shape produce a BFF-owned `502`. `Location`,
   `Content-Location`, `Set-Cookie`, `Authorization`, hop-by-hop headers, and
   upstream server-identifying headers are not forwarded. All BFF API responses
   use `Cache-Control: no-store`.
@@ -262,6 +267,17 @@ ingress、Relay 与 Product 的独立门槛仍关闭时，也不能宣称整体 
   owner-owned; the BFF validates these declared fields against the owner
   OpenAPI schema but does not rewrite JSON. Missing schemas or invalid refs fail
   closed with `502`.
+- The Exchange route-draft `COMMAND` may accept its closed `sourceEndpoint`
+  request selector with exactly `product: "reactor"`, a UUID `endpointId`, and
+  a positive integer `resourceVersion`. This command-only selector is not a
+  navigable `ProductResourceReference`; Exchange checks the exact scoped grant
+  and resolves the source through its fixed Reactor service connection. The
+  browser cannot supply a URL, path, or Product operation.
+- Navigator Harness append remains denied to Frontend callers. The legacy
+  request includes a writer token, epoch, batch ID, and an open event object
+  array; it cannot be exposed through the ordinary Web projection. A future
+  trusted writer handoff must preserve exact Workspace scope, writer fencing,
+  and atomic replay semantics before this operation can be enabled.
 - Product response schemas must not expose a raw Product service URL, path, or
   internal routing address in a resource-link field. If an owner contract has
   not declared these fields using the closed `ProductResourceReference` shape,
@@ -282,12 +298,14 @@ ingress、Relay 与 Product 的独立门槛仍关闭时，也不能宣称整体 
   推导 operation kind 或上游 method。
 - 请求及响应 JSON body 均须为合法 UTF-8，且各自不超过 4 MiB。请求使用 `Content-Type: application/json`；
   接受的响应类型为 `application/json` 和 `application/problem+json`，`Accept` 必须允许其中至少一种。超限输入返回 `413`，无效或不安全的上游响应返回 `502`。
-- Product HTTP status 和 JSON bytes 原样保留。不得转发 `Location`、`Content-Location`、`Set-Cookie`、
+- 只有选中的 owner response schema 和 runtime 安全检查全部通过后，才保留 Product HTTP status 和 JSON bytes。RFC 9457 错误必须使用封闭共享 problem schema，`type` 和 `instance` 均为 `about:blank`、body status 与 HTTP 一致，且没有 `resourceRef` 或 extension field。错误结构、文本、路径或内部地址不安全时返回 BFF 自有 `502`。不得转发 `Location`、`Content-Location`、`Set-Cookie`、
   `Authorization`、hop-by-hop header 和可识别上游 server 的 header。所有 BFF API 响应使用 `Cache-Control: no-store`。
 - Product 所有的资源引用使用 relative `ProductResourceReference` object：一个 allowlisted read `operation` 加不透明
   `resourceId`，在当前 Workspace 下通过本 BFF 解析。该 object 不包含 `href`、URL、path、host 或 credential。禁止绝对
   service URL、network-path reference、内部 Product origin、本地路径、device 详情和 container identifier。Product body
   仍归 owner 所有；BFF 按 owner OpenAPI schema 校验这些声明字段，但不重写 JSON。缺少 schema 或引用无效时 fail closed 并返回 `502`。
+- Exchange route-draft `COMMAND` 可接受仅含 `product: "reactor"`、UUID `endpointId`、正整数 `resourceVersion` 的封闭 `sourceEndpoint` request selector。它是仅用于命令的 selector，不是可导航的 `ProductResourceReference`；Exchange 必须核对准确作用域 grant，并经固定 Reactor service connection 解析来源。浏览器不能提交 URL、path 或 Product operation。
+- Navigator Harness append 仍拒绝 Frontend caller。Legacy request 含 writer token、epoch、batch ID 和开放 event object 数组，不能暴露给普通 Web projection。未来 trusted writer handoff 必须保持准确 Workspace scope、writer fencing 和原子重放语义，之后才能启用该 operation。
 - Product response schema 不得在 resource-link field 中暴露原始 Product service URL、path 或内部 routing address。Owner contract
   未用封闭 `ProductResourceReference` shape 声明这些字段时，BFF 返回 `502` 且不转发 body。
 - BFF 可接受合法的 W3C Trace Context v00 `traceparent`；未提供时由可信 runtime 创建新的 trace context。该 context
@@ -314,8 +332,10 @@ Semantic `READ` operations use the same POST envelope and exact Origin check, bu
 require a CSRF header or cookie.
 
 BFF-owned errors use `application/problem+json` (RFC 9457), with `status`
-equal to the HTTP status and a stable `code`. Product errors keep the owning
-Product status and JSON response body. Error details never disclose access-token
+equal to the HTTP status and a stable `code`. Product error status and body are
+kept only when the closed RFC 9457 schema, status equality, public `about:blank`
+type and instance, and error-text safety checks pass; otherwise the BFF returns
+its own `502`. Error details never disclose access-token
 contents or claims, signing keys, device credentials, relay routing data, internal
 service addresses or upstream URLs.
 
@@ -333,7 +353,7 @@ projection manifest 中类型为 `COMMAND` 的 operation 还要求 `X-CSRF-Token
 语义类型为 `READ` 的 operation 使用相同 POST invocation envelope 与 exact Origin 检查，但不要求 CSRF header 或 cookie。
 
 BFF 自身错误使用 `application/problem+json`（RFC 9457），`status` 必须与 HTTP status 一致，并提供稳定的 `code`。
-Product 错误保留 owner 的 status 和 JSON response body。错误详情不得泄漏 access token 或 claim、签名密钥、device credential、
+仅当 Product 错误通过封闭 RFC 9457 schema、status 一致性、公开的 `about:blank` type/instance 和错误文本安全检查时，才保留 owner 的 status 与 JSON response body；否则 BFF 返回自有 `502`。错误详情不得泄漏 access token 或 claim、签名密钥、device credential、
 relay routing 数据、内部 service 地址或上游 URL。
 
 ## Web-to-Relay Frontend session handoff

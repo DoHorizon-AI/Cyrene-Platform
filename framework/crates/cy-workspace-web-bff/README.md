@@ -38,15 +38,29 @@ WebBffState::new requires all providers and a canonical operation catalog:
 - ProductOperationCatalog must contain exactly one matching owner OpenAPI
   operation for each canonical projection row. Its operation key, owner,
   Product operationId, and semantic kind must match the TCK. The BFF does not
-  maintain a second owner or permission table.
+  maintain a second owner or permission table. Navigator append is retained as
+  a canonical provenance row but is deny-only: its request/response schemas are
+  not compiled into the callable catalog and no upstream dispatch is allowed.
+  For operations 01–12, the loader also requires the owner-specific private
+  path namespace and one exact HTTP bearer security scheme:
+  `WorkspaceServiceBearer` for Catalyst, Yield, Reactor, and Echo;
+  `WorkspaceControlBearer` for Exchange; `NavigatorProductBearer` for operation
+  11; and `NavigatorWorkspaceBearer` for operation 12. Missing, alternate, or
+  inherited-only security fails startup.
 
 build.rs reads
 contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv.
 The generated rows are checked against the compiled
 WorkspaceProductApiOperation enum at router composition and in crate tests.
-The runtime composition root must compile request, path, and response schema
-validators from the Product OpenAPI documents and fail closed if a required
-operation contract is absent or disagrees with its TCK row.
+The runtime composition root loads the read-only release bundle named by
+`CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`. It verifies the canonical
+TCK digest, six repository pins, every raw file hash, and the complete local
+`$ref` closure before compiling request, path, and response schemas. The bundle
+must contain all 13 TCK operation mappings. Operations 01–12 compile closed
+owner request/path/response schemas. Operation 13 must resolve to its recorded
+Navigator POST operation but stays deny-only; its open append body is never
+compiled as callable input. A missing, stale, partial, remote, or out-of-root
+contract prevents readiness.
 
 WebBffState::new 必须接收全部 provider 与 canonical operation catalog：
 
@@ -67,8 +81,10 @@ WebBffState::new 必须接收全部 provider 与 canonical operation catalog：
   operation key、owner、Product operationId 和语义类型必须与 TCK 一致。BFF 不维护第二份 owner 或 permission table。
 
 build.rs 从 contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv 读取 projection rows，并在 router
-composition 与 crate tests 中和生成的 WorkspaceProductApiOperation enum 对齐。Runtime composition root 必须从 Product
-OpenAPI 文档编译 request、path、response schema validator；缺少 operation 合同或与 TCK 不符时 fail closed。
+composition 与 crate tests 中和生成的 WorkspaceProductApiOperation enum 对齐。Runtime composition root 从环境变量
+`CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT` 指定的只读 release bundle 加载合同，校验 canonical TCK digest、六个仓库 pin、
+每个文件的原始字节 hash 和完整本地 `$ref` 闭包，再编译 request、path、response schema。bundle 必须包含全部 13 个 TCK operation mapping。
+Operation 01–12 编译封闭 owner request/path/response schema。Operation 13 必须能解析到所记录的 Navigator POST operation，但保持 deny-only；开放 append body 不会编译成可调用输入。合同缺失、过期、部分、远端或越界均阻止 readiness。
 
 ## HTTP and security behavior
 
@@ -94,11 +110,30 @@ OpenAPI 文档编译 request、path、response schema validator；缺少 operati
   __Secure-cyrene-csrf with Secure, HttpOnly, SameSite=Strict, and
   Path=/api/workspace/v1, without Domain. The access token and any
   access-token fingerprint are absent from both response and logs.
-- Every JSON request and response is limited to 4 MiB. Owner request and
-  response schemas validate without rewriting Product JSON bytes. Declared
-  resource references must be closed relative objects with an allowlisted READ
-  key and one opaque resourceId; missing response schema or unsafe reference
-  returns 502 with no Product body.
+- Every JSON request and response is limited to 4 MiB. Successful Product
+  responses must match closed owner schemas; undeclared fields and URL-shaped
+  resource links fail closed. Declared resource references must be closed
+  relative objects with an allowlisted READ key and a bounded opaque resourceId
+  containing no URL or path separators. The BFF preserves a Product status and
+  body only after those checks pass.
+- Exchange operation 08 may accept the closed command-only `sourceEndpoint`
+  selector (`product: "reactor"`, UUID `endpointId`, positive integer
+  `resourceVersion`). It is not a navigable Product resource reference. The
+  Exchange owner must check the scoped grant and resolve the endpoint through
+  its fixed Reactor service connection; browser input never supplies a URL,
+  path, or upstream operation.
+- Navigator operation 13 remains unavailable to ordinary Web callers. Its
+  legacy `AppendRequest.events` items are open objects, and its writer token,
+  epoch fencing, and batch replay semantics require a trusted server-side
+  Harness writer handoff. The current BFF has no such handoff; it retains the
+  TCK row for provenance, keeps it outside the callable catalog, and returns
+  BFF-owned 403 without reading or forwarding its body.
+- Product `application/problem+json` responses must use the closed shared
+  RFC 9457 schema. Runtime accepts only `type` and `instance` equal to
+  `about:blank`, a body status matching the HTTP status, and no `resourceRef`
+  or extension fields. Address-like or path-like error text fails closed with
+  a BFF-owned 502; it is not relayed to the browser. Product error status and
+  body are preserved only after these checks pass.
 - Traceparent is validated as W3C v00, rejects zero identifiers, and is
   generated when absent. The verified value is propagated in
   WorkspaceApiRequest.traceparent; trace data never affects identity.
