@@ -29,3 +29,7 @@ tempfile = "3.8"
 [[bin]]
 name = "cy-workspace-fabric-fixture"
 path = "src/bin/cy-workspace-fabric-fixture.rs"
+
+[[bin]]
+name = "cy-workspace-relay-host"
+path = "src/bin/cy-workspace-relay-host.rs"

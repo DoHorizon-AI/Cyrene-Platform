@@ -31,7 +31,7 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/direct.rs` | Workspace API endpoint with session and membership checks. | 校验会话与成员关系的 Workspace API 直连端点。 |
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
 | `src/transport.rs` | Direct candidate selection and outbound mTLS Relay transport. | 直连候选选择与出站 mTLS Relay 传输。 |
-| `src/bin/` | Real acceptance relay, connector, and reference frontend. | 真实验收 Relay、Connector 与参考 frontend。 |
+| `src/bin/` | Fail-closed Relay host and acceptance-only connector/reference frontend fixtures. | fail-closed Relay host 与仅用于验收的 Connector/参考 frontend fixture。 |
 
 `FileWorkspaceDirectory::open` needs a private directory on a persistent volume
 with one active owner. `replace` publishes a complete membership and descriptor
@@ -71,6 +71,50 @@ certificates, verify TLS peers, or issue credentials. No private keys,
 certificate bodies, or session credentials are stored, and this crate does not
 itself run a Directory service.
 
+## Relay host security state
+
+`cy-workspace-relay-host` is a runnable, non-fixture process shell around
+`WorkspaceRelay`. The production device IAM verifier and directory
+administration integration are not implemented, so the host uses an
+unavailable verifier that rejects every Relay session and keeps `/readyz` at
+HTTP 503. `/healthz` reports only that the process is alive. This is a
+fail-closed host scaffold, not a production Relay deployment.
+
+Run the host locally with an owner-only state directory:
+
+```bash
+CYRENE_WORKSPACE_RELAY_DIRECTORY=/path/to/private/workspace-relay-state \
+  cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
+```
+
+The default listeners are `127.0.0.1:8080` for gRPC and `127.0.0.1:8081` for
+health probes. `GET /healthz` returns HTTP 200; `GET /readyz` returns HTTP 503
+until production identity and directory administration exist.
+
+The host defaults to loopback. A non-loopback Relay bind requires the explicit
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`
+setting. A non-loopback health bind also requires
+`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`. Both
+settings are operator assertions, not proof of live ACA configuration. ACA
+must bind both listeners to the container interface (for example
+`0.0.0.0:8080` and `0.0.0.0:8081`), explicitly set ingress `targetPort: 8080`
+and `transport: http2`, set `allowInsecure: false`, require client
+certificates with `clientCertificateMode: require`, and leave `8081` out of
+`additionalPortMappings`. Configure startup/liveness probes at `8081/healthz`
+and readiness at `8081/readyz`. ACA's default probes target the ingress port,
+so explicit probe configuration is required with both listeners. The current
+`/readyz` response is 503 by design, which keeps the revision unready and
+prevents it receiving ingress traffic. Mount a private persistent directory
+and maintain a single active owner for its lock. The host does not read or trust
+`X-Forwarded-Client-Cert`; production IAM must validate the enrolled
+certificate fingerprint and bind it to an authorized device and Workspace
+session before readiness can be enabled. Do not deploy fixture credentials or
+`DevelopmentSessionVerifier` as production identity.
+
+The Relay host transports Workspace requests only. Product, Kernel/Lease,
+Runtime, and Artifact authorities remain in their owning components; the host
+does not load fixture handlers or acquire their state.
+
 Run:
 
 ```bash
@@ -100,7 +144,7 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 | `src/direct.rs` | 校验会话与成员关系的 Workspace API 私网直连端点。 |
 | `src/relay.rs` | 不拥有 Workspace authority 的实时应用请求路由。 |
 | `src/transport.rs` | 直连候选选择、出站 mTLS Relay client 和 connector session。 |
-| `src/bin/` | 真实 acceptance relay、connector 和参考 frontend。 |
+| `src/bin/` | fail-closed Relay host 与仅用于 acceptance 的 Connector/参考 frontend fixture。 |
 
 `FileWorkspaceDirectory::open` 需要挂载在持久卷上的私有目录，同一时间仅允许一个实例持有。`replace` 原子发布成员关系和描述符版本，并保留设备记录。注册表只导入已经外部批准并签发的证书记录，导入时状态为 `Approved`；记录作用域身份和调用方提供的 SHA-256 证书指纹，支持按设备键或指纹查找，拒绝重复身份/指纹，并允许撤销。撤销后的身份和指纹不能重新导入；证书轮换需由未来的显式操作处理。注册表不表示待审批请求，也不执行审批决策。
 
@@ -109,6 +153,41 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 此证书只认证 Workspace Connector 到 Relay 的客户端身份，不认证 Relay 服务到 Connector 的服务端身份。Workspace 接收端只能在 Relay 会话的服务端证书由配置的 Relay CA 验证且匹配配置的 server name 时信任转发的 `caller_roles`。出站 transport 会独立校验这些服务端事实与 Connector 已注册客户端证书。Direct 端点仍是 Frontend 用户会话路径，不得把 Workspace 设备证书用作用户身份。
 
 存储层只校验指纹格式，不解析证书、不验证 TLS 对端、不签发凭据。这里不保存私钥、证书正文或会话凭据，crate 也不自行运行 Directory 服务。
+
+## Relay host 安全状态
+
+`cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的可运行非 fixture 进程入口。生产设备 IAM
+verifier 与目录管理集成尚未实现，因此 host 使用不可用 verifier，拒绝所有 Relay session，并使
+`/readyz` 保持 HTTP 503。`/healthz` 只表示进程存活。这是 fail-closed host 脚手架，不是生产
+Relay 部署。
+
+使用仅限服务所有者访问的状态目录，可在本地启动 host：
+
+```bash
+CYRENE_WORKSPACE_RELAY_DIRECTORY=/path/to/private/workspace-relay-state \
+  cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
+```
+
+默认 gRPC listener 为 `127.0.0.1:8080`，健康探针 listener 为
+`127.0.0.1:8081`。`GET /healthz` 返回 HTTP 200；在生产身份和目录管理接通前，
+`GET /readyz` 返回 HTTP 503。
+
+host 默认绑定 loopback。Relay 使用非 loopback bind 时，必须显式设置
+`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`。该设置只是运维声明，
+不能证明 ACA 的实时配置。健康 listener 使用非 loopback bind 时，也必须设置
+`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`。ACA 必须在 Envoy 终止客户端
+TLS、强制客户端证书；两个 listener 绑定容器网卡（例如 `0.0.0.0:8080` 与
+`0.0.0.0:8081`），显式将 ingress `targetPort: 8080`、`transport: http2`、
+`allowInsecure: false`，并设置 `clientCertificateMode: require`。`8081` 不得放入
+`additionalPortMappings`。启动/存活 probe 配为 `8081/healthz`，就绪 probe 配为
+`8081/readyz`。两个 listener 并存时，ACA 默认 probe 会检查 ingress port，因此必须显式配置 probe。
+当前 `/readyz` 按设计返回 503，使 revision 保持未就绪并且不接收 ingress 流量。挂载私有持久目录，
+并保证同一时间只有一个 owner 持有目录锁。host 不读取或信任
+`X-Forwarded-Client-Cert`；生产 IAM 必须验证已登记证书指纹，并将其绑定到授权设备及 Workspace
+session 后才能启用 readiness。不得将 fixture credential 或 `DevelopmentSessionVerifier` 用作生产身份。
+
+Relay host 只传输 Workspace request。Product、Kernel/Lease、Runtime 与 Artifact authority 仍属于
+各自的组件；host 不加载 fixture handler，也不获得 fixture 状态。
 
 运行：
 
