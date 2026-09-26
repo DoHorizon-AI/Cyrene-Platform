@@ -12,7 +12,7 @@ info:
     v1 contract. The manager has a local ACK-backed state machine, but the HTTP
     flow still requires production Directory identity/recovery binding, durable
     cross-process storage, verifier, CA, retirement, and registry adapters.
-x-cyrene-runtime-status: contract-only
+x-cyrene-runtime-status: http-handler-ports-only
 servers:
   - url: https://{host}
     variables:
@@ -28,23 +28,23 @@ paths:
       operationId: startDeviceAuthorization
       summary: Start a WorkspaceDevice enrollment
       description: >-
-    The server generates device_id and authorization_id. device_code is a
-    256-bit poll bearer returned in each start response; user_code is a
-    rate-limited human lookup value. The 256-bit registration_key is a separate
-    recovery credential used only to recover a lost start response. Directory
-    binds its domain-separated digest to the exact organization/workspace, CSR DER digest,
-    and SPKI digest tuple. A matching retry in a recoverable, unexpired state
-    keeps the same device_id, authorization_id, authorization_generation,
-    issuer idempotency key, and any already-issued certificate, while one CAS
-    rotates device_code and user_code and increments device_code_generation.
-    The prior codes immediately stop authorizing poll, approval lookup, or ACK.
-    Reusing the key with a changed tuple or a denied, consumed, delivery-expired,
-    or expired authorization is a conflict. If approval is concurrently
-    verifying or CA issuance is in progress, recovery must preserve that exact
-    authorization and resolve to the same certificate or explicit pending;
-    it must never create a second authorization or certificate. Clients discard
-    start responses with a lower device_code_generation. Active devices must
-    use the mTLS rotation route.
+        The server generates device_id and authorization_id. device_code is a
+        256-bit poll bearer returned in each start response; user_code is a
+        rate-limited human lookup value. The 256-bit registration_key is a separate
+        recovery credential used only to recover a lost start response. Directory
+        binds its domain-separated digest to the exact organization/workspace, CSR DER digest,
+        and SPKI digest tuple. A matching retry in a recoverable, unexpired state
+        keeps the same device_id, authorization_id, authorization_generation,
+        issuer idempotency key, and any already-issued certificate, while one CAS
+        rotates device_code and user_code and increments device_code_generation.
+        The prior codes immediately stop authorizing poll, approval lookup, or ACK.
+        Reusing the key with a changed tuple or a denied, consumed, delivery-expired,
+        or expired authorization is a conflict. If approval is concurrently
+        verifying or CA issuance is in progress, recovery must preserve that exact
+        authorization and resolve to the same certificate or explicit pending;
+        it must never create a second authorization or certificate. Clients discard
+        start responses with a lower device_code_generation. Active devices must
+        use the mTLS rotation route.
       requestBody:
         required: true
         content:
@@ -183,12 +183,14 @@ paths:
         Only device_code is accepted as the pre-certificate poll credential.
         RFC 8628-style nonterminal and terminal outcomes use the error values
         authorization_pending, slow_down, access_denied, and expired_token.
-        Target v1 delivery semantics repeat the same certificate bytes and
-        delivery_id until ACK or the bounded deadline. The current manager does
-        not implement this receipt protocol; its first approved poll is
-        at-most-once. After the ACK deadline, delivery_expired means the
-        certificate was confirmed revoked or retired. A
-        delivery_recovery_blocked result explicitly reports pending or
+        The local manager supports byte-identical certificate retries until an
+        exact ACK and explicit deadline retirement. HTTP routes require an
+        injected application adapter to map these states. Production Directory
+        recovery transactions, cross-process storage, CA, and registry
+        activation are still unavailable, so the route layer alone is not a
+        deployable enrollment service. After the ACK deadline,
+        delivery_expired means the certificate was confirmed revoked or retired.
+        A delivery_recovery_blocked result explicitly reports pending or
         unresolved CA recovery and never claims delivery success.
       requestBody:
         required: true

@@ -15,6 +15,7 @@ mod auth;
 mod caller;
 mod control_plane;
 mod device_auth;
+pub mod device_enrollment_http;
 mod device_registry;
 mod direct;
 mod directory;
@@ -79,6 +80,11 @@ pub use device_auth::{
 };
 pub use device_authorization_postgres::{
     DeviceAuthorizationPostgresError, PostgresDeviceAuthorizationStore,
+};
+pub use device_enrollment_http::{
+    device_enrollment_v1_router, DeviceEnrollmentAuthorizationPort,
+    DeviceEnrollmentHttpDependencies, DeviceEnrollmentRegistrationTransactionPort,
+    TrustedEnrollmentAbuseKey, TrustedInteractiveUserSession,
 };
 pub use device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,

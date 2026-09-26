@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
 [dependencies]
+async-trait = "0.1"
 axum = { version = "0.7", features = ["json"] }
 base64 = "0.22"
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }

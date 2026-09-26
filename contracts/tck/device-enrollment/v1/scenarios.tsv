@@ -17,6 +17,9 @@ csr_digest_recomputed	CSR with matching declared SPKI digest	start authorization
 csr_digest_mismatch	CSR+different declared SPKI digest	start authorization	REJECTED before persistence
 scope_binding	org+workspace+CSR+device_code	all transitions	exact scope retained
 user_code_not_credential	user_code without trusted user session	approval challenge	REJECTED
+http_approval_requires_session	missing trusted interactive session	POST /v1/device-authorizations/approval-challenges	401; application approval port is not called
+http_forged_approver_rejected	request body includes caller-supplied approver	POST /v1/device-authorizations/approval-challenges	400; user identity is accepted only from trusted middleware
+http_approval_finish_issuing	valid session plus accepted WebAuthn assertion; durable state is ISSUING	POST /v1/device-authorizations/approval-challenges/{approval_id}/complete	202 with authorization ref and approvedBy bound to trusted session
 user_code_rate_limit	repeated invalid user_code	approval challenge	RATE_LIMITED
 device_id_not_poll_credential	device_id without device_code	poll	REJECTED
 authorization_id_not_poll_credential	authorization_id without device_code	poll	REJECTED
@@ -29,11 +32,15 @@ denial_trusted_member	trusted workspace member+user_code	denial	DENIED; outstand
 poll_pending	pending or WebAuthn challenge active	poll	authorization_pending+current interval
 poll_issuing_recovery	durable ISSUING+ambiguous CA outcome	poll and signer recovery	PENDING; same authorization_id request returns same certificate
 poll_slow_down	poll before current interval	poll	slow_down+interval increased by 5 seconds up to 60 seconds
+http_poll_retry_after	application returns slow_down with retryAfterSeconds	POST /v1/device-authorizations/poll	400 slow_down and matching Retry-After header
 poll_denied	denied authorization	poll	access_denied; no certificate
 poll_expired	expired authorization	poll	expired_token; codes and challenges invalid
 poll_approved	certificate durable and delivery pending	poll	approved+certificate+delivery_id+deadline
+http_poll_certificate_binding	application poll response has certificate DER and metadata	POST /v1/device-authorizations/poll	200 only when Directory device_id, authorization, CSR/SPKI digests, and certificate fingerprint agree
 delivery_retry_before_ack	approved but unacknowledged authorization	repeated poll	byte-identical certificate+same delivery_id before deadline
 ack_binding_mismatch	wrong authorization or delivery ID or cert fingerprint or CSR or SPKI digest	ACK	REJECTED; remains delivery pending
+http_ack_receipt_binding	ACK adapter returns a receipt for a different authorization, delivery, or certificate	POST /v1/device-authorizations/delivery-acknowledgements	503; response is not reported as a successful receipt
+http_ack_conflict_not_success	ACK application reports a tuple/state conflict	POST /v1/device-authorizations/delivery-acknowledgements	409 state_conflict; no receipt success response
 ack_idempotent	exact ACK repeated	ACK	SAME receipt result
 ack_replay_after_deadline	identical receipt committed before deadline; retry after deadline	ACK	SAME receipt result; does not reopen delivery
 ack_first_after_deadline	no prior receipt; first ACK at or after deadline	ACK	REJECTED; recovery/revocation outcome remains explicit
@@ -51,3 +58,6 @@ revocation_idempotent	same serial and reason repeated	revocation endpoint	SAME r
 identity_roles_separate	UserIdentityRef+WorkspaceDevice+Workload	certificate issue	no identity substitution; no Workload identity minted
 no_provider_token_to_device	approved enrollment	poll response	Cyrene WorkspaceDevice certificate only; no Microsoft/OAuth token
 secret_redaction	device_code+user_code+assertion+CA key	logs and responses	secrets redacted; CA key absent
+http_secret_response_rejected	injected adapter returns device_code, opaque WebAuthn state, recovery key, assertion, private key, or provider token	protected HTTP response	503; sensitive material is never serialized
+http_start_without_atomic_transaction	CSR is valid but composite Directory+manager transaction port is absent	POST /v1/device-authorizations	503; no identity binding or authorization is started
+http_start_directory_identity	composite transaction returns Directory binding and authorization	POST /v1/device-authorizations	201; stable device_id differs from authorization_id and matches returned binding

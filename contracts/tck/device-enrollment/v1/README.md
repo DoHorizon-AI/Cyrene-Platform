@@ -120,12 +120,13 @@ success. Confirmed retirement or revocation returns `delivery_expired`. A lost
 response is never treated as an ACK. The device must use a new authorized
 enrollment or rotation after an expired delivery.
 
-These issuance and ACK rules are contract requirements, not runtime evidence.
-The manager now has a locally testable ACK-backed delivery/retirement state
-machine. It still lacks production Directory identity mapping, recovery-key
-checks with same-authorization code rotation, cross-process persistence, CA,
-registry activation, and HTTP composition; end-to-end enrollment remains
-pending those adapters.
+These issuance and ACK rules are contract requirements, not full runtime
+evidence. The manager has a locally testable ACK-backed delivery/retirement
+state machine, and the HTTP route layer now accepts explicit application ports
+and fails closed when the atomic registration transaction is absent. Production
+Directory identity mapping with same-authorization recovery-key code rotation,
+cross-process persistence, CA, registry activation, and host composition are
+still missing; end-to-end enrollment remains pending those adapters.
 
 ## Rotation and revocation
 
@@ -202,7 +203,7 @@ bash tooling/ci/check-public-proto-sync.sh
 
 CA 返回证书后，必须先持久化证书与 `delivery_id` 再响应。直到收到精确 ACK，交付仍为 pending。若 acknowledgement deadline 到期，服务必须先撤销或退役未交付证书，再将交付标记为 expired。如果撤销结果无法确认，轮询必须返回明确的 `delivery_recovery_blocked`，并说明 `REVOCATION_PENDING` 或 `RECOVERY_BLOCKED`，不能报告交付成功。确认撤销或退役后才返回 `delivery_expired`。响应丢失绝不等于 ACK。交付过期后，设备必须走新的授权注册或轮换流程。
 
-Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。生产 Directory identity mapping、同授权 recovery-key code rotation、跨进程存储、CA、registry activation 与 HTTP composition 仍未完成；端到端入网依然依赖这些 adapter。
+Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。HTTP route layer 现在可通过显式注入的 ports 运行并在缺少适配器时 fail closed。生产 Directory identity mapping 与同授权 recovery-key code rotation 原子事务、跨进程存储、CA、registry activation 及 host composition 仍未完成；端到端入网依然依赖这些 adapter。
 
 ## 轮换与撤销
 
@@ -212,7 +213,7 @@ Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。
 
 禁止记录原始 `registration_key`、`device_code`、`user_code`、WebAuthn assertion 或服务端 WebAuthn state。必须对 `verification_uri_complete` 脱敏，因为其中可能含有 `user_code`。只保存 recovery/device/user code 的 keyed digest，不保存原始值。CA private key 必须留在外部 CA 边界内，不得进入 API response、应用日志或 node 进程。
 
-此 TCK 是未来 endpoint、Directory、WebAuthn、持久化 store、CA 与 revocation adapter 的目标。Buf lint 通过或 `cy-proto` 编译成功并不表示这些 runtime 场景已经通过。
+此 TCK 仍是 Directory 原子恢复事务、WebAuthn、持久化 store、CA、registry activation 与 host composition 的验收目标。HTTP route 层已有本地测试，但 Buf lint、`cy-proto` 编译或 handler 单测通过都不表示端到端 runtime 场景已经通过。
 
 ### 运行定向契约检查
 
