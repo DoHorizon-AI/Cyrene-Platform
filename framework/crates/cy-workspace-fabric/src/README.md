@@ -17,6 +17,7 @@
 | `relay.rs` | Ephemeral authenticated routing. | 临时认证路由。 |
 | `transport.rs` | Direct candidate selection and outbound mTLS transport. | 直连候选选择与出站 mTLS 传输。 |
 | `sidecar.rs` | External-credential consumer and authenticated local gRPC bridge. | 外部凭据 consumer 与本地认证 gRPC 代理。 |
+| `user_code_secret.rs` | Versioned HMAC key ring for user-code storage and verification. | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixtures and the standalone Workspace sidecar. | Acceptance fixture 与独立 Workspace sidecar。 |
 
 Relay and Directory code must never become Product, execution, Lease/Event,
@@ -55,6 +56,7 @@ identity 权威。
 | `relay.rs` | 临时认证路由。 |
 | `transport.rs` | 直连候选选择与出站 mTLS 传输。 |
 | `bin/` | Acceptance fixture 与独立 Workspace sidecar。 |
+| `user_code_secret.rs` | user code 存储与校验使用的带版本 HMAC key ring。 |
 
 Relay 和 Directory 代码绝不能成为 Product、execution、Lease/Event 或 Artifact identity authority。Workspace Connector 仅在 Tonic TLS 对端证书匹配已批准且未撤销的设备记录时接受；frontend 直连仍校验用户会话和成员关系。
 

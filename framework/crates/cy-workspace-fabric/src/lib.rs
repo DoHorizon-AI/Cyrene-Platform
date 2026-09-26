@@ -26,6 +26,7 @@ mod product_projection;
 mod relay;
 mod sidecar;
 mod transport;
+mod user_code_secret;
 
 pub use api::{
     bounded_workspace_direct_server, bounded_workspace_relay_server, LocalWorkspaceClient,
@@ -68,6 +69,9 @@ pub use sidecar::{LocalBearerInterceptor, SidecarConfigurationError, WorkspaceSi
 pub use transport::{
     connect_discovered_workspace, connect_relay_session, run_workspace_connector_session,
     RelayClientConfig, RelaySession, WorkspaceConnection,
+};
+pub use user_code_secret::{
+    UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest, MAX_USER_CODE_KEY_VERSIONS,
 };
 
 pub use cy_proto::workspace_v1;
