@@ -11,6 +11,7 @@
 mod api;
 mod auth;
 mod control_plane;
+mod device_registry;
 mod direct;
 mod directory;
 mod persistent_directory;
@@ -24,6 +25,10 @@ pub use auth::{
 pub use control_plane::{
     WorkspaceControlPlane, WorkspaceControlPlaneConfigError, WorkspaceDispatchError,
     WorkspaceOperationProjection, WorkspaceProductRequest, WorkspaceRequestDispatcher,
+};
+pub use device_registry::{
+    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,
+    WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
 };
 pub use direct::DirectWorkspaceServer;
 pub use directory::{
