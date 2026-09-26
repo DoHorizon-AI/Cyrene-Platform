@@ -17,10 +17,11 @@ frontend-to-Workspace API 投影；不实现生产 IAM、VPN、NAT 打洞、全�
 ## 1. Boundary and authority / 边界与权威
 
 The Account/Directory plane answers **who may discover which Workspace and
-how it may currently be reached**. The Workspace Control Plane remains the
-only owner of Workspace and Product state. Relay is authenticated transport;
-it keeps only live routing registrations and cannot reconstruct, mutate, or
-reconcile an Operation.
+how it may currently be reached**. The Workspace Control Plane owns Workspace
+authority and is the stable frontend-facing API for Product projections. Each
+Product service retains authority over its domain records behind that API.
+Relay is authenticated transport; it keeps only live routing registrations and
+cannot reconstruct, mutate, or reconcile an Operation.
 
 A frontend authenticates with organization-scoped user claims before it knows
 a Workspace ID. Membership-filtered discovery returns the Workspace identity;
@@ -29,8 +30,9 @@ optionally narrow later requests to one Workspace, but discovery never requires
 the client to supply the target Workspace in advance.
 
 Account/Directory 平面只回答“某身份可发现哪些 Workspace，以及当前有哪些连接方式”。
-Workspace Control Plane 仍是 Workspace/Product 状态的唯一权威。Relay 只是认证传输；
-它仅保存当前连接的临时路由，不能重建、修改或协调 Operation。
+Workspace Control Plane 持有 Workspace 权威，并提供面向前端的稳定 Product API 投影；
+各 Product 服务仍持有各自领域记录的权威。Relay 只是认证传输；它仅保存当前连接的
+临时路由，不能重建、修改或协调 Operation。
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
@@ -138,8 +140,8 @@ When Relay disappears:
 2. it reconnects with the same enrolled device identity and a fresh relay
    session;
 3. frontend requests may retry through a newly discovered/current candidate;
-4. the Workspace Control Plane keeps the same Operation identity, Product
-   state, Artifact references, and authority instance;
+4. the Workspace Control Plane keeps the same Operation identity, Artifact
+   references, and authority instance; Product owners retain their state;
 5. Execution Fabric reconciliation continues independently through its
    existing Node/Runtime control stream and Lease/Fence rules.
 
@@ -204,7 +206,7 @@ native mesh、全球 P2P/CDN scheduler 或生产级全球 IAM/control plane。
 
 ## 1. 边界与权威
 
-Account/Directory 平面回答：**谁能发现哪些 Workspace，以及当前可以通过什么方式访问它们**。Workspace Control Plane 仍是 Workspace 和 Product 状态的唯一 owner。Relay 是认证传输，只保留活动路由 registration，不能重建、修改或 reconciliation 一个 Operation。
+Account/Directory 平面回答：**谁能发现哪些 Workspace，以及当前可以通过什么方式访问它们**。Workspace Control Plane 持有 Workspace 权威，并提供面向前端的稳定 Product API 投影；各 Product 服务仍持有各自领域记录的权威。Relay 是认证传输，只保留活动路由 registration，不能重建、修改或 reconciliation 一个 Operation。
 
 在知道 Workspace ID 之前，frontend 使用组织作用域的 user claim 完成认证。按成员关系过滤的 discovery 会返回 Workspace identity；之后 frontend 才能向 Workspace API 发送请求。credential 可以选择将后续 request 限定到一个 Workspace，但 discovery 不要求 client 预先提供目标 Workspace。
 
@@ -274,7 +276,7 @@ Relay connection 及其 \`relay_session_id\) 是可丢弃的 transport state。R
 1. Workspace connector 观察到 stream 已关闭；
 2. connector 使用相同的已注册 device identity 和新的 Relay session 重新连接；
 3. frontend request 可以通过重新发现或当前有效的 candidate 重试；
-4. Workspace Control Plane 保留相同的 Operation identity、Product 状态、Artifact 引用和 authority instance；
+4. Workspace Control Plane 保留相同的 Operation identity、Artifact 引用和 authority instance；各 Product owner 保留其状态；
 5. Execution Fabric 通过原有 Node/Runtime control stream 和 Lease/Fence 规则独立继续 reconciliation。
 
 Relay 重启不会提升 Runtime generation，也不会创建新的 Operation、Artifact 或 Workspace authority。Relay 不能把连接丢失解释为执行丢失；执行状态仍由既有 Execution Fabric 证据和 Lease/Fence 协调。
