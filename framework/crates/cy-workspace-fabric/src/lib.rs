@@ -34,11 +34,15 @@ pub(crate) mod device_certificate_authority;
 // current revocation-status provider are configured.
 #[allow(dead_code)]
 pub(crate) mod device_certificate_validation;
+// This inbound peer validator remains disconnected until Relay supplies a
+// trusted transport identity source and a current revocation adapter.
 mod product_adapters;
 #[allow(dead_code)]
 pub(crate) mod product_authorization;
 mod product_projection;
 mod relay;
+#[allow(dead_code)]
+pub(crate) mod relay_peer_certificate_validation;
 mod sidecar;
 mod transport;
 mod user_code_secret;
