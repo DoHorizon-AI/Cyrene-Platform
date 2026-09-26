@@ -19,9 +19,9 @@ pub use acquisition::{
     AcquisitionProvider, ExternalSource, HttpAcquisitionProvider, SourceImportJob, SourceSnapshot,
 };
 pub use contract::{
-    ArtifactPeer, ArtifactPeerKind, ArtifactReplica, ArtifactSourceCandidate, TransferCheckpoint,
-    TransferEstimate, TransferManifest, TransferPart, TransferPartSource, TransferPlan,
-    TransferProtocol, TransferSession, TransferSource, TransferTicket,
+    ArtifactPeer, ArtifactPeerKind, ArtifactReplica, ArtifactSourceCandidate, ArtifactTransferPath,
+    TransferCheckpoint, TransferEstimate, TransferManifest, TransferPart, TransferPartSource,
+    TransferPlan, TransferProtocol, TransferSession, TransferSource, TransferTicket,
 };
 pub use cy_manifest::{
     ArtifactDirectoryEntry, ArtifactKind, ArtifactRef, PortableDirectoryManifest,

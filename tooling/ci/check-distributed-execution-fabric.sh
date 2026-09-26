@@ -17,9 +17,15 @@ for path in "${tck_root}/README.md" "${tck_root}/scenarios.tsv" "${schema}"; do
     test -f "${path}" || { printf 'missing Fabric contract artifact: %s\n' "${path}" >&2; exit 1; }
 done
 
-for scenario in enrollment_welcome_replay credential_ambiguity welcome_ordering placement_assignment assignment_ack_after_start assignment_prepare_failure kernel_unavailable_unknown rollback_host_replacement verified_local_assignment verified_local_mismatch artifact_ticket_tamper artifact_legacy_uri_only; do
+for scenario in enrollment_welcome_replay credential_ambiguity welcome_ordering placement_assignment assignment_ack_after_start assignment_prepare_failure kernel_unavailable_unknown rollback_host_replacement verified_local_assignment verified_local_mismatch artifact_ticket_tamper artifact_legacy_uri_only artifact_lan_direct_preferred artifact_user_object_store_fallback artifact_no_route_fail_closed artifact_unspecified_path artifact_expired_store_url; do
     rg -q "^${scenario}$(printf '\t')" "${tck_root}/scenarios.tsv" || { printf 'missing Fabric TCK scenario: %s\n' "${scenario}" >&2; exit 1; }
 done
+
+rg -q 'enum ArtifactTransferPath' "${core_root}/node_control.proto"
+rg -q 'ARTIFACT_TRANSFER_PATH_LAN_DIRECT = 1' "${core_root}/node_control.proto"
+rg -q 'ARTIFACT_TRANSFER_PATH_USER_PROVIDED_OBJECT_STORE = 2' "${core_root}/node_control.proto"
+rg -q 'ArtifactTransferPath path = 5' "${core_root}/node_control.proto"
+rg -q 'locator_expires_at_unix_ms = 6' "${core_root}/node_control.proto"
 
 for message in ExecutionNodeDescriptor ExecutionAgentHello ExecutionAgentWelcome RuntimeAssignment AssignmentAck RuntimeHeartbeat LeaseRenewalRequest LeaseRenewalResult RuntimeObservation ProviderRuntimeObservation RuntimeProgress StructuredAgentEvent LogReference StopCommand StopAck ArtifactTransferSource ArtifactPartSource ArtifactLocalInput; do
     rg -q "message ${message}" "${core_root}/node_control.proto" || { printf 'missing wire message: %s\n' "${message}" >&2; exit 1; }

@@ -635,6 +635,8 @@ mod tests {
                     replica_id: "replica-1".to_string(),
                     locator: "https://source.example.test/artifact".to_string(),
                     transfer_ticket: "opaque-ticket".to_string(),
+                    path: core_v1::ArtifactTransferPath::LanDirect as i32,
+                    locator_expires_at_unix_ms: 0,
                 }]
             },
             part_sources: if artifact.size_bytes == 0 {

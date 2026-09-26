@@ -27,10 +27,29 @@ pub enum TransferProtocol {
 pub enum ArtifactPeerKind {
     CentralSeed,
     RegionalCache,
+    /// A gateway configured and owned through an explicit user storage binding.
     ObjectStoreGateway,
     DesktopCache,
     NodeCache,
     Generic,
+}
+
+/// Network path authorized for one bulk Artifact transfer source.
+///
+/// `UserProvidedObjectStore` means the resolver has verified an explicit
+/// user-owned storage binding and supplied a short-lived, pre-signed HTTPS
+/// locator. It does not authorize sending Artifact bytes through the control
+/// Relay.
+///
+/// 单个 Artifact 批量传输源获准使用的网络路径。对象存储路径必须来自用户显式绑定，
+/// 并携带短时预签名 HTTPS 地址；它不允许经由控制 Relay 传送 Artifact 字节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactTransferPath {
+    /// An identity-authorized source reachable directly over the private LAN.
+    LanDirect,
+    /// An explicitly user-provided object store reached by a short-lived URL.
+    UserProvidedObjectStore,
 }
 
 /// Policy and quality facts for one Artifact transfer Peer.
@@ -92,10 +111,30 @@ impl ArtifactReplica {
 }
 
 /// Policy-bearing directory result before a destination-scoped ticket exists.
+/// `path` is a reachability result: direct routes are eligible only while the
+/// resolver can reach them, and object-store routes require an explicit user
+/// binding plus a short-lived pre-signed URL.
+///
+/// 此候选表示目录解析后的策略与可达性结果。直连路径必须当前可达；对象存储路径必须有
+/// 显式用户绑定和短时预签名 URL。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactSourceCandidate {
     pub peer: ArtifactPeer,
     pub replica: ArtifactReplica,
+    pub path: ArtifactTransferPath,
+}
+
+impl ArtifactSourceCandidate {
+    /// Validate the typed route and the source facts before planning.
+    ///
+    /// # Errors
+    /// Returns a contract error when a gateway is mislabeled as direct, or a
+    /// user object-store URL is not represented by an expiring HTTPS replica.
+    pub fn validate(&self) -> Result<(), TransferError> {
+        self.peer.validate()?;
+        self.replica.validate()?;
+        validate_transfer_path(self.path, self.peer.kind, &self.replica)
+    }
 }
 
 /// Short-lived authorization for Peer-to-Peer part transfer.
@@ -152,6 +191,51 @@ pub struct TransferSource {
     pub peer: ArtifactPeer,
     pub replica: ArtifactReplica,
     pub ticket: TransferTicket,
+}
+
+impl TransferSource {
+    /// Return the transfer path encoded by this source's existing peer kind.
+    ///
+    /// Keeping the path as a projection preserves the serialized transfer-plan
+    /// contract while ensuring object-store requests do not receive a
+    /// Platform bearer ticket.
+    ///
+    /// 根据现有 Peer 类型投影传输路径，无需改动已冻结的传输计划 JSON 契约，
+    /// 同时确保对象存储请求不会携带 Platform bearer ticket。
+    pub fn transfer_path(&self) -> ArtifactTransferPath {
+        if self.peer.kind == ArtifactPeerKind::ObjectStoreGateway {
+            ArtifactTransferPath::UserProvidedObjectStore
+        } else {
+            ArtifactTransferPath::LanDirect
+        }
+    }
+}
+
+fn validate_transfer_path(
+    path: ArtifactTransferPath,
+    peer_kind: ArtifactPeerKind,
+    replica: &ArtifactReplica,
+) -> Result<(), TransferError> {
+    match path {
+        ArtifactTransferPath::LanDirect if peer_kind == ArtifactPeerKind::ObjectStoreGateway => {
+            Err(TransferError::Contract(
+                "ObjectStoreGateway cannot be routed as LAN_DIRECT".to_string(),
+            ))
+        }
+        ArtifactTransferPath::UserProvidedObjectStore
+            if peer_kind != ArtifactPeerKind::ObjectStoreGateway =>
+        {
+            Err(TransferError::Contract(
+                "user-provided object-store path requires ObjectStoreGateway".to_string(),
+            ))
+        }
+        ArtifactTransferPath::UserProvidedObjectStore if replica.expires_at_unix_ms.is_none() => {
+            Err(TransferError::Contract(
+                "user-provided object-store replicas require a short-lived URL".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Per-part source assignment. Different parts may select different Peers.
@@ -226,6 +310,7 @@ impl TransferPlan {
             })?;
             source.peer.validate()?;
             source.replica.validate()?;
+            validate_transfer_path(source.transfer_path(), source.peer.kind, &source.replica)?;
             source.ticket.validate()?;
             if source
                 .replica
@@ -631,6 +716,40 @@ mod tests {
                 },
             ],
         };
+        assert!(compiled_schema()
+            .validate(&serde_json::to_value(plan).unwrap())
+            .is_ok());
+    }
+
+    #[test]
+    fn user_object_store_plan_serialization_matches_the_frozen_schema() {
+        let artifact = identity(4);
+        let mut source = estimate_source("user-store", 30, 100, 5, 0);
+        source.peer.kind = ArtifactPeerKind::ObjectStoreGateway;
+        source.replica.expires_at_unix_ms = Some(u64::MAX);
+        let plan = TransferPlan {
+            plan_id: "object-store-plan".to_string(),
+            artifact,
+            destination_peer_id: "target-cache".to_string(),
+            sources: vec![source],
+            part_sources: vec![TransferPartSource {
+                part_index: 0,
+                peer_id: "user-store".to_string(),
+                replica_id: "replica-user-store".to_string(),
+            }],
+        };
+        let manifest = TransferManifest {
+            artifact: plan.artifact.clone(),
+            part_size_bytes: 4,
+            parts: vec![TransferPart {
+                index: 0,
+                start: 0,
+                end_exclusive: 4,
+                digest: format!("sha256:{}", "1".repeat(64)),
+            }],
+        };
+
+        assert!(plan.validate(&manifest, 1).is_ok());
         assert!(compiled_schema()
             .validate(&serde_json::to_value(plan).unwrap())
             .is_ok());

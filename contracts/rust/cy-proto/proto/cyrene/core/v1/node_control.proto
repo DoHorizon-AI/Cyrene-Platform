@@ -183,6 +183,21 @@ message ExecutionAgentWelcome {
   cyrene.semantic.v1.ContractRevision selected_contract = 7;
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// ARTIFACT TRANSFER PATH: bulk Artifact data routing, never control Relay fallback
+//
+//   The unspecified value is rejected by Runtime Agent admission. A transfer
+//   must name a reachable LAN_DIRECT peer or an explicitly user-bound object
+//   store URL; control Relay is not an Artifact data path.
+//   未指定路径会被 Runtime Agent 拒绝。Artifact 必须使用可达的 LAN_DIRECT 或用户显式
+//   绑定的对象存储 URL；控制 Relay 不承载 Artifact 数据。
+// ════════════════════════════════════════════════════════════════════════
+enum ArtifactTransferPath {
+  ARTIFACT_TRANSFER_PATH_UNSPECIFIED = 0;
+  ARTIFACT_TRANSFER_PATH_LAN_DIRECT = 1;
+  ARTIFACT_TRANSFER_PATH_USER_PROVIDED_OBJECT_STORE = 2;
+}
+
 message ArtifactTransferSource {
   string peer_id = 1;
   string replica_id = 2;
@@ -190,6 +205,10 @@ message ArtifactTransferSource {
   // Opaque, short-lived Artifact-plane ticket presented to the source Peer.
   // 向 source Peer 出示的短期 Artifact Plane ticket。
   string transfer_ticket = 4;
+  ArtifactTransferPath path = 5;
+  // Expiry of the locator itself; required for USER_PROVIDED_OBJECT_STORE.
+  // locator 自身的到期时间；USER_PROVIDED_OBJECT_STORE 必须提供。
+  uint64 locator_expires_at_unix_ms = 6;
 }
 
 message ArtifactPartSource {

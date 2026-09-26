@@ -17,7 +17,7 @@ use reqwest::header::{AUTHORIZATION, RANGE};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{TransferCheckpoint, TransferPart, TransferSession};
+use crate::{ArtifactTransferPath, TransferCheckpoint, TransferPart, TransferSession};
 
 /// Transfer failure with integrity and publication errors separated.
 #[derive(Debug, Error)]
@@ -114,6 +114,7 @@ impl HttpRangeTransfer {
                     part.clone(),
                     source.replica.locator.clone(),
                     source.ticket.signature.clone(),
+                    source.transfer_path(),
                 )
             })
             .collect::<VecDeque<_>>();
@@ -138,10 +139,10 @@ impl HttpRangeTransfer {
                         .lock()
                         .ok()
                         .and_then(|mut values| values.pop_front());
-                    let Some((part, locator, ticket)) = part else {
+                    let Some((part, locator, ticket, path)) = part else {
                         return;
                     };
-                    let result = download_part(&client, &locator, &ticket, &part, &part_root)
+                    let result = download_part(&client, path, &locator, &ticket, &part, &part_root)
                         .and_then(|_| {
                             let mut checkpoint = completed.lock().map_err(|_| {
                                 TransferError::Checkpoint("checkpoint lock is poisoned".to_string())
@@ -174,6 +175,7 @@ impl HttpRangeTransfer {
 
 fn download_part(
     client: &Client,
+    path: ArtifactTransferPath,
     locator: &str,
     ticket: &str,
     part: &TransferPart,
@@ -184,15 +186,9 @@ fn download_part(
         verify_file(&final_path, &part.digest, part.size_bytes())?;
         return Ok(());
     }
-    let response = client
-        .get(locator)
-        .header(AUTHORIZATION, format!("Bearer {ticket}"))
-        .header(
-            RANGE,
-            format!("bytes={}-{}", part.start, part.end_exclusive - 1),
-        )
+    let response = build_range_request(client, path, locator, ticket, part)
         .send()
-        .map_err(|error| TransferError::Http(error.to_string()))?;
+        .map_err(|error| TransferError::Http(error.without_url().to_string()))?;
     if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(TransferError::Http(format!(
             "replica returned {} instead of 206",
@@ -201,7 +197,7 @@ fn download_part(
     }
     let bytes = response
         .bytes()
-        .map_err(|error| TransferError::Http(error.to_string()))?;
+        .map_err(|error| TransferError::Http(error.without_url().to_string()))?;
     if bytes.len() as u64 != part.size_bytes() || sha256_bytes(&bytes) != part.digest {
         return Err(TransferError::PartDigest(format!(
             "part {} did not match its manifest",
@@ -214,6 +210,25 @@ fn download_part(
     handle.sync_all()?;
     fs::rename(temporary, final_path)?;
     Ok(())
+}
+
+fn build_range_request(
+    client: &Client,
+    path: ArtifactTransferPath,
+    locator: &str,
+    ticket: &str,
+    part: &TransferPart,
+) -> reqwest::blocking::RequestBuilder {
+    let request = client.get(locator).header(
+        RANGE,
+        format!("bytes={}-{}", part.start, part.end_exclusive - 1),
+    );
+    match path {
+        ArtifactTransferPath::LanDirect => {
+            request.header(AUTHORIZATION, format!("Bearer {ticket}"))
+        }
+        ArtifactTransferPath::UserProvidedObjectStore => request,
+    }
 }
 
 fn assemble_and_publish(session: &TransferSession, part_root: &Path) -> Result<(), TransferError> {
@@ -362,6 +377,45 @@ mod tests {
         TransferManifest, TransferPartSource, TransferPlan, TransferProtocol, TransferSource,
         TransferTicket,
     };
+
+    #[test]
+    fn pre_signed_object_store_request_does_not_send_a_peer_bearer_ticket() {
+        let client = Client::new();
+        let part = TransferPart {
+            index: 0,
+            start: 0,
+            end_exclusive: 4,
+            digest: format!("sha256:{}", "0".repeat(64)),
+        };
+        let url = "https://bucket.example.test/model?signature=secret";
+
+        let object_store = build_range_request(
+            &client,
+            ArtifactTransferPath::UserProvidedObjectStore,
+            url,
+            "platform-ticket-secret",
+            &part,
+        )
+        .build()
+        .unwrap();
+
+        assert!(object_store.headers().get(AUTHORIZATION).is_none());
+        assert_eq!(object_store.headers().get(RANGE).unwrap(), "bytes=0-3");
+
+        let direct = build_range_request(
+            &client,
+            ArtifactTransferPath::LanDirect,
+            "https://node.example.test/model",
+            "peer-ticket",
+            &part,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            direct.headers().get(AUTHORIZATION).unwrap(),
+            "Bearer peer-ticket"
+        );
+    }
 
     fn existing_session(root: &Path, bytes: &[u8], digest: String) -> TransferSession {
         let destination = root.join("published-artifact");
