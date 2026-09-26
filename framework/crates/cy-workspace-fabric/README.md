@@ -29,11 +29,18 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/persistent_directory.rs` | Private, single-owner snapshot storage for memberships, descriptors, and device records. | 成员关系、描述符与设备记录的私有单实例快照存储。 |
 | `src/api.rs` | Stable frontend-to-Workspace API port and LOCAL adapter. | 稳定 frontend API port 与 LOCAL adapter。 |
 | `src/direct.rs` | Workspace API endpoint with session and membership checks. | 校验会话与成员关系的 Workspace API 直连端点。 |
+| `src/frontend_relay_client.rs` | Verified-principal Web Frontend client for an outbound mTLS Relay session. | 基于已验证主体的出站 mTLS Relay 客户端。 |
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
 | `src/transport.rs` | Direct candidate selection and outbound mTLS Relay transport. | 直连候选选择与出站 mTLS Relay 传输。 |
 | `src/bin/` | Fail-closed Relay host and acceptance-only connector/reference frontend fixtures. | fail-closed Relay host 与仅用于验收的 Connector/参考 frontend fixture。 |
 | `src/sidecar.rs` | Loopback-authenticated bridge for non-Rust Workspace clients. | 为非 Rust Workspace client 提供 loopback 认证代理。 |
 | `src/bin/` | Acceptance relay/connector/frontend fixtures and the loopback sidecar executable. | 验收 Relay/Connector/frontend fixture 与 loopback sidecar 可执行程序。 |
+
+The Web Frontend Relay adapter's trust boundaries and required host wiring are
+documented in [`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md).
+
+Web Frontend Relay adapter 的信任边界与 host 接线要求见
+[`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md)。
 
 ## Local Python bridge
 

@@ -18,6 +18,7 @@ mod device_registry;
 mod direct;
 mod directory;
 mod durable_directory;
+mod frontend_relay_client;
 mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
 pub mod device_authorization;
@@ -76,6 +77,10 @@ pub use durable_directory::{
     DirectoryMutation, DirectoryOperatorProvisioner, DurableDirectoryError,
     PostgresDeviceRegistrationAuthority, PostgresWorkspaceDirectory,
     WorkspaceDeviceRegistrationAuthority, SUPPORTED_OPERATOR_ROLES,
+};
+pub use frontend_relay_client::{
+    FrontendRelayClient, FrontendRelayClientConfig, FrontendRelayClientError,
+    FrontendWorkspaceTransport,
 };
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_adapters::{
