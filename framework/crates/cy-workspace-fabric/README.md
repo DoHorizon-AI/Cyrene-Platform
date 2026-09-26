@@ -24,11 +24,17 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | --- | --- | --- |
 | `src/auth.rs` | Replaceable short-lived relay authentication seam. | 可替换的短期 Relay 认证 seam。 |
 | `src/directory.rs` | Membership-scoped Workspace discovery. | 基于成员关系的 Workspace 发现。 |
+| `src/persistent_directory.rs` | Private, single-owner snapshot storage for memberships and descriptors. | 成员关系与描述符的私有单实例快照存储。 |
 | `src/api.rs` | Stable frontend-to-Workspace API port and LOCAL adapter. | 稳定 frontend API port 与 LOCAL adapter。 |
 | `src/direct.rs` | Workspace API endpoint with session and membership checks. | 校验会话与成员关系的 Workspace API 直连端点。 |
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
 | `src/transport.rs` | Direct candidate selection and outbound mTLS Relay transport. | 直连候选选择与出站 mTLS Relay 传输。 |
 | `src/bin/` | Real acceptance relay, connector, and reference frontend. | 真实验收 Relay、Connector 与参考 frontend。 |
+
+`FileWorkspaceDirectory::open` needs a private directory on a persistent volume
+with one active owner. `replace` publishes a complete membership and descriptor
+revision atomically. It stores no session credentials and does not itself run a
+Directory service.
 
 Run:
 
@@ -52,11 +58,15 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 |---|---|
 | `src/auth.rs` | 可替换的短时 Relay 认证边界。 |
 | `src/directory.rs` | 以成员关系为作用域的 Workspace 发现。 |
+| `src/persistent_directory.rs` | 成员关系与描述符的私有单实例快照存储；需挂载持久卷。 |
 | `src/api.rs` | 稳定的 frontend-to-Workspace API port 与 LOCAL adapter。 |
 | `src/direct.rs` | 校验会话与成员关系的 Workspace API 私网直连端点。 |
 | `src/relay.rs` | 不拥有 Workspace authority 的实时应用请求路由。 |
 | `src/transport.rs` | 直连候选选择、出站 mTLS Relay client 和 connector session。 |
 | `src/bin/` | 真实 acceptance relay、connector 和参考 frontend。 |
+
+`FileWorkspaceDirectory::open` 需要挂载在持久卷上的私有目录，同一时间仅允许一个实例持有。
+`replace` 原子发布完整的成员关系和描述符版本。该存储不包含会话凭据，也不自行运行 Directory 服务。
 
 运行：
 

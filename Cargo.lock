@@ -564,13 +564,17 @@ version = "0.1.0"
 dependencies = [
  "cy-observability",
  "cy-proto",
+ "prost",
  "prost-types",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

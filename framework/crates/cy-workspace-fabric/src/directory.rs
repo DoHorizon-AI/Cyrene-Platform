@@ -30,6 +30,8 @@ pub enum WorkspaceDirectoryError {
     Identity(String),
     #[error("WORKSPACE_DESCRIPTOR_INVALID: {0}")]
     Descriptor(String),
+    #[error("WORKSPACE_DIRECTORY_STORAGE: {0}")]
+    Storage(String),
 }
 
 /// Account/Directory port. Implementations own membership and descriptors only.
