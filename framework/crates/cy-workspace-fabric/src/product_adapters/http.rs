@@ -287,6 +287,10 @@ impl ProductEndpointConfig {
             service_credential: service_credential.into(),
         }
     }
+
+    pub(super) fn is_scoped_to(&self, organization_id: &str, workspace_id: &str) -> bool {
+        self.organization_id == organization_id && self.workspace_id == workspace_id
+    }
 }
 
 impl fmt::Debug for ProductEndpointConfig {

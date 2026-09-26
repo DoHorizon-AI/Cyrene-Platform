@@ -163,6 +163,30 @@ pub fn load_product_endpoint_configs(
     Ok(configs)
 }
 
+/// Load Product endpoints and require every configured route to use one exact
+/// authenticated Workspace scope.
+///
+/// A Connector process is pinned to a single Workspace identity. This wrapper
+/// rejects a valid manifest whose entries belong to another organization or
+/// Workspace before any Relay session is opened.
+pub fn load_product_endpoint_configs_for_workspace(
+    manifest_path: &Path,
+    private_secret_root: &Path,
+    organization_id: &str,
+    workspace_id: &str,
+) -> Result<Vec<ProductEndpointConfig>, ProductEndpointManifestError> {
+    let configs = load_product_endpoint_configs(manifest_path, private_secret_root)?;
+    if organization_id.trim().is_empty()
+        || workspace_id.trim().is_empty()
+        || configs
+            .iter()
+            .any(|config| !config.is_scoped_to(organization_id, workspace_id))
+    {
+        return Err(ProductEndpointManifestError::ManifestInvalid);
+    }
+    Ok(configs)
+}
+
 /// Non-Unix targets fail closed because the loader cannot verify Unix owner and mode policy.
 #[cfg(not(unix))]
 pub fn load_product_endpoint_configs(

@@ -42,6 +42,13 @@ documented in [`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md).
 Web Frontend Relay adapter 的信任边界与 host 接线要求见
 [`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md)。
 
+The production outbound Connector host's fixed private-file layout, exact
+device identity construction, Product scope checks, and external Relay registry
+gate are documented in [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.md).
+
+生产出站 Connector host 的固定私有文件布局、设备身份构造、Product scope 校验与
+Relay 外部注册表 gate 见 [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.md)。
+
 ## Local Python bridge
 
 `cy-workspace-sidecar` exposes the versioned local gRPC contract in

@@ -20,7 +20,10 @@ use crate::{
     WorkspaceCallerContext,
 };
 
-pub use endpoint_manifest::{load_product_endpoint_configs, ProductEndpointManifestError};
+pub use endpoint_manifest::{
+    load_product_endpoint_configs, load_product_endpoint_configs_for_workspace,
+    ProductEndpointManifestError,
+};
 pub use http::{ProductEndpointConfig, ProductHttpClient};
 
 #[cfg(test)]
