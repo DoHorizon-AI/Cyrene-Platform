@@ -37,12 +37,108 @@ pub struct DeviceAuthorizationScope {
     pub workspace_id: String,
 }
 
+/// Stable Directory device identity copied into one authorization record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthorizationDeviceKey {
+    pub organization_id: String,
+    pub workspace_id: String,
+    pub device_id: String,
+}
+
+/// Opaque, immutable snapshot of a Directory-authoritative registration.
+///
+/// Fields are private so request adapters cannot deserialize or manufacture an
+/// identity. The only production conversion seam accepts the private trusted
+/// Directory-result trait implemented inside this crate; tests use a cfg-only
+/// fixture. Until that adapter and the registered-store transaction are wired,
+/// `DeviceAuthorizationStore` defaults deny start and state transitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthorizationRegistrationBinding {
+    binding_id: [u8; 16],
+    key: DeviceAuthorizationDeviceKey,
+    authorization_generation: u64,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+}
+
+/// Implemented only by the Directory authority adapter for its trusted result.
+/// This crate-private seam prevents public request data from supplying identity.
+#[allow(dead_code)] // The production Directory adapter is not integrated yet.
+pub(crate) trait VerifiedDirectoryRegistrationBinding {
+    fn binding_id(&self) -> &[u8; 16];
+    fn organization_id(&self) -> &str;
+    fn workspace_id(&self) -> &str;
+    fn device_id(&self) -> &str;
+    fn authorization_generation(&self) -> u64;
+    fn csr_sha256(&self) -> &[u8; 32];
+    fn spki_sha256(&self) -> &[u8; 32];
+}
+
+impl DeviceAuthorizationRegistrationBinding {
+    #[allow(dead_code)] // Wired by the production Directory adapter at integration.
+    pub(crate) fn from_verified_directory_binding(
+        binding: &impl VerifiedDirectoryRegistrationBinding,
+    ) -> Self {
+        Self {
+            binding_id: *binding.binding_id(),
+            key: DeviceAuthorizationDeviceKey {
+                organization_id: binding.organization_id().to_owned(),
+                workspace_id: binding.workspace_id().to_owned(),
+                device_id: binding.device_id().to_owned(),
+            },
+            authorization_generation: binding.authorization_generation(),
+            csr_sha256: *binding.csr_sha256(),
+            spki_sha256: *binding.spki_sha256(),
+        }
+    }
+
+    fn binding_id(&self) -> &[u8; 16] {
+        &self.binding_id
+    }
+
+    fn key(&self) -> &DeviceAuthorizationDeviceKey {
+        &self.key
+    }
+
+    fn authorization_generation(&self) -> u64 {
+        self.authorization_generation
+    }
+
+    fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        binding_id: [u8; 16],
+        key: DeviceAuthorizationDeviceKey,
+        authorization_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            binding_id,
+            key,
+            authorization_generation,
+            csr_sha256,
+            spki_sha256,
+        }
+    }
+}
+
 /// Input used to start one device enrollment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceAuthorizationRequest {
     pub scope: DeviceAuthorizationScope,
     /// DER-encoded PKCS#10 CSR. Private key material must never be sent here.
     pub csr_der: Vec<u8>,
+    /// Trusted result returned by the Directory registration authority.
+    /// Request adapters must never construct or deserialize this value.
+    pub registration_binding: DeviceAuthorizationRegistrationBinding,
 }
 
 /// Codes and timing returned once to the device and its operator.
@@ -50,6 +146,8 @@ pub struct DeviceAuthorizationRequest {
 pub struct DeviceAuthorizationStart {
     /// Stable ID for this authorization attempt and the CA idempotency key.
     pub authorization_id: DeviceAuthorizationId,
+    pub device_id: String,
+    pub authorization_generation: u64,
     /// 256-bit, server-generated secret; callers must not log or persist it.
     pub device_code: String,
     /// Human-entered code. It is returned once and stored only as a digest.
@@ -71,6 +169,9 @@ pub struct DeviceApprovalChallenge {
 pub struct WebAuthnAuthenticationContext {
     pub approval_id: DeviceAuthorizationId,
     pub authorization_id: DeviceAuthorizationId,
+    pub registration_binding_id: [u8; 16],
+    pub device_key: DeviceAuthorizationDeviceKey,
+    pub authorization_generation: u64,
     pub approver: UserIdentityRef,
     pub scope: DeviceAuthorizationScope,
     pub csr_sha256: [u8; 32],
@@ -97,6 +198,10 @@ pub struct IssuedDeviceCertificate {
     pub certificate_der: Vec<u8>,
     pub ca_chain_der: Vec<Vec<u8>>,
     pub serial_number: Vec<u8>,
+    /// Issuer attestation for the exact Directory binding supplied to the port.
+    pub registration_binding_id: [u8; 16],
+    pub device_key: DeviceAuthorizationDeviceKey,
+    pub authorization_generation: u64,
     pub scope: DeviceAuthorizationScope,
     pub spki_sha256: [u8; 32],
     pub not_after_unix_ms: u64,
@@ -107,6 +212,8 @@ pub struct IssuedDeviceCertificate {
 pub struct DeviceCertificateDelivery {
     pub authorization_id: DeviceAuthorizationId,
     pub delivery_id: DeviceAuthorizationId,
+    pub device_id: String,
+    pub authorization_generation: u64,
     pub certificate_der: Vec<u8>,
     pub ca_chain_der: Vec<Vec<u8>>,
     pub scope: DeviceAuthorizationScope,
@@ -123,6 +230,8 @@ pub struct DeviceCertificateDelivery {
 pub struct DeviceCertificateDeliveryReceipt {
     pub authorization_id: DeviceAuthorizationId,
     pub delivery_id: DeviceAuthorizationId,
+    pub device_id: String,
+    pub authorization_generation: u64,
     pub certificate_sha256: [u8; 32],
     pub csr_sha256: [u8; 32],
     pub csr_spki_sha256: [u8; 32],
@@ -241,6 +350,8 @@ pub enum DeviceAuthorizationState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceAuthorizationRecord {
     pub id: DeviceAuthorizationId,
+    /// Immutable Directory binding for this exact authorization generation.
+    pub registration_binding: DeviceAuthorizationRegistrationBinding,
     pub device_code_hash: DeviceAuthorizationCodeHash,
     pub user_code_digest: VersionedUserCodeDigest,
     pub scope: DeviceAuthorizationScope,
@@ -328,6 +439,24 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         &self,
         record: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError>;
+    /// Creates a record only when the current Directory binding generation is
+    /// checked and locked in the same transaction as authorization insertion.
+    /// The default deliberately fails closed for stores without that composite
+    /// transaction; legacy `insert` implementations are not an authorization path.
+    fn insert_registered(
+        &self,
+        _record: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
+    /// Verifies the record revision and Directory generation against one
+    /// current snapshot. The default denies use by legacy stores.
+    fn require_current_registered_record(
+        &self,
+        _record: &DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     fn by_device_code_hash(
         &self,
         code_hash: &DeviceAuthorizationCodeHash,
@@ -352,6 +481,16 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError>;
+    /// Applies an authorization transition only while the immutable Directory
+    /// binding and current generation are checked under the same database
+    /// transaction/row lock. The default denies use by legacy stores.
+    fn compare_and_swap_registered(
+        &self,
+        _expected_revision: u64,
+        _replacement: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     /// Commits `DeliveryPending -> Delivered` only if the current stored
     /// deadline is still open. Durable adapters must check database time and
     /// perform this transition in one transaction; caller time alone is not
@@ -361,6 +500,16 @@ pub trait DeviceAuthorizationStore: Send + Sync {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError>;
+    /// Commits a new ACK only when both the persisted deadline and current
+    /// Directory generation are checked in one transaction. Exact replay of
+    /// an already committed receipt is handled before this method is called.
+    fn compare_and_swap_registered_delivery_ack(
+        &self,
+        _expected_revision: u64,
+        _replacement: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
 }
 
 /// Storage failures exposed by the authorization state machine.
@@ -397,6 +546,84 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
             return Err(DeviceAuthorizationStoreError::CodeCollision);
         }
         records.insert(record.id, record);
+        Ok(())
+    }
+
+    fn insert_registered(
+        &self,
+        record: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let key = record.registration_binding.key();
+        let generation = record.registration_binding.authorization_generation();
+        let newest_generation = records
+            .values()
+            .filter(|existing| existing.registration_binding.key() == key)
+            .map(|existing| existing.registration_binding.authorization_generation())
+            .max();
+        if newest_generation.is_some_and(|newest| generation < newest) {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+        if newest_generation.is_some_and(|newest| generation > newest)
+            && records.values().any(|existing| {
+                existing.registration_binding.key() == key
+                    && newest_generation
+                        == Some(existing.registration_binding.authorization_generation())
+                    && matches!(
+                        &existing.state,
+                        DeviceAuthorizationState::Issuing { .. }
+                            | DeviceAuthorizationState::DeliveryPending { .. }
+                            | DeviceAuthorizationState::RetirementPending { .. }
+                    )
+            })
+        {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+        if records.values().any(|existing| {
+            existing.device_code_hash == record.device_code_hash
+                || existing.user_code_digest == record.user_code_digest
+                || existing.id == record.id
+                || existing.registration_binding.binding_id()
+                    == record.registration_binding.binding_id()
+                || (existing.registration_binding.key() == key
+                    && existing.registration_binding.authorization_generation() == generation)
+        }) {
+            return Err(DeviceAuthorizationStoreError::CodeCollision);
+        }
+        records.insert(record.id, record);
+        Ok(())
+    }
+
+    fn require_current_registered_record(
+        &self,
+        record: &DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let current = records
+            .get(&record.id)
+            .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+        if current.revision != record.revision
+            || current.registration_binding != record.registration_binding
+        {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+        let newest_generation = records
+            .values()
+            .filter(|existing| {
+                existing.registration_binding.key() == record.registration_binding.key()
+            })
+            .map(|existing| existing.registration_binding.authorization_generation())
+            .max()
+            .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+        if newest_generation != record.registration_binding.authorization_generation() {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
         Ok(())
     }
 
@@ -474,7 +701,15 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
-        self.compare_and_swap_inner(expected_revision, replacement, false)
+        self.compare_and_swap_inner(expected_revision, replacement, false, false)
+    }
+
+    fn compare_and_swap_registered(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        self.compare_and_swap_inner(expected_revision, replacement, false, true)
     }
 
     fn compare_and_swap_delivery_ack(
@@ -482,7 +717,15 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
-        self.compare_and_swap_inner(expected_revision, replacement, true)
+        self.compare_and_swap_inner(expected_revision, replacement, true, false)
+    }
+
+    fn compare_and_swap_registered_delivery_ack(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationStoreError> {
+        self.compare_and_swap_inner(expected_revision, replacement, true, true)
     }
 }
 
@@ -492,6 +735,7 @@ impl InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
         delivery_ack: bool,
+        registered: bool,
     ) -> Result<(), DeviceAuthorizationStoreError> {
         let mut records = self
             .records
@@ -500,6 +744,19 @@ impl InMemoryDeviceAuthorizationStore {
         let current = records
             .get(&replacement.id)
             .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+        if registered {
+            let key = replacement.registration_binding.key();
+            let generation = replacement.registration_binding.authorization_generation();
+            let newest_generation = records
+                .values()
+                .filter(|existing| existing.registration_binding.key() == key)
+                .map(|existing| existing.registration_binding.authorization_generation())
+                .max()
+                .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+            if generation != newest_generation {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+        }
         let Some(next_revision) = expected_revision.checked_add(1) else {
             return Err(DeviceAuthorizationStoreError::Conflict);
         };
@@ -513,6 +770,7 @@ impl InMemoryDeviceAuthorizationStore {
             || current.spki_sha256 != replacement.spki_sha256
             || current.created_at_unix_ms != replacement.created_at_unix_ms
             || current.expires_at_unix_ms != replacement.expires_at_unix_ms
+            || current.registration_binding != replacement.registration_binding
         {
             return Err(DeviceAuthorizationStoreError::Conflict);
         }
@@ -537,6 +795,9 @@ impl InMemoryDeviceAuthorizationStore {
                         && current_certificate_sha256 == &receipt.certificate_sha256
                         && receipt.csr_sha256 == current.csr_sha256
                         && receipt.csr_spki_sha256 == current.spki_sha256
+                        && receipt.device_id == current.registration_binding.key().device_id
+                        && receipt.authorization_generation
+                            == current.registration_binding.authorization_generation()
                         && receipt.acknowledged_at_unix_ms < *delivery_deadline_unix_ms
                 }
                 _ => false,
@@ -698,19 +959,19 @@ pub trait WebAuthnAuthenticationPort: Send + Sync {
 
 /// External CA boundary. Implementations must durably and concurrently
 /// deduplicate by authorization ID, returning the same certificate for every
-/// retry of the same scope, CSR, SPKI digest, and `issued_at` value, including
-/// after a signer restart. They must honor the exact organization/workspace
-/// scope and attest the certificate's SPKI binding. A definitive rejection
-/// must also prove no concurrent request for that ID can later commit; every
-/// ambiguous result must use `OutcomeUnknown`. The authorization record is
-/// durably reserved as `Issuing` before this port is called.
+/// retry of the same Directory registration binding, CSR, and `issued_at`
+/// value, including after a signer restart. The result must attest the exact
+/// binding ID, stable device key, authorization generation, scope, and SPKI.
+/// A definitive rejection must also prove no concurrent request for that ID
+/// can later commit; every ambiguous result must use `OutcomeUnknown`. The
+/// authorization record is durably reserved as `Issuing` before this port is
+/// called.
 pub trait DeviceCertificateIssuer: Send + Sync {
     fn issue_device_certificate(
         &self,
         authorization_id: &DeviceAuthorizationId,
-        scope: &DeviceAuthorizationScope,
+        registration_binding: &DeviceAuthorizationRegistrationBinding,
         csr_der: &[u8],
-        expected_spki_sha256: &[u8; 32],
         issued_at_unix_ms: u64,
     ) -> Result<IssuedDeviceCertificate, DeviceCertificateIssuanceError>;
 }
@@ -865,6 +1126,8 @@ pub enum DeviceAuthorizationError {
     CsrValidatorUnavailable,
     #[error("CSR SubjectPublicKeyInfo binding changed")]
     CsrBindingMismatch,
+    #[error("Directory registration binding does not match the validated request")]
+    InvalidRegistrationBinding,
     #[error("WebAuthn assertion is invalid")]
     InvalidWebAuthnAssertion,
     #[error("no registered WebAuthn credential is available for approval")]
@@ -957,6 +1220,14 @@ where
             }
         };
         let csr_sha256 = sha256(&request.csr_der);
+        if !registration_binding_matches(
+            &request.registration_binding,
+            &request.scope,
+            &csr_sha256,
+            &spki_sha256,
+        ) {
+            return Err(DeviceAuthorizationError::InvalidRegistrationBinding);
+        }
 
         // A bounded retry handles the vanishingly unlikely random code collision.
         for _ in 0..3 {
@@ -967,6 +1238,7 @@ where
             let user_code = encode_user_code(&user_code_entropy);
             let record = DeviceAuthorizationRecord {
                 id: enrollment_id,
+                registration_binding: request.registration_binding.clone(),
                 device_code_hash: hash_code(b"device", device_code.as_bytes()),
                 user_code_digest: self
                     .user_code_keys
@@ -983,10 +1255,14 @@ where
                 revision: 0,
                 state: DeviceAuthorizationState::Pending,
             };
-            match self.store.insert(record) {
+            match self.store.insert_registered(record) {
                 Ok(()) => {
                     return Ok(DeviceAuthorizationStart {
                         authorization_id: enrollment_id,
+                        device_id: request.registration_binding.key().device_id.clone(),
+                        authorization_generation: request
+                            .registration_binding
+                            .authorization_generation(),
                         device_code,
                         user_code,
                         expires_at_unix_ms,
@@ -1020,6 +1296,7 @@ where
         }
         let mut record = self.lookup_by_user_code(&user_code)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
+        self.require_current_registration(&record)?;
         if record.scope != *scope {
             return Err(DeviceAuthorizationError::ScopeMismatch);
         }
@@ -1057,6 +1334,9 @@ where
         let context = WebAuthnAuthenticationContext {
             approval_id,
             authorization_id: record.id,
+            registration_binding_id: *record.registration_binding.binding_id(),
+            device_key: record.registration_binding.key().clone(),
+            authorization_generation: record.registration_binding.authorization_generation(),
             approver: approver.clone(),
             scope: record.scope.clone(),
             csr_sha256: record.csr_sha256,
@@ -1144,6 +1424,7 @@ where
             .map_err(map_store_error)?
             .ok_or(DeviceAuthorizationError::InvalidCode)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
+        self.require_current_registration(&record)?;
 
         // An Issuing record proves that membership, CSR binding, and the
         // WebAuthn assertion were already checked before the durable CAS.
@@ -1229,6 +1510,9 @@ where
         let context = WebAuthnAuthenticationContext {
             approval_id: *approval_id,
             authorization_id: record.id,
+            registration_binding_id: *record.registration_binding.binding_id(),
+            device_key: record.registration_binding.key().clone(),
+            authorization_generation: record.registration_binding.authorization_generation(),
             approver: approver.clone(),
             scope: record.scope.clone(),
             csr_sha256: record.csr_sha256,
@@ -1441,9 +1725,8 @@ where
         };
         let certificate = match ports.issue_device_certificate(
             &record.id,
-            &record.scope,
+            &record.registration_binding,
             &record.csr_der,
-            &record.spki_sha256,
             issued_at_unix_ms,
         ) {
             Ok(certificate) => certificate,
@@ -1477,8 +1760,12 @@ where
         let certificate_sha256 = sha256(&certificate.certificate_der);
         if certificate.certificate_der.is_empty()
             || certificate.serial_number.is_empty()
+            || certificate.registration_binding_id != *record.registration_binding.binding_id()
+            || certificate.device_key != *record.registration_binding.key()
+            || certificate.authorization_generation
+                != record.registration_binding.authorization_generation()
             || certificate.scope != record.scope
-            || certificate.spki_sha256 != record.spki_sha256
+            || certificate.spki_sha256 != *record.registration_binding.spki_sha256()
         {
             return self.quarantine_issued_certificate(
                 record,
@@ -1918,6 +2205,7 @@ where
         }
         let mut record = self.lookup_by_user_code(&user_code)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
+        self.require_current_registration(&record)?;
         if record.scope != *scope {
             return Err(DeviceAuthorizationError::ScopeMismatch);
         }
@@ -2042,6 +2330,10 @@ where
                     let delivery = DeviceCertificateDelivery {
                         authorization_id: record.id,
                         delivery_id,
+                        device_id: record.registration_binding.key().device_id.clone(),
+                        authorization_generation: record
+                            .registration_binding
+                            .authorization_generation(),
                         certificate_der: certificate.certificate_der.clone(),
                         ca_chain_der: certificate.ca_chain_der.clone(),
                         scope: certificate.scope.clone(),
@@ -2177,6 +2469,10 @@ where
                     let receipt = DeviceCertificateDeliveryReceipt {
                         authorization_id: record.id,
                         delivery_id: *delivery_id,
+                        device_id: record.registration_binding.key().device_id.clone(),
+                        authorization_generation: record
+                            .registration_binding
+                            .authorization_generation(),
                         certificate_sha256: *certificate_sha256,
                         csr_sha256: record.csr_sha256,
                         csr_spki_sha256: record.spki_sha256,
@@ -2193,7 +2489,7 @@ where
                         .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
                     match self
                         .store
-                        .compare_and_swap_delivery_ack(expected_revision, replacement)
+                        .compare_and_swap_registered_delivery_ack(expected_revision, replacement)
                     {
                         Ok(()) => return Ok(receipt),
                         Err(DeviceAuthorizationStoreError::Conflict) => {
@@ -2293,6 +2589,15 @@ where
         }
     }
 
+    fn require_current_registration(
+        &self,
+        record: &DeviceAuthorizationRecord,
+    ) -> Result<(), DeviceAuthorizationError> {
+        self.store
+            .require_current_registered_record(record)
+            .map_err(map_store_error)
+    }
+
     fn expire_if_due(
         &self,
         record: &mut DeviceAuthorizationRecord,
@@ -2390,7 +2695,7 @@ where
             .checked_add(1)
             .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
         self.store
-            .compare_and_swap(expected_revision, replacement)
+            .compare_and_swap_registered(expected_revision, replacement)
             .map_err(map_store_error)
     }
 }
@@ -2406,6 +2711,25 @@ fn validate_scope(scope: &DeviceAuthorizationScope) -> Result<(), DeviceAuthoriz
         return Err(DeviceAuthorizationError::InvalidRequest);
     }
     Ok(())
+}
+
+fn registration_binding_matches(
+    binding: &DeviceAuthorizationRegistrationBinding,
+    scope: &DeviceAuthorizationScope,
+    csr_sha256: &[u8; 32],
+    spki_sha256: &[u8; 32],
+) -> bool {
+    let key = binding.key();
+    !binding.binding_id().iter().all(|byte| *byte == 0)
+        && binding.authorization_generation() > 0
+        && key.organization_id == scope.organization_id
+        && key.workspace_id == scope.workspace_id
+        && !key.device_id.trim().is_empty()
+        && key.device_id.len() <= 256
+        && key.device_id == key.device_id.trim()
+        && !key.device_id.chars().any(char::is_control)
+        && binding.csr_sha256() == csr_sha256
+        && binding.spki_sha256() == spki_sha256
 }
 
 fn validate_identity(identity: &UserIdentityRef) -> Result<(), DeviceAuthorizationError> {
@@ -2803,19 +3127,16 @@ mod tests {
         fn issue_device_certificate(
             &self,
             _enrollment_id: &DeviceAuthorizationId,
-            scope: &DeviceAuthorizationScope,
+            registration_binding: &DeviceAuthorizationRegistrationBinding,
             _csr_der: &[u8],
-            expected_spki_sha256: &[u8; 32],
             issued_at_unix_ms: u64,
         ) -> Result<IssuedDeviceCertificate, DeviceCertificateIssuanceError> {
-            Ok(IssuedDeviceCertificate {
-                certificate_der: b"test-only-not-a-real-certificate".to_vec(),
-                ca_chain_der: vec![],
-                serial_number: vec![1],
-                scope: scope.clone(),
-                spki_sha256: *expected_spki_sha256,
-                not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
-            })
+            Ok(test_certificate_for(
+                registration_binding,
+                b"test-only-not-a-real-certificate",
+                &[1],
+                issued_at_unix_ms.saturating_add(60_000),
+            ))
         }
     }
 
@@ -2850,13 +3171,16 @@ mod tests {
         let mut state = Vec::new();
         state.extend_from_slice(&context.approval_id);
         state.extend_from_slice(&context.authorization_id);
+        state.extend_from_slice(&context.registration_binding_id);
         for value in [
             context.scope.organization_id.as_bytes(),
             context.scope.workspace_id.as_bytes(),
+            context.device_key.device_id.as_bytes(),
         ] {
             state.extend_from_slice(&(value.len() as u64).to_be_bytes());
             state.extend_from_slice(value);
         }
+        state.extend_from_slice(&context.authorization_generation.to_be_bytes());
         state.extend_from_slice(&context.csr_sha256);
         state.extend_from_slice(&context.spki_sha256);
         state.extend_from_slice(&context.expires_at_unix_ms.to_be_bytes());
@@ -3025,9 +3349,8 @@ mod tests {
         fn issue_device_certificate(
             &self,
             _authorization_id: &DeviceAuthorizationId,
-            scope: &DeviceAuthorizationScope,
+            registration_binding: &DeviceAuthorizationRegistrationBinding,
             _csr_der: &[u8],
-            expected_spki_sha256: &[u8; 32],
             issued_at_unix_ms: u64,
         ) -> Result<IssuedDeviceCertificate, DeviceCertificateIssuanceError> {
             self.state.lock().expect("verifier state").issuer_calls += 1;
@@ -3041,14 +3364,12 @@ mod tests {
                 self.current_time_unix_ms
                     .store(not_after_unix_ms, Ordering::SeqCst);
             }
-            Ok(IssuedDeviceCertificate {
-                certificate_der: b"test-only-coordinated-certificate".to_vec(),
-                ca_chain_der: vec![],
-                serial_number: vec![3],
-                scope: scope.clone(),
-                spki_sha256: *expected_spki_sha256,
+            Ok(test_certificate_for(
+                registration_binding,
+                b"test-only-coordinated-certificate",
+                &[3],
                 not_after_unix_ms,
-            })
+            ))
         }
     }
 
@@ -3171,9 +3492,8 @@ mod tests {
         fn issue_device_certificate(
             &self,
             _enrollment_id: &DeviceAuthorizationId,
-            scope: &DeviceAuthorizationScope,
+            registration_binding: &DeviceAuthorizationRegistrationBinding,
             _csr_der: &[u8],
-            expected_spki_sha256: &[u8; 32],
             issued_at_unix_ms: u64,
         ) -> Result<IssuedDeviceCertificate, DeviceCertificateIssuanceError> {
             let mut state = self.state.lock().expect("signer state");
@@ -3195,14 +3515,12 @@ mod tests {
             while !state.released {
                 state = self.changed.wait(state).expect("signer state");
             }
-            let certificate = IssuedDeviceCertificate {
-                certificate_der: b"test-only-idempotent-certificate".to_vec(),
-                ca_chain_der: vec![],
-                serial_number: vec![1],
-                scope: scope.clone(),
-                spki_sha256: *expected_spki_sha256,
-                not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
-            };
+            let certificate = test_certificate_for(
+                registration_binding,
+                b"test-only-idempotent-certificate",
+                &[1],
+                issued_at_unix_ms.saturating_add(60_000),
+            );
             state.certificate = Some(certificate.clone());
             state.in_flight = false;
             self.changed.notify_all();
@@ -3234,6 +3552,7 @@ mod tests {
         calls: Mutex<usize>,
         definitive_no_commit: bool,
         misbound_certificate: bool,
+        misbound_device_identity: bool,
     }
 
     impl DeviceCsrValidator for UncertainOnceApprovalPorts {
@@ -3284,9 +3603,8 @@ mod tests {
         fn issue_device_certificate(
             &self,
             enrollment_id: &DeviceAuthorizationId,
-            scope: &DeviceAuthorizationScope,
+            registration_binding: &DeviceAuthorizationRegistrationBinding,
             _csr_der: &[u8],
-            expected_spki_sha256: &[u8; 32],
             issued_at_unix_ms: u64,
         ) -> Result<IssuedDeviceCertificate, DeviceCertificateIssuanceError> {
             let mut calls = self.calls.lock().expect("signer call count");
@@ -3302,23 +3620,20 @@ mod tests {
             if self.definitive_no_commit {
                 return Err(DeviceCertificateIssuanceError::DefinitiveNoCommit);
             }
-            let certificate = IssuedDeviceCertificate {
-                certificate_der: b"test-only-committed-before-timeout".to_vec(),
-                ca_chain_der: vec![],
-                serial_number: vec![2],
-                scope: if self.misbound_certificate {
-                    DeviceAuthorizationScope {
-                        organization_id: scope.organization_id.clone(),
-                        workspace_id: "wrong-workspace".to_string(),
-                    }
-                } else {
-                    scope.clone()
-                },
-                spki_sha256: *expected_spki_sha256,
-                not_after_unix_ms: issued_at_unix_ms.saturating_add(60_000),
-            };
-            *state = Some((*enrollment_id, certificate));
+            let mut certificate = test_certificate_for(
+                registration_binding,
+                b"test-only-committed-before-timeout",
+                &[2],
+                issued_at_unix_ms.saturating_add(60_000),
+            );
             if self.misbound_certificate {
+                certificate.scope.workspace_id = "wrong-workspace".to_string();
+            }
+            if self.misbound_device_identity {
+                certificate.device_key.device_id = "wrong-device".to_string();
+            }
+            *state = Some((*enrollment_id, certificate));
+            if self.misbound_certificate || self.misbound_device_identity {
                 return Ok(state.as_ref().expect("certificate stored").1.clone());
             }
             // Model a lost response after the CA committed the certificate.
@@ -3393,21 +3708,177 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct LegacyDeviceAuthorizationStore(InMemoryDeviceAuthorizationStore);
+
+    impl DeviceAuthorizationStore for LegacyDeviceAuthorizationStore {
+        fn insert(
+            &self,
+            record: DeviceAuthorizationRecord,
+        ) -> Result<(), DeviceAuthorizationStoreError> {
+            self.0.insert(record)
+        }
+
+        fn by_device_code_hash(
+            &self,
+            code_hash: &DeviceAuthorizationCodeHash,
+        ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
+            self.0.by_device_code_hash(code_hash)
+        }
+
+        fn by_user_code_candidates(
+            &self,
+            candidates: &[VersionedUserCodeDigest],
+        ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
+            self.0.by_user_code_candidates(candidates)
+        }
+
+        fn user_code_key_versions(&self) -> Result<Vec<u32>, DeviceAuthorizationStoreError> {
+            self.0.user_code_key_versions()
+        }
+
+        fn by_approval_id(
+            &self,
+            approval_id: &DeviceAuthorizationId,
+        ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
+            self.0.by_approval_id(approval_id)
+        }
+
+        fn compare_and_swap(
+            &self,
+            expected_revision: u64,
+            replacement: DeviceAuthorizationRecord,
+        ) -> Result<(), DeviceAuthorizationStoreError> {
+            self.0.compare_and_swap(expected_revision, replacement)
+        }
+
+        fn compare_and_swap_delivery_ack(
+            &self,
+            expected_revision: u64,
+            replacement: DeviceAuthorizationRecord,
+        ) -> Result<(), DeviceAuthorizationStoreError> {
+            self.0
+                .compare_and_swap_delivery_ack(expected_revision, replacement)
+        }
+    }
+
     fn start<S, L>(manager: &DeviceAuthorizationManager<S, L>) -> DeviceAuthorizationStart
+    where
+        S: DeviceAuthorizationStore,
+        L: UserCodeAttemptLimiter,
+    {
+        static NEXT_TEST_GENERATION: AtomicU64 = AtomicU64::new(1);
+        let generation = NEXT_TEST_GENERATION.fetch_add(1, Ordering::SeqCst);
+        start_with_generation(manager, generation)
+    }
+
+    fn start_with_generation<S, L>(
+        manager: &DeviceAuthorizationManager<S, L>,
+        generation: u64,
+    ) -> DeviceAuthorizationStart
     where
         S: DeviceAuthorizationStore,
         L: UserCodeAttemptLimiter,
     {
         manager
             .begin(
-                DeviceAuthorizationRequest {
-                    scope: scope(),
-                    csr_der: b"test-only-csr".to_vec(),
-                },
+                test_authorization_request(&scope(), generation),
                 100,
                 &TestCsrValidator,
             )
             .expect("begin enrollment")
+    }
+
+    fn test_authorization_request(
+        request_scope: &DeviceAuthorizationScope,
+        generation: u64,
+    ) -> DeviceAuthorizationRequest {
+        let csr_der = b"test-only-csr".to_vec();
+        DeviceAuthorizationRequest {
+            scope: request_scope.clone(),
+            csr_der: csr_der.clone(),
+            registration_binding: test_registration_binding(request_scope, &csr_der, generation),
+        }
+    }
+
+    fn test_registration_binding(
+        scope: &DeviceAuthorizationScope,
+        csr_der: &[u8],
+        generation: u64,
+    ) -> DeviceAuthorizationRegistrationBinding {
+        let authority_result = TestDirectoryRegistrationBinding {
+            binding_id: [u8::try_from(generation % 255 + 1).expect("bounded generation"); 16],
+            key: DeviceAuthorizationDeviceKey {
+                organization_id: scope.organization_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                device_id: "test-stable-device-id".to_string(),
+            },
+            authorization_generation: generation,
+            csr_sha256: sha256(csr_der),
+            spki_sha256: [7; 32],
+        };
+        DeviceAuthorizationRegistrationBinding::from_verified_directory_binding(&authority_result)
+    }
+
+    struct TestDirectoryRegistrationBinding {
+        binding_id: [u8; 16],
+        key: DeviceAuthorizationDeviceKey,
+        authorization_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+    }
+
+    impl VerifiedDirectoryRegistrationBinding for TestDirectoryRegistrationBinding {
+        fn binding_id(&self) -> &[u8; 16] {
+            &self.binding_id
+        }
+
+        fn organization_id(&self) -> &str {
+            &self.key.organization_id
+        }
+
+        fn workspace_id(&self) -> &str {
+            &self.key.workspace_id
+        }
+
+        fn device_id(&self) -> &str {
+            &self.key.device_id
+        }
+
+        fn authorization_generation(&self) -> u64 {
+            self.authorization_generation
+        }
+
+        fn csr_sha256(&self) -> &[u8; 32] {
+            &self.csr_sha256
+        }
+
+        fn spki_sha256(&self) -> &[u8; 32] {
+            &self.spki_sha256
+        }
+    }
+
+    fn test_certificate_for(
+        registration_binding: &DeviceAuthorizationRegistrationBinding,
+        certificate_der: &[u8],
+        serial_number: &[u8],
+        not_after_unix_ms: u64,
+    ) -> IssuedDeviceCertificate {
+        let key = registration_binding.key().clone();
+        IssuedDeviceCertificate {
+            certificate_der: certificate_der.to_vec(),
+            ca_chain_der: vec![],
+            serial_number: serial_number.to_vec(),
+            registration_binding_id: *registration_binding.binding_id(),
+            device_key: key.clone(),
+            authorization_generation: registration_binding.authorization_generation(),
+            scope: DeviceAuthorizationScope {
+                organization_id: key.organization_id,
+                workspace_id: key.workspace_id,
+            },
+            spki_sha256: *registration_binding.spki_sha256(),
+            not_after_unix_ms,
+        }
     }
 
     #[test]
@@ -3450,6 +3921,9 @@ mod tests {
         let context = WebAuthnAuthenticationContext {
             approval_id,
             authorization_id: record.id,
+            registration_binding_id: *record.registration_binding.binding_id(),
+            device_key: record.registration_binding.key().clone(),
+            authorization_generation: record.registration_binding.authorization_generation(),
             approver: user(),
             scope: record.scope.clone(),
             csr_sha256: record.csr_sha256,
@@ -3566,12 +4040,28 @@ mod tests {
             result => panic!("unexpected poll result: {result:?}"),
         };
         assert_eq!(delivery.scope, scope());
+        assert_eq!(delivery.device_id, start.device_id);
+        assert_eq!(
+            delivery.authorization_generation,
+            start.authorization_generation
+        );
         let retry = manager
             .poll(&start.device_code, 2_200, &TestApprovalPorts)
             .expect("retry poll returns same certificate");
         assert_eq!(
             retry,
             DeviceAuthorizationPoll::CertificateReady(delivery.clone())
+        );
+        assert_eq!(
+            manager.begin(
+                test_authorization_request(
+                    &scope(),
+                    start.authorization_generation.saturating_add(1),
+                ),
+                100,
+                &TestCsrValidator,
+            ),
+            Err(DeviceAuthorizationError::ConcurrentTransition)
         );
         let acknowledgement = DeviceCertificateDeliveryAcknowledgement {
             authorization_id: delivery.authorization_id,
@@ -3584,13 +4074,105 @@ mod tests {
         let receipt = manager
             .acknowledge_delivery(&acknowledgement, &TestApprovalPorts)
             .expect("delivery ACK");
+        assert_eq!(receipt.device_id, start.device_id);
+        assert_eq!(
+            receipt.authorization_generation,
+            start.authorization_generation
+        );
+        let rotated_start =
+            start_with_generation(&manager, start.authorization_generation.saturating_add(100));
+        assert_eq!(rotated_start.device_id, start.device_id);
+        assert!(rotated_start.authorization_generation > start.authorization_generation);
         assert_eq!(
             manager.acknowledge_delivery(&acknowledgement, &TestApprovalPorts),
             Ok(receipt.clone())
         );
         assert_eq!(
             manager.poll(&start.device_code, 3_300, &TestApprovalPorts),
-            Ok(DeviceAuthorizationPoll::Delivered(receipt))
+            Err(DeviceAuthorizationError::ConcurrentTransition)
+        );
+    }
+
+    #[test]
+    fn stale_generation_cannot_commit_new_ack() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let start = start(&manager);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[29; 32],
+                200,
+                &TestApprovalPorts,
+            )
+            .expect("challenge");
+        manager
+            .complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                300,
+                &TestApprovalPorts,
+            )
+            .expect("issue fake test certificate");
+        let delivery = match manager
+            .poll(&start.device_code, 1_100, &TestApprovalPorts)
+            .expect("test delivery")
+        {
+            DeviceAuthorizationPoll::CertificateReady(delivery) => delivery,
+            result => panic!("unexpected poll result: {result:?}"),
+        };
+
+        // Bypass the registered test operation to model a Directory generation
+        // change racing a pending ACK; production adapters must make this
+        // impossible by sharing the transaction and row lock.
+        let old_record = store
+            .by_device_code_hash(&hash_code(
+                b"device",
+                start.device_code.to_ascii_lowercase().as_bytes(),
+            ))
+            .expect("load pending authorization")
+            .expect("authorization record");
+        store
+            .insert(DeviceAuthorizationRecord {
+                id: [0x99; 16],
+                registration_binding: test_registration_binding(
+                    &old_record.scope,
+                    &old_record.csr_der,
+                    start.authorization_generation.saturating_add(1),
+                ),
+                device_code_hash: [0xaa; 32],
+                user_code_digest: manager
+                    .user_code_keys
+                    .digest_for_storage("ABCDEFGHJKLM")
+                    .expect("hash new test code"),
+                scope: old_record.scope.clone(),
+                csr_der: old_record.csr_der.clone(),
+                csr_sha256: old_record.csr_sha256,
+                spki_sha256: old_record.spki_sha256,
+                created_at_unix_ms: old_record.created_at_unix_ms,
+                expires_at_unix_ms: old_record.expires_at_unix_ms,
+                poll_interval_ms: old_record.poll_interval_ms,
+                last_poll_at_unix_ms: None,
+                revision: 0,
+                state: DeviceAuthorizationState::Pending,
+            })
+            .expect("simulate Directory generation transition outside composite store");
+
+        assert_eq!(
+            manager.acknowledge_delivery(
+                &DeviceCertificateDeliveryAcknowledgement {
+                    authorization_id: delivery.authorization_id,
+                    device_code: start.device_code,
+                    delivery_id: delivery.delivery_id,
+                    certificate_sha256: delivery.certificate_sha256,
+                    csr_sha256: delivery.csr_sha256,
+                    csr_spki_sha256: delivery.csr_spki_sha256,
+                },
+                &TestApprovalPorts,
+            ),
+            Err(DeviceAuthorizationError::ConcurrentTransition)
         );
     }
 
@@ -3640,6 +4222,17 @@ mod tests {
             DeviceAuthorizationState::Issuing { .. }
         ));
         assert_eq!(reserved.revision, 3);
+        assert_eq!(
+            manager.begin(
+                test_authorization_request(
+                    &scope(),
+                    start.authorization_generation.saturating_add(1),
+                ),
+                100,
+                &TestCsrValidator,
+            ),
+            Err(DeviceAuthorizationError::ConcurrentTransition)
+        );
         assert_eq!(
             manager.deny(
                 &start.user_code,
@@ -3915,6 +4508,48 @@ mod tests {
     }
 
     #[test]
+    fn issuer_device_identity_attestation_must_match_directory_binding() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let start = start(&manager);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[27; 32],
+                200,
+                &TestApprovalPorts,
+            )
+            .expect("challenge");
+        let ports = UncertainOnceApprovalPorts {
+            misbound_device_identity: true,
+            ..UncertainOnceApprovalPorts::default()
+        };
+
+        assert_eq!(
+            manager.complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                300,
+                &ports,
+            ),
+            Err(DeviceAuthorizationError::CertificateBindingMismatch)
+        );
+        assert!(matches!(
+            store
+                .by_approval_id(&challenge.approval_id)
+                .expect("read quarantined issuer result")
+                .expect("approval record")
+                .state,
+            DeviceAuthorizationState::IssuanceFailed {
+                failure: DeviceCertificateIssuanceFailure::MisboundCertificateRetired,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn delivery_expiry_stays_recovery_pending_until_retirement_is_confirmed() {
         let store = InMemoryDeviceAuthorizationStore::default();
         let manager = manager_with_store(store.clone());
@@ -4077,6 +4712,122 @@ mod tests {
     }
 
     #[test]
+    fn start_rejects_directory_binding_with_mismatched_csr_digest() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(store.clone());
+        let request_scope = scope();
+        let csr_der = b"test-only-csr".to_vec();
+        let mut binding = test_registration_binding(&request_scope, &csr_der, 900);
+        binding = DeviceAuthorizationRegistrationBinding::test_fixture(
+            *binding.binding_id(),
+            binding.key().clone(),
+            binding.authorization_generation(),
+            [0; 32],
+            *binding.spki_sha256(),
+        );
+
+        assert_eq!(
+            manager.begin(
+                DeviceAuthorizationRequest {
+                    scope: request_scope,
+                    csr_der,
+                    registration_binding: binding,
+                },
+                100,
+                &TestCsrValidator,
+            ),
+            Err(DeviceAuthorizationError::InvalidRegistrationBinding)
+        );
+        assert!(store.records.lock().expect("store lock").is_empty());
+    }
+
+    #[test]
+    fn legacy_store_defaults_fail_closed_for_registered_start() {
+        let inner = InMemoryDeviceAuthorizationStore::default();
+        let manager = DeviceAuthorizationManager::new(
+            LegacyDeviceAuthorizationStore(inner.clone()),
+            InMemoryUserCodeAttemptLimiter::default(),
+            test_user_code_key_ring(),
+            test_policy(),
+        )
+        .expect("valid test policy");
+        let request_scope = scope();
+        let csr_der = b"test-only-csr".to_vec();
+
+        assert_eq!(
+            manager.begin(
+                DeviceAuthorizationRequest {
+                    scope: request_scope.clone(),
+                    csr_der: csr_der.clone(),
+                    registration_binding: test_registration_binding(&request_scope, &csr_der, 901,),
+                },
+                100,
+                &TestCsrValidator,
+            ),
+            Err(DeviceAuthorizationError::StorageUnavailable)
+        );
+        assert!(inner.records.lock().expect("store lock").is_empty());
+    }
+
+    #[test]
+    fn legacy_store_defaults_fail_closed_for_registered_poll_and_ack() {
+        let inner = InMemoryDeviceAuthorizationStore::default();
+        let manager = manager_with_store(inner.clone());
+        let start = start(&manager);
+        let challenge = manager
+            .begin_approval(
+                &start.user_code,
+                &scope(),
+                &user(),
+                &[28; 32],
+                200,
+                &TestApprovalPorts,
+            )
+            .expect("challenge");
+        manager
+            .complete_approval(
+                &challenge.approval_id,
+                b"test-only-valid-assertion",
+                300,
+                &TestApprovalPorts,
+            )
+            .expect("issue fake test certificate");
+        let delivery = match manager
+            .poll(&start.device_code, 1_100, &TestApprovalPorts)
+            .expect("test delivery")
+        {
+            DeviceAuthorizationPoll::CertificateReady(delivery) => delivery,
+            result => panic!("unexpected poll result: {result:?}"),
+        };
+
+        let legacy_manager = DeviceAuthorizationManager::new(
+            LegacyDeviceAuthorizationStore(inner),
+            InMemoryUserCodeAttemptLimiter::default(),
+            test_user_code_key_ring(),
+            test_policy(),
+        )
+        .expect("valid test policy");
+        assert_eq!(
+            legacy_manager.poll(&start.device_code, 2_200, &TestApprovalPorts),
+            Err(DeviceAuthorizationError::StorageUnavailable)
+        );
+        assert_eq!(
+            legacy_manager.acknowledge_delivery(
+                &DeviceCertificateDeliveryAcknowledgement {
+                    authorization_id: delivery.authorization_id,
+                    device_code: start.device_code,
+                    delivery_id: delivery.delivery_id,
+                    certificate_sha256: delivery.certificate_sha256,
+                    csr_sha256: delivery.csr_sha256,
+                    csr_spki_sha256: delivery.csr_spki_sha256,
+                },
+                &TestApprovalPorts,
+            ),
+            Err(DeviceAuthorizationError::StorageUnavailable)
+        );
+    }
+
+    #[test]
     fn early_poll_slowdown_increases_the_required_interval() {
         let manager = manager();
         let start = start(&manager);
@@ -4200,6 +4951,51 @@ mod tests {
                 .state,
             DeviceAuthorizationState::DeliveryPending { .. }
         ));
+    }
+
+    #[test]
+    fn newer_directory_generation_fences_old_approval_before_signer_call() {
+        let store = InMemoryDeviceAuthorizationStore::default();
+        let manager = Arc::new(manager_with_store(store));
+        let old_start = start_with_generation(manager.as_ref(), 700);
+        let (ports, verifier_started) = CoordinatedApprovalPorts::new(VerifierBehavior::Block, 300);
+        let ports = Arc::new(ports);
+        let challenge = manager
+            .begin_approval(
+                &old_start.user_code,
+                &scope(),
+                &user(),
+                &[26; 32],
+                200,
+                ports.as_ref(),
+            )
+            .expect("old generation challenge");
+
+        let approval_manager = Arc::clone(&manager);
+        let approval_ports = Arc::clone(&ports);
+        let approval_id = challenge.approval_id;
+        let approval = thread::spawn(move || {
+            approval_manager.complete_approval(
+                &approval_id,
+                b"test-only-valid-assertion",
+                300,
+                approval_ports.as_ref(),
+            )
+        });
+        verifier_started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("old generation verifier entered");
+
+        let new_start = start_with_generation(manager.as_ref(), 701);
+        assert_eq!(new_start.device_id, old_start.device_id);
+        assert!(new_start.authorization_generation > old_start.authorization_generation);
+        ports.release_verifier();
+
+        assert_eq!(
+            approval.join().expect("approval thread"),
+            Err(DeviceAuthorizationError::ConcurrentTransition)
+        );
+        assert_eq!(ports.issuer_calls(), 0);
     }
 
     #[test]
