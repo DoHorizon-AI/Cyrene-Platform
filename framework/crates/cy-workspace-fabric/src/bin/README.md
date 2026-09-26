@@ -26,6 +26,11 @@ is composed. A device CA mount by itself does not enable Connector access.
 Directory administration, DeviceAuthorization, CA issuance, WebAuthn and
 Product private access are also not composed.
 
+Product HTTP is performed by `ProductHttpApiAdapter` on the WorkspaceConnector
+path. A configured Frontend Relay session does not create that Product path;
+Connector authentication is denied here, so no Product request can currently
+reach the owning service through this host.
+
 `GET /healthz` returns HTTP 200 while the process is alive. `GET /readyz` runs a
 bounded read-only Directory database probe and reports only fixed dependency
 booleans. It returns HTTP 503 until Directory administration, the durable
@@ -95,7 +100,7 @@ review-only template; this host is not deployed or ready for production traffic.
 `CYRENE_WORKSPACE_RELAY_WEB_HANDOFF_AUDIENCE` 和
 `CYRENE_WORKSPACE_RELAY_WEB_HANDOFF_PUBLIC_KEY_BASE64URL`。host 会先在同一 RPC 上校验 ACA 覆盖写入的 XFCC：证书链来自独立 BFF CA，subject 精确匹配，叶证书指纹命中未撤销 pin；之后才校验短时签名 handoff。浏览器 AAD access token 不是 Relay credential。部分配置会使启动失败；未配置时所有 Frontend 请求均被拒绝。
 
-此 host 禁用 WorkspaceConnector 认证。持久设备注册表 adapter 接通前，host 不加载 device CA，也不接受 Connector；仅挂载 device CA 不会启用访问。Directory 管理、DeviceAuthorization、CA 签发、WebAuthn 和 Product 私有访问也尚未组合。
+此 host 禁用 WorkspaceConnector 认证。持久设备注册表 adapter 接通前，host 不加载 device CA，也不接受 Connector；仅挂载 device CA 不会启用访问。Directory 管理、DeviceAuthorization、CA 签发、WebAuthn 和 Product 私有访问也尚未组合。Product HTTP 由 WorkspaceConnector 路径上的 `ProductHttpApiAdapter` 发起；Frontend Relay session 配置不会自动产生该通路。此 host 拒绝 Connector 身份，因此当前没有请求能经它到达 Product owner。
 
 进程存活时 `GET /healthz` 返回 HTTP 200。`GET /readyz` 会在有界时间内执行只读 Directory 数据库探测，并只报告固定依赖布尔值。Directory 管理、持久 Workspace 设备注册表、DeviceAuthorization、证书签发、WebAuthn、Product 私有访问和部署拓扑全部验证前，响应保持 HTTP 503。host 无法根据环境变量推断 ACA 实际设置或私网连通性，因此拓扑仍是外部 gate。探针不包含数据库诊断信息或 credential。
 

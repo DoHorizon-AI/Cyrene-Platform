@@ -160,6 +160,11 @@ until the durable device registry adapter is composed. Directory
 administration, DeviceAuthorization, certificate issuance, WebAuthn, and
 Product private access are not composed.
 
+Product HTTP is performed by `ProductHttpApiAdapter` on the WorkspaceConnector
+path. Frontend Relay authentication alone does not create a Product request
+path; this host rejects Connector sessions, so no Product request can currently
+reach its owner through this host.
+
 `GET /healthz` reports process liveness. `GET /readyz` performs a bounded,
 read-only PostgreSQL Directory probe and returns fixed dependency booleans; it
 remains HTTP 503 until every required service and the deployment topology are
@@ -341,7 +346,7 @@ RPC 附加 `authorization: Bearer <local-token>` metadata。
 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL` 并连接只读 PostgreSQL Directory；host 不再回退到文件存储。
 PostgreSQL TLS 会校验证书和主机名；私有数据库 CA 需要通过 `sslrootcert` 配置。数据库配置缺失或不可用时启动失败，并将数据库错误转换为固定安全错误。
 
-未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发、WebAuthn 和 Product 私有访问仍未组合。
+未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发、WebAuthn 和 Product 私有访问仍未组合。Product HTTP 由 WorkspaceConnector 路径上的 `ProductHttpApiAdapter` 发起；Frontend Relay authentication 不会自动创建 Product 请求通路。此 host 拒绝 Connector session，因此当前没有请求能经它到达 Product owner。
 
 `GET /healthz` 表示进程存活。`GET /readyz` 会在有界时间内执行只读 PostgreSQL Directory 探测，并返回固定依赖布尔值；全部必需服务和部署拓扑验证完成前，保持 HTTP 503。host 无法从配置值推断 ACA 实际 ingress 设置或私网连通性。这是 fail-closed 的分阶段组合，不是生产 Relay 部署。准确运行配置和探针行为见 `src/bin/README.md`。
 
