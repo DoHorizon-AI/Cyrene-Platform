@@ -2510,6 +2510,137 @@ mod tests {
         });
     }
 
+    fn seed_directory_registration(database_url: &str, record: &DeviceAuthorizationRecord) {
+        let options = PgConnectOptions::from_str(database_url)
+            .expect("valid admin URL")
+            .ssl_mode(PgSslMode::VerifyFull);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Directory seed runtime");
+        runtime.block_on(async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("connect as migration role");
+            let binding = &record.registration_binding;
+            let key = binding.key();
+            sqlx::query(
+                "INSERT INTO cyrene_workspace_directory.workspace_device_identities \
+                 (organization_id, workspace_id, device_id, current_authorization_generation) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(&key.organization_id)
+            .bind(&key.workspace_id)
+            .bind(&key.device_id)
+            .bind(i64::try_from(binding.authorization_generation()).expect("generation fits"))
+            .execute(&pool)
+            .await
+            .expect("seed Directory identity");
+            sqlx::query(
+                "INSERT INTO cyrene_workspace_directory.device_registration_bindings \
+                 (registration_key_digest, binding_id, organization_id, workspace_id, device_id, \
+                  authorization_generation, csr_sha256, spki_sha256) \
+                 VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(random_bytes::<32>().to_vec())
+            .bind(uuid::Uuid::from_bytes(*binding.binding_id()).to_string())
+            .bind(&key.organization_id)
+            .bind(&key.workspace_id)
+            .bind(&key.device_id)
+            .bind(i64::try_from(binding.authorization_generation()).expect("generation fits"))
+            .bind(binding.csr_sha256().to_vec())
+            .bind(binding.spki_sha256().to_vec())
+            .execute(&pool)
+            .await
+            .expect("seed Directory registration binding");
+            pool.close().await;
+        });
+    }
+
+    fn advance_directory_generation(database_url: &str, record: &DeviceAuthorizationRecord) {
+        let options = PgConnectOptions::from_str(database_url)
+            .expect("valid admin URL")
+            .ssl_mode(PgSslMode::VerifyFull);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Directory rotation runtime");
+        runtime.block_on(async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("connect as migration role");
+            let binding = &record.registration_binding;
+            let key = binding.key();
+            let next_generation = binding
+                .authorization_generation()
+                .checked_add(1)
+                .expect("generation has room");
+            let update = sqlx::query(
+                "UPDATE cyrene_workspace_directory.workspace_device_identities \
+                 SET current_authorization_generation = $4, updated_at = clock_timestamp() \
+                 WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3",
+            )
+            .bind(&key.organization_id)
+            .bind(&key.workspace_id)
+            .bind(&key.device_id)
+            .bind(i64::try_from(next_generation).expect("generation fits"))
+            .execute(&pool)
+            .await
+            .expect("advance Directory generation");
+            assert_eq!(update.rows_affected(), 1);
+            sqlx::query(
+                "INSERT INTO cyrene_workspace_directory.device_registration_bindings \
+                 (registration_key_digest, binding_id, organization_id, workspace_id, device_id, \
+                  authorization_generation, csr_sha256, spki_sha256) \
+                 VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(random_bytes::<32>().to_vec())
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&key.organization_id)
+            .bind(&key.workspace_id)
+            .bind(&key.device_id)
+            .bind(i64::try_from(next_generation).expect("generation fits"))
+            .bind(random_bytes::<32>().to_vec())
+            .bind(random_bytes::<32>().to_vec())
+            .execute(&pool)
+            .await
+            .expect("seed rotated Directory registration binding");
+            pool.close().await;
+        });
+    }
+
+    fn delivered_record_state(
+        record: &DeviceAuthorizationRecord,
+        acknowledged_at_unix_ms: u64,
+    ) -> DeviceAuthorizationState {
+        let DeviceAuthorizationState::DeliveryPending {
+            approval_id,
+            delivery_id,
+            certificate_sha256,
+            ..
+        } = &record.state
+        else {
+            unreachable!();
+        };
+        DeviceAuthorizationState::Delivered {
+            approval_id: *approval_id,
+            receipt: DeviceCertificateDeliveryReceipt {
+                authorization_id: record.id,
+                delivery_id: *delivery_id,
+                device_id: record.registration_binding.key().device_id.clone(),
+                authorization_generation: record.registration_binding.authorization_generation(),
+                certificate_sha256: *certificate_sha256,
+                csr_sha256: record.csr_sha256,
+                csr_spki_sha256: record.spki_sha256,
+                acknowledged_at_unix_ms,
+            },
+        }
+    }
+
     #[test]
     fn every_state_round_trips() {
         let approval_id = [7; 16];
@@ -2835,7 +2966,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an ephemeral PostgreSQL 17 server with verify-full TLS"]
+    #[ignore = "requires an ephemeral PostgreSQL 17 server with verify-full TLS and Directory migrations"]
     fn postgres_migrations_and_ack_deadline_are_transactional() {
         let migration_url =
             std::env::var("CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_TEST_MIGRATOR_URL")
@@ -2850,6 +2981,63 @@ mod tests {
             .expect("connect with the restricted runtime role");
 
         let now = current_unix_ms();
+        assert!(store.database_time_unix_ms().expect("database time") > 0);
+
+        let registered_record = pending_record(
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            now,
+            now.saturating_add(90_000),
+        );
+        seed_directory_registration(&migration_url, &registered_record);
+        store
+            .insert_registered(registered_record.clone())
+            .expect("insert with a locked current Directory binding");
+        store
+            .require_current_registered_record(&registered_record)
+            .expect("read current registration snapshot");
+        let mut registered_ack = registered_record.clone();
+        registered_ack.revision = 1;
+        registered_ack.state = delivered_record_state(&registered_record, now);
+        store
+            .compare_and_swap_registered_delivery_ack(0, registered_ack.clone())
+            .expect("commit ACK with a locked current Directory binding");
+        assert_eq!(
+            store
+                .by_authorization_id(&registered_record.id)
+                .expect("read registered ACK by authorization ID"),
+            Some(registered_ack)
+        );
+
+        let stale_record = pending_record(
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            random_bytes(),
+            now,
+            now.saturating_add(90_000),
+        );
+        seed_directory_registration(&migration_url, &stale_record);
+        store
+            .insert_registered(stale_record.clone())
+            .expect("insert record before Directory rotation");
+        advance_directory_generation(&migration_url, &stale_record);
+        assert_eq!(
+            store.require_current_registered_record(&stale_record),
+            Err(DeviceAuthorizationStoreError::Conflict),
+            "poll/start snapshot must reject an old Directory generation"
+        );
+        let mut stale_ack = stale_record.clone();
+        stale_ack.revision = 1;
+        stale_ack.state = delivered_record_state(&stale_record, now);
+        assert_eq!(
+            store.compare_and_swap_registered_delivery_ack(0, stale_ack),
+            Err(DeviceAuthorizationStoreError::Conflict),
+            "ACK must reject a record fenced by a newer Directory generation"
+        );
+
         let open_deadline = now.saturating_add(90_000);
         let open_record = pending_record(
             random_bytes(),
@@ -2973,11 +3161,43 @@ mod tests {
             .due_certificate_deliveries(now, 10)
             .expect("scan expired delivery deadlines")
             .contains(&expired_record));
+        let DeviceAuthorizationState::DeliveryPending {
+            approval_id,
+            approver,
+            certificate,
+            delivery_id,
+            certificate_sha256,
+            ..
+        } = &expired_record.state
+        else {
+            unreachable!();
+        };
+        let mut expired_retirement = expired_record.clone();
+        expired_retirement.revision = 1;
+        expired_retirement.state = DeviceAuthorizationState::RetirementPending {
+            approval_id: *approval_id,
+            approver: approver.clone(),
+            certificate: certificate.clone(),
+            certificate_sha256: *certificate_sha256,
+            delivery_id: Some(*delivery_id),
+            reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
+            entered_at_unix_ms: now,
+            last_failure: None,
+        };
+        assert!(store
+            .compare_and_swap_due_delivery_to_retirement(0, expired_retirement.clone())
+            .expect("DB-time due retirement CAS"));
+        assert_eq!(
+            store
+                .by_authorization_id(&expired_record.id)
+                .expect("read retirement CAS"),
+            Some(expired_retirement.clone())
+        );
         assert_eq!(
             store
                 .by_device_code_hash(&expired_hash)
                 .expect("read expired delivery"),
-            Some(expired_record)
+            Some(expired_retirement)
         );
 
         let mut retirement_record = pending_record(
