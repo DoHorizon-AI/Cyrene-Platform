@@ -10,6 +10,7 @@
 
 mod api;
 mod auth;
+mod control_plane;
 mod direct;
 mod directory;
 mod persistent_directory;
@@ -19,6 +20,10 @@ mod transport;
 pub use api::{LocalWorkspaceClient, WorkspaceApi};
 pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
+};
+pub use control_plane::{
+    WorkspaceControlPlane, WorkspaceControlPlaneConfigError, WorkspaceDispatchError,
+    WorkspaceOperationProjection, WorkspaceProductRequest, WorkspaceRequestDispatcher,
 };
 pub use direct::DirectWorkspaceServer;
 pub use directory::{

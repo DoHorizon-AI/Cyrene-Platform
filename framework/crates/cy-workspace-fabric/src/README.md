@@ -7,6 +7,7 @@
 | `directory.rs` | Membership and descriptor validation. | 成员关系与 descriptor 校验。 |
 | `persistent_directory.rs` | Private, single-owner snapshot storage. | 私有单实例快照存储。 |
 | `api.rs` | Workspace-owned API port and LOCAL adapter. | Workspace 权威 API port 与 LOCAL adapter。 |
+| `control_plane.rs` | Workspace authority-pinned API handler and Product dispatch port. | 固定 Workspace 权威的 API handler 与 Product 分发 port。 |
 | `direct.rs` | Session- and membership-checked private API endpoint. | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | Ephemeral authenticated routing. | 临时认证路由。 |
 | `transport.rs` | Direct candidate selection and outbound mTLS transport. | 直连候选选择与出站 mTLS 传输。 |
@@ -30,6 +31,7 @@ identity 权威。
 | `directory.rs` | 成员关系和 descriptor 校验。 |
 | `persistent_directory.rs` | 私有单实例持久化快照存储。 |
 | `api.rs` | Workspace 所有的 API port 与 LOCAL adapter。 |
+| `control_plane.rs` | 固定 Workspace 权威的 API handler 与 Product 分发 port。 |
 | `direct.rs` | 校验会话与成员关系的私网 API 端点。 |
 | `relay.rs` | 临时认证路由。 |
 | `transport.rs` | 直连候选选择与出站 mTLS 传输。 |
