@@ -399,7 +399,9 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
         Some(workspace_api_response::Outcome::Error(error))
             if error.code == 14 && error.message == "WORKSPACE_CONNECTOR_OFFLINE"
     ) {
-        return Err("Relay did not reject a request while its Workspace connector was offline".into());
+        return Err(
+            "Relay did not reject a request while its Workspace connector was offline".into(),
+        );
     }
     println!("LAN_DIRECT_UNREACHABLE_RELAY_DENIED=PASS");
     Ok(())
@@ -438,8 +440,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !has_direct || !has_relay {
         return Err("Workspace descriptor is missing LAN_DIRECT or RELAY candidate".into());
     }
-    let mut connection =
-        connect_discovered_workspace(descriptor, hello, &config, session).await?;
+    let mut connection = connect_discovered_workspace(descriptor, hello, &config, session).await?;
     if connection.mode() != ConnectivityMode::LanDirect {
         return Err("Workspace API proof requires the configured LAN_DIRECT candidate".into());
     }
