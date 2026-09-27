@@ -6,10 +6,10 @@
 //! │  模块职责：提供设备注册 v1 HTTP 路由与可信身份注入边界。               │
 //! └─────────────────────────────────────────────────────────────────────┘
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Path, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use zeroize::Zeroize;
 
 use crate::device_authorization::{
@@ -34,6 +35,9 @@ use crate::relay_peer_certificate_validation::AuthenticatedRelayWorkspaceDevice;
 const MAX_CSR_DER_BYTES: usize = 16 * 1024;
 const MAX_WEBAUTHN_ASSERTION_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 128 * 1024;
+const MAX_CONCURRENT_DEVICE_AUTHORIZATION_STARTS: usize = 8;
+
+static DEVICE_AUTHORIZATION_START_ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[allow(dead_code)]
 #[path = "device_certificate_rotation_host.rs"]
@@ -576,7 +580,13 @@ pub struct DeviceEnrollmentHttpDependencies {
 
 /// Creates the device enrollment v1 routes with explicit trust-boundary ports.
 pub fn device_enrollment_v1_router(dependencies: DeviceEnrollmentHttpDependencies) -> Router {
-    let state = DeviceEnrollmentHttpState { dependencies };
+    let state =
+        DeviceEnrollmentHttpState {
+            dependencies,
+            start_admission: Arc::clone(DEVICE_AUTHORIZATION_START_ADMISSION.get_or_init(|| {
+                Arc::new(Semaphore::new(MAX_CONCURRENT_DEVICE_AUTHORIZATION_STARTS))
+            })),
+        };
     Router::new()
         .route(
             "/v1/device-authorizations",
@@ -609,6 +619,8 @@ pub fn device_enrollment_v1_router(dependencies: DeviceEnrollmentHttpDependencie
 #[derive(Clone)]
 struct DeviceEnrollmentHttpState {
     dependencies: DeviceEnrollmentHttpDependencies,
+    // Shared by every router instance in this process; no state is keyed by untrusted input.
+    start_admission: Arc<Semaphore>,
 }
 
 /// Exact tenant scope in the public JSON contract.
@@ -776,11 +788,16 @@ struct AcknowledgeDeviceDeliveryRequestWire {
 
 async fn start_device_authorization(
     State(state): State<DeviceEnrollmentHttpState>,
-    payload: Result<
-        Json<StartDeviceAuthorizationRequestWire>,
-        axum::extract::rejection::JsonRejection,
-    >,
+    request: Request,
 ) -> Result<(StatusCode, Json<StartDeviceAuthorizationResponse>), HttpApiFailure> {
+    // Keep admission ahead of Axum's body extraction so JSON parsing is bounded too.
+    // The route's DefaultBodyLimit still caps the extracted body at MAX_HTTP_BODY_BYTES.
+    let _admission = state
+        .start_admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
+    let payload = Json::<StartDeviceAuthorizationRequestWire>::from_request(request, &state).await;
     let Json(request) = parse_json(payload)?;
     let scope = request.scope.into_domain()?;
     let csr_der = STANDARD
