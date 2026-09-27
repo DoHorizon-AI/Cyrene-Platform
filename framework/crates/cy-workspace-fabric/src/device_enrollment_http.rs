@@ -7,6 +7,7 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Request, State};
@@ -36,6 +37,7 @@ const MAX_CSR_DER_BYTES: usize = 16 * 1024;
 const MAX_WEBAUTHN_ASSERTION_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 128 * 1024;
 const MAX_CONCURRENT_DEVICE_AUTHORIZATION_STARTS: usize = 8;
+const DEVICE_AUTHORIZATION_START_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 static DEVICE_AUTHORIZATION_START_ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -797,7 +799,12 @@ async fn start_device_authorization(
         .clone()
         .try_acquire_owned()
         .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
-    let payload = Json::<StartDeviceAuthorizationRequestWire>::from_request(request, &state).await;
+    let payload = tokio::time::timeout(
+        DEVICE_AUTHORIZATION_START_BODY_TIMEOUT,
+        Json::<StartDeviceAuthorizationRequestWire>::from_request(request, &state),
+    )
+    .await
+    .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
     let Json(request) = parse_json(payload)?;
     let scope = request.scope.into_domain()?;
     let csr_der = STANDARD
@@ -839,19 +846,30 @@ async fn start_device_authorization(
         .registration
         .as_ref()
         .ok_or(DeviceEnrollmentHttpError::Unavailable)?;
-    let start = registration
-        .bind_and_start(DeviceAuthorizationRegistrationRequest::new(
-            scope.clone(),
-            csr_der,
-            csr_sha256,
-            actual_spki_sha256,
-            registration_key_digest,
-        ))
-        .await?;
-    validate_directory_binding(&start.binding, &scope, &csr_sha256, &actual_spki_sha256)?;
-    validate_start_response(&start.response, &start.binding)?;
-    validate_start_commit(&start.committed_snapshot, &start.binding, &start.response)?;
-    Ok((StatusCode::CREATED, Json(start.response)))
+    let registration = Arc::clone(registration);
+    let registration_request = DeviceAuthorizationRegistrationRequest::new(
+        scope.clone(),
+        csr_der,
+        csr_sha256,
+        actual_spki_sha256,
+        registration_key_digest,
+    );
+    // Keep the process-wide admission permit with the work, even if the
+    // client disconnects and drops this handler while the adapter's blocking
+    // PostgreSQL transaction is still running. This task builds the result;
+    // only the handler writes the HTTP response, and a join failure maps to
+    // the existing generic 503.
+    let start = tokio::spawn(async move {
+        let _admission = _admission;
+        let start = registration.bind_and_start(registration_request).await?;
+        validate_directory_binding(&start.binding, &scope, &csr_sha256, &actual_spki_sha256)?;
+        validate_start_response(&start.response, &start.binding)?;
+        validate_start_commit(&start.committed_snapshot, &start.binding, &start.response)?;
+        Ok::<_, HttpApiFailure>((StatusCode::CREATED, Json(start.response)))
+    })
+    .await
+    .map_err(|_| DeviceEnrollmentHttpError::Unavailable)??;
+    Ok(start)
 }
 
 /// Private mTLS-only rotation handler. It consumes an internal validated peer
