@@ -138,7 +138,8 @@ jobs:
           "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" -m pip install \
             --requirement "$platform_root/tooling/workspace-product-contract-bundle/requirements.txt"
 
-          python "$platform_root/tooling/workspace-product-contract-bundle/build_bundle.py" \
+          "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" \
+            "$platform_root/tooling/workspace-product-contract-bundle/build_bundle.py" \
             --source "Cyrene-Catalyst=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Catalyst" \
             --commit Cyrene-Catalyst=8aa3432fc17fb0b1de50a4e0d5eb0ca37f4f21c9 \
             --source "Cyrene-Yield=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Yield" \
