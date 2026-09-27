@@ -26,8 +26,9 @@ use uuid::Uuid;
 
 use crate::device_authorization::DeviceAuthorizationId;
 use crate::device_registry::{
-    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,
-    WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
+    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey, WorkspaceDeviceRecord,
+    WorkspaceDeviceRegistry,
 };
 use crate::directory::WorkspaceDirectoryError;
 
@@ -247,6 +248,21 @@ impl WorkspaceDeviceRegistry for PostgresWorkspaceDeviceRegistry {
         )
         .map_err(to_directory_error)
     }
+
+    fn find_current_device_certificate_identity(
+        &self,
+        fingerprint_sha256: &str,
+    ) -> Result<Option<WorkspaceDeviceCertificateIdentity>, WorkspaceDirectoryError> {
+        if !is_sha256_hex(fingerprint_sha256) {
+            return Ok(None);
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::FindCurrentCertificateIdentity(fingerprint_sha256.to_owned(), reply),
+            result,
+        )
+        .map_err(to_directory_error)
+    }
 }
 
 fn to_directory_error(error: DeviceRegistryPostgresError) -> WorkspaceDirectoryError {
@@ -267,6 +283,7 @@ enum Command {
     Revoke(WorkspaceDeviceKey, Reply<WorkspaceDeviceRecord>),
     FindByKey(WorkspaceDeviceKey, Reply<Option<WorkspaceDeviceRecord>>),
     FindByFingerprint(String, Reply<Option<WorkspaceDeviceRecord>>),
+    FindCurrentCertificateIdentity(String, Reply<Option<WorkspaceDeviceCertificateIdentity>>),
 }
 
 fn worker_main(
@@ -316,6 +333,12 @@ fn worker_main(
             Command::FindByFingerprint(fingerprint, reply) => {
                 let _ =
                     reply.send(runtime.block_on(find_device_by_fingerprint(&pool, &fingerprint)));
+            }
+            Command::FindCurrentCertificateIdentity(fingerprint, reply) => {
+                let _ = reply.send(runtime.block_on(find_current_device_certificate_identity(
+                    &pool,
+                    &fingerprint,
+                )));
             }
         }
     }
@@ -441,6 +464,19 @@ impl RegistrySnapshot {
             } else {
                 DeviceAuthorizationStatus::Revoked
             },
+        }
+    }
+
+    fn certificate_identity(&self) -> WorkspaceDeviceCertificateIdentity {
+        WorkspaceDeviceCertificateIdentity {
+            key: self.delivery.key.clone(),
+            certificate_fingerprint_sha256: hex(&self.delivery.certificate_sha256),
+            registration_binding_id: *self.delivery.binding_id.as_bytes(),
+            authorization_generation: self.delivery.generation,
+            csr_sha256: self.delivery.csr_sha256,
+            spki_sha256: self.delivery.spki_sha256,
+            serial_number: self.delivery.serial_number.clone(),
+            not_after_unix_ms: self.delivery.not_after_unix_ms,
         }
     }
 }
@@ -941,7 +977,9 @@ async fn find_device(
         return Ok(None);
     };
     if snapshot.state == RegistryState::Active {
-        return verify_active_record(pool, &snapshot).await;
+        return Ok(verify_active_record(pool, &snapshot)
+            .await?
+            .map(|current| current.record()));
     }
     Ok(Some(snapshot.record()))
 }
@@ -967,9 +1005,39 @@ async fn find_device_by_fingerprint(
     };
     let snapshot = decode_registry(row)?;
     if snapshot.state == RegistryState::Active {
-        return verify_active_record(pool, &snapshot).await;
+        return Ok(verify_active_record(pool, &snapshot)
+            .await?
+            .map(|current| current.record()));
     }
     Ok(Some(snapshot.record()))
+}
+
+async fn find_current_device_certificate_identity(
+    pool: &PgPool,
+    fingerprint_sha256: &str,
+) -> RegistryResult<Option<WorkspaceDeviceCertificateIdentity>> {
+    let digest = unhex_32(fingerprint_sha256).ok_or(DeviceRegistryPostgresError::Unavailable)?;
+    let query = format!(
+        "SELECT authorization_id, registration_binding_id, organization_id, workspace_id, \
+         device_id, authorization_generation, delivery_id, certificate_sha256, csr_sha256, \
+         spki_sha256, serial_number, not_after_unix_ms, delivery_deadline_unix_ms, state, \
+         acknowledged_at_unix_ms FROM {REGISTRY_TABLE} WHERE certificate_sha256 = $1"
+    );
+    let row = sqlx::query(&query)
+        .bind(digest.as_slice())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let snapshot = decode_registry(row)?;
+    if snapshot.state != RegistryState::Active {
+        return Ok(None);
+    }
+    Ok(verify_active_record(pool, &snapshot)
+        .await?
+        .map(|current| current.certificate_identity()))
 }
 
 async fn select_latest_registry_by_key(
@@ -997,7 +1065,7 @@ async fn select_latest_registry_by_key(
 async fn verify_active_record(
     pool: &PgPool,
     initial: &RegistrySnapshot,
-) -> RegistryResult<Option<WorkspaceDeviceRecord>> {
+) -> RegistryResult<Option<RegistrySnapshot>> {
     // One MVCC statement snapshot ties authorization, binding, current generation,
     // registry status, and database time together for this mTLS decision.
     let query = format!(
@@ -1059,7 +1127,7 @@ async fn verify_active_record(
     {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
-    Ok(Some(current.record()))
+    Ok(Some(current))
 }
 
 fn decode_active_authorization(row: &PgRow) -> RegistryResult<AuthorizationSnapshot> {

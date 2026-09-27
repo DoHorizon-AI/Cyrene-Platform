@@ -93,8 +93,9 @@ pub use device_enrollment_http::{
     TrustedEnrollmentAbuseKey, TrustedInteractiveUserSession,
 };
 pub use device_registry::{
-    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,
-    WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
+    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey, WorkspaceDeviceRecord,
+    WorkspaceDeviceRegistry,
 };
 pub use device_registry_postgres::{
     DeviceCertificateRegistryActivation, DeviceRegistryPostgresError,

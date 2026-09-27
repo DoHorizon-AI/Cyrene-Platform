@@ -60,6 +60,26 @@ pub struct WorkspaceDeviceRecord {
     pub authorization_status: DeviceAuthorizationStatus,
 }
 
+/// Current active certificate facts required to authenticate a Relay peer.
+///
+/// A registry implementation must return this record only when the certificate
+/// is active, its authorization is Delivered, and its registration binding and
+/// generation still match the current Directory identity. Implementations must
+/// fail closed when that current-state check is unavailable.
+///
+/// Relay 对端认证所需的当前有效证书事实；适配器必须核对已交付状态及当前 binding/generation。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceDeviceCertificateIdentity {
+    pub key: WorkspaceDeviceKey,
+    pub certificate_fingerprint_sha256: String,
+    pub registration_binding_id: [u8; 16],
+    pub authorization_generation: u64,
+    pub csr_sha256: [u8; 32],
+    pub spki_sha256: [u8; 32],
+    pub serial_number: Vec<u8>,
+    pub not_after_unix_ms: u64,
+}
+
 /// Persistent Directory port for approved, externally issued Workspace device certificates.
 ///
 /// Implementations only store externally approved certificate metadata and
@@ -108,4 +128,19 @@ pub trait WorkspaceDeviceRegistry: Send + Sync {
         &self,
         fingerprint_sha256: &str,
     ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError>;
+
+    /// Find the current active device certificate and its immutable binding tuple.
+    ///
+    /// The default refuses the lookup because a basic fingerprint record cannot
+    /// prove current generation or binding state.
+    ///
+    /// 按指纹读取当前有效证书和不可变绑定元组；基础记录无法证明当前代次，默认拒绝。
+    fn find_current_device_certificate_identity(
+        &self,
+        _fingerprint_sha256: &str,
+    ) -> Result<Option<WorkspaceDeviceCertificateIdentity>, WorkspaceDirectoryError> {
+        Err(WorkspaceDirectoryError::Storage(
+            "Current Workspace device certificate identity is unavailable".to_owned(),
+        ))
+    }
 }
