@@ -563,6 +563,10 @@ pub enum DeviceEnrollmentHttpError {
     /// An attempt limit was reached; clients must wait for the supplied interval.
     #[error("request rate limit exceeded")]
     RateLimited { retry_after_seconds: u64 },
+    /// The PostgreSQL PZ001 first-start admission quota was exhausted.
+    /// PostgreSQL PZ001 首启配额耗尽；无法计算间隔时不发送 Retry-After。
+    #[error("first-start admission quota exceeded")]
+    FirstStartQuotaExceeded,
     /// A required Directory, store, verifier, CA, retirement, or registry port is absent.
     #[error("required enrollment service is unavailable")]
     Unavailable,
@@ -1899,6 +1903,9 @@ impl IntoResponse for HttpApiFailure {
                 "slow_down",
                 Some(retry_after_seconds),
             ),
+            DeviceEnrollmentHttpError::FirstStartQuotaExceeded => {
+                (StatusCode::TOO_MANY_REQUESTS, "slow_down", None)
+            }
             DeviceEnrollmentHttpError::Unavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", None)
             }

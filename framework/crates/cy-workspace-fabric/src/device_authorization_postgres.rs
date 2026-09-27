@@ -2451,6 +2451,9 @@ fn same_immutable_fields(
 
 fn map_database_error(error: sqlx::Error) -> DeviceAuthorizationStoreError {
     if let Some(database_error) = error.as_database_error() {
+        if database_error.code().as_deref() == Some("PZ001") {
+            return DeviceAuthorizationStoreError::FirstStartQuotaExceeded;
+        }
         if database_error.code().as_deref() == Some("23505") {
             return match database_error.constraint() {
                 Some("authorizations_approval_id_unique") => {

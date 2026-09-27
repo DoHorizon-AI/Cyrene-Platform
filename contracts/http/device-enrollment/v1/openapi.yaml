@@ -228,7 +228,9 @@ paths:
           description: RFC-style pending, slow_down, denied, expired, or consumed outcome.
           headers:
             Retry-After:
-              description: Seconds before the next permitted poll for slow_down.
+              description: >-
+                Seconds before the next permitted poll for slow_down, when the
+                server can calculate that interval. This header may be omitted.
               schema:
                 type: integer
                 minimum: 1
@@ -463,9 +465,12 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
     RateLimited:
-      description: Retry limit reached; retry only after the returned interval.
+      description: >-
+        Admission or attempt limit reached. Retry-After is included only when
+        the server can calculate the next permitted interval.
       headers:
         Retry-After:
+          description: Seconds before retry, when calculable; this header may be omitted.
           schema:
             type: integer
             minimum: 1

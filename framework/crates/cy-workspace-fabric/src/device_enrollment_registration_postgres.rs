@@ -340,6 +340,9 @@ fn map_manager_error(error: DeviceAuthorizationError) -> DeviceEnrollmentHttpErr
         DeviceAuthorizationError::Expired | DeviceAuthorizationError::DeliveryExpired => {
             DeviceEnrollmentHttpError::Expired
         }
+        DeviceAuthorizationError::FirstStartQuotaExceeded => {
+            DeviceEnrollmentHttpError::FirstStartQuotaExceeded
+        }
         // In this start-only manager, this result is the PostgreSQL store's
         // permanent maximum recovery count, not a waitable user-code throttle.
         DeviceAuthorizationError::TooManyAttempts => DeviceEnrollmentHttpError::Conflict,

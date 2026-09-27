@@ -1161,6 +1161,10 @@ pub enum DeviceAuthorizationStoreError {
     Conflict,
     #[error("device authorization recovery attempts exceeded")]
     RecoveryLimit,
+    /// PostgreSQL's PZ001 admission guard rejected a new generation-one start.
+    /// PostgreSQL PZ001 首启配额拒绝了新注册；恢复次数上限仍单独映射为冲突。
+    #[error("device authorization first-start quota exceeded")]
+    FirstStartQuotaExceeded,
     #[error("device authorization storage unavailable")]
     Unavailable,
 }
@@ -1975,6 +1979,10 @@ pub enum DeviceAuthorizationError {
     InvalidCode,
     #[error("device authorization code attempts exceeded")]
     TooManyAttempts,
+    /// The durable first-start admission quota rejected a new registration.
+    /// 持久化首启准入配额已耗尽。
+    #[error("device authorization first-start quota exceeded")]
+    FirstStartQuotaExceeded,
     #[error("attempt limiter unavailable or clock invalid")]
     AttemptLimiterUnavailable,
     #[error("device authorization expired")]
@@ -5245,6 +5253,9 @@ fn map_store_error(error: DeviceAuthorizationStoreError) -> DeviceAuthorizationE
         DeviceAuthorizationStoreError::CodeCollision => DeviceAuthorizationError::CodeCollision,
         DeviceAuthorizationStoreError::Conflict => DeviceAuthorizationError::ConcurrentTransition,
         DeviceAuthorizationStoreError::RecoveryLimit => DeviceAuthorizationError::TooManyAttempts,
+        DeviceAuthorizationStoreError::FirstStartQuotaExceeded => {
+            DeviceAuthorizationError::FirstStartQuotaExceeded
+        }
         DeviceAuthorizationStoreError::Unavailable => DeviceAuthorizationError::StorageUnavailable,
     }
 }
