@@ -28,6 +28,7 @@ mod persistent_directory;
 pub mod device_authorization;
 mod device_authorization_postgres;
 pub mod device_enrollment_authorization_service;
+mod device_enrollment_registration_postgres;
 pub mod user_code_attempt_limiter_postgres;
 // The Directory-bound consumer lands separately; keep this staged port
 // available without wiring a production signer that does not exist yet.
@@ -100,6 +101,9 @@ pub use device_enrollment_http::{
     DeviceEnrollmentHttpDependencies, DeviceEnrollmentHttpError,
     DeviceEnrollmentRegistrationTransactionPort, SecretBytes, TrustedEnrollmentAbuseKey,
     TrustedInteractiveUserSession,
+};
+pub use device_enrollment_registration_postgres::{
+    DeviceEnrollmentRegistrationPostgresError, PostgresDeviceEnrollmentRegistrationTransaction,
 };
 pub use device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
