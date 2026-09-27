@@ -1003,6 +1003,18 @@ pub trait DeviceAuthorizationStore: Send + Sync {
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
         Err(DeviceAuthorizationStoreError::Unavailable)
     }
+    /// Checks whether this exact retirement revision may contact the CA now.
+    /// Durable stores must use their database clock and current persisted row;
+    /// the default denies the operation for adapters without that check.
+    /// This is a due check, not a distributed lease: concurrent workers may
+    /// both pass it, so the CA operation must remain idempotent.
+    fn retirement_retry_due(
+        &self,
+        _authorization_id: &DeviceAuthorizationId,
+        _expected_revision: u64,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     fn compare_and_swap(
         &self,
         expected_revision: u64,
@@ -1287,6 +1299,24 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         authorization_id: &DeviceAuthorizationId,
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
         self.find(|record| &record.id == authorization_id)
+    }
+
+    fn retirement_retry_due(
+        &self,
+        authorization_id: &DeviceAuthorizationId,
+        expected_revision: u64,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        Ok(records.get(authorization_id).is_some_and(|record| {
+            record.revision == expected_revision
+                && matches!(
+                    &record.state,
+                    DeviceAuthorizationState::RetirementPending { .. }
+                )
+        }))
     }
 
     fn compare_and_swap(
@@ -2947,6 +2977,14 @@ where
             ),
             _ => return Err(state_error(&record.state)),
         };
+
+        if !self
+            .store
+            .retirement_retry_due(&record.id, record.revision)
+            .map_err(map_store_error)?
+        {
+            return Ok(record);
+        }
 
         match retirement_port.retire_or_confirm(
             &record.id,

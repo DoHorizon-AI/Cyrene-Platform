@@ -68,6 +68,13 @@ This provides PostgreSQL scanning and durable retry state only. The real CA
 revoker and production scheduler are still absent, so hosts must keep this
 worker disabled.
 
+Every manager path that can resume retirement now checks the exact persisted
+revision and retry schedule against the PostgreSQL clock immediately before a
+CA call. A false result leaves the record pending, and a storage error prevents
+the call. This check is not a distributed lease: concurrent workers may both
+pass it, so the configured CA revoker must be idempotent by authorization ID
+and certificate fingerprint.
+
 ## PostgreSQL 重试计划补充
 
 迁移 `device_authorization/0006_retirement_retry_schedule` 为授权记录增加
@@ -83,4 +90,8 @@ worker disabled.
 
 这只完成 PostgreSQL 扫描与持久重试状态。真实 CA revoker 和生产调度器仍未配置，host 必须继续
 禁用此 worker。
+
+所有 manager 撤销恢复路径都会在 CA 调用前，以 PostgreSQL 时钟检查精确持久化 revision 和重试计划。
+未到期时保留 pending 状态；存储检查失败则不调用 CA。此检查不是分布式租约：并发 worker 仍可能同时
+通过检查，因此配置的 CA revoker 必须以 authorization ID 和证书指纹实现幂等。
 <!-- /device-certificate-retirement-postgres-retry -->

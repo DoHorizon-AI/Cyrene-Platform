@@ -344,6 +344,18 @@ impl DeviceAuthorizationStore for PostgresDeviceAuthorizationStore {
         self.call(Command::ByAuthorizationId(*authorization_id, reply), result)
     }
 
+    fn retirement_retry_due(
+        &self,
+        authorization_id: &DeviceAuthorizationId,
+        expected_revision: u64,
+    ) -> StoreResult<bool> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::RetirementRetryDue(*authorization_id, expected_revision, reply),
+            result,
+        )
+    }
+
     fn compare_and_swap(
         &self,
         expected_revision: u64,
@@ -461,6 +473,7 @@ enum Command {
         DeviceAuthorizationId,
         StoreReply<Option<DeviceAuthorizationRecord>>,
     ),
+    RetirementRetryDue(DeviceAuthorizationId, u64, StoreReply<bool>),
     CompareAndSwap(u64, DeviceAuthorizationRecord, StoreReply<()>),
     CompareAndSwapDueDeliveryToRetirement(u64, DeviceAuthorizationRecord, StoreReply<bool>),
     CompareAndSwapRegistered(u64, DeviceAuthorizationRecord, StoreReply<()>),
@@ -548,6 +561,13 @@ fn worker_main(
             }
             Command::ByAuthorizationId(authorization_id, reply) => {
                 let _ = reply.send(runtime.block_on(by_authorization_id(&pool, &authorization_id)));
+            }
+            Command::RetirementRetryDue(authorization_id, revision, reply) => {
+                let _ = reply.send(runtime.block_on(retirement_retry_due(
+                    &pool,
+                    &authorization_id,
+                    revision,
+                )));
             }
             Command::CompareAndSwap(expected, replacement, reply) => {
                 let _ = reply.send(runtime.block_on(compare_and_swap(
@@ -1612,6 +1632,31 @@ async fn by_authorization_id(
     .await
     .map_err(map_database_error)?;
     row.map(decode_record).transpose()
+}
+
+/// Checks the exact pending revision against retry eligibility on the primary DB clock.
+/// 使用主库时钟检查指定待撤销代次是否已到重试时间。
+async fn retirement_retry_due(
+    pool: &PgPool,
+    authorization_id: &DeviceAuthorizationId,
+    expected_revision: u64,
+) -> StoreResult<bool> {
+    let revision = to_i64(expected_revision)?;
+    sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM {TABLE} \
+             WHERE id = $1 AND revision = $2 AND state_kind = 'retirement_pending' \
+               AND retirement_attempt_count >= 0 \
+               AND retirement_next_attempt_at_unix_ms >= 0 \
+               AND retirement_next_attempt_at_unix_ms <= \
+                   FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
+         )"
+    ))
+    .bind(authorization_id.to_vec())
+    .bind(revision)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
 }
 
 async fn expired_records(
