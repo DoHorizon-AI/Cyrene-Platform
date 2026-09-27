@@ -22,6 +22,30 @@ GRANT CREATE ON SCHEMA cyrene_workspace_device_registry
     TO cyrene_workspace_device_registry_owner;
 SET ROLE cyrene_workspace_device_registry_owner;
 
+-- SQLx runs this migration in one transaction by default. Hold the writer-blocking
+-- table lock through legacy preflight and gate replacement; reject runners that do
+-- not preserve it across statements. The registry lock is acquired before any row
+-- locks so its order does not invert the registry write paths.
+LOCK TABLE cyrene_workspace_device_registry.certificate_records
+    IN SHARE ROW EXCLUSIVE MODE;
+DO $transactional_migration_guard$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_locks
+        WHERE locktype = 'relation'
+          AND relation =
+                'cyrene_workspace_device_registry.certificate_records'::regclass
+          AND mode = 'ShareRowExclusiveLock'
+          AND granted
+          AND pid = pg_catalog.pg_backend_pid()
+    ) THEN
+        RAISE EXCEPTION
+            'device registry 0003 requires a transactional migration retaining the certificate_records lock';
+    END IF;
+END
+$transactional_migration_guard$;
+
 -- Authorization v5 binds validator provenance to the immutable certificate snapshot.
 CREATE OR REPLACE FUNCTION cyrene_workspace_device_registry.certificate_validation_checked_at(
     authorization_payload JSONB
@@ -391,6 +415,13 @@ BEGIN
               ) IS DISTINCT FROM TRUE
            OR certificate_validation_checked_at(payload) IS NULL
            OR certificate_validation_checked_at(payload) > validation_now_unix_ms
+           OR (
+                OLD.state = 'pending_ack'
+                AND certificate_validation_is_fresh(
+                    payload, NEW.certificate_sha256,
+                    NEW.registration_binding_id, validation_now_unix_ms
+                ) IS DISTINCT FROM TRUE
+           )
            OR certificate -> 'registration_binding_id' IS DISTINCT FROM
                 cyrene_workspace_device_registry.bytes_to_json_array(uuid_send(NEW.registration_binding_id))
            OR certificate #> '{device_key,organization_id}' IS DISTINCT FROM to_jsonb(NEW.organization_id)
@@ -646,6 +677,18 @@ BEGIN
             WHERE authorization_id = requested_authorization_id;
         END IF;
         RETURN 'ineligible';
+    END IF;
+
+    -- An ACK can remain durable while its validation ages out. Keep that row
+    -- pending until the Manager revalidates and refreshes the marker.
+    IF previous_state = 'pending_ack'
+       AND cyrene_workspace_device_registry.certificate_validation_is_fresh(
+            payload,
+            registry_row.certificate_sha256,
+            registry_row.registration_binding_id,
+            now_unix_ms
+       ) IS DISTINCT FROM TRUE THEN
+        RETURN 'awaiting_acknowledgement';
     END IF;
 
     UPDATE cyrene_workspace_device_registry.certificate_records

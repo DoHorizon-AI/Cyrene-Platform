@@ -1085,6 +1085,47 @@ fn delivery_matches_registry(delivery: &DeliverySnapshot, registry: &RegistrySna
     delivery == &registry.delivery
 }
 
+fn authorization_matches_delivery_identity(
+    auth: &AuthorizationSnapshot,
+    delivery: &DeliverySnapshot,
+) -> bool {
+    auth.id == delivery.authorization_id
+        && auth.binding_id == delivery.binding_id
+        && auth.key == delivery.key
+        && auth.generation == delivery.generation
+        && auth.csr_sha256 == delivery.csr_sha256
+        && auth.spki_sha256 == delivery.spki_sha256
+}
+
+async fn directory_binding_matches_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery: &DeliverySnapshot,
+) -> RegistryResult<bool> {
+    let generation = to_i64(delivery.generation)?;
+    let query = format!(
+        "SELECT EXISTS (\
+            SELECT 1 FROM {DIRECTORY_IDENTITIES_TABLE} i \
+            JOIN {DIRECTORY_BINDINGS_TABLE} b ON b.binding_id = $1 \
+            WHERE i.organization_id = $2 AND i.workspace_id = $3 \
+              AND i.device_id = $4 AND i.current_authorization_generation = $5 \
+              AND b.organization_id = $2 AND b.workspace_id = $3 \
+              AND b.device_id = $4 AND b.authorization_generation = $5 \
+              AND b.csr_sha256 = $6 AND b.spki_sha256 = $7\
+        )"
+    );
+    sqlx::query_scalar(&query)
+        .bind(delivery.binding_id)
+        .bind(&delivery.key.organization_id)
+        .bind(&delivery.key.workspace_id)
+        .bind(&delivery.key.device_id)
+        .bind(generation)
+        .bind(delivery.csr_sha256.as_slice())
+        .bind(delivery.spki_sha256.as_slice())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)
+}
+
 async fn stage_pending_delivery(
     pool: &PgPool,
     authorization_id: &DeviceAuthorizationId,
@@ -1099,11 +1140,53 @@ async fn stage_pending_delivery(
     if auth.id != *authorization_id {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
-    let (delivery, certificate_validation) = decode_delivery_with_validation(&auth)?;
     let now = database_now_ms(&mut transaction).await?;
+
+    if let Some(existing) = select_registry(&mut transaction, authorization_id, true).await? {
+        let reusable = match auth.state_kind.as_str() {
+            "delivery_pending" => {
+                let (delivery, certificate_validation) = decode_delivery_with_validation(&auth)?;
+                delivery_matches_registry(&delivery, &existing)
+                    && existing.state == RegistryState::PendingAck
+                    && existing.acknowledged_at_unix_ms.is_none()
+                    && delivery.delivery_deadline_unix_ms > now
+                    && delivery.not_after_unix_ms > now
+                    && certificate_validation.checked_at_unix_ms <= now
+                    && directory_binding_matches_delivery(&mut transaction, &delivery).await?
+            }
+            "delivered" => {
+                let (receipt, certificate_validation) = decode_receipt_with_validation(&auth)?;
+                authorization_matches_delivery_identity(&auth, &existing.delivery)
+                    && receipt_matches(&existing.delivery, &receipt, now)
+                    && certificate_validation.checked_at_unix_ms <= now
+                    && existing.delivery.not_after_unix_ms > now
+                    && match existing.state {
+                        RegistryState::PendingAck => existing.acknowledged_at_unix_ms.is_none(),
+                        RegistryState::Active => {
+                            existing.acknowledged_at_unix_ms
+                                == Some(receipt.acknowledged_at_unix_ms)
+                        }
+                        _ => false,
+                    }
+                    && directory_binding_matches_delivery(&mut transaction, &existing.delivery)
+                        .await?
+            }
+            _ => false,
+        };
+        if !reusable {
+            return Err(DeviceRegistryPostgresError::Unavailable);
+        }
+        return transaction
+            .commit()
+            .await
+            .map_err(|_| DeviceRegistryPostgresError::Unavailable);
+    }
+
+    let (delivery, certificate_validation) = decode_delivery_with_validation(&auth)?;
     if delivery.delivery_deadline_unix_ms <= now
         || delivery.not_after_unix_ms <= now
         || !certificate_validation_is_fresh(certificate_validation.checked_at_unix_ms, now)
+        || !directory_binding_matches_delivery(&mut transaction, &delivery).await?
     {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
@@ -1133,7 +1216,7 @@ async fn stage_pending_delivery(
         .await
         .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
 
-    let existing = select_registry(&mut transaction, authorization_id, false)
+    let existing = select_registry(&mut transaction, authorization_id, true)
         .await?
         .ok_or(DeviceRegistryPostgresError::Unavailable)?;
     if !delivery_matches_registry(&delivery, &existing)

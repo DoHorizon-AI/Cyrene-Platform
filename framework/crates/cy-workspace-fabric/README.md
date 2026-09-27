@@ -197,15 +197,21 @@ The device registry accepts staged and delivered authorization snapshots only
 in wrapper V5 when the server-written `certificate_validation` marker matches
 the exact certificate SHA-256 and Directory registration binding. Staging
 requires that validation timestamp to be no more than 30 seconds old according
-to the PostgreSQL clock. Activation and reconciliation retain crash recovery
-for a timely durable ACK when the matching V5 marker is older; the Relay
-dispatch fence still checks the active registry and identity tuple, while the
-Relay independently checks current certificate revocation on every request.
+to the PostgreSQL clock. A retry for an already staged exact V5 snapshot is
+idempotent after that window, but a new stage still requires fresh validation.
+Activation and reconciliation also require a fresh marker when moving a
+`pending_ack` row to `active`; an older marker leaves the durable ACK pending
+until the Manager revalidates it and retries. Repeated activation of an already
+active row remains idempotent. The Relay dispatch fence still checks the active
+registry and identity tuple, while the Relay independently checks current
+certificate revocation on every request.
 Registry migration `0003_certificate_validation_provenance` refuses to proceed
 while legacy `active` or `pending_ack` rows lack matching V5 provenance. It
-leaves those rows unchanged for controlled audit and recovery. Legacy V1–V4
-Delivered rows cannot be activated by Registry; V1–V3 also lack the certificate
-snapshot needed for automatic revalidation.
+leaves those rows unchanged for controlled audit and recovery, and requires the
+SQLx transactional migration runner so its writer-blocking table lock spans the
+preflight and gate replacement. Legacy V1–V4 Delivered rows cannot be activated
+by Registry; V1–V3 also lack the certificate snapshot needed for automatic
+revalidation.
 
 调用证书撤销 port 前，manager 会先请求 PostgreSQL claim 到期的精确
 `RetirementPending` revision。claim 事务使用主库时钟校验已持久化的状态和版本，写入
@@ -464,11 +470,14 @@ mTLS 设备轮换保持不可用。
 设备注册表只接受带有 V5 wrapper 和服务端写入的
 `certificate_validation` 标记的 staged/Delivered 授权快照；标记中的精确证书
 SHA-256 和 Directory registration binding 必须匹配。Stage 要求 PostgreSQL
-时钟下的验证时间不超过 30 秒。Activation/reconcile 可用较早但匹配的 V5
-标记恢复及时持久化的 ACK；Relay dispatch fence 仍校验 active registry 与身份元组，
+时钟下的验证时间不超过 30 秒。已精确持久化的 V5 stage 重试在该时限后仍保持幂等，
+新 stage 仍要求新鲜验证。`pending_ack` 转为 `active` 时，Activation/reconcile 也要求
+验证标记新鲜；较早的标记会让持久 ACK 保持待处理，直到 Manager 重新验证、刷新标记并重试。
+对已 active 行重复激活仍保持幂等。Relay dispatch fence 仍校验 active registry 与身份元组，
 Relay 还会在每次请求上独立检查当前证书撤销状态。Registry 迁移
 `0003_certificate_validation_provenance` 遇到缺少匹配 V5 来源证明的旧
 `active` 或 `pending_ack` 行时会拒绝迁移，不会修改这些审计行，需在受控窗口盘点并恢复。
+迁移要求使用 SQLx transactional runner，使阻止写入的表锁覆盖旧行预检与 gate 替换。
 V1–V4 的 Delivered 记录不能由 Registry 激活；V1–V3 也缺少可供自动复验的证书快照。
 
 `PostgresUserCodeAttemptReservation` 为 enrollment composite 提供共享异步尝试预留；composite
