@@ -44,19 +44,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out the image source commit
+      - name: Check out the pinned Platform source commit
         uses: actions/checkout@v5
         with:
           path: image-source
           ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Check out the pinned bundle builder and release lock
-        uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Platform
-          ref: 1fee72ff09558aa2cf8b641458aecf519c5207cd
-          path: Cyrene-Platform
           fetch-depth: 0
           persist-credentials: false
 
@@ -82,7 +74,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Navigator
-          ref: 05d7d88f3d38c21b1cb0641c66dc81fd033d4d2f
+          ref: 7d5fce9790f719ea6371338b5f3cab3b0372991c
           path: Cyrene-Services/Cyrene-Navigator
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -104,32 +96,50 @@ jobs:
           python-version: "3.11"
 
       - name: Verify lock pins and build the exact Product contract bundle
+        id: verify_bundle
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
           IMAGE_SOURCE: ${{ github.workspace }}/image-source
+          SOURCE_SHA: ${{ github.sha }}
           PRODUCT_CONTRACT_OUTPUT: ${{ runner.temp }}/product-contracts-stage2
         run: |
           set -euo pipefail
-          platform_root="$WORKSPACE_ROOT/Cyrene-Platform"
+          platform_root="$IMAGE_SOURCE"
           lock="$platform_root/tooling/workspace-product-contract-bundle/releases/product-contract-bundle-stage2.json"
-          tck_path="contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv"
-          tck_commit="267d48ebf42a89e2ebf11c7ea6d035e7c0985593"
-          tck_sha256="ec75c976afd7261e4043eff5c1e53510580b6e90a9af71a07c2371413a984855"
+          mapfile -t platform_tck < <(
+            python - "$lock" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
 
-          test "$(git -C "$platform_root" rev-parse HEAD)" = "1fee72ff09558aa2cf8b641458aecf519c5207cd"
+          lock = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tck = lock["platformTck"]
+          print(tck["commit"])
+          print(tck["path"])
+          print(tck["sha256"])
+          PY
+          )
+          test "${#platform_tck[@]}" -eq 3
+          tck_commit="${platform_tck[0]}"
+          tck_path="${platform_tck[1]}"
+          tck_sha256="${platform_tck[2]}"
+          test "$tck_path" = "contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv"
+          [[ "$tck_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$tck_sha256" =~ ^[0-9a-f]{64}$ ]]
+
+          test "$(git -C "$platform_root" rev-parse HEAD)" = "$SOURCE_SHA"
           git -C "$platform_root" cat-file -e "$tck_commit^{commit}"
           locked_tck_sha256="$(git -C "$platform_root" show "$tck_commit:$tck_path" | sha256sum | cut -d ' ' -f 1)"
-          builder_tck_sha256="$(sha256sum "$platform_root/$tck_path" | cut -d ' ' -f 1)"
-          image_tck_sha256="$(sha256sum "$IMAGE_SOURCE/$tck_path" | cut -d ' ' -f 1)"
+          source_tck_sha256="$(sha256sum "$platform_root/$tck_path" | cut -d ' ' -f 1)"
           test "$locked_tck_sha256" = "$tck_sha256"
-          test "$builder_tck_sha256" = "$tck_sha256"
-          test "$image_tck_sha256" = "$tck_sha256"
+          test "$source_tck_sha256" = "$tck_sha256"
 
           python -m venv "$RUNNER_TEMP/product-contract-bundle-venv"
           "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" -m pip install \
             --requirement "$platform_root/tooling/workspace-product-contract-bundle/requirements.txt"
 
-          python "$platform_root/tooling/workspace-product-contract-bundle/build_bundle.py" \
+          "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" \
+            "$platform_root/tooling/workspace-product-contract-bundle/build_bundle.py" \
             --source "Cyrene-Catalyst=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Catalyst" \
             --commit Cyrene-Catalyst=8aa3432fc17fb0b1de50a4e0d5eb0ca37f4f21c9 \
             --source "Cyrene-Yield=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Yield" \
@@ -141,7 +151,7 @@ jobs:
             --source "Cyrene-Echo=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Echo" \
             --commit Cyrene-Echo=fcd641832d0d154c18e5ab5811ee7232d6d91fbc \
             --source "Cyrene-Navigator=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Navigator" \
-            --commit Cyrene-Navigator=05d7d88f3d38c21b1cb0641c66dc81fd033d4d2f \
+            --commit Cyrene-Navigator=7d5fce9790f719ea6371338b5f3cab3b0372991c \
             --output "$PRODUCT_CONTRACT_OUTPUT"
 
           "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" - \
@@ -162,6 +172,10 @@ jobs:
           assert len(manifest["files"]) == 36
           print("Validated 36 contract files against the Stage 2 source lock.")
           PY
+          {
+            printf 'platform_tck_commit=%s\n' "$tck_commit"
+            printf 'platform_tck_sha256=%s\n' "$tck_sha256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -180,10 +194,12 @@ jobs:
       - name: Record build-only result
         env:
           SOURCE_SHA: ${{ github.sha }}
+          PLATFORM_TCK_COMMIT: ${{ steps.verify_bundle.outputs.platform_tck_commit }}
+          PLATFORM_TCK_SHA256: ${{ steps.verify_bundle.outputs.platform_tck_sha256 }}
         run: |
           set -euo pipefail
           {
             printf 'Source commit: `%s`\n\n' "$SOURCE_SHA"
-            printf 'Product bundle: Stage 2 lock `1fee72ff09558aa2cf8b641458aecf519c5207cd` with a BuildKit `product-contracts` context.\n\n'
+            printf 'Product bundle: offline builder and Stage 2 lock from pinned source commit `%s`; Platform TCK `%s` (`%s`) with a BuildKit `product-contracts` context.\n\n' "$SOURCE_SHA" "$PLATFORM_TCK_COMMIT" "$PLATFORM_TCK_SHA256"
             printf 'This workflow builds locally on the runner only. It does not log in to GHCR, publish an image, deploy to Azure, or assert production readiness.\n'
           } >> "$GITHUB_STEP_SUMMARY"

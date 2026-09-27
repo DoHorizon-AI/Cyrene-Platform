@@ -1,18 +1,17 @@
 # Distributed Workspace Fabric v1
 
-Status: **V1 REFERENCE VERTICAL IMPLEMENTED**
+Status: **V1 direct/runtime/artifact reference path implemented; positive Workspace Connector over Relay is not configured**
 
 Scope: identity-based Workspace discovery, transport-neutral connection
-descriptors, `LOCAL` and application-level `RELAY` connectivity, and a stable
+descriptors, private `LAN_DIRECT` access, Relay Frontend discovery, and a stable
 frontend-to-Workspace API projection.
 
 Non-goals: production IAM, a VPN, direct NAT traversal, a global relay fleet,
 multi-region Workspace authority, or a second execution or Artifact system.
 
-状态：**v1 reference vertical 已实现**。本文约束基于身份的 Workspace 发现、
-transport-neutral 连接描述符、`LOCAL`/应用层 `RELAY` 连接，以及稳定的
-frontend-to-Workspace API 投影；不实现生产 IAM、VPN、NAT 打洞、全球 Relay 集群或
-第二套 Execution/Artifact 系统。
+状态：**v1 直连、Runtime 与 Artifact 参考链路已实现；正向 Relay Connector 路径等待 trust 接线**。
+本文约束基于身份的 Workspace 发现、transport-neutral 连接描述符、直连与 Relay 连接，以及稳定的
+frontend-to-Workspace API 投影；不实现生产 IAM、VPN、NAT 打洞、全球 Relay 集群或第二套 Execution/Artifact 系统。
 
 ## 1. Boundary and authority / 边界与权威
 
@@ -86,10 +85,10 @@ candidates, not execution placement:
 | Mode | Contract status | v1 implementation |
 | --- | --- | --- |
 | `LOCAL` | supported | in-process `LocalWorkspaceClient` |
-| `LAN_DIRECT` | extension seam | not implemented |
+| `LAN_DIRECT` | supported | private mTLS reference fixture; production topology remains deployment configuration |
 | `DIRECT` | extension seam | not implemented |
 | `OVERLAY` | extension seam | future Tailscale/private-network provider |
-| `RELAY` | supported | outbound mTLS application relay |
+| `RELAY` | supported | Frontend discovery; Connector sessions fail closed until trust providers are composed |
 
 Each candidate carries a provider ID, URI, TLS server name, priority, and
 opaque routing hint. Those fields are transport inputs only. The descriptor
@@ -107,7 +106,7 @@ identity，也不得暴露 Docker、Runtime Agent、Artifact Peer 或本地路�
 Remote Navigator/Web/CLI-like client
     | user session: discover Workspace by membership
     v
-Account/Directory -> WorkspaceConnectionDescriptor { LOCAL, RELAY }
+Account/Directory -> WorkspaceConnectionDescriptor { LOCAL, LAN_DIRECT, RELAY }
     | frontend outbound mTLS + short-lived user session
     v
 Relay/Rendezvous (live routing only)
@@ -131,9 +130,32 @@ Workspace Connector 主动建立出站 mTLS，因此 Workspace host 不需要入
 Workspace API，不直接调用 Runtime Agent、Docker、Kernel 内部接口或 Artifact 本地
 存储。
 
+The diagram describes the target Relay route. The current reference host accepts
+Frontend discovery and rejects Workspace Connector sessions while peer certificate
+validation, current revocation evidence, and an active Registry binding with dispatch
+fence are unavailable. The executable proof verifies this denial and uses `LAN_DIRECT`
+for its positive Workspace API, Runtime Agent, and Artifact path. The Relay trace names
+the Workspace-device peer validator, signed current revocation, current Registry binding
+validation, and dispatch fence as `NOT_CONFIGURED`. TLS client-certificate trust remains
+configured. This Connector attempt is denied at the first missing application-level
+validator gate, so the proof does not claim to exercise later gates independently.
+
+此图描述目标 Relay 路径。当前参考 host 支持 Frontend discovery；在 peer certificate
+validation、当前撤销证据、active Registry binding 和 dispatch fence 未接通时，会拒绝
+Workspace Connector session。Relay trace 会将 Workspace-device peer validator、签名的当前
+撤销证据、当前 Registry binding validation 和 dispatch fence 明确记录为 `NOT_CONFIGURED`。
+TLS client-certificate trust 仍然配置。本次 Connector 尝试在首个缺失的应用层 validator
+gate 被拒绝，因此 proof 不宣称单独执行了后续 gate。可执行 proof 通过 `LAN_DIRECT` 验收
+正向的 Workspace API、Runtime Agent 与 Artifact 链路。
+
 ## 5. Relay failure semantics / Relay 故障语义
 
 A relay connection and its `relay_session_id` are disposable transport state.
+The following are target failure semantics after the Workspace Connector has
+passed configured device authentication. The current reference fixture rejects
+the Connector before a session is established and checks that it remains denied
+after Relay restart; it does not claim to prove Connector reconnection.
+
 When Relay disappears:
 
 1. the Workspace connector observes stream closure;
@@ -156,27 +178,44 @@ The v1 Workspace API intentionally exposes only:
 - stable Workspace and semantic Operation identity;
 - Product-facing Operation state and progress;
 - Artifact URIs and stable resource references;
-- an authority-instance marker used by the acceptance fixture to prove Relay
-  restart did not replace Workspace authority.
+- an authority-instance marker used by the acceptance fixture to verify that
+  private direct access reaches the same Workspace authority.
 
 The `FileWorkspaceApi` and opaque development credentials are acceptance-only
-fixtures, not production stores or IAM. The real vertical sends a remote start
-request through Relay, releases an existing Execution Fabric assignment,
-starts the existing Runtime Agent in an ordinary unprivileged container,
-downloads an existing digest-addressed Artifact through the existing range
-transfer, and reports progress to the same logical Operation. It then breaks
-and restarts Relay and proves the same Workspace authority and Operation remain
-observable.
+fixtures, not production stores or IAM. The current proof discovers the Workspace
+through an authenticated Frontend Relay session, verifies that the Relay denies
+the unconfigured Workspace Connector at its application-level device validator,
+then sends the start request over private `LAN_DIRECT`. It releases an existing
+Execution Fabric assignment, starts the existing Runtime Agent in an ordinary unprivileged container, downloads an
+existing digest-addressed Artifact through the existing range transfer, and
+reports progress to the same logical Operation. It also confirms that an offline
+Relay Connector is not treated as a successful fallback and that direct Workspace
+authority remains available after Relay stops.
+
+Positive Workspace Connector traffic through Relay remains unimplemented. It
+requires a device certificate issuer and validator, signed current CRL/OCSP
+revocation evidence, and an active current Registry binding with a dispatch fence.
 
 v1 API 只暴露稳定 Workspace/Operation identity、面向产品的状态/进度、Artifact URI
 与资源引用。`FileWorkspaceApi` 和开发凭据仅用于 acceptance，不是生产状态存储或
-IAM。
+IAM。当前 proof 通过已认证的 Frontend Relay session 发现 Workspace，确认 Relay 在应用层
+device validator 拒绝尚未配置 trust providers 的 Connector，然后通过私网 `LAN_DIRECT`
+发送 start request。Relay trace 会将 Workspace-device peer validator、当前撤销证据、当前
+Registry binding validation 和 dispatch fence 记录为 `NOT_CONFIGURED`；TLS client-certificate
+trust 仍然配置，proof 不宣称单独执行了后续 gate。它释放现有
+Execution Fabric assignment，在普通无特权 container 中启动现有
+Runtime Agent，通过现有 range transfer 下载 digest-addressed Artifact，并向同一个
+Operation 报告进度；同时验证 Connector 离线时 Relay 不会假装回退成功，以及 Relay 停止后
+Workspace 仍可通过直连访问。
+
+Workspace Connector 经 Relay 的正向流量尚未实现。它需要设备证书签发与验证器、已签名且
+当前的 CRL/OCSP 撤销证据，以及包含 dispatch fence 的 active current Registry binding。
 
 Run the release evidence:
 
 ```bash
 bash tooling/ci/check-distributed-workspace-fabric.sh
-bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh
+bash tooling/acceptance/distributed-workspace-fabric/run-workspace-fail-closed-proof.sh
 ```
 
 The Docker proof is mandatory for release acceptance. A Docker daemon or WSL
@@ -240,10 +279,10 @@ Runtime container 不接收长期 user credential，也不接收 frontend Relay 
 | 模式 | 契约状态 | v1 实现 |
 |---|---|---|
 | \`LOCAL\` | 支持 | 进程内 \`LocalWorkspaceClient\` |
-| \`LAN_DIRECT\` | 扩展 seam | 未实现 |
+| \`LAN_DIRECT\` | 支持 | 私网 mTLS 参考 fixture；生产网络拓扑仍由部署配置提供 |
 | \`DIRECT\` | 扩展 seam | 未实现 |
 | \`OVERLAY\` | 扩展 seam | 未来的 Tailscale/private-network provider |
-| \`RELAY\` | 支持 | 出站 mTLS application relay |
+| \`RELAY\` | 支持 | Frontend discovery 可用；Connector trust providers 接通前保持 fail-closed |
 
 每个 candidate 包含 provider ID、URI、TLS server name、priority 和不透明 routing hint。这些字段只是 transport 输入。Descriptor 不暴露 Docker address、Runtime Agent address、Artifact peer 或本地路径；它的 API 结构也不绑定到 Relay。
 
@@ -253,7 +292,7 @@ Runtime container 不接收长期 user credential，也不接收 frontend Relay 
 Remote Navigator/Web/CLI-like client
     | user session：根据成员关系发现 Workspace
     v
-Account/Directory -> WorkspaceConnectionDescriptor { LOCAL, RELAY }
+Account/Directory -> WorkspaceConnectionDescriptor { LOCAL, LAN_DIRECT, RELAY }
     | frontend 出站 mTLS + 短时 user session
     v
 Relay/Rendezvous（仅实时路由）
@@ -270,6 +309,10 @@ Workspace Control Plane / stable Workspace API
 Workspace connector 主动建立连接，因此 Workspace host 无需开放入站端口；用户也不需要输入 host IP、port、Docker address、overlay address 或 container ID。Frontend 只调用 Workspace API，不调用 Runtime Agent、Docker、Kernel 内部接口或 Artifact 本地存储。
 
 ## 5. Relay 故障语义
+
+以下是 Workspace Connector 通过已配置的 device authentication 后的目标故障语义。当前
+reference fixture 会在建立 Connector session 前拒绝连接，并确认 Relay 重启后仍然拒绝；
+它不宣称证明了 Connector 重连。
 
 Relay connection 及其 \`relay_session_id\) 是可丢弃的 transport state。Relay 消失后：
 
@@ -288,18 +331,20 @@ v1 Workspace API 仅公开：
 - 稳定的 Workspace 和 semantic Operation identity；
 - 面向 Product 的 Operation 状态和进度；
 - Artifact URI 和稳定 resource reference；
-- authority-instance 标记；acceptance fixture 用它证明 Relay 重启没有替换 Workspace authority。
+- authority-instance 标记；acceptance fixture 用它验证私网直连仍访问同一 Workspace authority。
 
-\`FileWorkspaceApi\` 和不透明开发 credential 仅用于 acceptance fixture，不是生产 store 或 IAM。真实纵向流程通过 Relay 发送远程启动 request，释放现有 Execution Fabric assignment，在普通无特权 container 中启动现有 Runtime Agent，通过现有的 range transfer 下载一个按 digest 寻址的 Artifact，并向同一个逻辑 Operation 报告进度。之后中断并重启 Relay，再证明同一 Workspace authority 和 Operation 仍可观测。
+\`FileWorkspaceApi\` 和不透明开发 credential 仅用于 acceptance fixture，不是生产 store 或 IAM。当前 proof 通过已认证的 Frontend Relay session 发现 Workspace，确认 Relay 会拒绝尚未配置 Workspace trust providers 的 Connector，然后通过私网 \`LAN_DIRECT\` 发送 start request。它释放现有 Execution Fabric assignment，在普通无特权 container 中启动现有 Runtime Agent，通过现有 range transfer 下载 digest-addressed Artifact，并向同一个 Operation 报告进度；同时验证 Connector 离线时 Relay 不会假装回退成功，以及 Relay 停止后 Workspace 仍可通过直连访问。
+
+Workspace Connector 经 Relay 的正向流量尚未实现。它需要设备证书签发与验证器、已签名且当前的 CRL/OCSP 撤销证据，以及包含 dispatch fence 的 active current Registry binding。
 
 运行发布证据：
 
 \`\`\`bash
 bash tooling/ci/check-distributed-workspace-fabric.sh
-bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh
+bash tooling/acceptance/distributed-workspace-fabric/run-workspace-fail-closed-proof.sh
 \`\`\`
 
-发布验收必须执行 Docker proof。Docker daemon 或 WSL transport 故障是 blocker，不能转成跳过或 mock pass。
+发布验收必须执行 Docker proof。Docker daemon 或 WSL transport 故障是 blocker，不能跳过或 mock pass。
 
 ## 7. 扩展 seam 与非目标
 

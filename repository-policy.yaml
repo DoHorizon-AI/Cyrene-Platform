@@ -14,15 +14,15 @@ ownership:
   - Rust Kernel, process isolation & cgroup sandboxing
   - Product-neutral Kernel execution and resource-fact contracts
   - Generic plugin installation, resolution, admission, health, and endpoint grants
+  - Existing Workspace BFF and Connector hosts with only Directory-derived caller authorization, the closed Workspace Product operation map, fixed owner routes, bounded transport, and read-only pinned contract loading
   - Generic daemon units and repository CI tooling
   does_not_own:
   - Capability payload contracts, generated capability SDKs, or capability TCKs
-  - Concrete plugin implementations, provider adapters, or business request routing
-  - Product-specific AI state
-  - Product lifecycle, run, attempt, retry, and persistence state
+  - Concrete plugin implementations, Product service adapters, or open-ended business routing outside the bounded Workspace host surface
+  - Product-private domain state, schemas, lifecycle, workflows, retries, persistence, or service decisions
   - Training epoch loops or Serving engine internals
-  - Product deployment, edge configuration, adapters, or compatibility snapshots
-  - Cross-repository Product and plugin catalogs
+  - Product deployment and edge templates, including Workspace Azure application templates owned by the consuming repository
+  - Product compatibility snapshots and authoritative cross-repository Product or plugin catalogs; the BFF only loads the pinned read-only operation contract bundle
 build:
   independent: true
   build_systems:

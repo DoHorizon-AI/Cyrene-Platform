@@ -146,6 +146,10 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
     let relay = WorkspaceRelay::with_workspace_device_registry(directory, authenticator, registry);
     trace(
         Path::new(&required("CYRENE_WORKSPACE_RELAY_TRACE")?),
+        "RELAY_CONNECTOR_TRUST_PIPELINE workspace_device_peer_certificate_validator=NOT_CONFIGURED signed_current_revocation=NOT_CONFIGURED current_registry_binding_validation=NOT_CONFIGURED dispatch_fence=NOT_CONFIGURED",
+    );
+    trace(
+        Path::new(&required("CYRENE_WORKSPACE_RELAY_TRACE")?),
         &format!("RELAY_STARTED bind={bind}"),
     );
     let tls = ServerTlsConfig::new()
@@ -373,7 +377,7 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
     direct.connection_uri = "https://127.0.0.1:9".to_string();
     let mut connection = connect_discovered_workspace(&descriptor, hello, &config, relay).await?;
     if connection.mode() != ConnectivityMode::Relay {
-        return Err("unreachable direct candidate did not fall back to Relay".into());
+        return Err("unreachable direct candidate did not select the Relay route".into());
     }
     let response = connection
         .execute(WorkspaceApiRequest {
@@ -390,11 +394,16 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
             )),
         })
         .await?;
-    let view = operation_view(response)?;
-    if view.authority_instance_id != required("CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID")? {
-        return Err("fallback route changed Workspace authority".into());
+    if !matches!(
+        response.outcome,
+        Some(workspace_api_response::Outcome::Error(error))
+            if error.code == 14 && error.message == "WORKSPACE_CONNECTOR_OFFLINE"
+    ) {
+        return Err(
+            "Relay did not reject a request while its Workspace connector was offline".into(),
+        );
     }
-    println!("LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS");
+    println!("LAN_DIRECT_UNREACHABLE_RELAY_DENIED=PASS");
     Ok(())
 }
 
@@ -411,7 +420,8 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
         workspace_id: String::new(),
         device: None,
     };
-    let mut session = connect_relay_session(&relay_client_config()?, hello).await?;
+    let config = relay_client_config()?;
+    let mut session = connect_relay_session(&config, hello.clone()).await?;
     let descriptors = session
         .discover("discover-workspaces", user, organization_id)
         .await?;
@@ -419,23 +429,27 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .find(|descriptor| descriptor.workspace_id == workspace_id)
         .ok_or("Workspace was not discovered by identity")?;
-    let has_local = descriptor.candidates.iter().any(|candidate| {
-        candidate.mode == ConnectivityMode::Local as i32
-            && candidate.provider_id == "cyrene.local.v1"
+    let has_direct = descriptor.candidates.iter().any(|candidate| {
+        candidate.mode == ConnectivityMode::LanDirect as i32
+            && candidate.provider_id == "cyrene.direct.fixture.v1"
     });
     let has_relay = descriptor.candidates.iter().any(|candidate| {
         candidate.mode == ConnectivityMode::Relay as i32
             && candidate.provider_id == "cyrene.relay.fixture.v1"
     });
-    if !has_local || !has_relay {
-        return Err("Workspace descriptor is missing LOCAL or RELAY candidate".into());
+    if !has_direct || !has_relay {
+        return Err("Workspace descriptor is missing LAN_DIRECT or RELAY candidate".into());
+    }
+    let mut connection = connect_discovered_workspace(descriptor, hello, &config, session).await?;
+    if connection.mode() != ConnectivityMode::LanDirect {
+        return Err("Workspace API proof requires the configured LAN_DIRECT candidate".into());
     }
     let operation = OperationIdentity {
         id: "operation-1".to_string(),
         generation: 1,
     };
     if start {
-        let response = session
+        let response = connection
             .execute(WorkspaceApiRequest {
                 request_id: "start-operation-1".to_string(),
                 workspace_id: workspace_id.clone(),
@@ -453,7 +467,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     let observed = loop {
-        let response = session
+        let response = connection
             .execute(WorkspaceApiRequest {
                 request_id: format!("get-operation-{}", now_unix_ms()),
                 workspace_id: workspace_id.clone(),
@@ -470,7 +484,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
             break view;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("timed out waiting for relayed Workspace operation".into());
+            return Err("timed out waiting for the Workspace operation over LAN_DIRECT".into());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
@@ -478,12 +492,12 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
         || !observed.artifact_uris.contains(&artifact_uri)
         || observed.authority_instance_id != required("CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID")?
     {
-        return Err("Workspace authority or Artifact identity changed across relay".into());
+        return Err("Workspace authority or Artifact identity changed across LAN_DIRECT".into());
     }
     println!("WORKSPACE_DISCOVERED_BY_IDENTITY=PASS");
+    println!("WORKSPACE_DISCOVERY_OVER_RELAY=PASS");
     println!("WORKSPACE_CONNECTION_DESCRIPTOR=PASS");
-    println!("LOCAL_CONNECTIVITY=PASS");
-    println!("RELAY_CONNECTIVITY=PASS");
+    println!("LAN_DIRECT_CONNECTIVITY=PASS");
     println!(
         "REMOTE_FRONTEND_OPERATION={}@{}",
         operation.id, operation.generation
@@ -498,8 +512,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
         observed.authority_instance_id
     );
     if !start {
-        println!("RELAY_DISCONNECT_RECONNECT=PASS");
-        println!("WORKSPACE_AUTHORITY_PRESERVED=PASS");
+        println!("WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS");
     }
     Ok(())
 }
@@ -712,7 +725,7 @@ impl WorkspaceApi for FileWorkspaceApi {
         request: WorkspaceApiRequest,
         caller: WorkspaceCallerContext,
     ) -> WorkspaceApiResponse {
-        // The fixture keeps one explicitly authenticated start path for relay proof;
+        // The fixture keeps one explicitly authenticated start path for direct proof;
         // production command authorization remains fail-closed in WorkspaceControlPlane.
         if caller.workspace_id() != self.workspace_id
             || caller.organization_id().trim().is_empty()

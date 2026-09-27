@@ -132,8 +132,11 @@ class GitSource:
     def _validate_repository_identity(self) -> None:
         urls = self._git("config", "--get-all", "remote.origin.url", check=False).decode("utf-8", "strict").splitlines()
         expected = EXPECTED_REPOSITORIES[self.name]
-        if urls != [expected]:
-            raise BundleError(f"{self.name}: origin must be exactly {expected}")
+        expected_without_suffix = expected[:-4] if expected.endswith(".git") else expected
+        if len(urls) != 1 or urls[0] not in (expected, expected_without_suffix):
+            raise BundleError(
+                f"{self.name}: origin must be exactly {expected} or {expected_without_suffix}"
+            )
 
     def _validate_commit(self) -> None:
         resolved = self._git("rev-parse", "--verify", f"{self.commit}^{{commit}}", check=False).decode(

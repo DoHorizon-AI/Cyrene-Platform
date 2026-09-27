@@ -4,15 +4,41 @@ Status: **Normative**
 Baseline: the canonical merge commit produced by this remediation
 
 Platform owns generic Kernel semantics, Node and Runtime supervision,
-Lease/Fence enforcement, Artifact identity/transfer, workspace execution, and
-the control-plane portion of Plugin installation, compatibility, activation,
-health, permissions, and endpoint discovery.
+Lease/Fence enforcement, Artifact identity/transfer, Workspace execution, and
+the generic Relay control plane. Generic Relay exposes an opaque
+`connection_ref` and does not inspect Product payloads. Directory-backed
+identity, membership, caller scope, and authorization also remain Platform
+authorities.
 
-Platform never owns capability payload schemas, Product lifecycle/state,
-Product manifests, ecosystem catalogs, protocol adapters, deployment templates,
-compatibility source snapshots, or business examples. It may return an opaque
-`connection_ref`; it may not proxy, parse, route, persist, or transform the
-business request or response carried by that endpoint.
+## Bounded Workspace application hosts
+
+The current Platform source retains the Workspace Connector and Workspace Web
+BFF application hosts. This exception covers the existing Workspace caller,
+control-plane, authorization and operation-projection modules; the typed
+owner-specific HTTP adapters; and the BFF's fixed routes and read-only,
+provenance-pinned Product contract loader.
+
+The Connector maps only the closed Workspace Product operation enum to fixed
+owner routes. Caller-provided resource identifiers use validated path segments.
+The BFF exposes the existing identity, Directory, device-approval, health and
+single Product-operation routes. These hosts do not own Product-private state,
+schemas, workflows, retries, persistence or service decisions, and they do not
+accept arbitrary Product URLs or open-ended business routes.
+
+Cyrene-Client owns the Workspace Azure Container Apps and Bicep deployment
+templates (transferred by [Client merge `07a8516`](https://github.com/DoHorizon-AI/Cyrene-Client/commit/07a851624193f22c524b14c81f382e770fd63e0e)).
+Platform retains the current Rust host source and its build/package path while
+Client has no runnable Rust host for these components. Source
+ownership may move after Client has a buildable host with pinned Platform
+contracts, a source CI and immutable image-artifact chain, and a deployment
+path that consumes that verified artifact. This ownership record does not
+assert production deployment readiness.
+
+Platform does not own capability payload schemas, Product-private domain
+contracts, Product service implementations, authoritative ecosystem catalogs,
+deployment templates, compatibility source snapshots, or business examples.
+Its Workspace host exception does not create ownership of the Product data or
+workflows carried by those bounded operations.
 
 ## Zero-change extension rule
 
@@ -62,9 +88,17 @@ and must not be inferred from Platform compilation.
 状态：**规范性文件**
 基线：本次治理修复生成的规范合并提交
 
-Platform 拥有通用 Kernel 语义、Node 与 Runtime 监管、Lease/Fence 强制执行、Artifact 身份/传输、workspace 执行，以及 Plugin 安装、兼容性、激活、健康状态、权限和端点发现的控制面部分。
+Platform 拥有通用 Kernel 语义、Node 与 Runtime 监管、Lease/Fence 强制执行、Artifact 身份/传输、Workspace 执行和通用 Relay 控制面。通用 Relay 只暴露不透明的 `connection_ref`，不会检查 Product payload。Directory 身份、成员关系、caller scope 与授权也由 Platform 负责。
 
-Platform 从不拥有 capability 负载 schema、Product 生命周期/状态、Product manifest、生态目录、协议 adapter、部署模板、兼容性源码快照或业务示例。它可以返回不透明的 `connection_ref`，但不得代理、解析、路由、持久化或转换该端点承载的业务 request 或 response。
+## 有界 Workspace 应用宿主
+
+当前 Platform 源码仍保留 Workspace Connector 与 Workspace Web BFF 应用宿主。例外范围仅含现有 Workspace caller、控制面、授权与 operation projection 模块，类型化 owner HTTP adapter，以及 BFF 固定路由和只读、带 provenance 校验的 Product 合同 loader。
+
+Connector 只将封闭的 Workspace Product operation enum 映射到固定 owner 路由。调用方提供的 resource ID 通过已校验的 path segment 传递。BFF 只暴露现有 identity、Directory、设备审批、health 与单一 Product operation 路由。这些宿主不拥有 Product 私有状态、schema、workflow、retry、持久化或服务决策，也不接受任意 Product URL 或开放式业务路由。
+
+Cyrene-Client 负责 Workspace Azure Container Apps 与 Bicep 部署模板（由 [Client merge `07a8516`](https://github.com/DoHorizon-AI/Cyrene-Client/commit/07a851624193f22c524b14c81f382e770fd63e0e) 完成迁移）。Client 尚无可运行这些组件的 Rust host，因此 Platform 暂时保留现有 Rust host 源码和 build/package 路径。只有当 Client 提供带固定 Platform 契约依赖的可构建 host、source CI 与不可变 image artifact 链路，以及消费已验证 artifact 的部署路径后，才迁移 host 源码。本归属记录不表示这些服务已达到生产部署就绪状态。
+
+Platform 不拥有 capability payload schema、Product 私有领域契约、Product 服务实现、权威生态 catalog、部署模板、兼容性源码快照或业务示例。Workspace 宿主例外不把这些有界 operation 承载的 Product 数据或 workflow 变为 Platform 所有。
 
 ## 零改动扩展规则
 

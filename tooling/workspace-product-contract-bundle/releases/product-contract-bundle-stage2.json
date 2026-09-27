@@ -3,7 +3,7 @@
   "release": "distributed-workspace-fabric-stage2",
   "platformTck": {
     "repository": "Cyrene-Platform",
-    "commit": "267d48ebf42a89e2ebf11c7ea6d035e7c0985593",
+    "commit": "35e18cfd127d12ee7be7b88f93725a53e4f43a39",
     "path": "contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv",
     "sha256": "ec75c976afd7261e4043eff5c1e53510580b6e90a9af71a07c2371413a984855"
   },
@@ -26,7 +26,7 @@
     {
       "name": "Cyrene-Navigator",
       "workspacePath": "Cyrene-Services/Cyrene-Navigator",
-      "commit": "05d7d88f3d38c21b1cb0641c66dc81fd033d4d2f"
+      "commit": "7d5fce9790f719ea6371338b5f3cab3b0372991c"
     },
     {
       "name": "Cyrene-Reactor",

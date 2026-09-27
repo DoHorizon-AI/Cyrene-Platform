@@ -129,6 +129,14 @@ owner_repositories = {
     "ECHO": "Cyrene-Echo",
     "NAVIGATOR": "Cyrene-Navigator",
 }
+owner_product_contracts = {
+    "CATALYST": {"workspace-internal.openapi.yaml"},
+    "YIELD": {"workspace-private.openapi.yaml"},
+    "REACTOR": {"workspace-private.openapi.yaml"},
+    "EXCHANGE": {"openapi.yaml"},
+    "ECHO": {"workspace-internal.openapi.yaml"},
+    "NAVIGATOR": {"openapi.yaml", "persistence.openapi.yaml"},
+}
 owner_kinds: dict[str, Counter[str]] = defaultdict(Counter)
 wire_operations: set[str] = set()
 owner_operation_pairs: set[tuple[str, str]] = set()
@@ -150,9 +158,10 @@ for row in rows:
         raise SystemExit(f"duplicate Product operation for owner {owner}: {product_operation}")
     if kind not in {"READ", "COMMAND"}:
         raise SystemExit(f"invalid Product API request kind in TCK: {kind}")
-    expected_contracts = {f"{owner_repositories[owner]}/contracts/product/v1/openapi.yaml"}
-    if owner == "NAVIGATOR":
-        expected_contracts.add("Cyrene-Navigator/contracts/product/v1/persistence.openapi.yaml")
+    expected_contracts = {
+        f"{owner_repositories[owner]}/contracts/product/v1/{contract_name}"
+        for contract_name in owner_product_contracts[owner]
+    }
     if contract not in expected_contracts:
         raise SystemExit(f"unexpected Product contract pointer for {owner}: {contract}")
     wire_operations.add(operation)
@@ -233,7 +242,7 @@ if rg -n 'Mutex<.*WorkspaceOperation|BTreeMap<.*WorkspaceOperation' "${workspace
 fi
 
 bash -n \
-  "${acceptance_root}/run-relay-proof.sh" \
+  "${acceptance_root}/run-workspace-fail-closed-proof.sh" \
   "${acceptance_root}/workspace-entrypoint.sh"
 
 buf_bin=${BUF_BIN:-buf}

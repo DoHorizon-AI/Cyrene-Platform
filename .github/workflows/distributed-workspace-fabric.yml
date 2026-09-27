@@ -26,12 +26,12 @@ jobs:
       - name: Check Workspace Fabric contract and unit suites
         run: bash tooling/ci/check-distributed-workspace-fabric.sh
 
-  relay-container-proof:
+  workspace-direct-relay-fail-closed-proof:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Run real Workspace direct, relay, and Runtime Agent proof
+      - name: Run Workspace direct, Relay fail-closed, Runtime Agent, and Artifact proof
         env:
           CYRENE_ACCEPTANCE_BASE_IMAGE: ubuntu:24.04
           CYRENE_ACCEPTANCE_PULL_IMAGE: "1"
-        run: bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh
+        run: bash tooling/acceptance/distributed-workspace-fabric/run-workspace-fail-closed-proof.sh

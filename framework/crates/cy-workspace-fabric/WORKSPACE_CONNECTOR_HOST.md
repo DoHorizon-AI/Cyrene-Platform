@@ -110,7 +110,7 @@ reachability to every configured Product owner, and the Product owners'
 credential validation. This template does not claim those live facts.
 
 The build-only image workflow and review-only ACA packaging gates are in
-[`workspace-connector.md`](../../../infrastructure/azure/container-apps/workspace-connector.md).
+[`workspace-connector.md`](https://github.com/DoHorizon-AI/Cyrene-Client/blob/07a851624193f22c524b14c81f382e770fd63e0e/infrastructure/azure/container-apps/workspace-connector.md).
 
 ## Workspace Connector Host 中文说明
 
@@ -163,4 +163,4 @@ Relay 拒绝或 session 中断时，进程以 1 至 30 秒有界退避重连。�
 owner 的 credential 校验。模板不声称这些线上事实已通过。
 
 仅构建镜像的 workflow 与 ACA 评审模板 gate 见
-[`workspace-connector.md`](../../../infrastructure/azure/container-apps/workspace-connector.md)。
+[`workspace-connector.md`](https://github.com/DoHorizon-AI/Cyrene-Client/blob/07a851624193f22c524b14c81f382e770fd63e0e/infrastructure/azure/container-apps/workspace-connector.md)。
