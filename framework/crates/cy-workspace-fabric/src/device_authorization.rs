@@ -2714,13 +2714,7 @@ where
                 } if current_id == &approval_id && current_hash == &certificate_sha256 => {
                     return Ok(record)
                 }
-                DeviceAuthorizationState::RegistrationRetired {
-                    approval_id: current_id,
-                    certificate_sha256: current_hash,
-                    ..
-                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
-                    return Ok(record)
-                }
+                state if state == &terminal => return Ok(record),
                 state => return Err(state_error(state)),
             }
             let mut replacement = record.clone();
@@ -3205,6 +3199,19 @@ where
                 }
                 DeviceAuthorizationState::Delivered { .. } => {
                     return Err(DeviceAuthorizationError::InvalidDeliveryAcknowledgement)
+                }
+                DeviceAuthorizationState::RetirementPending {
+                    reason: DeviceCertificateRetirementReason::RegistrationRotated,
+                    delivered_receipt: Some(receipt),
+                    ..
+                }
+                | DeviceAuthorizationState::RegistrationRetired {
+                    receipt: Some(receipt),
+                    ..
+                } if receipt_matches_acknowledgement(receipt, acknowledgement) => {
+                    // Preserve exact ACK replay after the Directory generation
+                    // advances and the old certificate enters retirement.
+                    return Ok(receipt.clone());
                 }
                 DeviceAuthorizationState::DeliveryPending {
                     approval_id,
@@ -4012,6 +4019,7 @@ fn retirement_state_already_resolved(
 ) -> bool {
     let DeviceAuthorizationState::RetirementPending {
         approval_id: target_id,
+        approver: target_approver,
         certificate,
         certificate_sha256: target_hash,
         delivery_id: target_delivery_id,
@@ -4025,16 +4033,20 @@ fn retirement_state_already_resolved(
     match current {
         DeviceAuthorizationState::RetirementPending {
             approval_id: current_id,
+            approver: current_approver,
             certificate: current_certificate,
             certificate_sha256: current_hash,
             delivery_id: current_delivery_id,
+            delivered_receipt: current_receipt,
             reason: current_reason,
             ..
         } => {
             current_id == target_id
+                && current_approver == target_approver
                 && current_certificate == certificate
                 && current_hash == target_hash
                 && current_delivery_id == target_delivery_id
+                && current_receipt == target_receipt
                 && current_reason == target_reason
         }
         DeviceAuthorizationState::DeliveryExpired {
