@@ -27,6 +27,8 @@ mod persistent_directory;
 // The policy slice lands before its separately owned caller/runtime call site.
 pub mod device_authorization;
 mod device_authorization_postgres;
+pub mod device_enrollment_authorization_service;
+pub mod user_code_attempt_limiter_postgres;
 // The Directory-bound consumer lands separately; keep this staged port
 // available without wiring a production signer that does not exist yet.
 #[allow(dead_code)]
@@ -89,10 +91,15 @@ pub use device_authorization_postgres::{
     DeviceAuthorizationPostgresError, PostgresDeviceAuthorizationStore,
 };
 pub use device_csr_validator::ProductionDeviceCsrValidator;
+pub use device_enrollment_authorization_service::{
+    DeviceCertificatePublicMetadata, DeviceCertificatePublicMetadataPort,
+    DeviceEnrollmentAuthorizationService, DeviceEnrollmentAuthorizationServiceConfig,
+};
 pub use device_enrollment_http::{
     device_enrollment_v1_router, DeviceEnrollmentAuthorizationPort,
-    DeviceEnrollmentHttpDependencies, DeviceEnrollmentRegistrationTransactionPort,
-    TrustedEnrollmentAbuseKey, TrustedInteractiveUserSession,
+    DeviceEnrollmentHttpDependencies, DeviceEnrollmentHttpError,
+    DeviceEnrollmentRegistrationTransactionPort, SecretBytes, TrustedEnrollmentAbuseKey,
+    TrustedInteractiveUserSession,
 };
 pub use device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,

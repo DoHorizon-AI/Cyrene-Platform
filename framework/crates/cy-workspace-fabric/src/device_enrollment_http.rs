@@ -137,7 +137,11 @@ impl DeviceEnrollmentAuthorizationSnapshot {
         let binding = &record.registration_binding;
         if record.device_code_generation == 0
             || binding.authorization_generation() == 0
-            || binding.key().device_id.trim().is_empty()
+            || !(16..=128).contains(&binding.key().device_id.len())
+            || binding.key().organization_id != record.scope.organization_id
+            || binding.key().workspace_id != record.scope.workspace_id
+            || binding.csr_sha256() != &record.csr_sha256
+            || binding.spki_sha256() != &record.spki_sha256
         {
             return Err(DeviceEnrollmentHttpError::Unavailable);
         }
@@ -309,7 +313,7 @@ impl DeviceCertificateRotationHttpState {
 pub struct SecretString(String);
 
 impl SecretString {
-    fn expose(&self) -> &str {
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 }
@@ -344,6 +348,33 @@ impl SecretBytes {
     /// Borrows the assertion bytes for verification.
     pub fn expose(&self) -> &[u8] {
         &self.0
+    }
+
+    /// Serializes a browser WebAuthn assertion with the same JSON encoder used
+    /// by this HTTP module, bounds it before returning, and clears the input
+    /// JSON strings. This is the only supported cross-crate constructor; raw
+    /// bytes and generic conversions remain private.
+    pub fn from_webauthn_assertion_json(
+        mut assertion: Value,
+    ) -> Result<Self, DeviceEnrollmentHttpError> {
+        if !assertion.is_object()
+            || !json_value_fits_bound(&assertion, MAX_WEBAUTHN_ASSERTION_BYTES)
+        {
+            zeroize_json_strings(&mut assertion);
+            return Err(DeviceEnrollmentHttpError::InvalidRequest);
+        }
+        let serialized = serde_json::to_vec(&assertion);
+        zeroize_json_strings(&mut assertion);
+        match serialized {
+            Ok(mut bytes) if !bytes.is_empty() && bytes.len() <= MAX_WEBAUTHN_ASSERTION_BYTES => {
+                Ok(Self(std::mem::take(&mut bytes)))
+            }
+            Ok(mut bytes) => {
+                bytes.zeroize();
+                Err(DeviceEnrollmentHttpError::InvalidRequest)
+            }
+            Err(_) => Err(DeviceEnrollmentHttpError::InvalidRequest),
+        }
     }
 }
 
@@ -1158,11 +1189,9 @@ fn decode_sha256(value: &str) -> Result<[u8; 32], DeviceEnrollmentHttpError> {
 }
 
 fn serialize_webauthn_assertion(
-    mut assertion: Value,
+    assertion: Value,
 ) -> Result<SecretBytes, DeviceEnrollmentHttpError> {
-    let serialized = serde_json::to_vec(&assertion).map(SecretBytes);
-    zeroize_json_strings(&mut assertion);
-    serialized.map_err(|_| DeviceEnrollmentHttpError::InvalidRequest)
+    SecretBytes::from_webauthn_assertion_json(assertion)
 }
 
 fn zeroize_json_strings(value: &mut Value) {
@@ -1172,6 +1201,54 @@ fn zeroize_json_strings(value: &mut Value) {
         Value::Object(values) => values.values_mut().for_each(zeroize_json_strings),
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+fn json_value_fits_bound(value: &Value, maximum: usize) -> bool {
+    fn add_bounded(total: &mut usize, amount: usize, maximum: usize) -> bool {
+        let Some(next) = total.checked_add(amount) else {
+            return false;
+        };
+        if next > maximum {
+            return false;
+        }
+        *total = next;
+        true
+    }
+
+    fn visit(value: &Value, total: &mut usize, maximum: usize) -> bool {
+        match value {
+            Value::String(value) => value
+                .len()
+                .checked_mul(6)
+                .and_then(|length| length.checked_add(2))
+                .is_some_and(|length| add_bounded(total, length, maximum)),
+            Value::Array(values) => {
+                if !add_bounded(total, values.len().saturating_sub(1), maximum) {
+                    return false;
+                }
+                values.iter().all(|value| visit(value, total, maximum))
+            }
+            Value::Object(values) => {
+                if !add_bounded(total, values.len().saturating_sub(1), maximum) {
+                    return false;
+                }
+                values.iter().all(|(key, value)| {
+                    key.len()
+                        .checked_mul(6)
+                        .and_then(|length| length.checked_add(3))
+                        .is_some_and(|length| {
+                            add_bounded(total, length, maximum) && visit(value, total, maximum)
+                        })
+                })
+            }
+            Value::Null => add_bounded(total, 4, maximum),
+            Value::Bool(value) => add_bounded(total, if *value { 4 } else { 5 }, maximum),
+            Value::Number(value) => add_bounded(total, value.to_string().len(), maximum),
+        }
+    }
+
+    let mut total = 0;
+    visit(value, &mut total, maximum)
 }
 
 fn map_csr_error(error: DeviceAuthorizationPortError) -> DeviceEnrollmentHttpError {
