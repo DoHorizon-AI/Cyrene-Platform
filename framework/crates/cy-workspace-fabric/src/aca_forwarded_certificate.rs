@@ -114,7 +114,12 @@ impl AcaForwardedCertificateAdapter {
     /// This preserves the canonical fingerprint approval, revocation, organization, Workspace,
     /// and device checks. The caller must select this method only for the explicitly trusted ACA
     /// ingress mode; ordinary ingress continues to use Tonic's TLS peer-certificate path.
-    pub fn authenticate_request<T>(
+    /// Legacy validation helper retained for existing crate-local fixtures.
+    ///
+    /// Relay production authentication does not call this method: ACA XFCC alone
+    /// cannot prove a TLS peer identity or fresh certificate revocation status.
+    #[allow(dead_code)]
+    pub(crate) fn authenticate_request<T>(
         &self,
         request: &Request<T>,
         hello: &RelayHello,

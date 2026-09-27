@@ -11,11 +11,15 @@ use std::sync::Arc;
 use cy_proto::workspace_v1::{RelayHello, RelayParticipantRole};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+#[cfg(test)]
 use tonic::Request;
 use x509_parser::parse_x509_certificate;
 
 use crate::auth::{RelaySessionClaims, SessionPrincipal};
 use crate::device_registry::{DeviceAuthorizationStatus, WorkspaceDeviceRegistry};
+use crate::relay_peer_certificate_validation::{
+    AuthenticatedRelayWorkspaceDevice, RelayPeerCertificateError, ValidatedRelayPeerCertificate,
+};
 
 /// Certificate identity derived from the peer certificate on a Tonic TLS connection.
 ///
@@ -41,6 +45,7 @@ impl VerifiedClientCertificate {
     /// with a peer certificate. No request metadata or forwarded header is read.
     ///
     /// 从 Tonic 已验证的 TLS 对端元数据读取叶子证书；缺失时拒绝，不读取转发 header。
+    #[cfg(test)]
     pub(crate) fn from_tonic_request<T>(
         request: &Request<T>,
     ) -> Result<Self, WorkspaceDeviceAuthenticationError> {
@@ -53,6 +58,7 @@ impl VerifiedClientCertificate {
         Self::from_tls_peer_der(leaf.as_ref())
     }
 
+    #[cfg(test)]
     fn from_tls_peer_der(der: &[u8]) -> Result<Self, WorkspaceDeviceAuthenticationError> {
         Self::from_validated_der(der)
     }
@@ -105,6 +111,8 @@ pub enum WorkspaceDeviceAuthenticationError {
     InvalidClientCertificate,
     #[error("WORKSPACE_DEVICE_TLS_CERTIFICATE_EXPIRED")]
     ExpiredCertificate,
+    #[error("WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_UNKNOWN")]
+    RevocationStatusUnknown,
     #[error("WORKSPACE_DEVICE_CERTIFICATE_NOT_REGISTERED")]
     UnregisteredCertificate,
     #[error("WORKSPACE_DEVICE_CERTIFICATE_REVOKED")]
@@ -136,7 +144,8 @@ impl RegistryWorkspaceDeviceVerifier {
     }
 
     /// Build connector claims only when the registered certificate is approved and in scope.
-    pub fn authenticate(
+    #[allow(dead_code)] // Legacy fingerprint-only verifier stays crate-private and is never wired by Relay.
+    pub(crate) fn authenticate(
         &self,
         hello: &RelayHello,
         certificate: &VerifiedClientCertificate,
@@ -187,6 +196,92 @@ impl RegistryWorkspaceDeviceVerifier {
             workspace_id: record.key.workspace_id,
             expires_at_unix_ms: certificate.expires_at_unix_ms(),
         })
+    }
+
+    /// Authenticate a fully validated Tonic peer against a current active Registry binding.
+    ///
+    /// The certificate validator proves chain/profile/time and fresh signed
+    /// revocation evidence before this method is called. This method then
+    /// requires the Registry's current generation and immutable binding tuple;
+    /// basic fingerprint records never authorize this path.
+    pub(crate) fn authenticate_validated_peer(
+        &self,
+        hello: &RelayHello,
+        certificate: &ValidatedRelayPeerCertificate,
+        now_unix_ms: u64,
+    ) -> Result<
+        (RelaySessionClaims, AuthenticatedRelayWorkspaceDevice),
+        WorkspaceDeviceAuthenticationError,
+    > {
+        if certificate.not_after_unix_ms() <= now_unix_ms {
+            return Err(WorkspaceDeviceAuthenticationError::ExpiredCertificate);
+        }
+        if hello.role != RelayParticipantRole::WorkspaceConnector as i32 || hello.user.is_some() {
+            return Err(WorkspaceDeviceAuthenticationError::IdentityMismatch);
+        }
+        let device = hello
+            .device
+            .as_ref()
+            .ok_or(WorkspaceDeviceAuthenticationError::IdentityMismatch)?;
+
+        let fingerprint = certificate.fingerprint_sha256_hex();
+        let record = self
+            .registry
+            .find_current_device_certificate_identity(&fingerprint)
+            .map_err(|_| WorkspaceDeviceAuthenticationError::RegistryUnavailable)?
+            .ok_or(WorkspaceDeviceAuthenticationError::UnregisteredCertificate)?;
+        let authenticated_peer = certificate
+            .match_registry_identity(&record)
+            .map_err(map_peer_certificate_error)?;
+        let key = authenticated_peer.key();
+        if key.organization_id.is_empty()
+            || key.workspace_id.is_empty()
+            || key.device_id.is_empty()
+            || hello.organization_id != key.organization_id
+            || hello.workspace_id != key.workspace_id
+            || device.workspace_id != key.workspace_id
+            || device.device_id != key.device_id
+        {
+            return Err(WorkspaceDeviceAuthenticationError::IdentityMismatch);
+        }
+
+        Ok((
+            RelaySessionClaims {
+                principal: SessionPrincipal::WorkspaceDevice {
+                    workspace_id: key.workspace_id.clone(),
+                    device_id: key.device_id.clone(),
+                },
+                organization_id: key.organization_id.clone(),
+                workspace_id: key.workspace_id.clone(),
+                expires_at_unix_ms: certificate.not_after_unix_ms(),
+            },
+            authenticated_peer,
+        ))
+    }
+}
+
+fn map_peer_certificate_error(
+    error: RelayPeerCertificateError,
+) -> WorkspaceDeviceAuthenticationError {
+    match error {
+        RelayPeerCertificateError::MissingPeerCertificate => {
+            WorkspaceDeviceAuthenticationError::MissingClientCertificate
+        }
+        RelayPeerCertificateError::ExpiredCertificate => {
+            WorkspaceDeviceAuthenticationError::ExpiredCertificate
+        }
+        RelayPeerCertificateError::Revoked => {
+            WorkspaceDeviceAuthenticationError::RevokedCertificate
+        }
+        RelayPeerCertificateError::RevocationStatusUnknown => {
+            WorkspaceDeviceAuthenticationError::RevocationStatusUnknown
+        }
+        RelayPeerCertificateError::IdentityMismatch => {
+            WorkspaceDeviceAuthenticationError::IdentityMismatch
+        }
+        RelayPeerCertificateError::InvalidCertificate => {
+            WorkspaceDeviceAuthenticationError::InvalidClientCertificate
+        }
     }
 }
 

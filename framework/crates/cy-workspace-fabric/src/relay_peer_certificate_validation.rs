@@ -26,8 +26,7 @@ use x509_parser::certificate::X509Certificate;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::parse_x509_certificate;
 
-use crate::device_registry::WorkspaceDeviceKey;
-use crate::durable_directory::DeviceRegistrationBinding;
+use crate::device_registry::{WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey};
 
 const MAX_TRUST_ROOTS: usize = 32;
 const MAX_TRUST_ROOT_BUNDLE_BYTES: usize = 1024 * 1024;
@@ -201,28 +200,30 @@ impl ValidatedRelayPeerCertificate {
         self.not_after_unix_ms
     }
 
-    /// Bind the certificate facts to a trusted Directory result.
+    /// Bind the certificate facts to a current, active Registry result.
     ///
-    /// The supplied result must come from a current-generation registry read or
-    /// transaction. This comparison alone does not prove that a previously
-    /// cached binding remains current; the PostgreSQL caller must repeat the
-    /// generation and binding comparison while holding the identity-row lock.
-    pub(crate) fn match_directory_binding(
+    /// The supplied result must come from a current-generation Registry query
+    /// that verifies the delivered authorization and current Directory binding.
+    /// A cached result must never be used to fence a later rotation transaction.
+    pub(crate) fn match_registry_identity(
         &self,
-        binding: &DeviceRegistrationBinding,
+        record: &WorkspaceDeviceCertificateIdentity,
     ) -> Result<AuthenticatedRelayWorkspaceDevice, RelayPeerCertificateError> {
-        if self.identity.key != *binding.key()
-            || self.identity.authorization_generation != binding.authorization_generation()
-            || self.identity.csr_sha256 != *binding.csr_sha256()
-            || self.identity.spki_sha256 != *binding.spki_sha256()
+        if self.identity.key != record.key
+            || self.identity.authorization_generation != record.authorization_generation
+            || self.identity.csr_sha256 != record.csr_sha256
+            || self.identity.spki_sha256 != record.spki_sha256
+            || self.fingerprint_sha256_hex() != record.certificate_fingerprint_sha256
+            || self.serial_number != record.serial_number
+            || self.not_after_unix_ms != record.not_after_unix_ms
             || self.identity.authorization_generation == 0
-            || binding.binding_id().iter().all(|byte| *byte == 0)
+            || record.registration_binding_id.iter().all(|byte| *byte == 0)
         {
             return Err(RelayPeerCertificateError::IdentityMismatch);
         }
 
         Ok(AuthenticatedRelayWorkspaceDevice {
-            registration_binding_id: *binding.binding_id(),
+            registration_binding_id: record.registration_binding_id,
             key: self.identity.key.clone(),
             authorization_generation: self.identity.authorization_generation,
             csr_sha256: self.identity.csr_sha256,
@@ -239,6 +240,7 @@ impl ValidatedRelayPeerCertificate {
 /// Never construct this from RelayHello or request data. A store must compare
 /// this binding ID and generation with its locked current identity row before
 /// reusing a device ID for certificate rotation.
+#[derive(Clone)]
 pub(crate) struct AuthenticatedRelayWorkspaceDevice {
     registration_binding_id: [u8; 16],
     key: WorkspaceDeviceKey,
@@ -285,6 +287,34 @@ impl AuthenticatedRelayWorkspaceDevice {
 }
 
 /// Inbound peer certificate validator initialized with private, configured trust roots.
+pub(crate) struct TonicPeerCertificateChain {
+    leaf_der: Vec<u8>,
+    intermediate_chain_der: Vec<Vec<u8>>,
+}
+
+impl TonicPeerCertificateChain {
+    /// Extract peer certificates only from Tonic's server-side TLS extensions.
+    pub(crate) fn from_request<T>(request: &Request<T>) -> Result<Self, RelayPeerCertificateError> {
+        let certificates = request
+            .peer_certs()
+            .ok_or(RelayPeerCertificateError::MissingPeerCertificate)?;
+        let leaf_der = certificates
+            .first()
+            .ok_or(RelayPeerCertificateError::MissingPeerCertificate)?
+            .as_ref()
+            .to_vec();
+        let intermediate_chain_der = certificates
+            .iter()
+            .skip(1)
+            .map(|certificate| certificate.as_ref().to_vec())
+            .collect();
+        Ok(Self {
+            leaf_der,
+            intermediate_chain_der,
+        })
+    }
+}
+
 pub(crate) struct RelayPeerCertificateValidator {
     roots: RootCertStore,
     trusted_roots_der: Vec<Vec<u8>>,
@@ -348,22 +378,22 @@ impl RelayPeerCertificateValidator {
         &self,
         request: &Request<T>,
         now_unix_ms: u64,
-        revocation_checker: &impl RelayPeerCertificateRevocationChecker,
+        revocation_checker: &dyn RelayPeerCertificateRevocationChecker,
     ) -> Result<ValidatedRelayPeerCertificate, RelayPeerCertificateError> {
-        let certificates = request
-            .peer_certs()
-            .ok_or(RelayPeerCertificateError::MissingPeerCertificate)?;
-        let leaf = certificates
-            .first()
-            .ok_or(RelayPeerCertificateError::MissingPeerCertificate)?;
-        let intermediates = certificates
-            .iter()
-            .skip(1)
-            .map(|certificate| certificate.as_ref().to_vec())
-            .collect::<Vec<_>>();
+        let chain = TonicPeerCertificateChain::from_request(request)?;
+        self.validate_tonic_peer_chain(&chain, now_unix_ms, revocation_checker)
+    }
+
+    /// Validate a chain extracted from Tonic's trusted TLS peer extensions.
+    pub(crate) fn validate_tonic_peer_chain(
+        &self,
+        chain: &TonicPeerCertificateChain,
+        now_unix_ms: u64,
+        revocation_checker: &dyn RelayPeerCertificateRevocationChecker,
+    ) -> Result<ValidatedRelayPeerCertificate, RelayPeerCertificateError> {
         self.validate_trusted_transport_chain(
-            leaf.as_ref(),
-            &intermediates,
+            &chain.leaf_der,
+            &chain.intermediate_chain_der,
             now_unix_ms,
             revocation_checker,
         )
@@ -379,7 +409,7 @@ impl RelayPeerCertificateValidator {
         leaf_der: &[u8],
         intermediate_chain_der: &[Vec<u8>],
         now_unix_ms: u64,
-        revocation_checker: &impl RelayPeerCertificateRevocationChecker,
+        revocation_checker: &dyn RelayPeerCertificateRevocationChecker,
     ) -> Result<ValidatedRelayPeerCertificate, RelayPeerCertificateError> {
         self.validate_trusted_transport_chain(
             leaf_der,
@@ -394,7 +424,7 @@ impl RelayPeerCertificateValidator {
         leaf_der: &[u8],
         intermediate_chain_der: &[Vec<u8>],
         now_unix_ms: u64,
-        revocation_checker: &impl RelayPeerCertificateRevocationChecker,
+        revocation_checker: &dyn RelayPeerCertificateRevocationChecker,
     ) -> Result<ValidatedRelayPeerCertificate, RelayPeerCertificateError> {
         if leaf_der.is_empty()
             || leaf_der.len() > MAX_CERTIFICATE_DER_BYTES

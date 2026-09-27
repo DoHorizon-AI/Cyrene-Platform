@@ -24,6 +24,11 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::relay_peer_certificate_validation::{
+    AuthenticatedRelayWorkspaceDevice, RelayPeerCertificateError,
+    RelayPeerCertificateRevocationChecker, RelayPeerCertificateValidator,
+    TonicPeerCertificateChain,
+};
 use crate::{
     AcaForwardedBffWorkloadCertificateAdapter, AcaForwardedCertificateAdapter,
     RegistryWorkspaceDeviceVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
@@ -44,6 +49,7 @@ const PENDING_REQUEST_TTL: Duration = Duration::from_secs(35);
 struct RegisteredConnection {
     relay_session_id: String,
     sender: RelaySender,
+    authenticated_device: Option<AuthenticatedRelayWorkspaceDevice>,
 }
 
 struct PendingRequest {
@@ -62,6 +68,8 @@ struct RelayState {
     directory: Arc<dyn WorkspaceDirectory>,
     authenticator: Arc<dyn RelayAuthenticator>,
     workspace_device_verifier: Option<Arc<RegistryWorkspaceDeviceVerifier>>,
+    workspace_peer_certificate_validator: Option<Arc<RelayPeerCertificateValidator>>,
+    workspace_peer_revocation_checker: Option<Arc<dyn RelayPeerCertificateRevocationChecker>>,
     aca_forwarded_certificate_adapter: Option<AcaForwardedCertificateAdapter>,
     aca_forwarded_bff_workload_certificate_adapter:
         Option<AcaForwardedBffWorkloadCertificateAdapter>,
@@ -81,44 +89,39 @@ impl WorkspaceRelay {
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,
     ) -> Self {
-        Self::build(directory, authenticator, None, None, None)
+        Self::build(directory, authenticator, None, None, None, None, None)
     }
 
-    /// Construct a Relay whose Workspace connectors authenticate with the
-    /// Tonic TLS peer certificate and the supplied device registry.
+    /// Compatibility constructor that keeps Workspace connectors disabled.
     ///
-    /// `new` deliberately leaves connector authentication disabled. A Relay
-    /// without a trusted device registry therefore cannot accept connectors.
+    /// A basic fingerprint lookup cannot prove the private certificate profile,
+    /// current Directory generation, or fresh signed revocation status.
     pub fn with_workspace_device_registry(
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,
-        registry: Arc<dyn WorkspaceDeviceRegistry>,
+        _registry: Arc<dyn WorkspaceDeviceRegistry>,
     ) -> Self {
-        Self::build(
-            directory,
-            authenticator,
-            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
-            None,
-            None,
-        )
+        Self::build(directory, authenticator, None, None, None, None, None)
     }
 
-    /// Construct a Relay that validates ACA-overwritten XFCC metadata for Workspace connectors.
+    /// Compatibility constructor that keeps Workspace connectors disabled.
     ///
-    /// This mode must only be selected behind ACA HTTP/2 ingress configured to require client
-    /// certificates and overwrite XFCC. It never falls back to a Tonic peer certificate when
-    /// the forwarded certificate is missing or invalid.
+    /// XFCC is not an authenticated peer fact by itself. A trusted ingress
+    /// adapter, certificate validator, revocation checker, and current Registry
+    /// binding lookup must all be composed before connector authentication is enabled.
     pub fn with_aca_forwarded_certificate_adapter(
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,
-        registry: Arc<dyn WorkspaceDeviceRegistry>,
+        _registry: Arc<dyn WorkspaceDeviceRegistry>,
         adapter: AcaForwardedCertificateAdapter,
     ) -> Self {
         Self::build(
             directory,
             authenticator,
-            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+            None,
             Some(adapter),
+            None,
+            None,
             None,
         )
     }
@@ -127,22 +130,24 @@ impl WorkspaceRelay {
     ///
     /// The Frontend branch validates the dedicated BFF service CA and exact certificate pin
     /// from this RPC's ACA-overwritten XFCC before validating the signed user handoff. The
-    /// WorkspaceConnector branch continues to use only the Workspace device registry.
+    /// WorkspaceConnector authentication remains disabled by this compatibility constructor.
     ///
-    /// 为 ACA Relay 配置独立 Frontend workload 与 Connector device trust；先校验同一 RPC 的 BFF XFCC，再验证 handoff。
+    /// 为 ACA Relay 配置 Frontend workload 信任；Connector 认证保持关闭。
     pub fn with_aca_forwarded_certificate_adapters(
         directory: Arc<dyn WorkspaceDirectory>,
         authenticator: Arc<dyn RelayAuthenticator>,
-        registry: Arc<dyn WorkspaceDeviceRegistry>,
+        _registry: Arc<dyn WorkspaceDeviceRegistry>,
         device_adapter: AcaForwardedCertificateAdapter,
         frontend_workload_adapter: AcaForwardedBffWorkloadCertificateAdapter,
     ) -> Self {
         Self::build(
             directory,
             authenticator,
-            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+            None,
             Some(device_adapter),
             Some(frontend_workload_adapter),
+            None,
+            None,
         )
     }
 
@@ -164,6 +169,33 @@ impl WorkspaceRelay {
             None,
             None,
             Some(frontend_workload_adapter),
+            None,
+            None,
+        )
+    }
+
+    /// Enable the Tonic TLS peer path only when all trusted providers are present.
+    ///
+    /// The Registry must verify current binding/generation, the validator must
+    /// verify the private certificate profile and chain, and the revocation
+    /// checker must return fresh signed good-status evidence. Production startup
+    /// does not call this until those providers are configured.
+    #[allow(dead_code)] // Production host remains disabled until trust providers are available.
+    pub(crate) fn with_tonic_workspace_peer_validation(
+        directory: Arc<dyn WorkspaceDirectory>,
+        authenticator: Arc<dyn RelayAuthenticator>,
+        registry: Arc<dyn WorkspaceDeviceRegistry>,
+        validator: RelayPeerCertificateValidator,
+        revocation_checker: Arc<dyn RelayPeerCertificateRevocationChecker>,
+    ) -> Self {
+        Self::build(
+            directory,
+            authenticator,
+            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+            None,
+            None,
+            Some(Arc::new(validator)),
+            Some(revocation_checker),
         )
     }
 
@@ -175,12 +207,16 @@ impl WorkspaceRelay {
         aca_forwarded_bff_workload_certificate_adapter: Option<
             AcaForwardedBffWorkloadCertificateAdapter,
         >,
+        workspace_peer_certificate_validator: Option<Arc<RelayPeerCertificateValidator>>,
+        workspace_peer_revocation_checker: Option<Arc<dyn RelayPeerCertificateRevocationChecker>>,
     ) -> Self {
         Self {
             state: Arc::new(RelayState {
                 directory,
                 authenticator,
                 workspace_device_verifier,
+                workspace_peer_certificate_validator,
+                workspace_peer_revocation_checker,
                 aca_forwarded_certificate_adapter,
                 aca_forwarded_bff_workload_certificate_adapter,
                 connections: Mutex::new(Connections::default()),
@@ -246,42 +282,60 @@ impl WorkspaceRelay {
                 Ok(claims)
             }
             RelayParticipantRole::WorkspaceConnector => {
-                let result = if let Some(adapter) = &self.state.aca_forwarded_certificate_adapter {
-                    let verifier =
-                        self.state
-                            .workspace_device_verifier
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Box::new(Status::unauthenticated(
-                                    "WORKSPACE_DEVICE_CERTIFICATE_AUTHENTICATION_NOT_CONFIGURED",
-                                ))
-                            })?;
-                    let request = aca_request.ok_or_else(|| {
-                        Box::new(Status::unauthenticated(
-                            "WORKSPACE_DEVICE_TLS_CERTIFICATE_REQUIRED",
-                        ))
-                    })?;
-                    adapter.authenticate_request(request, hello, verifier, now_unix_ms)
-                } else {
-                    let certificate = peer_certificate
-                        .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
-                    let verifier =
-                        self.state
-                            .workspace_device_verifier
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Box::new(Status::unauthenticated(
-                                    "WORKSPACE_DEVICE_CERTIFICATE_AUTHENTICATION_NOT_CONFIGURED",
-                                ))
-                            })?;
-                    verifier.authenticate(hello, &certificate, now_unix_ms)
-                };
-                result.map_err(|error| Box::new(Status::unauthenticated(error.to_string())))
+                let _ = (hello, now_unix_ms, aca_request);
+                match peer_certificate {
+                    Err(error) => Err(Box::new(Status::unauthenticated(error.to_string()))),
+                    Ok(_) => Err(Box::new(Status::unauthenticated(
+                        "WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED",
+                    ))),
+                }
             }
             RelayParticipantRole::Unspecified => Err(Box::new(Status::invalid_argument(
                 "relay participant role is required",
             ))),
         }
+    }
+
+    fn authenticate_tonic_workspace_device(
+        &self,
+        hello: &RelayHello,
+        chain: Result<TonicPeerCertificateChain, RelayPeerCertificateError>,
+        now_unix_ms: u64,
+    ) -> Result<(RelaySessionClaims, AuthenticatedRelayWorkspaceDevice), Box<Status>> {
+        let validator = self
+            .state
+            .workspace_peer_certificate_validator
+            .as_ref()
+            .ok_or_else(|| {
+                Box::new(Status::unauthenticated(
+                    "WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED",
+                ))
+            })?;
+        let revocation_checker = self
+            .state
+            .workspace_peer_revocation_checker
+            .as_ref()
+            .ok_or_else(|| {
+                Box::new(Status::unauthenticated(
+                    "WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_NOT_CONFIGURED",
+                ))
+            })?;
+        let registry_verifier = self
+            .state
+            .workspace_device_verifier
+            .as_ref()
+            .ok_or_else(|| {
+                Box::new(Status::unauthenticated(
+                    "WORKSPACE_DEVICE_REGISTRY_CURRENT_BINDING_NOT_CONFIGURED",
+                ))
+            })?;
+        let chain = chain.map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
+        let certificate = validator
+            .validate_tonic_peer_chain(&chain, now_unix_ms, revocation_checker.as_ref())
+            .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
+        registry_verifier
+            .authenticate_validated_peer(hello, &certificate, now_unix_ms)
+            .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))
     }
 
     fn next_session(&self, prefix: &str) -> String {
@@ -306,6 +360,13 @@ impl WorkspaceRelay {
         let Some(workspace) = connections.workspaces.get(workspace_id).cloned() else {
             return Ok(None);
         };
+        if workspace
+            .authenticated_device
+            .as_ref()
+            .is_some_and(|device| device.key().workspace_id != workspace_id)
+        {
+            return Ok(None);
+        }
         if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
             return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
         }
@@ -365,7 +426,7 @@ impl WorkspaceRelayService for WorkspaceRelay {
         &self,
         request: Request<Streaming<RelayFrame>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        let peer_certificate = VerifiedClientCertificate::from_tonic_request(&request);
+        let tonic_peer_chain = TonicPeerCertificateChain::from_request(&request);
         let has_aca_forwarded_certificate_adapter =
             self.state.aca_forwarded_certificate_adapter.is_some()
                 || self
@@ -387,22 +448,44 @@ impl WorkspaceRelayService for WorkspaceRelay {
         };
         let role = RelayParticipantRole::try_from(hello.role)
             .map_err(|_| Status::invalid_argument("unknown relay participant role"))?;
-        let claims = self
-            .authenticate_participant(
-                role,
-                &hello,
-                peer_certificate,
-                aca_request.as_ref(),
-                now_unix_ms(),
-            )
-            .map_err(|status| *status)?;
+        let now = now_unix_ms();
+        let (claims, authenticated_device) = match role {
+            RelayParticipantRole::Frontend => (
+                self.authenticate_participant(
+                    role,
+                    &hello,
+                    Err(WorkspaceDeviceAuthenticationError::MissingClientCertificate),
+                    aca_request.as_ref(),
+                    now,
+                )
+                .map_err(|status| *status)?,
+                None,
+            ),
+            RelayParticipantRole::WorkspaceConnector => {
+                let (claims, authenticated_device) = self
+                    .authenticate_tonic_workspace_device(&hello, tonic_peer_chain, now)
+                    .map_err(|status| *status)?;
+                (claims, Some(authenticated_device))
+            }
+            RelayParticipantRole::Unspecified => {
+                return Err(Status::invalid_argument(
+                    "relay participant role is required",
+                ));
+            }
+        };
         let (sender, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
         match role {
             RelayParticipantRole::Frontend => {
                 self.open_frontend(claims, inbound, sender).await?;
             }
             RelayParticipantRole::WorkspaceConnector => {
-                self.open_workspace(hello, claims, inbound, sender).await?;
+                let authenticated_device = authenticated_device.ok_or_else(|| {
+                    Status::unauthenticated(
+                        "WORKSPACE_DEVICE_REGISTRY_CURRENT_BINDING_NOT_CONFIGURED",
+                    )
+                })?;
+                self.open_workspace(hello, claims, authenticated_device, inbound, sender)
+                    .await?;
             }
             RelayParticipantRole::Unspecified => {
                 return Err(Status::invalid_argument(
@@ -443,6 +526,7 @@ impl WorkspaceRelay {
                 RegisteredConnection {
                     relay_session_id: relay_session_id.clone(),
                     sender: sender.clone(),
+                    authenticated_device: None,
                 },
             );
 
@@ -659,6 +743,7 @@ impl WorkspaceRelay {
         &self,
         hello: RelayHello,
         claims: RelaySessionClaims,
+        authenticated_device: AuthenticatedRelayWorkspaceDevice,
         mut inbound: Streaming<RelayFrame>,
         sender: RelaySender,
     ) -> Result<(), Status> {
@@ -671,7 +756,23 @@ impl WorkspaceRelay {
                 "Workspace connector requires device identity",
             ));
         };
-        if workspace_id != &hello.workspace_id
+        let authenticated_key = authenticated_device.key();
+        if authenticated_device.authorization_generation() == 0
+            || authenticated_device
+                .registration_binding_id()
+                .iter()
+                .all(|byte| *byte == 0)
+            || authenticated_device
+                .certificate_sha256()
+                .iter()
+                .all(|byte| *byte == 0)
+            || authenticated_device.serial_number().is_empty()
+            || authenticated_device.not_after_unix_ms() != claims.expires_at_unix_ms
+            || authenticated_key.organization_id != claims.organization_id
+            || authenticated_key.workspace_id != *workspace_id
+            || authenticated_key.device_id != *device_id
+            || authenticated_key.organization_id != hello.organization_id
+            || workspace_id != &hello.workspace_id
             || hello.device.as_ref().is_none_or(|device| {
                 device.workspace_id != *workspace_id || device.device_id != *device_id
             })
@@ -697,6 +798,7 @@ impl WorkspaceRelay {
                 RegisteredConnection {
                     relay_session_id: relay_session_id.clone(),
                     sender: sender.clone(),
+                    authenticated_device: Some(authenticated_device),
                 },
             );
 
@@ -925,6 +1027,7 @@ mod tests {
             RegisteredConnection {
                 relay_session_id: "frontend-1".into(),
                 sender: frontend_sender,
+                authenticated_device: None,
             },
         );
         connections.workspaces.insert(
@@ -932,6 +1035,7 @@ mod tests {
             RegisteredConnection {
                 relay_session_id: "workspace-session-1".into(),
                 sender: workspace_sender,
+                authenticated_device: None,
             },
         );
         drop(connections);
@@ -1015,7 +1119,10 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::Unauthenticated);
-        assert_eq!(error.message(), "WORKSPACE_DEVICE_TLS_CERTIFICATE_REQUIRED");
+        assert_eq!(
+            error.message(),
+            "WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED"
+        );
     }
 
     #[test]
@@ -1188,6 +1295,7 @@ mod tests {
             RegisteredConnection {
                 relay_session_id: "workspace-session-1".to_string(),
                 sender: workspace_sender,
+                authenticated_device: None,
             },
         );
 

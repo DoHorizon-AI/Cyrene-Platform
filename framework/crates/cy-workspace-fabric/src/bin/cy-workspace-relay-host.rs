@@ -360,6 +360,9 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
     let readiness = Arc::new(RelayReadiness {
         directory: directory.clone(),
         frontend_authentication_configured: config.frontend_workload.is_some(),
+        workspace_peer_certificate_validation_configured: false,
+        workspace_peer_revocation_configured: false,
+        workspace_device_current_registry_configured: false,
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -388,7 +391,7 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
             "deny_all_without_bff_workload_and_handoff_config"
         },
         workspace_directory = "postgresql",
-        workspace_device_authentication = "disabled_until_durable_device_registry_is_composed",
+        workspace_device_authentication = "disabled_until_peer_certificate_validation_revocation_and_current_registry_are_composed",
         ready = false,
         message = "Workspace Relay host is listening with fail-closed authentication",
     );
@@ -474,6 +477,9 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 struct RelayReadiness {
     directory: Arc<PostgresWorkspaceDirectory>,
     frontend_authentication_configured: bool,
+    workspace_peer_certificate_validation_configured: bool,
+    workspace_peer_revocation_configured: bool,
+    workspace_device_current_registry_configured: bool,
 }
 
 impl RelayReadiness {
@@ -488,6 +494,10 @@ impl RelayReadiness {
         )
         .await
         .is_ok_and(|result: Result<Vec<String>, DurableDirectoryError>| result.is_ok());
+        let workspace_peer_certificate_validation =
+            self.workspace_peer_certificate_validation_configured;
+        let workspace_peer_revocation = self.workspace_peer_revocation_configured;
+        let workspace_device_current_registry = self.workspace_device_current_registry_configured;
         let workspace_device_registry = false;
         let directory_administration = false;
         let device_authorization = false;
@@ -497,6 +507,9 @@ impl RelayReadiness {
         let deployment_topology_verified = false;
         let ready = directory_available
             && self.frontend_authentication_configured
+            && workspace_peer_certificate_validation
+            && workspace_peer_revocation
+            && workspace_device_current_registry
             && workspace_device_registry
             && directory_administration
             && device_authorization
@@ -510,10 +523,13 @@ impl RelayReadiness {
             (503, "Service Unavailable", "not_ready")
         };
         let body = format!(
-            r#"{{"status":"{}","checks":{{"directoryDatabase":{},"frontendAuthenticationConfigured":{},"directoryAdministration":{},"workspaceDeviceRegistry":{},"deviceAuthorization":{},"certificateIssuance":{},"webauthn":{},"productPrivateAccess":{},"deploymentTopologyVerified":{}}}}}"#,
+            r#"{{"status":"{}","checks":{{"directoryDatabase":{},"frontendAuthenticationConfigured":{},"workspacePeerCertificateValidation":{},"workspacePeerRevocation":{},"workspaceDeviceCurrentRegistry":{},"directoryAdministration":{},"workspaceDeviceRegistry":{},"deviceAuthorization":{},"certificateIssuance":{},"webauthn":{},"productPrivateAccess":{},"deploymentTopologyVerified":{}}}}}"#,
             state,
             directory_available,
             self.frontend_authentication_configured,
+            workspace_peer_certificate_validation,
+            workspace_peer_revocation,
+            workspace_device_current_registry,
             directory_administration,
             workspace_device_registry,
             device_authorization,
