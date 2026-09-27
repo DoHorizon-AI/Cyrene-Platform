@@ -50,8 +50,12 @@ const DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_SCAN_LIMIT: usize = 1_000;
 const MAX_STATE_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
-const MAX_CERTIFICATE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CERTIFICATE_DER_BYTES: usize = 16 * 1024;
+const MAX_CHAIN_CERTIFICATES: usize = 8;
+const MAX_CHAIN_DER_BYTES: usize = 128 * 1024;
 const MAX_SERIAL_NUMBER_BYTES: usize = 256;
+const CERTIFICATE_VALIDATION_VERSION: u8 = 1;
+const CERTIFICATE_VALIDATION_FRESHNESS_MS: u64 = 30_000;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations/device_registry");
 
@@ -704,6 +708,23 @@ async fn verify_schema(pool: &PgPool) -> RegistryResult<()> {
     if !dispatch_fence_available {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
+    let validation_gate_available: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure(\
+            'cyrene_workspace_device_registry.certificate_validation_matches(\
+                jsonb, bytea, uuid\
+            )'\
+        ) IS NOT NULL AND to_regprocedure(\
+            'cyrene_workspace_device_registry.certificate_validation_is_fresh(\
+                jsonb, bytea, uuid, bigint\
+            )'\
+        ) IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    if !validation_gate_available {
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
     Ok(())
 }
 
@@ -807,6 +828,7 @@ enum StoredAuthorizationState {
     DeliveryPending {
         approval_id: DeviceAuthorizationId,
         certificate: StoredCertificate,
+        certificate_validation: StoredCertificateValidation,
         delivery_id: DeviceAuthorizationId,
         certificate_sha256: [u8; 32],
         delivery_deadline_unix_ms: u64,
@@ -814,7 +836,17 @@ enum StoredAuthorizationState {
     Delivered {
         approval_id: DeviceAuthorizationId,
         receipt: StoredReceipt,
+        certificate_validation: StoredCertificateValidation,
     },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCertificateValidation {
+    validation_version: u8,
+    certificate_sha256: [u8; 32],
+    registration_binding_id: DeviceAuthorizationId,
+    checked_at_unix_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -915,18 +947,21 @@ fn decode_authorization(row: sqlx::postgres::PgRow) -> RegistryResult<Authorizat
     })
 }
 
-fn decode_delivery(auth: &AuthorizationSnapshot) -> RegistryResult<DeliverySnapshot> {
+fn decode_delivery_with_validation(
+    auth: &AuthorizationSnapshot,
+) -> RegistryResult<(DeliverySnapshot, StoredCertificateValidation)> {
     if auth.state_kind != "delivery_pending" {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
     let envelope: StoredEnvelope = serde_json::from_slice(&auth.state_payload)
         .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
-    if envelope.format_version != 2 {
+    if envelope.format_version != 5 {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
     let StoredAuthorizationState::DeliveryPending {
         approval_id,
         certificate,
+        certificate_validation,
         delivery_id,
         certificate_sha256,
         delivery_deadline_unix_ms,
@@ -935,6 +970,13 @@ fn decode_delivery(auth: &AuthorizationSnapshot) -> RegistryResult<DeliverySnaps
         return Err(DeviceRegistryPostgresError::Unavailable);
     };
     if auth.approval_id != Some(approval_id) {
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
+    if certificate_validation.validation_version != CERTIFICATE_VALIDATION_VERSION
+        || certificate_validation.certificate_sha256 != certificate_sha256
+        || certificate_validation.registration_binding_id != *auth.binding_id.as_bytes()
+        || certificate_validation.checked_at_unix_ms == 0
+    {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
     let expected_binding = *auth.binding_id.as_bytes();
@@ -947,11 +989,15 @@ fn decode_delivery(auth: &AuthorizationSnapshot) -> RegistryResult<DeliverySnaps
         .iter()
         .try_fold(0usize, |total, chain| total.checked_add(chain.len()));
     if certificate.certificate_der.is_empty()
-        || certificate.certificate_der.len() > MAX_CERTIFICATE_BYTES
+        || certificate.certificate_der.len() > MAX_CERTIFICATE_DER_BYTES
         || certificate.serial_number.is_empty()
         || certificate.serial_number.len() > MAX_SERIAL_NUMBER_BYTES
-        || certificate.ca_chain_der.len() > 8
-        || chain_bytes.is_none_or(|total| total > MAX_CERTIFICATE_BYTES)
+        || certificate.ca_chain_der.len() > MAX_CHAIN_CERTIFICATES
+        || certificate
+            .ca_chain_der
+            .iter()
+            .any(|chain| chain.is_empty() || chain.len() > MAX_CERTIFICATE_DER_BYTES)
+        || chain_bytes.is_none_or(|total| total > MAX_CHAIN_DER_BYTES)
         || certificate.registration_binding_id != expected_binding
         || certificate.device_key.organization_id != auth.key.organization_id
         || certificate.device_key.workspace_id != auth.key.workspace_id
@@ -967,33 +1013,39 @@ fn decode_delivery(auth: &AuthorizationSnapshot) -> RegistryResult<DeliverySnaps
     {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
-    Ok(DeliverySnapshot {
-        authorization_id: auth.id,
-        binding_id: auth.binding_id,
-        key: auth.key.clone(),
-        generation: auth.generation,
-        delivery_id,
-        certificate_sha256,
-        csr_sha256: auth.csr_sha256,
-        spki_sha256: auth.spki_sha256,
-        serial_number: certificate.serial_number,
-        not_after_unix_ms: certificate.not_after_unix_ms,
-        delivery_deadline_unix_ms: delivery_deadline,
-    })
+    Ok((
+        DeliverySnapshot {
+            authorization_id: auth.id,
+            binding_id: auth.binding_id,
+            key: auth.key.clone(),
+            generation: auth.generation,
+            delivery_id,
+            certificate_sha256,
+            csr_sha256: auth.csr_sha256,
+            spki_sha256: auth.spki_sha256,
+            serial_number: certificate.serial_number,
+            not_after_unix_ms: certificate.not_after_unix_ms,
+            delivery_deadline_unix_ms: delivery_deadline,
+        },
+        certificate_validation,
+    ))
 }
 
-fn decode_receipt(auth: &AuthorizationSnapshot) -> RegistryResult<StoredReceipt> {
+fn decode_receipt_with_validation(
+    auth: &AuthorizationSnapshot,
+) -> RegistryResult<(StoredReceipt, StoredCertificateValidation)> {
     if auth.state_kind != "delivered" {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
     let envelope: StoredEnvelope = serde_json::from_slice(&auth.state_payload)
         .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
-    if envelope.format_version != 2 {
+    if envelope.format_version != 5 {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
     let StoredAuthorizationState::Delivered {
         approval_id,
         receipt,
+        certificate_validation,
     } = envelope.state
     else {
         return Err(DeviceRegistryPostgresError::Unavailable);
@@ -1001,7 +1053,14 @@ fn decode_receipt(auth: &AuthorizationSnapshot) -> RegistryResult<StoredReceipt>
     if auth.approval_id != Some(approval_id) {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
-    Ok(receipt)
+    if certificate_validation.validation_version != CERTIFICATE_VALIDATION_VERSION
+        || certificate_validation.certificate_sha256 != receipt.certificate_sha256
+        || certificate_validation.registration_binding_id != *auth.binding_id.as_bytes()
+        || certificate_validation.checked_at_unix_ms == 0
+    {
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
+    Ok((receipt, certificate_validation))
 }
 
 fn receipt_matches(delivery: &DeliverySnapshot, receipt: &StoredReceipt, now: u64) -> bool {
@@ -1015,6 +1074,11 @@ fn receipt_matches(delivery: &DeliverySnapshot, receipt: &StoredReceipt, now: u6
         && receipt.acknowledged_at_unix_ms < delivery.delivery_deadline_unix_ms
         && receipt.acknowledged_at_unix_ms <= now
         && receipt.acknowledged_at_unix_ms < delivery.not_after_unix_ms
+}
+
+fn certificate_validation_is_fresh(checked_at_unix_ms: u64, now_unix_ms: u64) -> bool {
+    checked_at_unix_ms <= now_unix_ms
+        && now_unix_ms - checked_at_unix_ms <= CERTIFICATE_VALIDATION_FRESHNESS_MS
 }
 
 fn delivery_matches_registry(delivery: &DeliverySnapshot, registry: &RegistrySnapshot) -> bool {
@@ -1035,9 +1099,12 @@ async fn stage_pending_delivery(
     if auth.id != *authorization_id {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
-    let delivery = decode_delivery(&auth)?;
+    let (delivery, certificate_validation) = decode_delivery_with_validation(&auth)?;
     let now = database_now_ms(&mut transaction).await?;
-    if delivery.delivery_deadline_unix_ms <= now || delivery.not_after_unix_ms <= now {
+    if delivery.delivery_deadline_unix_ms <= now
+        || delivery.not_after_unix_ms <= now
+        || !certificate_validation_is_fresh(certificate_validation.checked_at_unix_ms, now)
+    {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
 
@@ -1434,8 +1501,9 @@ async fn verify_active_record(
     if current.delivery.not_after_unix_ms <= now {
         return Ok(None);
     }
-    let receipt = decode_receipt(&auth)?;
+    let (receipt, certificate_validation) = decode_receipt_with_validation(&auth)?;
     if !receipt_matches(&current.delivery, &receipt, now)
+        || certificate_validation.checked_at_unix_ms > now
         || current.acknowledged_at_unix_ms != Some(receipt.acknowledged_at_unix_ms)
     {
         return Err(DeviceRegistryPostgresError::Unavailable);
@@ -1576,7 +1644,7 @@ mod tests {
             state_kind: state_kind.to_owned(),
             state_deadline_unix_ms: Some(8_000),
             state_payload: serde_json::to_vec(&json!({
-                "format_version": 2,
+                "format_version": 5,
                 "state": state,
             }))
             .unwrap(),
@@ -1588,6 +1656,12 @@ mod tests {
         json!({
             "kind": "delivery_pending",
             "approval_id": vec![9; 16],
+            "certificate_validation": {
+                "validation_version": 1,
+                "certificate_sha256": certificate_sha256,
+                "registration_binding_id": binding_bytes(),
+                "checked_at_unix_ms": 7_000,
+            },
             "certificate": {
                 "certificate_der": certificate_der,
                 "ca_chain_der": [[48, 1, 0]],
@@ -1633,10 +1707,10 @@ mod tests {
     }
 
     #[test]
-    fn delivery_snapshot_requires_v2_binding_and_matching_der_digest() {
+    fn delivery_snapshot_requires_v5_validation_marker_and_matching_der_digest() {
         let der = [11, 22, 33];
         let auth = sample_auth("delivery_pending", pending_state(&der));
-        let snapshot = decode_delivery(&auth).unwrap();
+        let (snapshot, _) = decode_delivery_with_validation(&auth).unwrap();
         assert_eq!(snapshot.authorization_id, [1; 16]);
         assert_eq!(snapshot.delivery_id, [5; 16]);
         assert_eq!(snapshot.binding_id.as_bytes(), &binding_bytes());
@@ -1646,7 +1720,7 @@ mod tests {
         mismatched_state["certificate_sha256"] = json!(vec![0; 32]);
         let mismatched = sample_auth("delivery_pending", mismatched_state);
         assert_eq!(
-            decode_delivery(&mismatched),
+            decode_delivery_with_validation(&mismatched).map(|(snapshot, _)| snapshot),
             Err(DeviceRegistryPostgresError::Unavailable)
         );
     }

@@ -193,6 +193,20 @@ eligibility is checked again. After an ambiguous CA result and lease expiry,
 the same authorization and fingerprint may be replayed, preserving at-least-once
 retirement semantics.
 
+The device registry accepts staged and delivered authorization snapshots only
+in wrapper V5 when the server-written `certificate_validation` marker matches
+the exact certificate SHA-256 and Directory registration binding. Staging
+requires that validation timestamp to be no more than 30 seconds old according
+to the PostgreSQL clock. Activation and reconciliation retain crash recovery
+for a timely durable ACK when the matching V5 marker is older; the Relay
+dispatch fence still checks the active registry and identity tuple, while the
+Relay independently checks current certificate revocation on every request.
+Registry migration `0003_certificate_validation_provenance` refuses to proceed
+while legacy `active` or `pending_ack` rows lack matching V5 provenance. It
+leaves those rows unchanged for controlled audit and recovery. Legacy V1–V4
+Delivered rows cannot be activated by Registry; V1–V3 also lack the certificate
+snapshot needed for automatic revalidation.
+
 调用证书撤销 port 前，manager 会先请求 PostgreSQL claim 到期的精确
 `RetirementPending` revision。claim 事务使用主库时钟校验已持久化的状态和版本，写入
 至少 60 秒租约（如当前指数退避更长，则延至该退避时间）并推进 revision。只有事务明确成功返回后才调用 CA；队列拥塞、存储错误和适配器
@@ -446,6 +460,16 @@ unavailable；调用方传入的绑定快照不能证明 Directory 更新与授�
 证书确认，但不能用于 code 恢复或设备轮换。存储层不会补造缺失摘要，也不会持久化明文
 device/user code。在旧记录安全地进入 supersede/retirement 且同事务实现前，使用新 key 的
 mTLS 设备轮换保持不可用。
+
+设备注册表只接受带有 V5 wrapper 和服务端写入的
+`certificate_validation` 标记的 staged/Delivered 授权快照；标记中的精确证书
+SHA-256 和 Directory registration binding 必须匹配。Stage 要求 PostgreSQL
+时钟下的验证时间不超过 30 秒。Activation/reconcile 可用较早但匹配的 V5
+标记恢复及时持久化的 ACK；Relay dispatch fence 仍校验 active registry 与身份元组，
+Relay 还会在每次请求上独立检查当前证书撤销状态。Registry 迁移
+`0003_certificate_validation_provenance` 遇到缺少匹配 V5 来源证明的旧
+`active` 或 `pending_ack` 行时会拒绝迁移，不会修改这些审计行，需在受控窗口盘点并恢复。
+V1–V4 的 Delivered 记录不能由 Registry 激活；V1–V3 也缺少可供自动复验的证书快照。
 
 `PostgresUserCodeAttemptReservation` 为 enrollment composite 提供共享异步尝试预留；composite
 在调用同步状态机前先预留。它只保存调用方派生的 32-byte abuse digest、数据库时钟窗口起点、计数、
