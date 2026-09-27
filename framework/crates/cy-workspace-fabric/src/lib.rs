@@ -15,6 +15,7 @@ mod auth;
 mod caller;
 mod control_plane;
 mod device_auth;
+mod device_csr_validator;
 pub mod device_enrollment_http;
 mod device_registry;
 mod device_registry_postgres;
@@ -87,6 +88,7 @@ pub use device_auth::{
 pub use device_authorization_postgres::{
     DeviceAuthorizationPostgresError, PostgresDeviceAuthorizationStore,
 };
+pub use device_csr_validator::ProductionDeviceCsrValidator;
 pub use device_enrollment_http::{
     device_enrollment_v1_router, DeviceEnrollmentAuthorizationPort,
     DeviceEnrollmentHttpDependencies, DeviceEnrollmentRegistrationTransactionPort,
