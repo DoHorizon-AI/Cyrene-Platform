@@ -489,6 +489,98 @@ pub struct DeviceApprovalChallenge {
     pub credential_request_options_json: Vec<u8>,
 }
 
+/// Safe projection of one committed device-approval record for an HTTP adapter.
+///
+/// Raw CSR bytes, one-time code digests, certificates, and opaque verifier state
+/// remain inside the manager/store boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAuthorizationApprovalSnapshot {
+    authorization_id: DeviceAuthorizationId,
+    approval_id: DeviceAuthorizationId,
+    revision: u64,
+    approver: UserIdentityRef,
+    scope: DeviceAuthorizationScope,
+    device_id: String,
+    csr_sha256: [u8; 32],
+    spki_sha256: [u8; 32],
+    authorization_expires_at_unix_ms: u64,
+    authorization_generation: u64,
+    state: DeviceAuthorizationApprovalState,
+    approved_at_unix_ms: Option<u64>,
+}
+
+impl DeviceAuthorizationApprovalSnapshot {
+    pub fn authorization_id(&self) -> &DeviceAuthorizationId {
+        &self.authorization_id
+    }
+
+    pub fn approval_id(&self) -> &DeviceAuthorizationId {
+        &self.approval_id
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn approver(&self) -> &UserIdentityRef {
+        &self.approver
+    }
+
+    pub fn scope(&self) -> &DeviceAuthorizationScope {
+        &self.scope
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    pub fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    pub fn authorization_expires_at_unix_ms(&self) -> u64 {
+        self.authorization_expires_at_unix_ms
+    }
+
+    pub fn authorization_generation(&self) -> u64 {
+        self.authorization_generation
+    }
+
+    pub fn state(&self) -> DeviceAuthorizationApprovalState {
+        self.state
+    }
+
+    /// Approval time is absent for pending phases and legacy delivered rows.
+    pub fn approved_at_unix_ms(&self) -> Option<u64> {
+        self.approved_at_unix_ms
+    }
+}
+
+/// Non-secret lifecycle phase included in an approval snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAuthorizationApprovalState {
+    AwaitingWebAuthn,
+    VerifyingWebAuthn,
+    Issuing,
+    DeliveryPending,
+    Delivered,
+    RetirementPending,
+    IssuanceFailed,
+    DeliveryExpired,
+    RegistrationRetired,
+}
+
+/// Challenge and the exact committed snapshot that backs its HTTP projection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAuthorizationApprovalStarted {
+    pub challenge: DeviceApprovalChallenge,
+    pub committed_snapshot: DeviceAuthorizationApprovalSnapshot,
+}
+
 /// Immutable context binding one WebAuthn ceremony to its authorization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebAuthnAuthenticationContext {
@@ -637,6 +729,9 @@ pub enum DeviceAuthorizationState {
     DeliveryPending {
         approval_id: DeviceAuthorizationId,
         approver: UserIdentityRef,
+        /// Original WebAuthn approval reservation time, preserved through ACK.
+        /// Legacy rows decode as `None` and cannot produce an approved response.
+        approved_at_unix_ms: Option<u64>,
         decided_at_unix_ms: u64,
         certificate: IssuedDeviceCertificate,
         delivery_id: DeviceAuthorizationId,
@@ -646,6 +741,9 @@ pub enum DeviceAuthorizationState {
     Delivered {
         approval_id: DeviceAuthorizationId,
         receipt: DeviceCertificateDeliveryReceipt,
+        /// Original WebAuthn approval reservation time.
+        /// Legacy rows decode as `None` and cannot produce an approved response.
+        approved_at_unix_ms: Option<u64>,
         /// Missing only for legacy V3 rows created before ACK retained the
         /// certificate needed to retire an active registration.
         approver: Option<UserIdentityRef>,
@@ -926,7 +1024,11 @@ pub trait DeviceAuthorizationStore: Send + Sync {
     }
     /// Applies an authorization transition only while the immutable Directory
     /// binding and current generation are checked under the same database
-    /// transaction/row lock. The default denies use by legacy stores.
+    /// transaction/row lock. The manager checks the authenticated approver
+    /// against the committed approval row before this revision-fenced CAS.
+    /// This trait has no separate `(approval_id, approver)` predicate in the
+    /// CAS itself; adapters requiring that stronger same-statement guarantee
+    /// must add it. The default denies use by legacy stores.
     fn compare_and_swap_registered(
         &self,
         _expected_revision: u64,
@@ -1316,6 +1418,7 @@ impl InMemoryDeviceAuthorizationStore {
                     DeviceAuthorizationState::DeliveryPending {
                         approval_id: current_approval_id,
                         approver: current_approver,
+                        approved_at_unix_ms: current_approved_at_unix_ms,
                         certificate: current_certificate,
                         delivery_id: current_delivery_id,
                         certificate_sha256: current_certificate_sha256,
@@ -1325,11 +1428,13 @@ impl InMemoryDeviceAuthorizationStore {
                     DeviceAuthorizationState::Delivered {
                         approval_id: next_approval_id,
                         receipt,
+                        approved_at_unix_ms: next_approved_at_unix_ms,
                         approver: Some(next_approver),
                         certificate: Some(next_certificate),
                     },
                 ) => {
                     current_approval_id == next_approval_id
+                        && current_approved_at_unix_ms == next_approved_at_unix_ms
                         && current_approver == next_approver
                         && current_certificate == next_certificate
                         && receipt.authorization_id == replacement.id
@@ -1952,6 +2057,9 @@ where
 
     /// Checks an approval code, exact target scope, and membership, then issues
     /// a one-time WebAuthn challenge for the trusted SSO identity.
+    ///
+    /// HTTP adapters should call [`Self::begin_approval_with_snapshot`] so
+    /// response fields are taken from the committed approval row.
     pub fn begin_approval(
         &self,
         user_code: &str,
@@ -1961,6 +2069,21 @@ where
         now_unix_ms: u64,
         ports: &impl DeviceApprovalStartPorts,
     ) -> Result<DeviceApprovalChallenge, DeviceAuthorizationError> {
+        self.begin_approval_with_snapshot(user_code, scope, approver, abuse_key, now_unix_ms, ports)
+            .map(|started| started.challenge)
+    }
+
+    /// Begins or safely replays an approval and returns the committed row
+    /// projection that produced the challenge.
+    pub fn begin_approval_with_snapshot(
+        &self,
+        user_code: &str,
+        scope: &DeviceAuthorizationScope,
+        approver: &UserIdentityRef,
+        abuse_key: &[u8; 32],
+        now_unix_ms: u64,
+        ports: &impl DeviceApprovalStartPorts,
+    ) -> Result<DeviceAuthorizationApprovalStarted, DeviceAuthorizationError> {
         self.record_user_code_attempt(abuse_key, now_unix_ms)?;
         validate_scope(scope)?;
         validate_identity(approver)?;
@@ -1993,10 +2116,14 @@ where
         } = &record.state
         {
             if current_approver == approver {
-                return Ok(DeviceApprovalChallenge {
-                    approval_id: *approval_id,
-                    credential_request_options_json: credential_request_options_json.clone(),
-                });
+                return self.approval_started(
+                    &record,
+                    approver,
+                    DeviceApprovalChallenge {
+                        approval_id: *approval_id,
+                        credential_request_options_json: credential_request_options_json.clone(),
+                    },
+                );
             }
             return Err(DeviceAuthorizationError::AlreadyFinal);
         }
@@ -2044,12 +2171,16 @@ where
         // Re-read and retry only while the same enrollment is still pending.
         for _ in 0..5 {
             record.state = desired_state.clone();
-            match self.replace(record.clone()) {
-                Ok(()) => {
-                    return Ok(DeviceApprovalChallenge {
-                        approval_id,
-                        credential_request_options_json: start.credential_request_options_json,
-                    })
+            match self.replace_with_revision(record.clone()) {
+                Ok(committed_record) => {
+                    return self.approval_started(
+                        &committed_record,
+                        approver,
+                        DeviceApprovalChallenge {
+                            approval_id,
+                            credential_request_options_json: start.credential_request_options_json,
+                        },
+                    )
                 }
                 Err(DeviceAuthorizationError::ConcurrentTransition) => {
                     record = self
@@ -2068,11 +2199,15 @@ where
                             credential_request_options_json,
                             ..
                         } if current_approver == approver => {
-                            return Ok(DeviceApprovalChallenge {
-                                approval_id: *current_id,
-                                credential_request_options_json: credential_request_options_json
-                                    .clone(),
-                            });
+                            return self.approval_started(
+                                &record,
+                                approver,
+                                DeviceApprovalChallenge {
+                                    approval_id: *current_id,
+                                    credential_request_options_json:
+                                        credential_request_options_json.clone(),
+                                },
+                            );
                         }
                         state => return Err(state_error(state)),
                     }
@@ -2083,20 +2218,146 @@ where
         Err(DeviceAuthorizationError::ConcurrentTransition)
     }
 
-    /// Completes an approval only after rechecking membership, CSR/SPKI
-    /// binding, and the one-time WebAuthn assertion.
-    pub fn complete_approval(
+    fn approval_started(
         &self,
+        record: &DeviceAuthorizationRecord,
+        approver: &UserIdentityRef,
+        challenge: DeviceApprovalChallenge,
+    ) -> Result<DeviceAuthorizationApprovalStarted, DeviceAuthorizationError> {
+        let committed_snapshot =
+            self.approval_snapshot_from_record(record, &challenge.approval_id, approver)?;
+        Ok(DeviceAuthorizationApprovalStarted {
+            challenge,
+            committed_snapshot,
+        })
+    }
+
+    fn approval_snapshot_from_record(
+        &self,
+        record: &DeviceAuthorizationRecord,
+        approval_id: &DeviceAuthorizationId,
+        approver: &UserIdentityRef,
+    ) -> Result<DeviceAuthorizationApprovalSnapshot, DeviceAuthorizationError> {
+        require_persisted_approver(record, approval_id, approver)?;
+        let (state, approved_at_unix_ms) = match &record.state {
+            DeviceAuthorizationState::AwaitingWebAuthn { .. } => {
+                (DeviceAuthorizationApprovalState::AwaitingWebAuthn, None)
+            }
+            DeviceAuthorizationState::VerifyingWebAuthn { .. } => {
+                (DeviceAuthorizationApprovalState::VerifyingWebAuthn, None)
+            }
+            DeviceAuthorizationState::Issuing {
+                issued_at_unix_ms, ..
+            } => (
+                DeviceAuthorizationApprovalState::Issuing,
+                Some(*issued_at_unix_ms),
+            ),
+            DeviceAuthorizationState::DeliveryPending {
+                approved_at_unix_ms,
+                ..
+            } => (
+                DeviceAuthorizationApprovalState::DeliveryPending,
+                *approved_at_unix_ms,
+            ),
+            DeviceAuthorizationState::Delivered {
+                approved_at_unix_ms,
+                ..
+            } => (
+                DeviceAuthorizationApprovalState::Delivered,
+                *approved_at_unix_ms,
+            ),
+            DeviceAuthorizationState::RetirementPending { .. } => {
+                (DeviceAuthorizationApprovalState::RetirementPending, None)
+            }
+            DeviceAuthorizationState::IssuanceFailed { .. } => {
+                (DeviceAuthorizationApprovalState::IssuanceFailed, None)
+            }
+            DeviceAuthorizationState::DeliveryExpired { .. } => {
+                (DeviceAuthorizationApprovalState::DeliveryExpired, None)
+            }
+            DeviceAuthorizationState::RegistrationRetired { .. } => {
+                (DeviceAuthorizationApprovalState::RegistrationRetired, None)
+            }
+            _ => return Err(DeviceAuthorizationError::InvalidCode),
+        };
+        if matches!(
+            state,
+            DeviceAuthorizationApprovalState::DeliveryPending
+                | DeviceAuthorizationApprovalState::Delivered
+        ) && approved_at_unix_ms.is_none()
+        {
+            return Err(DeviceAuthorizationError::StorageUnavailable);
+        }
+
+        Ok(DeviceAuthorizationApprovalSnapshot {
+            authorization_id: record.id,
+            approval_id: *approval_id,
+            revision: record.revision,
+            approver: approver.clone(),
+            scope: record.scope.clone(),
+            device_id: record.registration_binding.key().device_id.clone(),
+            csr_sha256: record.csr_sha256,
+            spki_sha256: record.spki_sha256,
+            authorization_expires_at_unix_ms: record.expires_at_unix_ms,
+            authorization_generation: record.registration_binding.authorization_generation(),
+            state,
+            approved_at_unix_ms,
+        })
+    }
+
+    /// Completes or recovers an approval for the exact persisted approver.
+    ///
+    /// `authenticated_approver` must come from the host's verified identity
+    /// boundary. The manager compares it with the persisted approval before
+    /// invoking membership, WebAuthn, CA issuance, or retirement ports. The
+    /// returned projection is read from committed storage and contains no
+    /// confidential CSR or verifier state. An ambiguous CA result is returned
+    /// as an `Issuing` snapshot so HTTP can respond with its recoverable 202
+    /// state. Legacy delivery rows without a persisted approval timestamp fail
+    /// closed when a response snapshot is requested.
+    pub fn complete_approval_for_user(
+        &self,
+        approval_id: &DeviceAuthorizationId,
+        authenticated_approver: &UserIdentityRef,
+        assertion: &[u8],
+        now_unix_ms: u64,
+        ports: &impl DeviceApprovalPorts,
+    ) -> Result<DeviceAuthorizationApprovalSnapshot, DeviceAuthorizationError> {
+        validate_identity(authenticated_approver)?;
+        let record = self
+            .store
+            .by_approval_id(approval_id)
+            .map_err(map_store_error)?
+            .ok_or(DeviceAuthorizationError::InvalidCode)?;
+        require_persisted_approver(&record, approval_id, authenticated_approver)?;
+
+        let completion =
+            self.complete_approval_record(record, approval_id, assertion, now_unix_ms, ports);
+        match completion {
+            Ok(()) | Err(DeviceAuthorizationError::CertificateIssuanceInProgress) => {
+                let committed_record = self
+                    .store
+                    .by_approval_id(approval_id)
+                    .map_err(map_store_error)?
+                    .ok_or(DeviceAuthorizationError::StorageUnavailable)?;
+                self.approval_snapshot_from_record(
+                    &committed_record,
+                    approval_id,
+                    authenticated_approver,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn complete_approval_record(
+        &self,
+        mut record: DeviceAuthorizationRecord,
         approval_id: &DeviceAuthorizationId,
         assertion: &[u8],
         now_unix_ms: u64,
         ports: &impl DeviceApprovalPorts,
     ) -> Result<(), DeviceAuthorizationError> {
-        let mut record = self
-            .store
-            .by_approval_id(approval_id)
-            .map_err(map_store_error)?
-            .ok_or(DeviceAuthorizationError::InvalidCode)?;
         self.expire_if_due(&mut record, now_unix_ms)?;
         self.require_current_registration(&record)?;
 
@@ -2538,6 +2799,7 @@ where
             replacement.state = DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver: approver.clone(),
+                approved_at_unix_ms: Some(issued_at_unix_ms),
                 decided_at_unix_ms: delivery_started_at_unix_ms,
                 certificate: certificate.clone(),
                 delivery_id,
@@ -3117,6 +3379,7 @@ where
                 delivery_id,
                 certificate_sha256,
                 delivery_deadline_unix_ms,
+                ..
             } => {
                 if database_now_unix_ms >= delivery_deadline_unix_ms
                     || database_now_unix_ms >= certificate.not_after_unix_ms
@@ -3269,6 +3532,7 @@ where
                 DeviceAuthorizationState::DeliveryPending {
                     approval_id,
                     approver,
+                    approved_at_unix_ms,
                     certificate,
                     delivery_id,
                     certificate_sha256,
@@ -3350,6 +3614,7 @@ where
                     replacement.state = DeviceAuthorizationState::Delivered {
                         approval_id: *approval_id,
                         receipt: receipt.clone(),
+                        approved_at_unix_ms: *approved_at_unix_ms,
                         approver: Some(approver.clone()),
                         certificate: Some(certificate.clone()),
                     };
@@ -3616,6 +3881,69 @@ where
     }
 }
 
+fn require_persisted_approver(
+    record: &DeviceAuthorizationRecord,
+    approval_id: &DeviceAuthorizationId,
+    authenticated_approver: &UserIdentityRef,
+) -> Result<(), DeviceAuthorizationError> {
+    let (stored_approval_id, stored_approver) = match &record.state {
+        DeviceAuthorizationState::AwaitingWebAuthn {
+            approval_id,
+            approver,
+            ..
+        }
+        | DeviceAuthorizationState::VerifyingWebAuthn {
+            approval_id,
+            approver,
+            ..
+        }
+        | DeviceAuthorizationState::Issuing {
+            approval_id,
+            approver,
+            ..
+        }
+        | DeviceAuthorizationState::DeliveryPending {
+            approval_id,
+            approver,
+            ..
+        }
+        | DeviceAuthorizationState::RetirementPending {
+            approval_id,
+            approver,
+            ..
+        }
+        | DeviceAuthorizationState::IssuanceFailed {
+            approval_id,
+            approver,
+            ..
+        }
+        | DeviceAuthorizationState::RegistrationRetired {
+            approval_id,
+            approver,
+            ..
+        } => (*approval_id, Some(approver)),
+        DeviceAuthorizationState::Delivered {
+            approval_id,
+            approver,
+            ..
+        } => (*approval_id, approver.as_ref()),
+        DeviceAuthorizationState::DeliveryExpired { approval_id, .. } => (*approval_id, None),
+        DeviceAuthorizationState::SupersededForRegistrationRotation {
+            approval_id: Some(approval_id),
+            ..
+        } => (*approval_id, None),
+        _ => return Err(DeviceAuthorizationError::InvalidCode),
+    };
+
+    if &stored_approval_id != approval_id {
+        return Err(DeviceAuthorizationError::InvalidCode);
+    }
+    if stored_approver != Some(authenticated_approver) {
+        return Err(DeviceAuthorizationError::MembershipRequired);
+    }
+    Ok(())
+}
+
 fn validate_scope(scope: &DeviceAuthorizationScope) -> Result<(), DeviceAuthorizationError> {
     if scope.organization_id.trim().is_empty()
         || scope.workspace_id.trim().is_empty()
@@ -3865,6 +4193,7 @@ pub(crate) fn registration_rotation_transition(
             receipt,
             approver: Some(approver),
             certificate: Some(certificate),
+            ..
         } => {
             if !certificate_matches_rotation_peer(
                 record,
@@ -4017,6 +4346,7 @@ fn retirement_transition_allowed(
                 receipt: current_receipt,
                 approver: Some(current_approver),
                 certificate: Some(current_certificate),
+                ..
             },
             DeviceAuthorizationState::RetirementPending {
                 approval_id: target_id,
@@ -5200,8 +5530,9 @@ mod tests {
             )
             .expect("challenge");
         manager
-            .complete_approval(
+            .complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &TestApprovalPorts,
@@ -5285,8 +5616,9 @@ mod tests {
             )
             .expect("challenge");
         manager
-            .complete_approval(
+            .complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &TestApprovalPorts,
@@ -5378,8 +5710,9 @@ mod tests {
         let approval_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let approval = thread::spawn(move || {
-            approval_manager.complete_approval(
+            approval_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 approval_ports.as_ref(),
@@ -5434,7 +5767,7 @@ mod tests {
         ));
 
         ports.release_signer();
-        assert_eq!(approval.join().expect("approval thread"), Ok(()));
+        assert!(approval.join().expect("approval thread").is_ok());
         let approved = store
             .by_approval_id(&challenge.approval_id)
             .expect("read approved record")
@@ -5468,8 +5801,9 @@ mod tests {
         let first_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let first = thread::spawn(move || {
-            first_manager.complete_approval(
+            first_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 first_ports.as_ref(),
@@ -5483,17 +5817,31 @@ mod tests {
         let retry_ports = Arc::clone(&ports);
         let retry_id = challenge.approval_id;
         let retry = thread::spawn(move || {
-            retry_manager.complete_approval(&retry_id, &[], 301, retry_ports.as_ref())
+            retry_manager.complete_approval_for_user(
+                &retry_id,
+                &user(),
+                &[],
+                301,
+                retry_ports.as_ref(),
+            )
         });
         ports.wait_for_duplicate_retry();
         assert_eq!(ports.side_effect_count(), 1);
 
         ports.release_signer();
-        assert_eq!(first.join().expect("first approval"), Ok(()));
-        assert_eq!(retry.join().expect("repeated approval"), Ok(()));
+        assert!(first.join().expect("first approval").is_ok());
+        assert!(retry.join().expect("repeated approval").is_ok());
         assert_eq!(
-            manager.complete_approval(&challenge.approval_id, &[], 302, ports.as_ref()),
-            Ok(())
+            manager
+                .complete_approval_for_user(
+                    &challenge.approval_id,
+                    &user(),
+                    &[],
+                    302,
+                    ports.as_ref()
+                )
+                .map(|snapshot| snapshot.state()),
+            Ok(DeviceAuthorizationApprovalState::DeliveryPending)
         );
         assert_eq!(ports.side_effect_count(), 1);
     }
@@ -5516,13 +5864,16 @@ mod tests {
         let ports = UncertainOnceApprovalPorts::default();
 
         assert_eq!(
-            manager.complete_approval(
-                &challenge.approval_id,
-                b"test-only-valid-assertion",
-                300,
-                &ports,
-            ),
-            Err(DeviceAuthorizationError::CertificateIssuanceInProgress)
+            manager
+                .complete_approval_for_user(
+                    &challenge.approval_id,
+                    &user(),
+                    b"test-only-valid-assertion",
+                    300,
+                    &ports,
+                )
+                .map(|snapshot| snapshot.state()),
+            Ok(DeviceAuthorizationApprovalState::Issuing)
         );
         let issuing = store
             .by_approval_id(&challenge.approval_id)
@@ -5536,8 +5887,10 @@ mod tests {
         // A new manager models process recovery over the same durable store.
         let restarted_manager = manager_with_store(store.clone());
         assert_eq!(
-            restarted_manager.complete_approval(&challenge.approval_id, &[], 400, &ports),
-            Ok(())
+            restarted_manager
+                .complete_approval_for_user(&challenge.approval_id, &user(), &[], 400, &ports)
+                .map(|snapshot| snapshot.state()),
+            Ok(DeviceAuthorizationApprovalState::DeliveryPending)
         );
         let approved = store
             .by_approval_id(&challenge.approval_id)
@@ -5571,8 +5924,9 @@ mod tests {
         };
 
         assert_eq!(
-            manager.complete_approval(
+            manager.complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -5610,8 +5964,9 @@ mod tests {
             .expect("challenge");
 
         assert_eq!(
-            manager.complete_approval(
+            manager.complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -5660,8 +6015,9 @@ mod tests {
         };
 
         assert_eq!(
-            manager.complete_approval(
+            manager.complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -5708,8 +6064,9 @@ mod tests {
         };
 
         assert_eq!(
-            manager.complete_approval(
+            manager.complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -5740,8 +6097,9 @@ mod tests {
             .begin_approval(&start.user_code, &scope(), &user(), &[24; 32], 200, &ports)
             .expect("challenge");
         manager
-            .complete_approval(
+            .complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -5831,8 +6189,9 @@ mod tests {
             .begin_approval(&start.user_code, &scope(), &user(), &[26; 32], 200, &ports)
             .expect("challenge");
         manager
-            .complete_approval(
+            .complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -6125,8 +6484,9 @@ mod tests {
             )
             .expect("challenge");
         manager
-            .complete_approval(
+            .complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &TestApprovalPorts,
@@ -6252,8 +6612,9 @@ mod tests {
         let approval_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let approval = thread::spawn(move || {
-            approval_manager.complete_approval(
+            approval_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 approval_ports.as_ref(),
@@ -6281,7 +6642,7 @@ mod tests {
         ));
 
         ports.release_verifier();
-        assert_eq!(approval.join().expect("approval thread"), Ok(()));
+        assert!(approval.join().expect("approval thread").is_ok());
         assert_eq!(ports.issuer_calls(), 1);
         assert!(matches!(
             store
@@ -6315,8 +6676,9 @@ mod tests {
         let approval_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let approval = thread::spawn(move || {
-            approval_manager.complete_approval(
+            approval_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 approval_ports.as_ref(),
@@ -6359,8 +6721,9 @@ mod tests {
         let approval_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let approval = thread::spawn(move || {
-            approval_manager.complete_approval(
+            approval_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 approval_ports.as_ref(),
@@ -6409,8 +6772,9 @@ mod tests {
         let approval_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let approval = thread::spawn(move || {
-            approval_manager.complete_approval(
+            approval_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 approval_ports.as_ref(),
@@ -6455,8 +6819,9 @@ mod tests {
         let approval_ports = Arc::clone(&ports);
         let approval_id = challenge.approval_id;
         let approval = thread::spawn(move || {
-            approval_manager.complete_approval(
+            approval_manager.complete_approval_for_user(
                 &approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 approval_ports.as_ref(),
@@ -6499,8 +6864,9 @@ mod tests {
             .expect("challenge");
 
         assert_eq!(
-            manager.complete_approval(
+            manager.complete_approval_for_user(
                 &challenge.approval_id,
+                &user(),
                 b"test-only-valid-assertion",
                 300,
                 &ports,
@@ -6520,13 +6886,16 @@ mod tests {
 
         ports.set_current_time(301);
         assert_eq!(
-            manager.complete_approval(
-                &challenge.approval_id,
-                b"test-only-valid-assertion",
-                301,
-                &ports,
-            ),
-            Ok(())
+            manager
+                .complete_approval_for_user(
+                    &challenge.approval_id,
+                    &user(),
+                    b"test-only-valid-assertion",
+                    301,
+                    &ports,
+                )
+                .map(|snapshot| snapshot.state()),
+            Ok(DeviceAuthorizationApprovalState::DeliveryPending)
         );
         assert_eq!(ports.verifier_calls(), 2);
         assert_eq!(ports.credential_counter_updates(), 1);
