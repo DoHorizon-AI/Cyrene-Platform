@@ -1845,6 +1845,8 @@ mod tests {
         assert!(migration.contains("auth_row.state_kind IS DISTINCT FROM 'delivered'"));
         assert!(migration.contains("current_authorization_generation"));
         assert!(migration.contains("receipt -> 'certificate_sha256'"));
-        assert!(migration.contains("certificate ->> 'not_after_unix_ms'"));
+        assert!(migration.contains(
+            "certificate -> 'not_after_unix_ms'\n                IS DISTINCT FROM to_jsonb(NEW.not_after_unix_ms)"
+        ));
     }
 }
