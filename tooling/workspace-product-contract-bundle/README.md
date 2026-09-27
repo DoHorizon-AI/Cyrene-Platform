@@ -70,7 +70,7 @@ python3 "$PLATFORM_ROOT/tooling/workspace-product-contract-bundle/build_bundle.p
   --source "Cyrene-Echo=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Echo" \
   --commit Cyrene-Echo=fcd641832d0d154c18e5ab5811ee7232d6d91fbc \
   --source "Cyrene-Navigator=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Navigator" \
-  --commit Cyrene-Navigator=05d7d88f3d38c21b1cb0641c66dc81fd033d4d2f \
+  --commit Cyrene-Navigator=7d5fce9790f719ea6371338b5f3cab3b0372991c \
   --output "$OUTPUT"
 ```
 
