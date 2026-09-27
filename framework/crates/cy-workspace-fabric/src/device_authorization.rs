@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cy_proto::workspace_v1::UserIdentityRef;
 use sha2::{Digest, Sha256};
@@ -28,6 +29,9 @@ pub type DeviceAuthorizationId = [u8; 16];
 
 /// Maximum time a valid certificate may wait for device acknowledgement.
 pub const MAX_CERTIFICATE_DELIVERY_TTL_MS: u64 = 5 * 60 * 1_000;
+
+/// Minimum lease needed to cover the certificate-retirement hard call timeout.
+pub(crate) const MIN_CERTIFICATE_RETIREMENT_CLAIM_LEASE_MS: u64 = 60 * 1_000;
 
 /// Opaque digest stored in place of the high-entropy one-time device code.
 pub type DeviceAuthorizationCodeHash = [u8; 32];
@@ -1003,15 +1007,23 @@ pub trait DeviceAuthorizationStore: Send + Sync {
     ) -> Result<Option<DeviceAuthorizationRecord>, DeviceAuthorizationStoreError> {
         Err(DeviceAuthorizationStoreError::Unavailable)
     }
-    /// Checks whether this exact retirement revision may contact the CA now.
-    /// Durable stores must use their database clock and current persisted row;
-    /// the default denies the operation for adapters without that check.
-    /// This is a due check, not a distributed lease: concurrent workers may
-    /// both pass it, so the CA operation must remain idempotent.
-    fn retirement_retry_due(
+    /// Claims one due retirement before its external CA call.
+    ///
+    /// A durable implementation must atomically check the exact authorization
+    /// revision, `RetirementPending` state, retry eligibility, and absence of a
+    /// live claim using its primary database clock. It must persist a lease for
+    /// at least `lease_duration_ms`, extend it through the current retry delay
+    /// when that delay is longer, advance the record revision, and return `true`
+    /// only after that reservation commits. A timeout, conflict, or storage error
+    /// never authorizes a CA call. The CA port must enforce a hard timeout
+    /// shorter than the claim lease and remain idempotent by authorization ID
+    /// and certificate fingerprint. The default denies stores without this
+    /// distributed reservation.
+    fn claim_retirement_retry(
         &self,
         _authorization_id: &DeviceAuthorizationId,
         _expected_revision: u64,
+        _lease_duration_ms: u64,
     ) -> Result<bool, DeviceAuthorizationStoreError> {
         Err(DeviceAuthorizationStoreError::Unavailable)
     }
@@ -1098,6 +1110,7 @@ pub enum DeviceAuthorizationStoreError {
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryDeviceAuthorizationStore {
     records: Arc<Mutex<BTreeMap<DeviceAuthorizationId, DeviceAuthorizationRecord>>>,
+    retirement_claims: Arc<Mutex<BTreeMap<DeviceAuthorizationId, Instant>>>,
 }
 
 impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
@@ -1313,22 +1326,46 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         self.find(|record| &record.id == authorization_id)
     }
 
-    fn retirement_retry_due(
+    fn claim_retirement_retry(
         &self,
         authorization_id: &DeviceAuthorizationId,
         expected_revision: u64,
+        lease_duration_ms: u64,
     ) -> Result<bool, DeviceAuthorizationStoreError> {
-        let records = self
+        let Some(next_revision) = expected_revision.checked_add(1) else {
+            return Ok(false);
+        };
+        if lease_duration_ms == 0 {
+            return Err(DeviceAuthorizationStoreError::Unavailable);
+        }
+        let lease_until = Instant::now()
+            .checked_add(Duration::from_millis(lease_duration_ms))
+            .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
+        let mut records = self
             .records
             .lock()
             .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
-        Ok(records.get(authorization_id).is_some_and(|record| {
-            record.revision == expected_revision
-                && matches!(
-                    &record.state,
-                    DeviceAuthorizationState::RetirementPending { .. }
-                )
-        }))
+        let mut claims = self
+            .retirement_claims
+            .lock()
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let Some(record) = records.get_mut(authorization_id) else {
+            return Ok(false);
+        };
+        if record.revision != expected_revision
+            || !matches!(
+                &record.state,
+                DeviceAuthorizationState::RetirementPending { .. }
+            )
+            || claims
+                .get(authorization_id)
+                .is_some_and(|claimed_until| *claimed_until > Instant::now())
+        {
+            return Ok(false);
+        }
+        record.revision = next_revision;
+        claims.insert(*authorization_id, lease_until);
+        Ok(true)
     }
 
     fn compare_and_swap(
@@ -1530,7 +1567,21 @@ impl InMemoryDeviceAuthorizationStore {
                 return Err(DeviceAuthorizationStoreError::Conflict);
             }
         }
-        records.insert(replacement.id, replacement);
+        let clear_retirement_claim = !registered
+            && matches!(
+                &current.state,
+                DeviceAuthorizationState::RetirementPending { .. }
+            );
+        if clear_retirement_claim {
+            let mut claims = self
+                .retirement_claims
+                .lock()
+                .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+            records.insert(replacement.id, replacement.clone());
+            claims.remove(&replacement.id);
+        } else {
+            records.insert(replacement.id, replacement.clone());
+        }
         Ok(())
     }
 }
@@ -1718,8 +1769,24 @@ pub enum DeviceCertificateIssuanceError {
 /// `retire_or_confirm` must be durable and idempotent by authorization ID and
 /// certificate fingerprint. Success means the certificate is unusable or was
 /// already retired. Every error leaves the record in `RetirementPending` for
-/// explicit retry or operator recovery; errors never authorize delivery.
+/// explicit retry or operator recovery; errors never authorize delivery. The
+/// implementation must declare and enforce a hard call timeout shorter than
+/// the minimum 60-second durable claim lease and report ambiguous outcomes as
+/// `OutcomeUnknown`. The manager validates the declaration and checks how long
+/// the synchronous call took after it returns, but cannot interrupt a blocked
+/// call or a remote request that continues after the adapter returns. Safe
+/// replay therefore still depends on CA idempotency for the same authorization
+/// ID and certificate fingerprint, or equivalent CA-side attempt fencing.
 pub trait DeviceCertificateRetirementPort: Send + Sync {
+    /// Returns the adapter's trusted hard-call timeout declaration.
+    ///
+    /// Returning `None`, zero, or a duration at least as long as the minimum
+    /// claim lease disables retirement calls. This is a contract supplied by
+    /// the adapter; it does not let the manager cancel a synchronous call.
+    fn declared_hard_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     fn retire_or_confirm(
         &self,
         authorization_id: &DeviceAuthorizationId,
@@ -3002,7 +3069,7 @@ where
 
     fn try_retirement(
         &self,
-        record: DeviceAuthorizationRecord,
+        mut record: DeviceAuthorizationRecord,
         retirement_port: &impl DeviceCertificateRetirementPort,
     ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
         let (
@@ -3035,20 +3102,57 @@ where
             _ => return Err(state_error(&record.state)),
         };
 
+        let claimed_revision = record
+            .revision
+            .checked_add(1)
+            .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+        let hard_timeout = match retirement_port.declared_hard_timeout() {
+            Some(timeout)
+                if !timeout.is_zero()
+                    && timeout
+                        < Duration::from_millis(MIN_CERTIFICATE_RETIREMENT_CLAIM_LEASE_MS) =>
+            {
+                timeout
+            }
+            _ => {
+                return self
+                    .store
+                    .by_authorization_id(&record.id)
+                    .map_err(map_store_error)?
+                    .ok_or(DeviceAuthorizationError::ConcurrentTransition);
+            }
+        };
         if !self
             .store
-            .retirement_retry_due(&record.id, record.revision)
+            .claim_retirement_retry(
+                &record.id,
+                record.revision,
+                MIN_CERTIFICATE_RETIREMENT_CLAIM_LEASE_MS,
+            )
             .map_err(map_store_error)?
         {
-            return Ok(record);
+            return self
+                .store
+                .by_authorization_id(&record.id)
+                .map_err(map_store_error)?
+                .ok_or(DeviceAuthorizationError::ConcurrentTransition);
         }
+        record.revision = claimed_revision;
 
-        match retirement_port.retire_or_confirm(
+        let call_started_at = Instant::now();
+        let retirement_result = retirement_port.retire_or_confirm(
             &record.id,
             &certificate_sha256,
             &certificate,
             reason,
-        ) {
+        );
+        let retirement_result = if call_started_at.elapsed() >= hard_timeout {
+            Err(DeviceCertificateRetirementError::OutcomeUnknown)
+        } else {
+            retirement_result
+        };
+
+        match retirement_result {
             Ok(()) => {
                 let terminal = match reason {
                     DeviceCertificateRetirementReason::DeliveryDeadlineReached => {
@@ -3105,50 +3209,32 @@ where
         certificate_sha256: [u8; 32],
         terminal: DeviceAuthorizationState,
     ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
-        for _ in 0..5 {
-            match &record.state {
-                DeviceAuthorizationState::RetirementPending {
-                    approval_id: current_id,
-                    certificate_sha256: current_hash,
-                    ..
-                } if current_id == &approval_id && current_hash == &certificate_sha256 => {}
-                DeviceAuthorizationState::DeliveryExpired {
-                    approval_id: current_id,
-                    certificate_sha256: current_hash,
-                    ..
-                }
-                | DeviceAuthorizationState::IssuanceFailed {
-                    approval_id: current_id,
-                    certificate_sha256: Some(current_hash),
-                    ..
-                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
-                    return Ok(record)
-                }
-                state if state == &terminal => return Ok(record),
-                state => return Err(state_error(state)),
-            }
-            let mut replacement = record.clone();
-            replacement.state = terminal.clone();
-            match self.replace_retirement(replacement) {
-                Ok(()) => {
-                    record.revision = record
-                        .revision
-                        .checked_add(1)
-                        .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
-                    record.state = terminal;
-                    return Ok(record);
-                }
-                Err(DeviceAuthorizationError::ConcurrentTransition) => {
-                    record = self
-                        .store
-                        .by_approval_id(&approval_id)
-                        .map_err(map_store_error)?
-                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
-                }
-                Err(error) => return Err(error),
-            }
+        match &record.state {
+            DeviceAuthorizationState::RetirementPending {
+                approval_id: current_id,
+                certificate_sha256: current_hash,
+                ..
+            } if current_id == &approval_id && current_hash == &certificate_sha256 => {}
+            state => return Err(state_error(state)),
         }
-        Err(DeviceAuthorizationError::ConcurrentTransition)
+        let mut replacement = record.clone();
+        replacement.state = terminal.clone();
+        match self.replace_retirement(replacement) {
+            Ok(()) => {
+                record.revision = record
+                    .revision
+                    .checked_add(1)
+                    .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+                record.state = terminal;
+                Ok(record)
+            }
+            Err(DeviceAuthorizationError::ConcurrentTransition) => self
+                .store
+                .by_authorization_id(&record.id)
+                .map_err(map_store_error)?
+                .ok_or(DeviceAuthorizationError::ConcurrentTransition),
+            Err(error) => Err(error),
+        }
     }
 
     fn persist_retirement_failure(
@@ -3158,56 +3244,32 @@ where
         certificate_sha256: [u8; 32],
         failure: DeviceCertificateRetirementError,
     ) -> Result<DeviceAuthorizationRecord, DeviceAuthorizationError> {
-        for _ in 0..5 {
-            match &mut record.state {
-                DeviceAuthorizationState::RetirementPending {
-                    approval_id: current_id,
-                    certificate_sha256: current_hash,
-                    last_failure,
-                    ..
-                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
-                    *last_failure = Some(failure);
-                }
-                DeviceAuthorizationState::DeliveryExpired {
-                    approval_id: current_id,
-                    certificate_sha256: current_hash,
-                    ..
-                }
-                | DeviceAuthorizationState::IssuanceFailed {
-                    approval_id: current_id,
-                    certificate_sha256: Some(current_hash),
-                    ..
-                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
-                    return Ok(record)
-                }
-                DeviceAuthorizationState::RegistrationRetired {
-                    approval_id: current_id,
-                    certificate_sha256: current_hash,
-                    ..
-                } if current_id == &approval_id && current_hash == &certificate_sha256 => {
-                    return Ok(record)
-                }
-                state => return Err(state_error(state)),
+        match &mut record.state {
+            DeviceAuthorizationState::RetirementPending {
+                approval_id: current_id,
+                certificate_sha256: current_hash,
+                last_failure,
+                ..
+            } if current_id == &approval_id && current_hash == &certificate_sha256 => {
+                *last_failure = Some(failure);
             }
-            match self.replace_retirement(record.clone()) {
-                Ok(()) => {
-                    record.revision = record
-                        .revision
-                        .checked_add(1)
-                        .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
-                    return Ok(record);
-                }
-                Err(DeviceAuthorizationError::ConcurrentTransition) => {
-                    record = self
-                        .store
-                        .by_approval_id(&approval_id)
-                        .map_err(map_store_error)?
-                        .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
-                }
-                Err(error) => return Err(error),
-            }
+            state => return Err(state_error(state)),
         }
-        Err(DeviceAuthorizationError::ConcurrentTransition)
+        match self.replace_retirement(record.clone()) {
+            Ok(()) => {
+                record.revision = record
+                    .revision
+                    .checked_add(1)
+                    .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+                Ok(record)
+            }
+            Err(DeviceAuthorizationError::ConcurrentTransition) => self
+                .store
+                .by_authorization_id(&record.id)
+                .map_err(map_store_error)?
+                .ok_or(DeviceAuthorizationError::ConcurrentTransition),
+            Err(error) => Err(error),
+        }
     }
 
     fn resume_retirement(
@@ -4738,6 +4800,10 @@ mod tests {
     }
 
     impl DeviceCertificateRetirementPort for TestApprovalPorts {
+        fn declared_hard_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(30))
+        }
+
         fn retire_or_confirm(
             &self,
             _authorization_id: &DeviceAuthorizationId,
@@ -4971,6 +5037,10 @@ mod tests {
     }
 
     impl DeviceCertificateRetirementPort for CoordinatedApprovalPorts {
+        fn declared_hard_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(30))
+        }
+
         fn retire_or_confirm(
             &self,
             _authorization_id: &DeviceAuthorizationId,
@@ -5126,6 +5196,10 @@ mod tests {
     }
 
     impl DeviceCertificateRetirementPort for BlockingApprovalPorts {
+        fn declared_hard_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(30))
+        }
+
         fn retire_or_confirm(
             &self,
             _authorization_id: &DeviceAuthorizationId,
@@ -5239,6 +5313,10 @@ mod tests {
     }
 
     impl DeviceCertificateRetirementPort for UncertainOnceApprovalPorts {
+        fn declared_hard_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(30))
+        }
+
         fn retire_or_confirm(
             &self,
             _authorization_id: &DeviceAuthorizationId,

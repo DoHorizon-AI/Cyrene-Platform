@@ -169,6 +169,41 @@ raw device or user codes. New-key mTLS rotation stays unavailable until the
 predecessor supersede/retirement transition and Directory generation advance
 are committed together by the PostgreSQL adapter.
 
+Before any certificate-retirement port call, the manager asks PostgreSQL to
+claim the exact `RetirementPending` revision whose retry time is due. The
+claim transaction checks the persisted state and revision against the primary
+database clock, writes a 60-second claim lease, and advances the revision.
+The lease is at least 60 seconds and extends through the current exponential
+retry delay when that delay is longer.
+The CA is called only after that transaction returns success; queue pressure,
+storage errors, and a missing or invalid adapter timeout declaration fail
+closed. An ambiguous claim timeout may leave a lease committed, so no CA call is
+made and recovery waits for lease expiry. The adapter supplies a trusted hard
+call-timeout declaration shorter than the 60-second minimum lease and must
+enforce that timeout itself. The manager validates the declaration and checks
+the elapsed time after the synchronous call returns, but cannot interrupt a
+blocked call or a remote request that continues after the adapter returns. A
+call that returns after its declared timeout is handled as an unknown outcome.
+The CA must remain idempotent by authorization ID and certificate fingerprint,
+or provide equivalent attempt fencing, so replay is safe if an earlier remote
+request is still in progress. Success and failure are committed against the
+claimed revision once; an older call cannot update a newer claim. A process
+crash after a committed claim delays recovery until the lease expires and retry
+eligibility is checked again. After an ambiguous CA result and lease expiry,
+the same authorization and fingerprint may be replayed, preserving at-least-once
+retirement semantics.
+
+调用证书撤销 port 前，manager 会先请求 PostgreSQL claim 到期的精确
+`RetirementPending` revision。claim 事务使用主库时钟校验已持久化的状态和版本，写入
+至少 60 秒租约（如当前指数退避更长，则延至该退避时间）并推进 revision。只有事务明确成功返回后才调用 CA；队列拥塞、存储错误和适配器
+硬请求超时都会 fail closed。claim 超时结果不确定时可能已留下租约，因此不会调用 CA，恢复
+流程会等待租约过期。适配器提供受信的硬调用超时声明，manager 会校验它短于 60 秒最短租约，缺失或无效时
+拒绝发起 CA 调用；适配器仍须自行执行该超时。manager 只能在同步调用返回后检查耗时，无法中断挂起调用或
+适配器返回后仍在执行的远端请求。超过声明时限才返回的调用按结果不确定处理。如果早先远端请求仍在执行，
+CA 必须按 authorization ID 和证书指纹幂等，或提供等效的 attempt fencing，以保证重放安全。成功和失败只允许
+基于 claimed revision 提交一次，旧调用不能更新较新的 claim。已提交 claim 后进程崩溃时，要等租约到期再检查重试资格。
+CA 结果不确定且租约到期后，可能会以相同 authorization ID 和证书指纹重放；整个流程保持至少一次撤销语义。
+
 `PostgresUserCodeAttemptReservation` provides the shared asynchronous limiter
 reservation used by the enrollment composite before it calls the synchronous
 state machine. It stores only the caller-derived 32-byte abuse digest, a

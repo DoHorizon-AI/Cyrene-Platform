@@ -30,7 +30,7 @@ use crate::device_authorization::{
     DeviceAuthorizationStoreError, DeviceCertificateDeliveryReceipt,
     DeviceCertificateIssuanceFailure, DeviceCertificateRetirementError,
     DeviceCertificateRetirementReason, DeviceRegistrationKeyDigest, IssuedDeviceCertificate,
-    VerifiedDirectoryRegistrationBinding,
+    VerifiedDirectoryRegistrationBinding, MIN_CERTIFICATE_RETIREMENT_CLAIM_LEASE_MS,
 };
 use crate::relay_peer_certificate_validation::AuthenticatedRelayWorkspaceDevice;
 use crate::VersionedUserCodeDigest;
@@ -344,14 +344,20 @@ impl DeviceAuthorizationStore for PostgresDeviceAuthorizationStore {
         self.call(Command::ByAuthorizationId(*authorization_id, reply), result)
     }
 
-    fn retirement_retry_due(
+    fn claim_retirement_retry(
         &self,
         authorization_id: &DeviceAuthorizationId,
         expected_revision: u64,
+        lease_duration_ms: u64,
     ) -> StoreResult<bool> {
         let (reply, result) = mpsc::sync_channel(1);
         self.call(
-            Command::RetirementRetryDue(*authorization_id, expected_revision, reply),
+            Command::ClaimRetirementRetry(
+                *authorization_id,
+                expected_revision,
+                lease_duration_ms,
+                reply,
+            ),
             result,
         )
     }
@@ -485,7 +491,7 @@ enum Command {
         DeviceAuthorizationId,
         StoreReply<Option<DeviceAuthorizationRecord>>,
     ),
-    RetirementRetryDue(DeviceAuthorizationId, u64, StoreReply<bool>),
+    ClaimRetirementRetry(DeviceAuthorizationId, u64, u64, StoreReply<bool>),
     CompareAndSwap(u64, DeviceAuthorizationRecord, StoreReply<()>),
     CompareAndSwapDueDeliveryToRetirement(u64, DeviceAuthorizationRecord, StoreReply<bool>),
     CompareAndSwapRegistered(u64, DeviceAuthorizationRecord, StoreReply<()>),
@@ -575,11 +581,12 @@ fn worker_main(
             Command::ByAuthorizationId(authorization_id, reply) => {
                 let _ = reply.send(runtime.block_on(by_authorization_id(&pool, &authorization_id)));
             }
-            Command::RetirementRetryDue(authorization_id, revision, reply) => {
-                let _ = reply.send(runtime.block_on(retirement_retry_due(
+            Command::ClaimRetirementRetry(authorization_id, revision, lease_ms, reply) => {
+                let _ = reply.send(runtime.block_on(claim_retirement_retry(
                     &pool,
                     &authorization_id,
                     revision,
+                    lease_ms,
                 )));
             }
             Command::CompareAndSwap(expected, replacement, reply) => {
@@ -691,7 +698,8 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
         sqlx::query(
             "SELECT state_deadline_unix_ms, delivery_certificate_not_after_unix_ms, \
                     registration_key_digest, device_code_generation, \
-                    retirement_attempt_count, retirement_next_attempt_at_unix_ms \
+                    retirement_attempt_count, retirement_next_attempt_at_unix_ms, \
+                    retirement_claimed_until_unix_ms \
              FROM cyrene_workspace_device_authorization.authorizations LIMIT 0",
         )
         .fetch_all(&pool)
@@ -1050,7 +1058,10 @@ async fn rotate_registration_binding(
                  state_deadline_unix_ms = $6, delivery_certificate_not_after_unix_ms = $7, \
                  state_payload = $8, retirement_attempt_count = 0, \
                  retirement_next_attempt_at_unix_ms = \
-                    CASE WHEN $4 = 'retirement_pending' THEN $14 ELSE NULL END \
+                    CASE WHEN $4 = 'retirement_pending' THEN $14 ELSE NULL END, \
+                 retirement_claimed_until_unix_ms = \
+                    CASE WHEN $4 = 'retirement_pending' AND state_kind = 'retirement_pending' \
+                         THEN retirement_claimed_until_unix_ms ELSE NULL END \
                  WHERE id = $1 AND revision = $2 AND registration_binding_id = $9 \
                    AND organization_id = $10 AND workspace_id = $11 AND device_id = $12 \
                    AND authorization_generation = $13"
@@ -1682,29 +1693,104 @@ async fn by_authorization_id(
     row.map(decode_record).transpose()
 }
 
-/// Checks the exact pending revision against retry eligibility on the primary DB clock.
-/// 使用主库时钟检查指定待撤销代次是否已到重试时间。
-async fn retirement_retry_due(
+/// Durably leases an exact retry-due retirement revision before the CA call.
+/// 使用主库时钟为精确待撤销代次持久化租约，再允许调用 CA。
+async fn claim_retirement_retry(
     pool: &PgPool,
     authorization_id: &DeviceAuthorizationId,
     expected_revision: u64,
+    lease_duration_ms: u64,
 ) -> StoreResult<bool> {
+    if lease_duration_ms != MIN_CERTIFICATE_RETIREMENT_CLAIM_LEASE_MS {
+        return Err(DeviceAuthorizationStoreError::Unavailable);
+    }
+    let Some(claimed_revision) = expected_revision.checked_add(1) else {
+        return Ok(false);
+    };
     let revision = to_i64(expected_revision)?;
-    sqlx::query_scalar::<_, bool>(&format!(
-        "SELECT EXISTS ( \
-             SELECT 1 FROM {TABLE} \
-             WHERE id = $1 AND revision = $2 AND state_kind = 'retirement_pending' \
-               AND retirement_attempt_count >= 0 \
-               AND retirement_next_attempt_at_unix_ms >= 0 \
-               AND retirement_next_attempt_at_unix_ms <= \
-                   FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
-         )"
+    let claimed_revision = to_i64(claimed_revision)?;
+
+    let mut transaction = pool.begin().await.map_err(map_database_error)?;
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS}, retirement_attempt_count, \
+                retirement_next_attempt_at_unix_ms, retirement_claimed_until_unix_ms \
+         FROM {TABLE} WHERE id = $1 FOR UPDATE"
+    ))
+    .bind(authorization_id.to_vec())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    let Some(row) = row else {
+        transaction.rollback().await.map_err(map_database_error)?;
+        return Ok(false);
+    };
+
+    let retirement_attempt_count: i64 = row
+        .try_get("retirement_attempt_count")
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let retirement_next_attempt_at_unix_ms: Option<i64> = row
+        .try_get("retirement_next_attempt_at_unix_ms")
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let retirement_claimed_until_unix_ms: Option<i64> = row
+        .try_get("retirement_claimed_until_unix_ms")
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let current = decode_record(row)?;
+    let retirement_pending = matches!(
+        &current.state,
+        DeviceAuthorizationState::RetirementPending { .. }
+    );
+    if retirement_attempt_count < 0
+        || retirement_pending != retirement_next_attempt_at_unix_ms.is_some()
+        || retirement_next_attempt_at_unix_ms.is_some_and(|value| value < 0)
+        || retirement_claimed_until_unix_ms.is_some_and(|value| value < 0)
+        || (!retirement_pending && retirement_claimed_until_unix_ms.is_some())
+    {
+        return Err(DeviceAuthorizationStoreError::Unavailable);
+    }
+    if current.revision != expected_revision || !retirement_pending {
+        transaction.rollback().await.map_err(map_database_error)?;
+        return Ok(false);
+    }
+
+    let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+    let database_now = to_i64(database_now_unix_ms)?;
+    if retirement_next_attempt_at_unix_ms.is_some_and(|value| value > database_now)
+        || retirement_claimed_until_unix_ms.is_some_and(|value| value > database_now)
+    {
+        transaction.rollback().await.map_err(map_database_error)?;
+        return Ok(false);
+    }
+    let (_, next_retry_at_unix_ms) =
+        next_retirement_retry_schedule(retirement_attempt_count, database_now_unix_ms)?;
+    let retry_delay_ms = u64::try_from(next_retry_at_unix_ms - database_now)
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let claim_lease_ms = lease_duration_ms.max(retry_delay_ms);
+    let claimed_until_unix_ms = database_now_unix_ms
+        .checked_add(claim_lease_ms)
+        .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
+    let claimed_until_unix_ms = to_i64(claimed_until_unix_ms)?;
+    let update = sqlx::query(&format!(
+        "UPDATE {TABLE} SET revision = $3, retirement_claimed_until_unix_ms = $4 \
+         WHERE id = $1 AND revision = $2 AND state_kind = 'retirement_pending' \
+           AND retirement_attempt_count >= 0 \
+           AND retirement_next_attempt_at_unix_ms <= $5 \
+           AND (retirement_claimed_until_unix_ms IS NULL OR \
+                retirement_claimed_until_unix_ms <= $5)"
     ))
     .bind(authorization_id.to_vec())
     .bind(revision)
-    .fetch_one(pool)
+    .bind(claimed_revision)
+    .bind(claimed_until_unix_ms)
+    .bind(database_now)
+    .execute(&mut *transaction)
     .await
-    .map_err(map_database_error)
+    .map_err(map_database_error)?;
+    if update.rows_affected() != 1 {
+        transaction.rollback().await.map_err(map_database_error)?;
+        return Ok(false);
+    }
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(true)
 }
 
 async fn expired_records(
@@ -1807,6 +1893,9 @@ async fn recoverable_retirements(
          WHERE state_kind = 'retirement_pending' \
            AND retirement_next_attempt_at_unix_ms <= \
                FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
+           AND (retirement_claimed_until_unix_ms IS NULL OR \
+                retirement_claimed_until_unix_ms <= \
+                    FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT) \
          ORDER BY retirement_next_attempt_at_unix_ms, id LIMIT $1"
     ))
     .bind(limit)
@@ -1828,6 +1917,9 @@ async fn recoverable_retirement_id_page(
          WHERE state_kind = 'retirement_pending' \
            AND retirement_next_attempt_at_unix_ms <= \
                FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
+           AND (retirement_claimed_until_unix_ms IS NULL OR \
+                retirement_claimed_until_unix_ms <= \
+                    FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT) \
          ORDER BY retirement_next_attempt_at_unix_ms, id LIMIT $1"
     ))
     .bind(limit)
@@ -1867,8 +1959,8 @@ fn bounded_limit(limit: usize) -> StoreResult<i64> {
     i64::try_from(limit).map_err(|_| DeviceAuthorizationStoreError::Unavailable)
 }
 
-/// Advances the persisted failure count and computes its next DB-clock retry time.
-/// 递增持久化失败次数，并按数据库时钟计算下一次重试时间。
+/// Computes the next failure count and retry time without writing either value.
+/// 计算下一次失败计数与重试时间；持久化由调用方的 CAS 完成。
 fn next_retirement_retry_schedule(
     current_attempt_count: i64,
     database_now_unix_ms: u64,
@@ -1986,7 +2078,8 @@ async fn compare_and_swap_inner(
         lock_and_validate_registration(&mut transaction, &replacement.registration_binding).await?;
     }
     let row = sqlx::query(&format!(
-        "SELECT {SELECT_COLUMNS}, retirement_attempt_count, retirement_next_attempt_at_unix_ms \
+        "SELECT {SELECT_COLUMNS}, retirement_attempt_count, retirement_next_attempt_at_unix_ms, \
+                retirement_claimed_until_unix_ms \
          FROM {TABLE} WHERE id = $1 FOR UPDATE"
     ))
     .bind(replacement.id.to_vec())
@@ -2000,6 +2093,9 @@ async fn compare_and_swap_inner(
     let current_retirement_next_attempt_at_unix_ms: Option<i64> = row
         .try_get("retirement_next_attempt_at_unix_ms")
         .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let current_retirement_claimed_until_unix_ms: Option<i64> = row
+        .try_get("retirement_claimed_until_unix_ms")
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
     if current_retirement_attempt_count < 0 {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
@@ -2009,6 +2105,11 @@ async fn compare_and_swap_inner(
         DeviceAuthorizationState::RetirementPending { .. }
     ) != current_retirement_next_attempt_at_unix_ms.is_some()
         || current_retirement_next_attempt_at_unix_ms.is_some_and(|value| value < 0)
+        || current_retirement_claimed_until_unix_ms.is_some_and(|value| value < 0)
+        || (!matches!(
+            &current.state,
+            DeviceAuthorizationState::RetirementPending { .. }
+        ) && current_retirement_claimed_until_unix_ms.is_some())
     {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
@@ -2059,48 +2160,53 @@ async fn compare_and_swap_inner(
 
     // Initial retirement becomes immediately eligible; a failed retry moves to backoff.
     // 首次进入待撤销状态立即可执行；已失败的重试推进到退避时间。
-    let (retirement_attempt_count, retirement_next_attempt_at_unix_ms) =
-        match (&current.state, &replacement.state) {
-            (
-                DeviceAuthorizationState::RetirementPending { .. },
-                DeviceAuthorizationState::RetirementPending {
-                    last_failure: Some(_),
-                    ..
-                },
-            ) if !registered => {
-                let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
-                let (attempt_count, next_attempt_at) = next_retirement_retry_schedule(
-                    current_retirement_attempt_count,
-                    database_now_unix_ms,
-                )?;
-                (attempt_count, Some(next_attempt_at))
+    let (
+        retirement_attempt_count,
+        retirement_next_attempt_at_unix_ms,
+        retirement_claimed_until_unix_ms,
+    ) = match (&current.state, &replacement.state) {
+        (
+            DeviceAuthorizationState::RetirementPending { .. },
+            DeviceAuthorizationState::RetirementPending {
+                last_failure: Some(_),
+                ..
+            },
+        ) if !registered => {
+            let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+            let (attempt_count, next_attempt_at) = next_retirement_retry_schedule(
+                current_retirement_attempt_count,
+                database_now_unix_ms,
+            )?;
+            (attempt_count, Some(next_attempt_at), None)
+        }
+        (
+            current_state @ DeviceAuthorizationState::RetirementPending { .. },
+            replacement_state @ DeviceAuthorizationState::RetirementPending { .. },
+        ) if registered => {
+            // Registered Pending -> Pending persists poll metadata while
+            // preserving retry and claim leases. The manager claims before CA.
+            // 已注册的 Pending -> Pending 保存 poll 元数据并保留重试与 claim 租约；CA 前须由 manager 完成 claim。
+            if current_state != replacement_state {
+                return Err(DeviceAuthorizationStoreError::Conflict);
             }
+            let next_attempt_at = current_retirement_next_attempt_at_unix_ms
+                .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
             (
-                current_state @ DeviceAuthorizationState::RetirementPending { .. },
-                replacement_state @ DeviceAuthorizationState::RetirementPending { .. },
-            ) if registered => {
-                // Registered Pending -> Pending is only used to persist poll
-                // metadata. Keep the retirement payload and retry schedule
-                // unchanged; `try_retirement` checks due state before any CA call.
-                // 已注册的 Pending -> Pending 仅用于保存 poll 元数据；保留撤销状态和重试计划，
-                // 所有 CA 调用仍由 try_retirement 的到期检查统一拦截。
-                if current_state != replacement_state {
-                    return Err(DeviceAuthorizationStoreError::Conflict);
-                }
-                let next_attempt_at = current_retirement_next_attempt_at_unix_ms
-                    .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
-                (current_retirement_attempt_count, Some(next_attempt_at))
-            }
-            (
-                DeviceAuthorizationState::RetirementPending { .. },
-                DeviceAuthorizationState::RetirementPending { .. },
-            ) => return Err(DeviceAuthorizationStoreError::Conflict),
-            (_, DeviceAuthorizationState::RetirementPending { .. }) => {
-                let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
-                (0, Some(to_i64(database_now_unix_ms)?))
-            }
-            (_, _) => (current_retirement_attempt_count, None),
-        };
+                current_retirement_attempt_count,
+                Some(next_attempt_at),
+                current_retirement_claimed_until_unix_ms,
+            )
+        }
+        (
+            DeviceAuthorizationState::RetirementPending { .. },
+            DeviceAuthorizationState::RetirementPending { .. },
+        ) => return Err(DeviceAuthorizationStoreError::Conflict),
+        (_, DeviceAuthorizationState::RetirementPending { .. }) => {
+            let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+            (0, Some(to_i64(database_now_unix_ms)?), None)
+        }
+        (_, _) => (current_retirement_attempt_count, None, None),
+    };
 
     let encoded = EncodedRecord::new(replacement)?;
     let deadline_guard = if delivery_ack {
@@ -2114,7 +2220,8 @@ async fn compare_and_swap_inner(
          poll_interval_ms = $3, last_poll_at_unix_ms = $4, revision = $5, \
          state_kind = $6, approval_id = $7, state_deadline_unix_ms = $8, \
          delivery_certificate_not_after_unix_ms = $9, state_payload = $10, \
-         retirement_attempt_count = $11, retirement_next_attempt_at_unix_ms = $12 \
+         retirement_attempt_count = $11, retirement_next_attempt_at_unix_ms = $12, \
+         retirement_claimed_until_unix_ms = $13 \
          WHERE id = $1 AND revision = $2{deadline_guard}"
     ))
     .bind(encoded.id)
@@ -2129,6 +2236,7 @@ async fn compare_and_swap_inner(
     .bind(encoded.state_payload)
     .bind(retirement_attempt_count)
     .bind(retirement_next_attempt_at_unix_ms)
+    .bind(retirement_claimed_until_unix_ms)
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
@@ -2180,7 +2288,8 @@ async fn compare_and_swap_due_delivery_to_retirement(
          state_deadline_unix_ms = NULL, delivery_certificate_not_after_unix_ms = NULL, \
          state_payload = $6, retirement_attempt_count = 0, \
          retirement_next_attempt_at_unix_ms = \
-             FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
+             FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT, \
+         retirement_claimed_until_unix_ms = NULL \
          WHERE id = $1 AND revision = $2 AND state_kind = 'delivery_pending' \
            AND retirement_next_attempt_at_unix_ms IS NULL \
            AND registration_binding_id = $7 AND device_id = $8 \

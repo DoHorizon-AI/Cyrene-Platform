@@ -321,6 +321,10 @@ mod tests {
     struct TestRetirementPort;
 
     impl DeviceCertificateRetirementPort for TestRetirementPort {
+        fn declared_hard_timeout(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(30))
+        }
+
         fn retire_or_confirm(
             &self,
             _authorization_id: &DeviceAuthorizationId,

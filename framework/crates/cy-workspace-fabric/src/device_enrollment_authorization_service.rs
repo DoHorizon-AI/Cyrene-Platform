@@ -187,6 +187,15 @@ where
         (**self).by_authorization_id(authorization_id)
     }
 
+    fn claim_retirement_retry(
+        &self,
+        authorization_id: &DeviceAuthorizationId,
+        expected_revision: u64,
+        lease_duration_ms: u64,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        (**self).claim_retirement_retry(authorization_id, expected_revision, lease_duration_ms)
+    }
+
     fn compare_and_swap(
         &self,
         expected_revision: u64,
@@ -566,6 +575,10 @@ impl DeviceCertificateIssuer for ApprovalPorts<'_> {
 }
 
 impl DeviceCertificateRetirementPort for ApprovalPorts<'_> {
+    fn declared_hard_timeout(&self) -> Option<std::time::Duration> {
+        self.retirement.declared_hard_timeout()
+    }
+
     fn retire_or_confirm(
         &self,
         authorization_id: &DeviceAuthorizationId,
@@ -615,6 +628,10 @@ struct DeliveryPorts<'a> {
 }
 
 impl DeviceCertificateRetirementPort for DeliveryPorts<'_> {
+    fn declared_hard_timeout(&self) -> Option<std::time::Duration> {
+        self.retirement.declared_hard_timeout()
+    }
+
     fn retire_or_confirm(
         &self,
         authorization_id: &DeviceAuthorizationId,
