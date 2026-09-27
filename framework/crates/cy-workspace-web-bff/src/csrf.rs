@@ -12,7 +12,7 @@ use std::fmt;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use cy_workspace_fabric::VerifiedWebPrincipal;
+use cy_workspace_fabric::{VerifiedWebPrincipal, VerifiedWebSessionContext};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
@@ -143,6 +143,31 @@ impl CsrfSigner {
         let mac = self.message_mac(principal, access_token, expiry)?;
         mac.verify_slice(&signature)
             .map_err(|_| CsrfError::InvalidToken)
+    }
+
+    /// Verify the exact CSRF token before deriving the non-serializable web-session context.
+    ///
+    /// 精确校验 CSRF token 后才派生不可序列化的 web-session context。
+    pub(crate) fn context_after_verified_csrf(
+        &self,
+        principal: VerifiedWebPrincipal,
+        access_token: &str,
+        csrf_token: &str,
+        now_unix_ms: i64,
+    ) -> Result<VerifiedWebSessionContext, CsrfError> {
+        self.verify(
+            csrf_token,
+            CsrfPrincipalBinding::from_verified(&principal),
+            access_token,
+            now_unix_ms,
+        )?;
+        VerifiedWebSessionContext::from_bff_verified_access_token(
+            principal,
+            access_token,
+            &self.key,
+            csrf_token,
+        )
+        .map_err(|_| CsrfError::InvalidToken)
     }
 
     fn message_mac(

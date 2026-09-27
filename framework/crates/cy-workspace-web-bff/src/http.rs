@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Path, State};
+use axum::middleware::{self, Next};
 use axum::routing::any;
 use axum::Router;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -34,6 +35,7 @@ use url::form_urlencoded;
 use uuid::Uuid;
 
 use crate::csrf::{csrf_set_cookie, CsrfPrincipalBinding, CsrfSigner};
+use crate::device_approval::{device_approval_router, DeviceApprovalDependencies};
 use crate::manifest::product_projection_manifest;
 use crate::problem::{problem_response, ProblemCode};
 use crate::product::{
@@ -167,15 +169,42 @@ impl WebBffState {
 ///
 /// 创建版本化 Web BFF router；不创建网络 listener 或默认 provider。
 pub fn router(state: Arc<WebBffState>) -> Router {
-    Router::new()
+    let device_approval = DeviceApprovalDependencies {
+        service: None,
+        directory: Some(state.directory.clone()),
+        session_bindings: None,
+    };
+    router_with_device_approval(state, device_approval)
+}
+
+/// Build the BFF router with the three browser device-approval routes.
+///
+/// The caller supplies only trusted server-side providers. The current default
+/// composition leaves absent providers unset, so those routes fail closed with
+/// 503 until durable Device Authorization and WebAuthn adapters are configured.
+///
+/// 使用可信 server-side provider 构造含三个浏览器设备审批路由的 BFF router。
+/// 缺失 provider 时路由固定 fail closed 为 503。
+pub fn router_with_device_approval(
+    state: Arc<WebBffState>,
+    device_approval: DeviceApprovalDependencies,
+) -> Router {
+    let core_routes = Router::new()
         .route("/api/workspace/v1/session", any(session_route))
         .route("/api/workspace/v1/workspaces", any(workspaces_route))
         .route(
             "/api/workspace/v1/workspaces/:workspace_id/products/:operation",
             any(product_route),
         )
+        .with_state(state.clone());
+    let approval_routes = device_approval_router(device_approval).route_layer(
+        middleware::from_fn_with_state(state.clone(), device_approval_session),
+    );
+
+    Router::new()
+        .merge(core_routes)
+        .merge(approval_routes)
         .fallback(not_found_route)
-        .with_state(state)
 }
 
 #[derive(Serialize)]
@@ -210,6 +239,68 @@ struct TraceInfo {
 struct AuthenticatedRequest {
     principal: VerifiedWebPrincipal,
     access_token: String,
+}
+
+/// Authenticate one browser approval command and insert its typed session context.
+///
+/// This middleware runs only on the three approval routes. It verifies the exact
+/// configured Origin, bearer identity, and matching signed CSRF header/cookie
+/// before inserting the context; raw credential headers are then removed before
+/// the route handler runs.
+///
+/// 仅对三个审批命令验证精确 Origin、Bearer identity 与签名 CSRF header/cookie，成功后注入 typed context，
+/// 并在进入 handler 前移除原始 credential header。
+async fn device_approval_session(
+    State(state): State<Arc<WebBffState>>,
+    mut request: Request<Body>,
+    next: Next,
+) -> http::Response<Body> {
+    if request.method() != Method::POST {
+        return next.run(request).await;
+    }
+    let trace = match trace_info(request.headers()) {
+        Ok(value) => value,
+        Err(()) => return invalid_request(None),
+    };
+    if !exact_origin_matches(request.headers(), &state.client_origin) {
+        return forbidden(Some(&trace.trace_id));
+    }
+    let authenticated = match authenticate(&state, request.headers()).await {
+        Ok(value) => value,
+        Err((status, code, title)) => {
+            return problem_response(status, code, title, Some(&trace.trace_id));
+        }
+    };
+    let csrf_header = match single_header(request.headers(), CSRF_HEADER) {
+        Ok(value) => value.to_owned(),
+        Err(()) => return csrf_failed(Some(&trace.trace_id)),
+    };
+    let csrf_cookie = match csrf_cookie_from_header(request.headers()) {
+        Ok(value) => value.to_owned(),
+        Err(()) => return csrf_failed(Some(&trace.trace_id)),
+    };
+    if csrf_header != csrf_cookie {
+        return csrf_failed(Some(&trace.trace_id));
+    }
+    let now = match now_unix_ms() {
+        Some(value) => value,
+        None => return internal_error(Some(&trace.trace_id)),
+    };
+    let session = match state.csrf_signer.context_after_verified_csrf(
+        authenticated.principal,
+        &authenticated.access_token,
+        &csrf_header,
+        now,
+    ) {
+        Ok(value) => value,
+        Err(_) => return csrf_failed(Some(&trace.trace_id)),
+    };
+
+    request.headers_mut().remove(http::header::AUTHORIZATION);
+    request.headers_mut().remove(COOKIE);
+    request.headers_mut().remove(CSRF_HEADER);
+    request.extensions_mut().insert(session);
+    next.run(request).await
 }
 
 async fn session_route(
