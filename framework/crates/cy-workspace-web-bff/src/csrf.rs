@@ -16,6 +16,7 @@ use cy_workspace_fabric::VerifiedWebPrincipal;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
+use zeroize::Zeroize;
 
 const CSRF_COOKIE_NAME: &str = "__Secure-cyrene-csrf";
 const CSRF_COOKIE_PATH: &str = "/api/workspace/v1";
@@ -56,6 +57,12 @@ impl fmt::Debug for CsrfSigner {
             .debug_struct("CsrfSigner")
             .field("key", &"[REDACTED]")
             .finish()
+    }
+}
+
+impl Drop for CsrfSigner {
+    fn drop(&mut self) {
+        self.key.zeroize();
     }
 }
 

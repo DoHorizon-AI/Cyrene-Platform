@@ -1,14 +1,13 @@
 # Workspace Web BFF application
 
-This crate provides a composable Axum router for the versioned Workspace Web
-BFF contract. It deliberately has no executable or network listener. A deployable
-host must wait for the trusted OIDC token-store hop, the server-side identity
-Directory, the Workspace membership Directory, and an authenticated Workspace
-Product API adapter to be configured together.
+This crate provides the versioned Workspace Web BFF router and a production-host
+composition path. The executable starts only after its required configuration,
+PostgreSQL Directory, and pinned Product contract bundle load successfully. Its
+readiness probe remains closed until AAD and Relay external trust paths can be
+verified without a synthetic user.
 
-本 crate 提供版本化 Workspace Web BFF 合同的可装配 Axum router。当前不提供 executable 或网络 listener。只有可信 OIDC
-token-store hop、服务端 identity Directory、Workspace membership Directory 与已认证 Workspace Product API adapter
-共同完成配置后，才可添加部署 host。
+本 crate 提供版本化 Workspace Web BFF router 与 production-host 装配路径。只有配置、PostgreSQL Directory 和锁定来源的
+Product 合同 bundle 全部加载成功后 executable 才会启动。由于不能用合成用户验证 AAD 与 Relay 外部信任路径，就绪探针仍保持关闭。
 
 ## Composition boundary
 
@@ -29,12 +28,15 @@ WebBffState::new requires all providers and a canonical operation catalog:
   `WorkspaceApi::handle_authenticated`. Actor, organization, Workspace scope,
   and roles are never accepted from the HTTP request. The legacy unauthenticated
   `WorkspaceApi::handle` is not an acceptable adapter.
-- `WorkspaceApiResolver` is a required composition port. It receives only the
-  selected Directory descriptor and must return a `WorkspaceApiBinding` for one
-  of that descriptor's connection candidates. The binding is checked against
-  the selected Workspace and candidate before dispatch. This crate does not
-  provide a production endpoint-to-authority resolver or a listener; absent a
-  real authenticated resolver, the application cannot be composed for service.
+- `WorkspaceApiResolver` receives the same verified principal as the API
+  request and the selected Directory descriptor. The production host creates a
+  fresh `FrontendRelayClient` for that principal, discovers through that signed
+  session, requires the full descriptor to match exactly, and binds one exact
+  configured Relay candidate. The transport is never cached across users.
+- The request path is Web BFF → Frontend Relay session → Workspace Connector →
+  Product adapter. Product endpoint manifests are consumed by the Connector,
+  not by the BFF. The BFF loads owner OpenAPI schemas to validate browser
+  envelopes and responses; it never proxies browser-selected Product URLs.
 - ProductOperationCatalog must contain exactly one matching owner OpenAPI
   operation for each canonical projection row. Its operation key, owner,
   Product operationId, and semantic kind must match the TCK. The BFF does not
@@ -74,9 +76,11 @@ WebBffState::new 必须接收全部 provider 与 canonical operation catalog：
   完全相同的项。之后它通过 `WorkspaceCallerContext::from_verified_web_member` 重新查询 membership 和 Directory roles，才调用
   `WorkspaceApi::handle_authenticated`。HTTP request 不能提供 actor、organization、Workspace scope 或 roles。legacy 未认证的
   `WorkspaceApi::handle` 不能作为 adapter。
-- `WorkspaceApiResolver` 是必需的 composition port。它只接收选中的 Directory descriptor，并必须返回绑定到该 descriptor
-  某个 connection candidate 的 `WorkspaceApiBinding`。dispatch 前会再次校验绑定与选中 Workspace/candidate 相符。本 crate
-  尚未提供生产 endpoint-to-authority resolver 或 listener；缺少真实 authenticated resolver 时，应用不能组合为可服务状态。
+- `WorkspaceApiResolver` 接收与 API request 相同的 verified principal 和选中的 Directory descriptor。生产 host 为该 principal
+  创建新的 `FrontendRelayClient`，通过签名 session discovery，并要求完整 descriptor 精确匹配，再绑定到一个精确配置的 Relay
+  candidate。transport 不会跨用户缓存。
+- 调用链为 Web BFF → Frontend Relay session → Workspace Connector → Product adapter。Product endpoint manifest 由 Connector
+  使用，不由 BFF 消费。BFF 加载 owner OpenAPI schema 以校验浏览器 envelope 与 response；不会代理浏览器选择的 Product URL。
 - ProductOperationCatalog 对 canonical projection row 的每个 operation 必须恰有一个匹配的 owner OpenAPI operation。
   operation key、owner、Product operationId 和语义类型必须与 TCK 一致。BFF 不维护第二份 owner 或 permission table。
 
@@ -142,19 +146,91 @@ Operation 01–12 编译封闭 owner request/path/response schema。Operation 13
 
 ## Deployment gates
 
-The `cy-workspace-web-bff` executable currently binds `0.0.0.0:8080` and exposes
-only `GET /healthz` (liveness) and `GET /readyz` (always 503). It does not mount
-the authenticated application router and is not deployable as a working BFF.
-The production host still needs a trusted same-origin ingress route, token-store
-access token and API scope, production OIDC verifier configuration, an
-unambiguous server-side identity-to-organization mapping, durable Workspace
-membership, the pinned owner OpenAPI bundle, and an authenticated per-principal
-Workspace Relay transport. Do not enable public ingress; the eventual ACA app
-must use internal ingress and must remain unready until these providers are
-composed.
+The production executable binds `0.0.0.0:8080` only after startup configuration,
+the PostgreSQL Workspace Directory connection, Azure AD verifier configuration,
+the complete pinned Product schema bundle, and Relay mTLS/handoff configuration
+have been constructed. Missing or malformed configuration, unreachable PostgreSQL,
+or an incomplete/stale contract bundle aborts startup before the listener opens.
+`GET /healthz` reports process liveness. `GET /readyz` deliberately stays 503:
+without a real verified user token, the host cannot safely prove AAD JWKS,
+Directory query permissions, or the principal-scoped Relay service trust path.
+This executable is not eligible for live traffic yet. A Relay outage or a token/JWKS
+failure also fails the corresponding request closed.
 
-`cy-workspace-web-bff` executable 当前绑定 `0.0.0.0:8080`，只提供 `GET /healthz`（存活）与始终返回 503 的
-`GET /readyz`（就绪）；不会挂载已认证应用 router，因此尚不能作为可用 BFF 部署。生产 host 仍需可信同源 ingress、token-store
-access token 与 API scope、生产 OIDC verifier、唯一的服务端 identity→organization mapping、durable Workspace membership、
-锁定来源的 owner OpenAPI bundle，以及按 principal 隔离的认证 Workspace Relay transport。不得启用 public ingress；最终 ACA app
-必须使用 internal ingress，并在全部 provider 装配完成前保持未就绪。
+Required runtime configuration:
+
+- `CYRENE_WORKSPACE_WEB_BFF_CLIENT_ORIGIN`: one exact public HTTPS origin.
+- `CYRENE_WORKSPACE_WEB_BFF_CSRF_KEY_FILE`: absolute, non-symlink regular file
+  containing exactly 32 nonzero key bytes; Unix group/other permissions must be off.
+- `CYRENE_WORKSPACE_WEB_BFF_AAD_TENANT_ID` and
+  `CYRENE_WORKSPACE_WEB_BFF_AAD_AUDIENCE`: fixed tenant UUID and API audience.
+- `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`: Directory reader connection URL;
+  configure its login as the restricted `cyrene_workspace_directory_reader`
+  role. The adapter enforces PostgreSQL TLS `verify-full`.
+- `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`: read-only release bundle
+  directory. Production packaging supplies the locked 36-file bundle at
+  `/opt/cyrene/product-contracts`; the runtime verifies its TCK digest and all
+  repository/file pins before serving.
+- `CYRENE_WORKSPACE_WEB_BFF_RELAY_ENDPOINT` and
+  `CYRENE_WORKSPACE_WEB_BFF_RELAY_SERVER_NAME`: one trusted HTTPS Relay origin
+  and exact TLS SNI name. `CYRENE_WORKSPACE_WEB_BFF_RELAY_CA_FILE`,
+  `CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_CERT_FILE`, and
+  `CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_KEY_FILE` identify the Relay trust root
+  and BFF workload mTLS identity. Key material is read from bounded regular
+  files; the private key file must have restrictive Unix permissions.
+- `CYRENE_WORKSPACE_WEB_BFF_HANDOFF_ISSUER` and
+  `CYRENE_WORKSPACE_WEB_BFF_HANDOFF_AUDIENCE`: fixed signed handoff claims.
+  `CYRENE_WORKSPACE_WEB_BFF_HANDOFF_SIGNING_SEED_FILE` contains exactly 32
+  nonzero Ed25519 seed bytes and has restrictive Unix permissions. It must match
+  the verifier configured on the trusted Relay ingress.
+
+The request path is BFF → Frontend Relay session → Workspace Connector → Product
+adapter. Product endpoint manifests belong to the Connector. The BFF does not
+directly resolve or connect to Product ACA endpoints. In an internal ACA
+deployment, the Connector must reach each configured Product endpoint and the
+BFF must reach the trusted Relay ingress; placing only the BFF in a Product's ACA
+environment does not establish that path.
+
+As of the read-only topology review on 2026-09-26, five Product ACA apps used
+East Asia internal ingress, the Web app used external ingress, East Asia had no
+VNet configuration or private PostgreSQL server, and no live Navigator ACA app
+was found. A viable future topology must either move the Connector and required
+Products into the private VNet environment, or keep the Connector near those
+Products and provide a separately reviewed mTLS route to Relay hosted with the
+BFF and PostgreSQL. Cross-environment reachability must be proven; it is not
+implied by internal ingress or by co-locating only the BFF. No public Product
+surface, public BFF ingress, placeholder secrets, or deployment is authorized by
+this source change.
+
+生产 executable 只有在启动配置、PostgreSQL Workspace Directory 连接、Azure AD verifier 配置、完整锁定的 Product schema
+bundle、Relay mTLS/handoff 配置均构造成功后才会绑定 `0.0.0.0:8080`。配置缺失或格式错误、PostgreSQL 不可达、合同 bundle
+不完整或过期都会在 listener 打开前终止启动。`GET /healthz` 报告进程存活。`GET /readyz` 刻意保持 503：没有真实已验证用户
+token 时，host 无法安全证明 AAD JWKS、Directory 查询权限或 principal-scoped Relay 服务信任路径，因此当前 executable 不能接 live
+traffic。Relay outage 或 token/JWKS failure 也会使对应请求 fail closed。
+
+Required runtime configuration:
+
+- `CYRENE_WORKSPACE_WEB_BFF_CLIENT_ORIGIN`：唯一精确的 public HTTPS origin。
+- `CYRENE_WORKSPACE_WEB_BFF_CSRF_KEY_FILE`：绝对路径、非 symlink 的普通文件，恰含 32 个非零 key 字节；Unix group/other 权限必须关闭。
+- `CYRENE_WORKSPACE_WEB_BFF_AAD_TENANT_ID` 与 `CYRENE_WORKSPACE_WEB_BFF_AAD_AUDIENCE`：固定 tenant UUID 与 API audience。
+- `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`：Directory reader 连接 URL；运维必须配置受限的
+  `cyrene_workspace_directory_reader` 登录角色，adapter 强制 PostgreSQL TLS `verify-full`。
+- `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`：只读 release bundle 目录。生产 packaging 将锁定的 36-file bundle 放到
+  `/opt/cyrene/product-contracts`；runtime 在服务前校验 TCK digest 与所有 repository/file pins。
+- `CYRENE_WORKSPACE_WEB_BFF_RELAY_ENDPOINT` 与 `CYRENE_WORKSPACE_WEB_BFF_RELAY_SERVER_NAME`：可信 HTTPS Relay origin 和精确 TLS SNI。
+  `CYRENE_WORKSPACE_WEB_BFF_RELAY_CA_FILE`、`CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_CERT_FILE`、
+  `CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_KEY_FILE` 指定 Relay trust root 与 BFF workload mTLS identity。文件大小有界；private key
+  文件必须使用受限 Unix 权限。
+- `CYRENE_WORKSPACE_WEB_BFF_HANDOFF_ISSUER` 与 `CYRENE_WORKSPACE_WEB_BFF_HANDOFF_AUDIENCE`：固定签名 handoff claims。
+  `CYRENE_WORKSPACE_WEB_BFF_HANDOFF_SIGNING_SEED_FILE` 恰含 32 个非零 Ed25519 seed 字节并使用受限 Unix 权限，且必须与可信 Relay
+  ingress 的 verifier 相匹配。
+
+调用链为 BFF → Frontend Relay session → Workspace Connector → Product adapter。Product endpoint manifest 属于 Connector。BFF
+不会直接解析或连接 Product ACA endpoint。使用 internal ACA 时，Connector 必须能访问配置的 Product endpoint，BFF 必须能访问可信 Relay
+ingress；只把 BFF 放入 Product ACA environment 并不能建立该调用路径。
+
+截至 2026-09-26 的只读拓扑复核，五个 Product ACA app 使用 East Asia internal ingress，Web app 使用 external ingress；East Asia
+无 VNet 配置或 private PostgreSQL server，也未发现 live Navigator ACA app。可行后续拓扑要么把 Connector 与所需 Product 迁入 private
+VNet environment，要么让 Connector 留在 Product 附近，并为部署在 BFF/PostgreSQL 侧的 Relay 单独设计和审查 mTLS route。必须实证
+跨环境可达性；internal ingress 或只共置 BFF 都不会自动提供该路径。此源码变更不授权 public Product surface、public BFF ingress、
+占位 secret 或部署。
