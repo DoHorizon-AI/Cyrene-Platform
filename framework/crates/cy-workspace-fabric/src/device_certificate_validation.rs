@@ -11,6 +11,7 @@
 //! that proves the exact certificate currently has good revocation status.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -25,7 +26,8 @@ use x509_parser::extensions::ParsedExtension;
 use x509_parser::parse_x509_certificate;
 
 use crate::device_authorization::{
-    DeviceAuthorizationDeviceKey, DeviceAuthorizationScope, IssuedDeviceCertificate,
+    DeviceAuthorizationDeviceKey, DeviceAuthorizationRegistrationBinding, DeviceAuthorizationScope,
+    DeviceIssuedCertificateValidator, IssuedDeviceCertificate,
 };
 use crate::device_certificate_authority::DeviceCertificateIssuanceBinding;
 use crate::device_registry::WorkspaceDeviceKey;
@@ -58,7 +60,7 @@ pub(crate) enum DeviceCertificateValidationError {
 
 /// Revocation outcomes returned by a separately trusted status adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub(crate) enum DeviceCertificateRevocationCheckError {
+pub enum DeviceCertificateRevocationCheckError {
     #[error("certificate is revoked")]
     Revoked,
     #[error("current revocation status is unknown or unavailable")]
@@ -71,7 +73,7 @@ pub(crate) enum DeviceCertificateRevocationCheckError {
 /// current signed CRL or OCSP response) against the configured CA path. A
 /// cache miss, stale response, timeout, malformed evidence, or unavailable
 /// checker must return `Unknown`; it must never be treated as `Good`.
-pub(crate) struct DeviceCertificateRevocationQuery<'a> {
+pub struct DeviceCertificateRevocationQuery<'a> {
     certificate_der: &'a [u8],
     ca_chain_der: &'a [Vec<u8>],
     trusted_roots_der: &'a [Vec<u8>],
@@ -81,28 +83,28 @@ pub(crate) struct DeviceCertificateRevocationQuery<'a> {
 }
 
 impl DeviceCertificateRevocationQuery<'_> {
-    pub(crate) fn certificate_der(&self) -> &[u8] {
+    pub fn certificate_der(&self) -> &[u8] {
         self.certificate_der
     }
 
-    pub(crate) fn ca_chain_der(&self) -> &[Vec<u8>] {
+    pub fn ca_chain_der(&self) -> &[Vec<u8>] {
         self.ca_chain_der
     }
 
-    pub(crate) fn trusted_roots_der(&self) -> &[Vec<u8>] {
+    pub fn trusted_roots_der(&self) -> &[Vec<u8>] {
         self.trusted_roots_der
     }
 
     /// Canonical positive serial bytes, without the DER INTEGER sign octet.
-    pub(crate) fn serial_number(&self) -> &[u8] {
+    pub fn serial_number(&self) -> &[u8] {
         self.serial_number
     }
 
-    pub(crate) fn certificate_sha256(&self) -> &[u8; 32] {
+    pub fn certificate_sha256(&self) -> &[u8; 32] {
         &self.certificate_sha256
     }
 
-    pub(crate) fn checked_at_unix_ms(&self) -> u64 {
+    pub fn checked_at_unix_ms(&self) -> u64 {
         self.checked_at_unix_ms
     }
 }
@@ -112,7 +114,7 @@ impl DeviceCertificateRevocationQuery<'_> {
 /// Implementations must return `Ok(())` only after proving current good
 /// status for this exact DER and issuer path. There is intentionally no default
 /// implementation: absence of an OCSP/CRL/status integration denies issuance.
-pub(crate) trait DeviceCertificateRevocationChecker: Send + Sync {
+pub trait DeviceCertificateRevocationChecker: Send + Sync {
     fn require_current_good_status(
         &self,
         query: &DeviceCertificateRevocationQuery<'_>,
@@ -146,6 +148,7 @@ pub(crate) struct DeviceCertificateResponseValidator {
     roots: RootCertStore,
     trusted_roots_der: Vec<Vec<u8>>,
     root_fingerprints: BTreeSet<[u8; 32]>,
+    revocation_checker: Arc<dyn DeviceCertificateRevocationChecker>,
 }
 
 impl DeviceCertificateResponseValidator {
@@ -154,6 +157,7 @@ impl DeviceCertificateResponseValidator {
     /// An empty, oversized, malformed, duplicate, or non-CA bundle fails startup.
     pub(crate) fn new(
         trusted_roots_der: Vec<Vec<u8>>,
+        revocation_checker: Arc<dyn DeviceCertificateRevocationChecker>,
     ) -> Result<Self, DeviceCertificateValidationConfigError> {
         let total_bytes = trusted_roots_der
             .iter()
@@ -194,6 +198,7 @@ impl DeviceCertificateResponseValidator {
             roots,
             trusted_roots_der,
             root_fingerprints,
+            revocation_checker,
         })
     }
 
@@ -202,12 +207,11 @@ impl DeviceCertificateResponseValidator {
     /// The expected binding must come from the trusted Directory result used
     /// to authorize signing. The explicit checker parameter has no fallback;
     /// its errors reject the certificate.
-    pub(crate) fn validate_issued_certificate(
+    fn validate_issued_certificate_for_binding(
         &self,
         issued: &IssuedDeviceCertificate,
         binding: &DeviceCertificateIssuanceBinding,
         now_unix_ms: u64,
-        revocation_checker: &impl DeviceCertificateRevocationChecker,
     ) -> Result<ValidatedIssuedDeviceCertificate, DeviceCertificateValidationError> {
         if issued.certificate_der.is_empty()
             || issued.certificate_der.len() > MAX_CERTIFICATE_DER_BYTES
@@ -253,7 +257,7 @@ impl DeviceCertificateResponseValidator {
             certificate_sha256: leaf_fingerprint,
             checked_at_unix_ms: now_unix_ms,
         };
-        revocation_checker
+        self.revocation_checker
             .require_current_good_status(&query)
             .map_err(|error| match error {
                 DeviceCertificateRevocationCheckError::Revoked => {
@@ -344,6 +348,23 @@ impl DeviceCertificateResponseValidator {
         .map_err(|_| DeviceCertificateValidationError::InvalidCertificate)?;
 
         Ok(())
+    }
+}
+
+impl DeviceIssuedCertificateValidator for DeviceCertificateResponseValidator {
+    fn validate_issued_certificate(
+        &self,
+        issued: &IssuedDeviceCertificate,
+        authorization_id: &crate::device_authorization::DeviceAuthorizationId,
+        registration_binding: &DeviceAuthorizationRegistrationBinding,
+        now_unix_ms: u64,
+    ) -> Result<(), DeviceCertificateValidationError> {
+        let binding = DeviceCertificateIssuanceBinding::from_authorization_binding(
+            *authorization_id,
+            registration_binding,
+        );
+        self.validate_issued_certificate_for_binding(issued, &binding, now_unix_ms)
+            .map(|_| ())
     }
 }
 
@@ -860,11 +881,18 @@ mod tests {
     }
 
     fn validator(root_der: Vec<u8>) -> DeviceCertificateResponseValidator {
-        DeviceCertificateResponseValidator::new(vec![root_der]).expect("trusted root")
+        validator_with_revocation(root_der, Ok(()))
     }
 
-    fn good_revocation() -> TestRevocationChecker {
-        TestRevocationChecker(Ok(()))
+    fn validator_with_revocation(
+        root_der: Vec<u8>,
+        status: Result<(), DeviceCertificateRevocationCheckError>,
+    ) -> DeviceCertificateResponseValidator {
+        DeviceCertificateResponseValidator::new(
+            vec![root_der],
+            Arc::new(TestRevocationChecker(status)),
+        )
+        .expect("trusted root")
     }
 
     #[test]
@@ -893,11 +921,10 @@ mod tests {
             )
             .expect("test path validates");
         let validated = verifier
-            .validate_issued_certificate(
+            .validate_issued_certificate_for_binding(
                 &fixture.issued,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             )
             .expect("valid certificate response");
 
@@ -915,17 +942,19 @@ mod tests {
     #[test]
     fn no_root_or_unrelated_chain_fails_closed() {
         assert!(matches!(
-            DeviceCertificateResponseValidator::new(Vec::new()),
+            DeviceCertificateResponseValidator::new(
+                Vec::new(),
+                Arc::new(TestRevocationChecker(Ok(())))
+            ),
             Err(DeviceCertificateValidationConfigError::InvalidTrustRoots)
         ));
 
         let fixture = test_certificate(false, true);
         assert_eq!(
-            validator(fixture.alternate_root_der.clone()).validate_issued_certificate(
+            validator(fixture.alternate_root_der.clone()).validate_issued_certificate_for_binding(
                 &fixture.issued,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
@@ -963,11 +992,10 @@ mod tests {
         for binding in alternates {
             let issued = issued_for_binding(&fixture.issued, &binding);
             assert_eq!(
-                validator(fixture.root_der.clone()).validate_issued_certificate(
+                validator(fixture.root_der.clone()).validate_issued_certificate_for_binding(
                     &issued,
                     &binding,
                     TEST_NOW_UNIX_MS,
-                    &good_revocation(),
                 ),
                 Err(DeviceCertificateValidationError::InvalidCertificate)
             );
@@ -982,11 +1010,10 @@ mod tests {
         let mut wrong_serial = fixture.issued.clone();
         wrong_serial.serial_number[0] ^= 0x01;
         assert_eq!(
-            verifier.validate_issued_certificate(
+            verifier.validate_issued_certificate_for_binding(
                 &wrong_serial,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
@@ -994,11 +1021,10 @@ mod tests {
         let mut wrong_expiry = fixture.issued.clone();
         wrong_expiry.not_after_unix_ms += 1_000;
         assert_eq!(
-            verifier.validate_issued_certificate(
+            verifier.validate_issued_certificate_for_binding(
                 &wrong_expiry,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
@@ -1008,11 +1034,10 @@ mod tests {
             .certificate_der
             .resize(MAX_CERTIFICATE_DER_BYTES + 1, 0);
         assert_eq!(
-            verifier.validate_issued_certificate(
+            verifier.validate_issued_certificate_for_binding(
                 &oversized_leaf,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
@@ -1022,11 +1047,10 @@ mod tests {
             .ca_chain_der
             .push(vec![0; MAX_CHAIN_DER_BYTES + 1]);
         assert_eq!(
-            verifier.validate_issued_certificate(
+            verifier.validate_issued_certificate_for_binding(
                 &oversized_chain,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
@@ -1036,22 +1060,20 @@ mod tests {
     fn expired_or_non_client_auth_leaf_is_rejected() {
         let expired = test_certificate(true, true);
         assert_eq!(
-            validator(expired.root_der.clone()).validate_issued_certificate(
+            validator(expired.root_der.clone()).validate_issued_certificate_for_binding(
                 &expired.issued,
                 &expired.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
 
         let no_client_auth = test_certificate(false, false);
         assert_eq!(
-            validator(no_client_auth.root_der.clone()).validate_issued_certificate(
+            validator(no_client_auth.root_der.clone()).validate_issued_certificate_for_binding(
                 &no_client_auth.issued,
                 &no_client_auth.binding,
                 TEST_NOW_UNIX_MS,
-                &good_revocation(),
             ),
             Err(DeviceCertificateValidationError::InvalidCertificate)
         );
@@ -1060,23 +1082,28 @@ mod tests {
     #[test]
     fn revoked_and_unknown_status_never_accept_the_certificate() {
         let fixture = test_certificate(false, true);
-        let validator = validator(fixture.root_der.clone());
+        let revoked_validator = validator_with_revocation(
+            fixture.root_der.clone(),
+            Err(DeviceCertificateRevocationCheckError::Revoked),
+        );
+        let unknown_validator = validator_with_revocation(
+            fixture.root_der.clone(),
+            Err(DeviceCertificateRevocationCheckError::Unknown),
+        );
 
         assert_eq!(
-            validator.validate_issued_certificate(
+            revoked_validator.validate_issued_certificate_for_binding(
                 &fixture.issued,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &TestRevocationChecker(Err(DeviceCertificateRevocationCheckError::Revoked)),
             ),
             Err(DeviceCertificateValidationError::Revoked)
         );
         assert_eq!(
-            validator.validate_issued_certificate(
+            unknown_validator.validate_issued_certificate_for_binding(
                 &fixture.issued,
                 &fixture.binding,
                 TEST_NOW_UNIX_MS,
-                &TestRevocationChecker(Err(DeviceCertificateRevocationCheckError::Unknown)),
             ),
             Err(DeviceCertificateValidationError::RevocationStatusUnknown)
         );

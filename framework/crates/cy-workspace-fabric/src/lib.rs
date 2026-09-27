@@ -34,8 +34,8 @@ pub mod user_code_attempt_limiter_postgres;
 // available without wiring a production signer that does not exist yet.
 #[allow(dead_code)]
 pub(crate) mod device_certificate_authority;
-// This verifier also remains disconnected until a CA, trust roots, and a
-// current revocation-status provider are configured.
+// Issuance validation is mandatory in the composite service; host routes stay
+// disconnected until trusted CA and current revocation providers exist.
 #[allow(dead_code)]
 pub(crate) mod device_certificate_validation;
 // This inbound peer validator remains disconnected until Relay supplies a
@@ -90,6 +90,10 @@ pub use device_auth::{
 };
 pub use device_authorization_postgres::{
     DeviceAuthorizationPostgresError, PostgresDeviceAuthorizationStore,
+};
+pub use device_certificate_validation::{
+    DeviceCertificateRevocationCheckError, DeviceCertificateRevocationChecker,
+    DeviceCertificateRevocationQuery,
 };
 pub use device_csr_validator::ProductionDeviceCsrValidator;
 pub use device_enrollment_authorization_service::{

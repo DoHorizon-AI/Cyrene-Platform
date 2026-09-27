@@ -19,6 +19,7 @@ use cy_proto::workspace_v1::UserIdentityRef;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::device_certificate_validation::DeviceCertificateValidationError;
 use crate::relay_peer_certificate_validation::AuthenticatedRelayWorkspaceDevice;
 use crate::{UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest};
 
@@ -674,6 +675,7 @@ pub struct DeviceCertificateDeliveryAcknowledgement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceCertificateRetirementReason {
     MisboundCertificate,
+    CertificateValidationFailed,
     DeliveryDeadlineReached,
     CertificateExpiredBeforeDelivery,
     RegistrationRotated,
@@ -684,6 +686,7 @@ pub enum DeviceCertificateRetirementReason {
 pub enum DeviceCertificateIssuanceFailure {
     SignerRejectedWithoutCommit,
     MisboundCertificateRetired,
+    CertificateValidationFailedRetired,
     CertificateExpiredBeforeDeliveryRetired,
 }
 
@@ -1751,6 +1754,22 @@ pub trait DeviceCertificateIssuer: Send + Sync {
     ) -> Result<IssuedDeviceCertificate, DeviceCertificateIssuanceError>;
 }
 
+/// Validates a successful issuer response against persisted Directory authority.
+///
+/// Implementations must verify the exact leaf DER, chain, identity profile,
+/// validity interval, declared issuer metadata, and current good revocation
+/// state. An unavailable or inconclusive check is an error and the issuer
+/// response is quarantined for retirement instead of delivery.
+pub(crate) trait DeviceIssuedCertificateValidator: Send + Sync {
+    fn validate_issued_certificate(
+        &self,
+        issued: &IssuedDeviceCertificate,
+        authorization_id: &DeviceAuthorizationId,
+        registration_binding: &DeviceAuthorizationRegistrationBinding,
+        now_unix_ms: u64,
+    ) -> Result<(), DeviceCertificateValidationError>;
+}
+
 /// Signer result distinguishes definite no-commit from an ambiguous outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DeviceCertificateIssuanceError {
@@ -1951,6 +1970,21 @@ pub struct DeviceAuthorizationManager<S, L> {
     limiter: L,
     user_code_keys: UserCodeKeyRing,
     policy: DeviceAuthorizationPolicy,
+    certificate_validator: Arc<dyn DeviceIssuedCertificateValidator>,
+}
+
+struct UnconfiguredDeviceIssuedCertificateValidator;
+
+impl DeviceIssuedCertificateValidator for UnconfiguredDeviceIssuedCertificateValidator {
+    fn validate_issued_certificate(
+        &self,
+        _issued: &IssuedDeviceCertificate,
+        _authorization_id: &DeviceAuthorizationId,
+        _registration_binding: &DeviceAuthorizationRegistrationBinding,
+        _now_unix_ms: u64,
+    ) -> Result<(), DeviceCertificateValidationError> {
+        Err(DeviceCertificateValidationError::RevocationStatusUnknown)
+    }
 }
 
 impl<S, L> DeviceAuthorizationManager<S, L>
@@ -1961,12 +1995,34 @@ where
     /// Creates a state machine with validated timing, rate limits, and keys.
     ///
     /// The injected key ring must contain every key version referenced by the
-    /// store before the manager can serve user-code lookups.
+    /// store before the manager can serve user-code lookups. This constructor
+    /// has no certificate validator and therefore fails closed if it receives
+    /// an issuer response.
     pub fn new(
         store: S,
         limiter: L,
         user_code_keys: UserCodeKeyRing,
         policy: DeviceAuthorizationPolicy,
+    ) -> Result<Self, DeviceAuthorizationError> {
+        Self::new_with_certificate_validator(
+            store,
+            limiter,
+            user_code_keys,
+            policy,
+            Arc::new(UnconfiguredDeviceIssuedCertificateValidator),
+        )
+    }
+
+    /// Creates a state machine with an explicit issued-certificate validator.
+    ///
+    /// Production issuance must use this constructor with a validator built
+    /// from configured client-CA roots and a current-good revocation checker.
+    pub(crate) fn new_with_certificate_validator(
+        store: S,
+        limiter: L,
+        user_code_keys: UserCodeKeyRing,
+        policy: DeviceAuthorizationPolicy,
+        certificate_validator: Arc<dyn DeviceIssuedCertificateValidator>,
     ) -> Result<Self, DeviceAuthorizationError> {
         if !policy.is_valid() {
             return Err(DeviceAuthorizationError::InvalidPolicy);
@@ -1980,6 +2036,7 @@ where
             limiter,
             user_code_keys,
             policy,
+            certificate_validator,
         })
     }
 
@@ -2847,15 +2904,69 @@ where
         };
 
         let certificate_sha256 = sha256(&certificate.certificate_der);
-        if certificate.certificate_der.is_empty()
+        let declared_binding_mismatch = certificate.certificate_der.is_empty()
             || certificate.serial_number.is_empty()
             || certificate.registration_binding_id != *record.registration_binding.binding_id()
             || certificate.device_key != *record.registration_binding.key()
             || certificate.authorization_generation
                 != record.registration_binding.authorization_generation()
             || certificate.scope != record.scope
-            || certificate.spki_sha256 != *record.registration_binding.spki_sha256()
-        {
+            || certificate.spki_sha256 != *record.registration_binding.spki_sha256();
+
+        let delivery_started_at_unix_ms = match ports.current_unix_ms() {
+            Ok(now_unix_ms) => now_unix_ms,
+            Err(_) => {
+                return self.quarantine_issued_certificate(
+                    record,
+                    DeviceAuthorizationState::RetirementPending {
+                        approval_id,
+                        approver,
+                        certificate,
+                        certificate_sha256,
+                        delivery_id: None,
+                        delivered_receipt: None,
+                        reason: DeviceCertificateRetirementReason::CertificateValidationFailed,
+                        entered_at_unix_ms: issued_at_unix_ms,
+                        last_failure: None,
+                    },
+                    ports,
+                )
+            }
+        };
+        let validation_result = self.certificate_validator.validate_issued_certificate(
+            &certificate,
+            &record.id,
+            &record.registration_binding,
+            delivery_started_at_unix_ms,
+        );
+        if validation_result.is_err() {
+            let reason = if declared_binding_mismatch {
+                DeviceCertificateRetirementReason::MisboundCertificate
+            } else if certificate.not_after_unix_ms <= issued_at_unix_ms
+                || certificate.not_after_unix_ms <= delivery_started_at_unix_ms
+            {
+                DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery
+            } else {
+                DeviceCertificateRetirementReason::CertificateValidationFailed
+            };
+            return self.quarantine_issued_certificate(
+                record,
+                DeviceAuthorizationState::RetirementPending {
+                    approval_id,
+                    approver,
+                    certificate,
+                    certificate_sha256,
+                    delivery_id: None,
+                    delivered_receipt: None,
+                    reason,
+                    entered_at_unix_ms: delivery_started_at_unix_ms,
+                    last_failure: None,
+                },
+                ports,
+            );
+        }
+
+        if declared_binding_mismatch {
             return self.quarantine_issued_certificate(
                 record,
                 DeviceAuthorizationState::RetirementPending {
@@ -2866,18 +2977,15 @@ where
                     delivery_id: None,
                     delivered_receipt: None,
                     reason: DeviceCertificateRetirementReason::MisboundCertificate,
-                    entered_at_unix_ms: issued_at_unix_ms,
+                    entered_at_unix_ms: delivery_started_at_unix_ms,
                     last_failure: None,
                 },
                 ports,
             );
         }
 
-        // The signer may return after the certificate's validity window has
-        // ended. Never publish an already expired certificate.
-        let delivery_started_at_unix_ms = ports
-            .current_unix_ms()
-            .map_err(|_| DeviceAuthorizationError::ClockUnavailable)?;
+        // The validator parses validity from the exact leaf DER and rejects
+        // expired leaves; these metadata guards also bound the delivery TTL.
         if certificate.not_after_unix_ms <= issued_at_unix_ms
             || certificate.not_after_unix_ms <= delivery_started_at_unix_ms
         {
@@ -2897,6 +3005,7 @@ where
                 ports,
             );
         }
+
         let delivery_deadline_unix_ms = delivery_started_at_unix_ms
             .saturating_add(MAX_CERTIFICATE_DELIVERY_TTL_MS)
             .min(certificate.not_after_unix_ms);
@@ -3170,6 +3279,16 @@ where
                             approver: approver.clone(),
                             failed_at_unix_ms: retirement_entered_at(&record.state),
                             failure: DeviceCertificateIssuanceFailure::MisboundCertificateRetired,
+                            certificate_sha256: Some(certificate_sha256),
+                        }
+                    }
+                    DeviceCertificateRetirementReason::CertificateValidationFailed => {
+                        DeviceAuthorizationState::IssuanceFailed {
+                            approval_id,
+                            approver: approver.clone(),
+                            failed_at_unix_ms: retirement_entered_at(&record.state),
+                            failure: DeviceCertificateIssuanceFailure::
+                                CertificateValidationFailedRetired,
                             certificate_sha256: Some(certificate_sha256),
                         }
                     }
@@ -4247,6 +4366,7 @@ fn state_error(state: &DeviceAuthorizationState) -> DeviceAuthorizationError {
 fn issuance_failure_error(failure: DeviceCertificateIssuanceFailure) -> DeviceAuthorizationError {
     match failure {
         DeviceCertificateIssuanceFailure::SignerRejectedWithoutCommit
+        | DeviceCertificateIssuanceFailure::CertificateValidationFailedRetired
         | DeviceCertificateIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
             DeviceAuthorizationError::CertificateSigningFailed
         }
@@ -4468,6 +4588,7 @@ fn retirement_transition_allowed(
                 delivery_id: None,
                 reason:
                     DeviceCertificateRetirementReason::MisboundCertificate
+                    | DeviceCertificateRetirementReason::CertificateValidationFailed
                     | DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery,
                 ..
             },
@@ -4613,6 +4734,9 @@ fn retirement_state_already_resolved(
                     (
                         DeviceCertificateRetirementReason::MisboundCertificate,
                         DeviceCertificateIssuanceFailure::MisboundCertificateRetired
+                    ) | (
+                        DeviceCertificateRetirementReason::CertificateValidationFailed,
+                        DeviceCertificateIssuanceFailure::CertificateValidationFailedRetired
                     ) | (
                         DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery,
                         DeviceCertificateIssuanceFailure::CertificateExpiredBeforeDeliveryRetired
@@ -5334,6 +5458,20 @@ mod tests {
         }
     }
 
+    struct TestIssuedCertificateValidator;
+
+    impl DeviceIssuedCertificateValidator for TestIssuedCertificateValidator {
+        fn validate_issued_certificate(
+            &self,
+            _issued: &IssuedDeviceCertificate,
+            _authorization_id: &DeviceAuthorizationId,
+            _registration_binding: &DeviceAuthorizationRegistrationBinding,
+            _now_unix_ms: u64,
+        ) -> Result<(), DeviceCertificateValidationError> {
+            Ok(())
+        }
+    }
+
     fn manager(
     ) -> DeviceAuthorizationManager<InMemoryDeviceAuthorizationStore, InMemoryUserCodeAttemptLimiter>
     {
@@ -5344,11 +5482,12 @@ mod tests {
         store: InMemoryDeviceAuthorizationStore,
     ) -> DeviceAuthorizationManager<InMemoryDeviceAuthorizationStore, InMemoryUserCodeAttemptLimiter>
     {
-        DeviceAuthorizationManager::new(
+        DeviceAuthorizationManager::new_with_certificate_validator(
             store,
             InMemoryUserCodeAttemptLimiter::default(),
             test_user_code_key_ring(),
             test_policy(),
+            Arc::new(TestIssuedCertificateValidator),
         )
         .expect("valid test policy")
     }
@@ -5629,11 +5768,12 @@ mod tests {
         let store = InMemoryDeviceAuthorizationStore::default();
         let old_ring =
             UserCodeKeyRing::new(1, BTreeMap::from([(1, [0x11; 32])])).expect("old key ring");
-        let old_manager = DeviceAuthorizationManager::new(
+        let old_manager = DeviceAuthorizationManager::new_with_certificate_validator(
             store.clone(),
             InMemoryUserCodeAttemptLimiter::default(),
             old_ring,
             test_policy(),
+            Arc::new(TestIssuedCertificateValidator),
         )
         .expect("manager with old version");
         let old_authorization = start(&old_manager);
@@ -5641,11 +5781,12 @@ mod tests {
         let rotated_ring =
             UserCodeKeyRing::new(2, BTreeMap::from([(1, [0x11; 32]), (2, [0x22; 32])]))
                 .expect("rotated key ring retains old key");
-        let rotated_manager = DeviceAuthorizationManager::new(
+        let rotated_manager = DeviceAuthorizationManager::new_with_certificate_validator(
             store.clone(),
             InMemoryUserCodeAttemptLimiter::default(),
             rotated_ring,
             test_policy(),
+            Arc::new(TestIssuedCertificateValidator),
         )
         .expect("manager accepts all stored versions");
         rotated_manager
@@ -5675,11 +5816,12 @@ mod tests {
         let missing_old_key =
             UserCodeKeyRing::new(2, BTreeMap::from([(2, [0x22; 32])])).expect("new-only key ring");
         assert!(matches!(
-            DeviceAuthorizationManager::new(
+            DeviceAuthorizationManager::new_with_certificate_validator(
                 store,
                 InMemoryUserCodeAttemptLimiter::default(),
                 missing_old_key,
                 test_policy(),
+                Arc::new(TestIssuedCertificateValidator),
             ),
             Err(DeviceAuthorizationError::UserCodeKeysUnavailable)
         ));
@@ -6552,11 +6694,12 @@ mod tests {
     #[test]
     fn legacy_store_defaults_fail_closed_for_registered_start() {
         let inner = InMemoryDeviceAuthorizationStore::default();
-        let manager = DeviceAuthorizationManager::new(
+        let manager = DeviceAuthorizationManager::new_with_certificate_validator(
             LegacyDeviceAuthorizationStore(inner.clone()),
             InMemoryUserCodeAttemptLimiter::default(),
             test_user_code_key_ring(),
             test_policy(),
+            Arc::new(TestIssuedCertificateValidator),
         )
         .expect("valid test policy");
         let request_scope = scope();
@@ -6581,11 +6724,12 @@ mod tests {
     #[test]
     fn atomic_registration_recovery_store_defaults_fail_closed() {
         let inner = InMemoryDeviceAuthorizationStore::default();
-        let manager = DeviceAuthorizationManager::new(
+        let manager = DeviceAuthorizationManager::new_with_certificate_validator(
             LegacyDeviceAuthorizationStore(inner.clone()),
             InMemoryUserCodeAttemptLimiter::default(),
             test_user_code_key_ring(),
             test_policy(),
+            Arc::new(TestIssuedCertificateValidator),
         )
         .expect("valid test policy");
         let csr_der = b"test-only-csr".to_vec();
@@ -6673,11 +6817,12 @@ mod tests {
             result => panic!("unexpected poll result: {result:?}"),
         };
 
-        let legacy_manager = DeviceAuthorizationManager::new(
+        let legacy_manager = DeviceAuthorizationManager::new_with_certificate_validator(
             LegacyDeviceAuthorizationStore(inner),
             InMemoryUserCodeAttemptLimiter::default(),
             test_user_code_key_ring(),
             test_policy(),
+            Arc::new(TestIssuedCertificateValidator),
         )
         .expect("valid test policy");
         assert_eq!(

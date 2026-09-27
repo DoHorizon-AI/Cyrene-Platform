@@ -54,6 +54,7 @@ const MAX_REQUEST_OPTIONS_BYTES: usize = 1024 * 1024;
 const MAX_CERTIFICATE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERIAL_NUMBER_BYTES: usize = 256;
 const MAX_CA_CHAIN_CERTIFICATES: usize = 8;
+const MAX_CERTIFICATE_IDENTITY_FIELD_BYTES: usize = 8 * 1024;
 // Vec<u8> JSON encoding can expand each DER byte to four characters. Keep the
 // bundle below the database payload limit with room for the typed state fields.
 const MAX_CERTIFICATE_BUNDLE_BYTES: usize = 6 * 1024 * 1024;
@@ -2921,6 +2922,7 @@ impl From<StoredDeliveryReceipt> for DeviceCertificateDeliveryReceipt {
 #[serde(rename_all = "snake_case")]
 enum StoredRetirementReason {
     MisboundCertificate,
+    CertificateValidationFailed,
     DeliveryDeadlineReached,
     CertificateExpiredBeforeDelivery,
     RegistrationRotated,
@@ -2930,6 +2932,9 @@ impl From<DeviceCertificateRetirementReason> for StoredRetirementReason {
     fn from(reason: DeviceCertificateRetirementReason) -> Self {
         match reason {
             DeviceCertificateRetirementReason::MisboundCertificate => Self::MisboundCertificate,
+            DeviceCertificateRetirementReason::CertificateValidationFailed => {
+                Self::CertificateValidationFailed
+            }
             DeviceCertificateRetirementReason::DeliveryDeadlineReached => {
                 Self::DeliveryDeadlineReached
             }
@@ -2945,6 +2950,9 @@ impl From<StoredRetirementReason> for DeviceCertificateRetirementReason {
     fn from(reason: StoredRetirementReason) -> Self {
         match reason {
             StoredRetirementReason::MisboundCertificate => Self::MisboundCertificate,
+            StoredRetirementReason::CertificateValidationFailed => {
+                Self::CertificateValidationFailed
+            }
             StoredRetirementReason::DeliveryDeadlineReached => Self::DeliveryDeadlineReached,
             StoredRetirementReason::CertificateExpiredBeforeDelivery => {
                 Self::CertificateExpiredBeforeDelivery
@@ -2959,6 +2967,7 @@ impl From<StoredRetirementReason> for DeviceCertificateRetirementReason {
 enum StoredIssuanceFailure {
     SignerRejectedWithoutCommit,
     MisboundCertificateRetired,
+    CertificateValidationFailedRetired,
     CertificateExpiredBeforeDeliveryRetired,
 }
 
@@ -2970,6 +2979,9 @@ impl From<DeviceCertificateIssuanceFailure> for StoredIssuanceFailure {
             }
             DeviceCertificateIssuanceFailure::MisboundCertificateRetired => {
                 Self::MisboundCertificateRetired
+            }
+            DeviceCertificateIssuanceFailure::CertificateValidationFailedRetired => {
+                Self::CertificateValidationFailedRetired
             }
             DeviceCertificateIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
                 Self::CertificateExpiredBeforeDeliveryRetired
@@ -2983,6 +2995,9 @@ impl From<StoredIssuanceFailure> for DeviceCertificateIssuanceFailure {
         match failure {
             StoredIssuanceFailure::SignerRejectedWithoutCommit => Self::SignerRejectedWithoutCommit,
             StoredIssuanceFailure::MisboundCertificateRetired => Self::MisboundCertificateRetired,
+            StoredIssuanceFailure::CertificateValidationFailedRetired => {
+                Self::CertificateValidationFailedRetired
+            }
             StoredIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
                 Self::CertificateExpiredBeforeDeliveryRetired
             }
@@ -3149,22 +3164,36 @@ impl StoredCertificate {
         }
     }
 
-    fn is_valid(&self, scope: &DeviceAuthorizationScope, spki_sha256: &[u8; 32]) -> bool {
+    fn is_bounded_issued_response(&self) -> bool {
         let chain_bytes = self
             .ca_chain_der
             .iter()
             .try_fold(self.certificate_der.len(), |total, certificate| {
                 total.checked_add(certificate.len())
             });
-        !self.certificate_der.is_empty()
-            && self.certificate_der.len() <= MAX_CERTIFICATE_BYTES
+        self.certificate_der.len() <= MAX_CERTIFICATE_BYTES
             && self.ca_chain_der.len() <= MAX_CA_CHAIN_CERTIFICATES
-            && self.ca_chain_der.iter().all(|certificate| {
-                !certificate.is_empty() && certificate.len() <= MAX_CERTIFICATE_BYTES
-            })
+            && self
+                .ca_chain_der
+                .iter()
+                .all(|certificate| certificate.len() <= MAX_CERTIFICATE_BYTES)
             && chain_bytes.is_some_and(|total| total <= MAX_CERTIFICATE_BUNDLE_BYTES)
-            && !self.serial_number.is_empty()
             && self.serial_number.len() <= MAX_SERIAL_NUMBER_BYTES
+            && self.device_key.organization_id.len() <= MAX_CERTIFICATE_IDENTITY_FIELD_BYTES
+            && self.device_key.workspace_id.len() <= MAX_CERTIFICATE_IDENTITY_FIELD_BYTES
+            && self.device_key.device_id.len() <= MAX_CERTIFICATE_IDENTITY_FIELD_BYTES
+            && self.scope.organization_id.len() <= MAX_CERTIFICATE_IDENTITY_FIELD_BYTES
+            && self.scope.workspace_id.len() <= MAX_CERTIFICATE_IDENTITY_FIELD_BYTES
+    }
+
+    fn is_valid(&self, scope: &DeviceAuthorizationScope, spki_sha256: &[u8; 32]) -> bool {
+        self.is_bounded_issued_response()
+            && !self.certificate_der.is_empty()
+            && self
+                .ca_chain_der
+                .iter()
+                .all(|certificate| !certificate.is_empty())
+            && !self.serial_number.is_empty()
             && !self.device_key.device_id.trim().is_empty()
             && self.device_key.organization_id == self.scope.organization_id
             && self.device_key.workspace_id == self.scope.workspace_id
@@ -3421,10 +3450,11 @@ impl StoredAuthorizationState {
 
     fn matches_registration(&self, binding: &DeviceAuthorizationRegistrationBinding) -> bool {
         match self {
-            Self::DeliveryPending { certificate, .. }
-            | Self::RetirementPending { certificate, .. } => {
-                certificate.matches_registration(binding)
-            }
+            Self::DeliveryPending { certificate, .. } => certificate.matches_registration(binding),
+            // Retirement is quarantine state. Preserve a bounded issuer
+            // response even when its declared Directory tuple is the reason
+            // it must be retired.
+            Self::RetirementPending { certificate, .. } => certificate.is_bounded_issued_response(),
             Self::Delivered {
                 receipt,
                 certificate,
@@ -3552,13 +3582,14 @@ impl StoredAuthorizationState {
                 ..
             } => {
                 approver.is_valid()
-                    && certificate.is_valid(scope, spki_sha256)
+                    && certificate.is_bounded_issued_response()
                     && sha256(&certificate.certificate_der) == *certificate_sha256
                     && match reason {
                         StoredRetirementReason::DeliveryDeadlineReached => {
                             delivery_id.is_some() && delivered_receipt.is_none()
                         }
                         StoredRetirementReason::MisboundCertificate
+                        | StoredRetirementReason::CertificateValidationFailed
                         | StoredRetirementReason::CertificateExpiredBeforeDelivery => {
                             delivery_id.is_none() && delivered_receipt.is_none()
                         }
@@ -3596,6 +3627,7 @@ impl StoredAuthorizationState {
                             certificate_sha256.is_none()
                         }
                         StoredIssuanceFailure::MisboundCertificateRetired
+                        | StoredIssuanceFailure::CertificateValidationFailedRetired
                         | StoredIssuanceFailure::CertificateExpiredBeforeDeliveryRetired => {
                             certificate_sha256.is_some()
                         }

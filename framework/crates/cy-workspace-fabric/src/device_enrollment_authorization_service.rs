@@ -36,6 +36,9 @@ use crate::device_authorization::{
     WebAuthnAuthenticationPort, WebAuthnAuthenticationStart, WorkspaceMembershipPort,
 };
 use crate::device_authorization_postgres::PostgresDeviceAuthorizationStore;
+use crate::device_certificate_validation::{
+    DeviceCertificateResponseValidator, DeviceCertificateRevocationChecker,
+};
 use crate::device_enrollment_http::{
     AcknowledgeDeviceDeliveryCommand, CompleteApprovalHttpResponse,
     DeviceEnrollmentAuthorizationPort, DeviceEnrollmentAuthorizationSnapshot,
@@ -102,6 +105,10 @@ pub struct DeviceEnrollmentAuthorizationServiceConfig {
     pub registry: Arc<PostgresWorkspaceDeviceRegistry>,
     /// Trusted issuer metadata parser for the exact issued leaf DER.
     pub certificate_metadata: Arc<dyn DeviceCertificatePublicMetadataPort>,
+    /// Private client-CA trust anchors used to validate every issuer response.
+    pub device_certificate_trust_roots_der: Vec<Vec<u8>>,
+    /// Checker that proves current good revocation status for the exact leaf and path.
+    pub device_certificate_revocation_checker: Arc<dyn DeviceCertificateRevocationChecker>,
     /// Runtime-injected user-code HMAC key ring.
     pub user_code_keys: crate::UserCodeKeyRing,
     /// Bounded device-authorization timing and abuse policy.
@@ -287,18 +294,34 @@ impl DeviceEnrollmentAuthorizationService {
             retirement,
             registry,
             certificate_metadata,
+            device_certificate_trust_roots_der,
+            device_certificate_revocation_checker,
             user_code_keys,
             policy,
         } = config;
+        let certificate_validator = Arc::new(
+            DeviceCertificateResponseValidator::new(
+                device_certificate_trust_roots_der,
+                device_certificate_revocation_checker,
+            )
+            .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?,
+        );
         let limiter_state = Arc::new(Mutex::new(None));
         let limiter = RequestScopedLimiter {
             state: Arc::clone(&limiter_state),
         };
         let manager_store = Arc::clone(&store);
         let manager_keys = user_code_keys.clone();
+        let manager_certificate_validator = Arc::clone(&certificate_validator);
         let manager = tokio::task::spawn_blocking(move || {
-            DeviceAuthorizationManager::new(manager_store, limiter, manager_keys, policy.clone())
-                .map(|manager| (manager, policy))
+            DeviceAuthorizationManager::new_with_certificate_validator(
+                manager_store,
+                limiter,
+                manager_keys,
+                policy.clone(),
+                manager_certificate_validator,
+            )
+            .map(|manager| (manager, policy))
         })
         .await
         .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?

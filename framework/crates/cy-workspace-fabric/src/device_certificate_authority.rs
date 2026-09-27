@@ -27,8 +27,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::device_authorization::{
-    DeviceAuthorizationId, DeviceAuthorizationPortError, DeviceAuthorizationScope,
-    DeviceCsrValidator,
+    DeviceAuthorizationId, DeviceAuthorizationPortError, DeviceAuthorizationRegistrationBinding,
+    DeviceAuthorizationScope, DeviceCsrValidator,
 };
 use crate::device_registry::WorkspaceDeviceKey;
 use crate::durable_directory::DeviceRegistrationBinding;
@@ -72,6 +72,30 @@ impl fmt::Debug for DeviceCertificateIssuanceBinding {
 }
 
 impl DeviceCertificateIssuanceBinding {
+    /// Copy the expected issuance tuple from the persisted Directory binding.
+    ///
+    /// This constructor is used after signing to validate the exact issuer
+    /// response. The authorization ID and registration binding are loaded
+    /// from durable authorization state, never from the issuer response.
+    pub(crate) fn from_authorization_binding(
+        authorization_id: DeviceAuthorizationId,
+        registration_binding: &DeviceAuthorizationRegistrationBinding,
+    ) -> Self {
+        let key = registration_binding.key();
+        Self {
+            authorization_id,
+            registration_binding_id: *registration_binding.binding_id(),
+            device_key: WorkspaceDeviceKey {
+                organization_id: key.organization_id.clone(),
+                workspace_id: key.workspace_id.clone(),
+                device_id: key.device_id.clone(),
+            },
+            authorization_generation: registration_binding.authorization_generation(),
+            csr_sha256: *registration_binding.csr_sha256(),
+            spki_sha256: *registration_binding.spki_sha256(),
+        }
+    }
+
     pub(crate) fn authorization_id(&self) -> &DeviceAuthorizationId {
         &self.authorization_id
     }
