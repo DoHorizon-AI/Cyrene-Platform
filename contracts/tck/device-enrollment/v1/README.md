@@ -12,7 +12,7 @@ the OpenAPI file defines paths, JSON shapes, and HTTP status mappings.
 | `authorization_id` | One enrollment or rotation attempt; binds scope, exact CSR digest, and CSR SPKI digest. | No |
 | `authorization_generation` | Monotonic per-device generation for each new authorization or certificate rotation. | No |
 | `device_code_generation` | Monotonic same-authorization recovery revision; fences stale start responses after code rotation. | No |
-| `registration_key` | Fresh client-generated 256-bit secret bound to one exact authorization tuple and used to recover a lost start response. | Yes, start/recovery only |
+| `registration_key` | Fresh client-generated 256-bit secret bound to one exact authorization tuple; same-key recovery is for initial enrollment only. | Yes, initial start/recovery only |
 | `approval_id` | One server-stored WebAuthn challenge attempt. | No, without the trusted user session and assertion |
 | `device_code` | Current 256-bit secret returned to the device; recovery rotates it under the same authorization. | Yes, for poll and delivery ACK |
 | `user_code` | Human-entered, rate-limited authorization lookup value. | No; it cannot poll or approve |
@@ -56,11 +56,17 @@ The canonical endpoint and schema mapping is
    any late response with a lower `device_code_generation`. Reusing the key with
    a different scope or CSR, or after denial, delivery ACK, delivery expiry, or
    authorization expiry, is a conflict. Recovery is rate-limited and bounded
-   by authorization TTL and configured attempt count. A new authorization or
-   rotation uses a new key and increments `authorization_generation`; a
-   same-key retry after losing a rotation response only increments
-   `device_code_generation`. Active devices use the mTLS rotation route for a
-   fresh authorization. The response contains
+   by authorization TTL and configured attempt count. This same-key recovery
+   applies only to initial enrollment. A rotation uses a fresh key and increments
+   `authorization_generation`; once committed, the predecessor generation is
+   stale and the key cannot recover a lost response. Submitting a rotation key
+   to the initial-enrollment endpoint conflicts without changing state or codes.
+   V1 has no automatic
+   post-commit rotation recovery endpoint. Retry is permitted only after a known
+   pre-commit failure while the predecessor remains current; an ambiguous or
+   post-commit lost response requires a trusted manual/device process outside
+   this contract, and a stale-peer retry is rejected. Active devices use the
+   mTLS rotation route for a fresh authorization. The response contains
    `device_id`, `authorization_id`, `authorization_generation`,
    `device_code_generation`, `csr_sha256`,
    `device_code`, `user_code`,
@@ -147,12 +153,12 @@ These issuance and ACK rules are contract requirements, not full runtime
 evidence. The manager has a locally testable ACK-backed delivery/retirement
 state machine, and the HTTP route layer now accepts explicit application ports
 and fails closed when the atomic registration transaction is absent. Production
-Directory identity mapping with same-authorization recovery-key code rotation,
-cross-process persistence, CA, registry activation, and host composition are
-still missing; end-to-end enrollment remains pending those adapters. The mTLS
-rotation handler is a target contract only and is not mounted by this state/
-poll slice. Once mounted, it must return 503 without verified-peer and atomic
-Directory/authorization transaction adapters; no registration state may change.
+CA, registry activation, and host composition are still missing; end-to-end
+enrollment remains pending those adapters. The private mTLS rotation handler
+exists but is intentionally unmounted until trusted inbound-auth composition
+and its production transaction provider are wired. If reached without the
+required verified-peer and atomic Directory/authorization/retirement provider,
+it returns 503 before changing registration state.
 
 ## Rotation and revocation
 
@@ -246,7 +252,7 @@ HTTP 上的 `authorization_id` 是服务端生成的 128-bit 值的规范无填�
 
 规范 endpoint 和 schema 映射见 [`openapi.yaml`](../../../http/device-enrollment/v1/openapi.yaml)。
 
-1. `POST /v1/device-authorizations` 校验确切的 organization/workspace、DER PKCS#10 CSR、proof of possession、调用方给出的 32-byte `csr_spki_sha256`，以及客户端新生成的 256-bit secret `registration_key`。服务端重新解析 CSR；SPKI digest 不匹配时必须在保存授权之前拒绝，并自行计算精确 CSR digest。Directory 将 registration key 的 domain-separated digest 绑定到唯一的 scope/CSR/SPKI 元组并分配 `device_id`。若 start 响应丢失，使用同 key 和确切元组重试会保留相同 `authorization_id`、`authorization_generation`、CA 幂等键和已签证书；CAS 轮换 device/user codes 并递增 `device_code_generation`，使旧 codes 失效，但不重置审批或签发状态。若 WebAuthn 验证或 CA 签发正在进行，恢复必须保留原授权并返回同一证书或显式 pending，不能创建第二次签发。客户端忽略任何 `device_code_generation` 较低的迟到响应。key 若用于其他 scope/CSR，或在 denial、delivery ACK、delivery expiry 或授权 expiry 后重用，则返回 conflict。恢复受授权 TTL、频率与总次数限制。新授权/轮换使用新的 registration key 并递增 `authorization_generation`；同 key 的丢响应恢复只递增 `device_code_generation`。Active 设备创建新授权时使用 mTLS rotation route。响应包含 `device_id`、`authorization_id`、`authorization_generation`、`device_code_generation`、`csr_sha256`、`device_code`、`user_code`、`verification_uri`、可选的完整 URI、poll interval 和 expiry。
+1. `POST /v1/device-authorizations` 校验确切的 organization/workspace、DER PKCS#10 CSR、proof of possession、调用方给出的 32-byte `csr_spki_sha256`，以及客户端新生成的 256-bit secret `registration_key`。服务端重新解析 CSR；SPKI digest 不匹配时必须在保存授权之前拒绝，并自行计算精确 CSR digest。Directory 将 registration key 的 domain-separated digest 绑定到唯一的 scope/CSR/SPKI 元组并分配 `device_id`。初次注册 start 响应丢失时，使用同 key 和确切元组重试会保留相同 `authorization_id`、`authorization_generation`、CA 幂等键和已签证书；CAS 轮换 device/user codes 并递增 `device_code_generation`，使旧 codes 失效，但不重置审批或签发状态。若 WebAuthn 验证或 CA 签发正在进行，恢复必须保留原授权并返回同一证书或显式 pending，不能创建第二次签发。客户端忽略任何 `device_code_generation` 较低的迟到响应。key 若用于其他 scope/CSR，或在 denial、delivery ACK、delivery expiry 或授权 expiry 后重用，则返回 conflict。恢复受授权 TTL、频率与总次数限制。客户端在轮换时必须使用新 key 并递增 `authorization_generation`；该 key 只用于建立轮换授权，提交后不能恢复丢失的轮换响应。初次注册 endpoint 收到轮换 key 时必须冲突，且不改变状态或 codes。只有已知事务在提交前失败且前任 peer 仍 current 时才可重试；结果不明确或提交后丢响应需要 v1 未定义的可信人工/设备恢复流程。Active 设备创建新授权时使用 mTLS rotation route。响应包含 `device_id`、`authorization_id`、`authorization_generation`、`device_code_generation`、`csr_sha256`、`device_code`、`user_code`、`verification_uri`、可选的完整 URI、poll interval 和 expiry。
 2. 用户打开 verification URI，通过已配置的交互式身份边界登录，并提交 `user_code` 与确切 scope。服务端从 session 派生 `UserIdentityRef`，并重新检查当前 membership。请求 body 不能指定 approver。
 3. 配置的 WebAuthn verifier 创建浏览器 `PublicKeyCredentialRequestOptions` 与仅存于服务端的 opaque state，并将 state 绑定到 approval ID、user、authorization、scope、精确 CSR digest 和 SPKI digest。只有 options 会发送到浏览器。`approval_id` 仅用于查找已保存 state，不是凭证。首次 finish 必须包含 assertion；完成前必须重新检查 membership 与 CSR binding，并原子消费 WebAuthn state 和 assertion。durable `ISSUING` 后，同一 trusted session 可用相同 approval ID 省略已消费的 assertion，以恢复同一发行请求。
 4. Denial 需要可信 user session 和确切 scope 的 membership。基础 manager 要求 approval 使用 WebAuthn；denial 不要求 WebAuthn，因为它不会授予设备凭证。
@@ -270,7 +276,7 @@ Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。
 
 ## 轮换与撤销
 
-轮换由当前有效的 WorkspaceDevice 证书授权，复用相同 `device_id` 和 scope，并创建新的 `authorization_id`、`authorization_generation`、CSR、SPKI digest 和证书 serial。请求必须携带与前任 key 不同的全新 256-bit `registration_key`。证书与 rotation metadata 保留对应的 `authorization_id`。使用新 key 和相同 scope/CSR/SPKI 的精确重试可以取回同一授权、generation、CA 幂等键和已签证书，只轮换 codes 并增加 `device_code_generation`。
+轮换由当前有效的 WorkspaceDevice 证书授权，复用相同 `device_id` 和 scope，并创建新的 `authorization_id`、`authorization_generation`、CSR、SPKI digest 和证书 serial。请求必须携带与前任 key 不同的全新 256-bit `registration_key`。证书与 rotation metadata 保留对应的 `authorization_id`。事务提交后旧 generation 立即失效；registration key 不授权对已提交轮换的重放或恢复，v1 没有自动恢复 endpoint。初次注册 endpoint 收到轮换 key 时必须冲突，且不改变状态或 codes。仅在明确知道提交前失败且前任 peer 仍 current 时可重试；丢失或不明确的提交结果需使用本合同之外的可信人工/设备恢复流程，旧 peer 重试必须拒绝。
 
 mTLS verifier 必须提供可信的当前 device generation、CSR/SPKI digest、leaf fingerprint、serial 和 expiry。请求 body 不能自称前任设备身份。Directory device identity 行与 predecessor authorization row 必须在同一事务中锁定并校验。Pending、AwaitingWebAuthn 或 VerifyingWebAuthn 的前任记录可在 CA 签发前 supersede。Issuing、尚未解决的 retirement、过期或 stale peer，以及缺少证书快照的 legacy V3 Delivered 记录均返回 conflict。DeliveryPending 或 Delivered 只有在完整不可变证书快照存在时才能轮换；同一事务把旧状态设为 `RetirementPending(RegistrationRotated)`，并提交新的 Directory generation 与 authorization。已 ACK 的前任还必须保留完全相同的 receipt。事务提交后旧 mTLS generation 立即失效，不会在 replacement pending 期间继续有效。retirement worker 重试 CA/registry retirement，确认后写入 `RegistrationRetired`。旧 generation 的并发重放不能再次推进 generation。retirement 尚未解决时客户端使用新授权的 recovery key，不回退到旧证书。legacy V3 `Delivered` 仍可读且旧 ACK receipt 可精确重放，但因缺少完整证书快照而不能轮换。
 

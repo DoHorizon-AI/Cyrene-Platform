@@ -286,13 +286,15 @@ message AcknowledgeDeviceCertificateDeliveryResponse {
 // A rotation creates a new authorization for the existing device_id. It is
 // accepted only over the currently valid WorkspaceDevice certificate; normal
 // user approval still applies. A new 256-bit registration recovery key is
-// required and must differ from the previous generation's key. The exact-key
-// retry recovers a lost start response without another authorization or
-// generation; it rotates only device/user codes. When the current authorization
-// has a complete issued-certificate snapshot, rotation records retirement intent
-// atomically with the new generation, which immediately makes the old mTLS
-// generation stale. A legacy ACK receipt without a certificate snapshot cannot
-// be rotated.
+// required and must differ from the previous generation's key. A committed
+// rotation immediately makes the predecessor certificate stale, and this key
+// does not authorize replay or recovery. A retry is safe only after a known
+// pre-commit failure while the predecessor remains current. V1 defines no
+// automatic recovery endpoint for a lost or ambiguous post-commit response;
+// recovery then requires a trusted manual/device process outside this contract.
+// When the current authorization has a complete issued-certificate snapshot,
+// rotation records retirement intent atomically with the new generation. A
+// legacy ACK receipt without a certificate snapshot cannot be rotated.
 message BeginDeviceCertificateRotationRequest {
   string device_id = 1;
   bytes csr_der = 2;

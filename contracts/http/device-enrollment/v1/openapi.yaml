@@ -45,10 +45,18 @@ paths:
         authorization and resolve to the same certificate or explicit pending;
         it must never create a second authorization or certificate. Clients discard
         start responses with a lower device_code_generation. A fresh authorization
-        for an active device must use the mTLS rotation route. After a successful
-        rotation start, a lost response can be recovered here with the same new
-        registration_key and exact tuple; that recovery does not require the now-
-        stale previous mTLS generation and does not create another authorization.
+        for an active device must use the mTLS rotation route. This endpoint's
+        same-key recovery applies only to initial enrollment; a registration key
+        used for rotation is not a rotation recovery credential. If a rotation
+        key is presented here, the server returns 409 without rotating codes or
+        changing authorization state. Once rotation
+        commits, the predecessor mTLS generation is stale and cannot repeat or
+        recover the request. V1 defines no automatic recovery endpoint when a
+        committed rotation response is lost. A retry is safe only when the caller
+        knows the transaction failed before commit and the predecessor remains
+        current. An ambiguous or post-commit lost response requires a separate
+        trusted manual/device recovery process not defined by v1; the server
+        rejects stale-generation requests and does not create a second authorization.
         The HTTP adapter binds the start body to the exact committed Directory
         binding, authorization row revision, current code digest, and code
         generation returned by the atomic transaction. Poll responses are bound
@@ -289,10 +297,15 @@ paths:
         generation's key. The new CSR must match the existing device scope. A
         new authorization_id and authorization_generation are created while
         device_id remains stable; the new authorization follows the normal
-        interactive approval and delivery-ACK flow. Same-key exact-tuple retry
-        after a lost start response recovers that authorization and rotates
-        only device_code and user_code, incrementing device_code_generation; it
-        does not increment authorization_generation or issue a second certificate.
+        interactive approval and delivery-ACK flow. Committing the rotation
+        advances authorization_generation and immediately makes the predecessor
+        certificate stale. The registration_key does not authorize replay or
+        recovery after that commit, and v1 defines no automatic recovery endpoint
+        for a lost or ambiguous post-commit response. A retry is permitted only
+        after a known pre-commit failure while the predecessor remains current;
+        every request from the stale generation is rejected, including one with
+        the same registration_key. Recovery after an ambiguous or committed
+        outcome requires a trusted manual/device process outside this v1 contract.
 
         The transaction locks the Directory device identity and predecessor
         authorization together. A current predecessor in Pending,
