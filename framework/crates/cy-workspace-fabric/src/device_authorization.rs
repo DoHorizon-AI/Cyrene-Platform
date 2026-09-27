@@ -18,6 +18,7 @@ use cy_proto::workspace_v1::UserIdentityRef;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::relay_peer_certificate_validation::AuthenticatedRelayWorkspaceDevice;
 use crate::{UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest};
 
 /// Opaque server-generated identifier for one authorization attempt.
@@ -255,6 +256,7 @@ pub struct DeviceAuthorizationRegistrationRequest {
     pub(crate) spki_sha256: [u8; 32],
     pub(crate) registration_key_digest: DeviceRegistrationKeyDigest,
     pub(crate) authenticated_device: Option<AuthenticatedDeviceRotation>,
+    pub(crate) authenticated_relay_peer: Option<Arc<AuthenticatedRelayWorkspaceDevice>>,
 }
 
 impl DeviceAuthorizationRegistrationRequest {
@@ -272,6 +274,7 @@ impl DeviceAuthorizationRegistrationRequest {
             spki_sha256,
             registration_key_digest,
             authenticated_device: None,
+            authenticated_relay_peer: None,
         }
     }
 
@@ -282,6 +285,44 @@ impl DeviceAuthorizationRegistrationRequest {
     ) -> Self {
         self.authenticated_device = Some(authenticated_device);
         self
+    }
+
+    /// Attaches the matched, currently validated mTLS peer evidence supplied
+    /// by the private certificate-authentication boundary. The full marker is
+    /// carried to the transactional store so it can recheck binding and
+    /// generation while holding the Directory identity lock. A legacy claim
+    /// without this marker is never sufficient to authorize a rotation.
+    #[allow(dead_code)] // Consumed by the dedicated private rotation handler.
+    pub(crate) fn with_authenticated_relay_peer(
+        mut self,
+        peer: Arc<AuthenticatedRelayWorkspaceDevice>,
+    ) -> Result<Self, DeviceAuthorizationError> {
+        let peer_key = peer.key();
+        if self.scope.organization_id != peer_key.organization_id
+            || self.scope.workspace_id != peer_key.workspace_id
+            || peer_key.device_id.trim().is_empty()
+            || peer.authorization_generation() == 0
+            || peer.serial_number().is_empty()
+            || peer.not_after_unix_ms() == 0
+        {
+            return Err(DeviceAuthorizationError::InvalidRequest);
+        }
+
+        self.authenticated_device = Some(AuthenticatedDeviceRotation::from_verified_mtls_peer(
+            DeviceAuthorizationDeviceKey {
+                organization_id: peer_key.organization_id.clone(),
+                workspace_id: peer_key.workspace_id.clone(),
+                device_id: peer_key.device_id.clone(),
+            },
+            peer.authorization_generation(),
+            *peer.csr_sha256(),
+            *peer.spki_sha256(),
+            *peer.certificate_sha256(),
+            peer.serial_number().to_vec(),
+            peer.not_after_unix_ms(),
+        ));
+        self.authenticated_relay_peer = Some(peer);
+        Ok(self)
     }
 
     pub fn scope(&self) -> &DeviceAuthorizationScope {
@@ -322,6 +363,8 @@ pub struct DeviceAuthorizationStartCandidate {
     maximum_recovery_attempts: u32,
     observed_at_unix_ms: u64,
     authenticated_device: Option<AuthenticatedDeviceRotation>,
+    #[allow(dead_code)] // Consumed by the atomic rotation store adapter.
+    authenticated_relay_peer: Option<Arc<AuthenticatedRelayWorkspaceDevice>>,
 }
 
 impl DeviceAuthorizationStartCandidate {
@@ -377,6 +420,15 @@ impl DeviceAuthorizationStartCandidate {
 
     pub fn authenticated_device(&self) -> Option<&AuthenticatedDeviceRotation> {
         self.authenticated_device.as_ref()
+    }
+
+    /// Returns the full trusted mTLS evidence that was matched to a Directory
+    /// binding before this candidate was built. PostgreSQL adapters must use
+    /// it for the atomic predecessor binding/generation fence; the legacy
+    /// `authenticated_device` projection alone is insufficient.
+    #[allow(dead_code)] // The PostgreSQL rotation adapter lands separately.
+    pub(crate) fn authenticated_relay_peer(&self) -> Option<&AuthenticatedRelayWorkspaceDevice> {
+        self.authenticated_relay_peer.as_deref()
     }
 }
 
@@ -1846,6 +1898,7 @@ where
                 maximum_recovery_attempts: self.policy.maximum_recovery_attempts,
                 observed_at_unix_ms: now_unix_ms,
                 authenticated_device: request.authenticated_device.clone(),
+                authenticated_relay_peer: request.authenticated_relay_peer.clone(),
             };
             match self.store.start_or_recover_registered(candidate) {
                 Ok(snapshot) => {
