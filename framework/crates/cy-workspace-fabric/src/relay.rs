@@ -20,7 +20,8 @@ use cy_proto::workspace_v1::{
     DiscoverWorkspacesResponse, RelayForwardedRequest, RelayFrame, RelayHello,
     RelayParticipantRole, RelayReady, WorkspaceApiResponse,
 };
-use tokio::sync::mpsc;
+use futures_util::StreamExt as FuturesStreamExt;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status, Streaming};
 
@@ -50,6 +51,32 @@ struct RegisteredConnection {
     relay_session_id: String,
     sender: RelaySender,
     authenticated_device: Option<AuthenticatedRelayWorkspaceDevice>,
+    peer_certificate_chain: Option<TonicPeerCertificateChain>,
+    session_cancel: Option<watch::Sender<bool>>,
+    dispatch_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct AuthenticatedWorkspacePeer {
+    device: AuthenticatedRelayWorkspaceDevice,
+    certificate_chain: TonicPeerCertificateChain,
+}
+
+struct WorkspaceDispatch {
+    permit: mpsc::OwnedPermit<Result<RelayFrame, Status>>,
+    session_cancel: watch::Sender<bool>,
+    relay_session_id: String,
+    _dispatch_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl WorkspaceDispatch {
+    /// Enqueue synchronously after revalidation so no await can widen the authorization window.
+    fn send(self, frame: RelayFrame) -> Result<(), ()> {
+        if *self.session_cancel.borrow() {
+            return Err(());
+        }
+        self.permit.send(Ok(frame));
+        Ok(())
+    }
 }
 
 struct PendingRequest {
@@ -301,7 +328,7 @@ impl WorkspaceRelay {
         hello: &RelayHello,
         chain: Result<TonicPeerCertificateChain, RelayPeerCertificateError>,
         now_unix_ms: u64,
-    ) -> Result<(RelaySessionClaims, AuthenticatedRelayWorkspaceDevice), Box<Status>> {
+    ) -> Result<(RelaySessionClaims, AuthenticatedWorkspacePeer), Box<Status>> {
         let validator = self
             .state
             .workspace_peer_certificate_validator
@@ -333,9 +360,16 @@ impl WorkspaceRelay {
         let certificate = validator
             .validate_tonic_peer_chain(&chain, now_unix_ms, revocation_checker.as_ref())
             .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
-        registry_verifier
+        let (claims, authenticated_device) = registry_verifier
             .authenticate_validated_peer(hello, &certificate, now_unix_ms)
-            .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))
+            .map_err(|error| Box::new(Status::unauthenticated(error.to_string())))?;
+        Ok((
+            claims,
+            AuthenticatedWorkspacePeer {
+                device: authenticated_device,
+                certificate_chain: chain,
+            },
+        ))
     }
 
     fn next_session(&self, prefix: &str) -> String {
@@ -343,12 +377,193 @@ impl WorkspaceRelay {
         format!("{prefix}-{sequence}")
     }
 
-    fn register_pending(
+    fn revalidate_workspace_connection(
+        &self,
+        workspace_id: &str,
+        workspace: &RegisteredConnection,
+        now_unix_ms: u64,
+    ) -> Result<(), WorkspaceDeviceAuthenticationError> {
+        #[cfg(test)]
+        if workspace.authenticated_device.is_none()
+            && workspace.peer_certificate_chain.is_none()
+            && workspace.session_cancel.is_some()
+            && self.state.workspace_device_verifier.is_none()
+            && self.state.workspace_peer_certificate_validator.is_none()
+            && self.state.workspace_peer_revocation_checker.is_none()
+        {
+            // Unit routing fixtures do not represent a transport-authenticated Connector.
+            return Ok(());
+        }
+
+        let authenticated_device = workspace
+            .authenticated_device
+            .as_ref()
+            .ok_or(WorkspaceDeviceAuthenticationError::RegistryUnavailable)?;
+        if authenticated_device.key().workspace_id != workspace_id {
+            return Err(WorkspaceDeviceAuthenticationError::IdentityMismatch);
+        }
+        let chain = workspace
+            .peer_certificate_chain
+            .as_ref()
+            .ok_or(WorkspaceDeviceAuthenticationError::MissingClientCertificate)?;
+        let validator = self
+            .state
+            .workspace_peer_certificate_validator
+            .as_ref()
+            .ok_or(WorkspaceDeviceAuthenticationError::InvalidClientCertificate)?;
+        let revocation_checker = self
+            .state
+            .workspace_peer_revocation_checker
+            .as_ref()
+            .ok_or(WorkspaceDeviceAuthenticationError::RevocationStatusUnknown)?;
+        let registry_verifier = self
+            .state
+            .workspace_device_verifier
+            .as_ref()
+            .ok_or(WorkspaceDeviceAuthenticationError::RegistryUnavailable)?;
+
+        let certificate = validator
+            .validate_tonic_peer_chain(chain, now_unix_ms, revocation_checker.as_ref())
+            .map_err(|_| WorkspaceDeviceAuthenticationError::RevocationStatusUnknown)?;
+        registry_verifier.revalidate_authenticated_peer(
+            authenticated_device,
+            &certificate,
+            now_unix_ms,
+        )
+    }
+
+    fn invalidate_workspace_connection(
+        &self,
+        workspace_id: &str,
+        workspace: &RegisteredConnection,
+    ) -> Result<(), ()> {
+        let mut connections = self.state.connections.lock().map_err(|_| ())?;
+        let registered = connections
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|current| current.relay_session_id == workspace.relay_session_id);
+        if registered {
+            connections.workspaces.remove(workspace_id);
+        }
+        connections
+            .pending
+            .retain(|_, pending| pending.workspace_session_id != workspace.relay_session_id);
+        drop(connections);
+
+        if let Some(session_cancel) = &workspace.session_cancel {
+            session_cancel.send_replace(true);
+        }
+        Ok(())
+    }
+
+    /// Revalidate the retained peer chain and current Registry binding for every new request.
+    ///
+    /// The session gate remains held through synchronous dispatch. Registry and revocation reads
+    /// do not share a transaction with local enqueue, so a remote change can race after the read;
+    /// this bounds that window to the final local fence/send and does not claim cross-store
+    /// linearizability.
+    ///
+    /// 每次请求派发前重验对端证书与当前 binding；由于远端状态读取和本地入队没有共同事务，查询之后仍可能有极短并发窗口。
+    async fn register_pending(
         &self,
         workspace_id: &str,
         frontend_session_id: &str,
         request_id: &str,
-    ) -> Result<Option<RelaySender>, (i32, &'static str)> {
+    ) -> Result<Option<WorkspaceDispatch>, (i32, &'static str)> {
+        if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
+            return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
+        }
+        let key = (frontend_session_id.to_string(), request_id.to_string());
+        let workspace = {
+            let mut connections = self
+                .state
+                .connections
+                .lock()
+                .map_err(|_| (13, "RELAY_CONNECTION_STATE_POISONED"))?;
+            connections
+                .pending
+                .retain(|_, pending| pending.expires_at > Instant::now());
+            if connections.pending.contains_key(&key) {
+                return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
+            }
+            if connections.pending.len() >= MAX_PENDING_REQUESTS {
+                return Err((8, "RELAY_PENDING_REQUEST_LIMIT"));
+            }
+            let Some(workspace) = connections.workspaces.get(workspace_id).cloned() else {
+                return Ok(None);
+            };
+            workspace
+        };
+
+        let Some(session_cancel) = workspace.session_cancel.as_ref() else {
+            let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
+            return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
+        };
+        if *session_cancel.borrow() {
+            let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
+            return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
+        }
+        let dispatch_deadline = tokio::time::Instant::now() + PENDING_REQUEST_TTL;
+        let dispatch_guard = match tokio::time::timeout_at(
+            dispatch_deadline,
+            workspace.dispatch_gate.clone().lock_owned(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => return Err((14, "WORKSPACE_CONNECTOR_BACKPRESSURE")),
+        };
+        if *session_cancel.borrow() {
+            let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
+            return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
+        }
+
+        // Reserve queue capacity before checking trust, so a slow Connector cannot
+        // leave a previously valid authorization waiting in an async send queue.
+        let permit = match tokio::time::timeout_at(
+            dispatch_deadline,
+            workspace.sender.clone().reserve_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
+                return Ok(None);
+            }
+            Err(_) => return Err((14, "WORKSPACE_CONNECTOR_BACKPRESSURE")),
+        };
+
+        // Directory/registry and revocation adapters are synchronous ports. Keep their I/O off
+        // the async executor, with no connection-map lock held across this blocking check.
+        let relay = self.clone();
+        let connection = workspace.clone();
+        let workspace_id_for_check = workspace_id.to_string();
+        let validation = tokio::task::spawn_blocking(move || {
+            relay.revalidate_workspace_connection(
+                &workspace_id_for_check,
+                &connection,
+                now_unix_ms(),
+            )
+        })
+        .await;
+        if !matches!(validation, Ok(Ok(()))) {
+            let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
+            tracing::warn!(
+                event.name = "platform.relay.workspace_session_invalidated",
+                error.code = "PLATFORM.RELAY.WORKSPACE_SESSION_AUTHORIZATION_STALE",
+                session_id = %workspace.relay_session_id,
+                workspace_id = %workspace_id,
+                message = "Relay removed a Connector session after current authorization revalidation failed",
+            );
+            return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
+        }
+
+        let session_cancel = workspace
+            .session_cancel
+            .as_ref()
+            .ok_or((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"))?
+            .clone();
         let mut connections = self
             .state
             .connections
@@ -357,20 +572,13 @@ impl WorkspaceRelay {
         connections
             .pending
             .retain(|_, pending| pending.expires_at > Instant::now());
-        let Some(workspace) = connections.workspaces.get(workspace_id).cloned() else {
-            return Ok(None);
-        };
-        if workspace
-            .authenticated_device
-            .as_ref()
-            .is_some_and(|device| device.key().workspace_id != workspace_id)
-        {
+        let is_current_session = connections
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|current| current.relay_session_id == workspace.relay_session_id);
+        if !is_current_session || *session_cancel.borrow() {
             return Ok(None);
         }
-        if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
-            return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
-        }
-        let key = (frontend_session_id.to_string(), request_id.to_string());
         if connections.pending.contains_key(&key) {
             return Err((3, "WORKSPACE_REQUEST_ID_INVALID"));
         }
@@ -380,11 +588,49 @@ impl WorkspaceRelay {
         connections.pending.insert(
             key,
             PendingRequest {
-                workspace_session_id: workspace.relay_session_id,
+                workspace_session_id: workspace.relay_session_id.clone(),
                 expires_at: Instant::now() + PENDING_REQUEST_TTL,
             },
         );
-        Ok(Some(workspace.sender))
+        Ok(Some(WorkspaceDispatch {
+            permit,
+            session_cancel,
+            relay_session_id: workspace.relay_session_id,
+            _dispatch_guard: dispatch_guard,
+        }))
+    }
+
+    /// Fence the synchronous enqueue against session replacement and pending-route cleanup.
+    ///
+    /// The map lock is held only across local ID checks and the bounded-channel permit send; no
+    /// network or database work runs under this lock.
+    fn send_workspace_dispatch(
+        &self,
+        workspace_id: &str,
+        frontend_session_id: &str,
+        request_id: &str,
+        dispatch: WorkspaceDispatch,
+        frame: RelayFrame,
+    ) -> Result<(), (i32, &'static str)> {
+        let connections = self
+            .state
+            .connections
+            .lock()
+            .map_err(|_| (13, "RELAY_CONNECTION_STATE_POISONED"))?;
+        let is_current_session = connections
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|current| current.relay_session_id == dispatch.relay_session_id);
+        let has_pending_route = connections
+            .pending
+            .get(&(frontend_session_id.to_string(), request_id.to_string()))
+            .is_some_and(|pending| pending.workspace_session_id == dispatch.relay_session_id);
+        if !is_current_session || !has_pending_route {
+            return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
+        }
+        dispatch
+            .send(frame)
+            .map_err(|_| (7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"))
     }
 
     fn take_response_sender(
@@ -409,11 +655,21 @@ impl WorkspaceRelay {
             .map(|connection| connection.sender.clone()))
     }
 
-    fn clear_pending(&self, frontend_session_id: &str, request_id: &str) {
+    fn clear_pending(
+        &self,
+        frontend_session_id: &str,
+        request_id: &str,
+        workspace_session_id: &str,
+    ) {
         if let Ok(mut connections) = self.state.connections.lock() {
-            connections
+            let key = (frontend_session_id.to_string(), request_id.to_string());
+            let belongs_to_session = connections
                 .pending
-                .remove(&(frontend_session_id.to_string(), request_id.to_string()));
+                .get(&key)
+                .is_some_and(|pending| pending.workspace_session_id == workspace_session_id);
+            if belongs_to_session {
+                connections.pending.remove(&key);
+            }
         }
     }
 }
@@ -449,7 +705,7 @@ impl WorkspaceRelayService for WorkspaceRelay {
         let role = RelayParticipantRole::try_from(hello.role)
             .map_err(|_| Status::invalid_argument("unknown relay participant role"))?;
         let now = now_unix_ms();
-        let (claims, authenticated_device) = match role {
+        let (claims, authenticated_workspace_peer) = match role {
             RelayParticipantRole::Frontend => (
                 self.authenticate_participant(
                     role,
@@ -462,10 +718,10 @@ impl WorkspaceRelayService for WorkspaceRelay {
                 None,
             ),
             RelayParticipantRole::WorkspaceConnector => {
-                let (claims, authenticated_device) = self
+                let (claims, authenticated_workspace_peer) = self
                     .authenticate_tonic_workspace_device(&hello, tonic_peer_chain, now)
                     .map_err(|status| *status)?;
-                (claims, Some(authenticated_device))
+                (claims, Some(authenticated_workspace_peer))
             }
             RelayParticipantRole::Unspecified => {
                 return Err(Status::invalid_argument(
@@ -474,18 +730,29 @@ impl WorkspaceRelayService for WorkspaceRelay {
             }
         };
         let (sender, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let mut workspace_session_cancel_receiver = None;
         match role {
             RelayParticipantRole::Frontend => {
                 self.open_frontend(claims, inbound, sender).await?;
             }
             RelayParticipantRole::WorkspaceConnector => {
-                let authenticated_device = authenticated_device.ok_or_else(|| {
-                    Status::unauthenticated(
-                        "WORKSPACE_DEVICE_REGISTRY_CURRENT_BINDING_NOT_CONFIGURED",
-                    )
-                })?;
-                self.open_workspace(hello, claims, authenticated_device, inbound, sender)
-                    .await?;
+                let authenticated_workspace_peer =
+                    authenticated_workspace_peer.ok_or_else(|| {
+                        Status::unauthenticated(
+                            "WORKSPACE_DEVICE_REGISTRY_CURRENT_BINDING_NOT_CONFIGURED",
+                        )
+                    })?;
+                let (session_cancel, session_cancel_receiver) = watch::channel(false);
+                self.open_workspace(
+                    hello,
+                    claims,
+                    authenticated_workspace_peer,
+                    inbound,
+                    sender,
+                    session_cancel,
+                )
+                .await?;
+                workspace_session_cancel_receiver = Some(session_cancel_receiver);
             }
             RelayParticipantRole::Unspecified => {
                 return Err(Status::invalid_argument(
@@ -493,7 +760,17 @@ impl WorkspaceRelayService for WorkspaceRelay {
                 ));
             }
         }
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+        let stream: RelayStream =
+            if let Some(mut session_cancel) = workspace_session_cancel_receiver {
+                Box::pin(ReceiverStream::new(receiver).take_until(async move {
+                    if !*session_cancel.borrow() {
+                        let _ = session_cancel.changed().await;
+                    }
+                }))
+            } else {
+                Box::pin(ReceiverStream::new(receiver))
+            };
+        Ok(Response::new(stream))
     }
 }
 
@@ -527,6 +804,9 @@ impl WorkspaceRelay {
                     relay_session_id: relay_session_id.clone(),
                     sender: sender.clone(),
                     authenticated_device: None,
+                    peer_certificate_chain: None,
+                    session_cancel: None,
+                    dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },
             );
 
@@ -678,11 +958,14 @@ impl WorkspaceRelay {
                 return;
             }
         };
-        let workspace_sender = match self.register_pending(
-            &request.workspace_id,
-            frontend_session_id,
-            &request.request_id,
-        ) {
+        let workspace_dispatch = match self
+            .register_pending(
+                &request.workspace_id,
+                frontend_session_id,
+                &request.request_id,
+            )
+            .await
+        {
             Ok(sender) => sender,
             Err((code, message)) => {
                 let _ =
@@ -690,7 +973,7 @@ impl WorkspaceRelay {
                 return;
             }
         };
-        let Some(workspace_sender) = workspace_sender else {
+        let Some(workspace_dispatch) = workspace_dispatch else {
             tracing::warn!(
                 event.name = "platform.relay.workspace_offline",
                 error.code = "PLATFORM.RELAY.STREAM_DISCONNECTED",
@@ -711,31 +994,28 @@ impl WorkspaceRelay {
         let request_id = request.request_id.clone();
         let (caller_principal, caller_organization_id, caller_workspace_id, caller_roles) =
             caller.to_relay_fields();
-        if send_frame(
-            &workspace_sender,
-            RelayFrame {
-                frame_id: request.request_id.clone(),
-                body: Some(relay_frame::Body::ForwardedRequest(RelayForwardedRequest {
-                    frontend_session_id: frontend_session_id.to_string(),
-                    request: Some(request),
-                    caller_principal,
-                    caller_organization_id,
-                    caller_workspace_id,
-                    caller_roles,
-                })),
-            },
-        )
-        .await
-        .is_err()
-        {
-            self.clear_pending(frontend_session_id, &request_id);
-            let _ = send_workspace_error(
-                frontend_sender,
-                request_id,
-                14,
-                "WORKSPACE_CONNECTOR_OFFLINE",
-            )
-            .await;
+        let workspace_session_id = workspace_dispatch.relay_session_id.clone();
+        let workspace_id = request.workspace_id.clone();
+        let frame = RelayFrame {
+            frame_id: request.request_id.clone(),
+            body: Some(relay_frame::Body::ForwardedRequest(RelayForwardedRequest {
+                frontend_session_id: frontend_session_id.to_string(),
+                request: Some(request),
+                caller_principal,
+                caller_organization_id,
+                caller_workspace_id,
+                caller_roles,
+            })),
+        };
+        if let Err((code, message)) = self.send_workspace_dispatch(
+            &workspace_id,
+            frontend_session_id,
+            &request_id,
+            workspace_dispatch,
+            frame,
+        ) {
+            self.clear_pending(frontend_session_id, &request_id, &workspace_session_id);
+            let _ = send_workspace_error(frontend_sender, request_id, code, message).await;
         }
     }
 
@@ -743,9 +1023,10 @@ impl WorkspaceRelay {
         &self,
         hello: RelayHello,
         claims: RelaySessionClaims,
-        authenticated_device: AuthenticatedRelayWorkspaceDevice,
+        authenticated_peer: AuthenticatedWorkspacePeer,
         mut inbound: Streaming<RelayFrame>,
         sender: RelaySender,
+        session_cancel: watch::Sender<bool>,
     ) -> Result<(), Status> {
         let SessionPrincipal::WorkspaceDevice {
             workspace_id,
@@ -756,6 +1037,8 @@ impl WorkspaceRelay {
                 "Workspace connector requires device identity",
             ));
         };
+        let authenticated_device = authenticated_peer.device;
+        let peer_certificate_chain = authenticated_peer.certificate_chain;
         let authenticated_key = authenticated_device.key();
         if authenticated_device.authorization_generation() == 0
             || authenticated_device
@@ -788,25 +1071,42 @@ impl WorkspaceRelay {
             workspace_id = %workspace_id,
             message = "Relay accepted workspace connector connection",
         );
-        self.state
-            .connections
-            .lock()
-            .map_err(|_| Status::internal("relay connection state poisoned"))?
-            .workspaces
-            .insert(
+        {
+            let mut connections = self
+                .state
+                .connections
+                .lock()
+                .map_err(|_| Status::internal("relay connection state poisoned"))?;
+            let displaced = connections.workspaces.insert(
                 workspace_id.clone(),
                 RegisteredConnection {
                     relay_session_id: relay_session_id.clone(),
                     sender: sender.clone(),
                     authenticated_device: Some(authenticated_device),
+                    peer_certificate_chain: Some(peer_certificate_chain),
+                    session_cancel: Some(session_cancel.clone()),
+                    dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
                 },
             );
+            if let Some(previous) = displaced.as_ref() {
+                connections
+                    .pending
+                    .retain(|_, pending| pending.workspace_session_id != previous.relay_session_id);
+                if let Some(previous_cancel) = &previous.session_cancel {
+                    previous_cancel.send_replace(true);
+                }
+            }
+        }
 
         let relay = self.clone();
         let registered_workspace = workspace_id.clone();
         let session_deadline = session_deadline(claims.expires_at_unix_ms);
+        let mut session_cancel_receiver = session_cancel.subscribe();
         tokio::spawn(async move {
-            while let Some(frame) = next_authorized_frame(&mut inbound, session_deadline).await {
+            while let Some(frame) = tokio::select! {
+                _ = session_cancel_receiver.changed() => None,
+                frame = next_authorized_frame(&mut inbound, session_deadline) => frame,
+            } {
                 let Some(relay_frame::Body::ForwardedResponse(forwarded)) = frame.body else {
                     tracing::warn!(
                         event.name = "platform.relay.frame_error",
@@ -881,6 +1181,7 @@ impl WorkspaceRelay {
                     .pending
                     .retain(|_, pending| pending.workspace_session_id != relay_session_id);
             }
+            session_cancel.send_replace(true);
             tracing::info!(
                 event.name = "platform.relay.disconnected",
                 session_id = %relay_session_id,
@@ -1016,11 +1317,11 @@ mod tests {
 
     use super::*;
 
-    fn relay_with_connections() -> WorkspaceRelay {
+    fn relay_with_connections() -> (WorkspaceRelay, mpsc::Receiver<Result<RelayFrame, Status>>) {
         let directory = Arc::new(InMemoryWorkspaceDirectory::new(Vec::new(), Vec::new()).unwrap());
         let relay = WorkspaceRelay::new(directory, Arc::new(DevelopmentSessionVerifier::default()));
         let (frontend_sender, _) = mpsc::channel(RELAY_QUEUE_FRAMES);
-        let (workspace_sender, _) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let (workspace_sender, workspace_receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
         let mut connections = relay.state.connections.lock().unwrap();
         connections.frontends.insert(
             "frontend-1".into(),
@@ -1028,18 +1329,25 @@ mod tests {
                 relay_session_id: "frontend-1".into(),
                 sender: frontend_sender,
                 authenticated_device: None,
+                peer_certificate_chain: None,
+                session_cancel: None,
+                dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
+        let (workspace_cancel, _) = watch::channel(false);
         connections.workspaces.insert(
             "workspace-1".into(),
             RegisteredConnection {
                 relay_session_id: "workspace-session-1".into(),
                 sender: workspace_sender,
                 authenticated_device: None,
+                peer_certificate_chain: None,
+                session_cancel: Some(workspace_cancel),
+                dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
         drop(connections);
-        relay
+        (relay, workspace_receiver)
     }
 
     #[test]
@@ -1218,11 +1526,12 @@ mod tests {
         assert_eq!(error.message(), "BFF_WORKLOAD_CERTIFICATE_INVALID");
     }
 
-    #[test]
-    fn response_requires_the_registered_workspace_session_and_request() {
-        let relay = relay_with_connections();
+    #[tokio::test]
+    async fn response_requires_the_registered_workspace_session_and_request() {
+        let (relay, _workspace_receiver) = relay_with_connections();
         assert!(relay
             .register_pending("workspace-1", "frontend-1", "request-1")
+            .await
             .unwrap()
             .is_some());
         assert!(relay
@@ -1243,14 +1552,17 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn duplicate_request_ids_do_not_overwrite_pending_routes() {
-        let relay = relay_with_connections();
+    #[tokio::test]
+    async fn duplicate_request_ids_do_not_overwrite_pending_routes() {
+        let (relay, _workspace_receiver) = relay_with_connections();
         relay
             .register_pending("workspace-1", "frontend-1", "request-1")
+            .await
             .unwrap();
         assert!(matches!(
-            relay.register_pending("workspace-1", "frontend-1", "request-1"),
+            relay
+                .register_pending("workspace-1", "frontend-1", "request-1")
+                .await,
             Err((3, "WORKSPACE_REQUEST_ID_INVALID"))
         ));
         assert!(relay
@@ -1259,11 +1571,13 @@ mod tests {
             .is_some());
     }
 
-    #[test]
-    fn request_ids_are_bounded_before_entering_the_pending_table() {
-        let relay = relay_with_connections();
+    #[tokio::test]
+    async fn request_ids_are_bounded_before_entering_the_pending_table() {
+        let (relay, _workspace_receiver) = relay_with_connections();
         assert!(matches!(
-            relay.register_pending("workspace-1", "frontend-1", &"x".repeat(129)),
+            relay
+                .register_pending("workspace-1", "frontend-1", &"x".repeat(129))
+                .await,
             Err((3, "WORKSPACE_REQUEST_ID_INVALID"))
         ));
         assert!(relay.state.connections.lock().unwrap().pending.is_empty());
@@ -1290,12 +1604,16 @@ mod tests {
         let relay = WorkspaceRelay::new(directory, Arc::new(DevelopmentSessionVerifier::default()));
         let (frontend_sender, _) = mpsc::channel(RELAY_QUEUE_FRAMES);
         let (workspace_sender, mut workspace_receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
+        let (workspace_cancel, _) = watch::channel(false);
         relay.state.connections.lock().unwrap().workspaces.insert(
             "workspace-1".to_string(),
             RegisteredConnection {
                 relay_session_id: "workspace-session-1".to_string(),
                 sender: workspace_sender,
                 authenticated_device: None,
+                peer_certificate_chain: None,
+                session_cancel: Some(workspace_cancel),
+                dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
 

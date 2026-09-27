@@ -258,6 +258,37 @@ impl RegistryWorkspaceDeviceVerifier {
             authenticated_peer,
         ))
     }
+
+    /// Recheck a previously authenticated peer against fresh certificate and Registry facts.
+    ///
+    /// Relays call this before dispatching each new Workspace request. The returned identity
+    /// must match the complete cached binding, so a revocation or generation rotation invalidates
+    /// the established session instead of leaving it authorized until the TLS stream expires.
+    pub(crate) fn revalidate_authenticated_peer(
+        &self,
+        expected: &AuthenticatedRelayWorkspaceDevice,
+        certificate: &ValidatedRelayPeerCertificate,
+        now_unix_ms: u64,
+    ) -> Result<(), WorkspaceDeviceAuthenticationError> {
+        if certificate.not_after_unix_ms() <= now_unix_ms {
+            return Err(WorkspaceDeviceAuthenticationError::ExpiredCertificate);
+        }
+
+        let fingerprint = certificate.fingerprint_sha256_hex();
+        let record = self
+            .registry
+            .find_current_device_certificate_identity(&fingerprint)
+            .map_err(|_| WorkspaceDeviceAuthenticationError::RegistryUnavailable)?
+            .ok_or(WorkspaceDeviceAuthenticationError::UnregisteredCertificate)?;
+        let current = certificate
+            .match_registry_identity(&record)
+            .map_err(map_peer_certificate_error)?;
+        if &current != expected {
+            return Err(WorkspaceDeviceAuthenticationError::IdentityMismatch);
+        }
+
+        Ok(())
+    }
 }
 
 fn map_peer_certificate_error(

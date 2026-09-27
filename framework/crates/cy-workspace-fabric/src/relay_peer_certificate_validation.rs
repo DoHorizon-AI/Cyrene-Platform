@@ -240,7 +240,7 @@ impl ValidatedRelayPeerCertificate {
 /// Never construct this from RelayHello or request data. A store must compare
 /// this binding ID and generation with its locked current identity row before
 /// reusing a device ID for certificate rotation.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AuthenticatedRelayWorkspaceDevice {
     registration_binding_id: [u8; 16],
     key: WorkspaceDeviceKey,
@@ -287,6 +287,7 @@ impl AuthenticatedRelayWorkspaceDevice {
 }
 
 /// Inbound peer certificate validator initialized with private, configured trust roots.
+#[derive(Clone)]
 pub(crate) struct TonicPeerCertificateChain {
     leaf_der: Vec<u8>,
     intermediate_chain_der: Vec<Vec<u8>>,
