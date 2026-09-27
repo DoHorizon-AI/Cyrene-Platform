@@ -98,6 +98,7 @@ struct DeviceEnrollmentAuthorizationSnapshotFixture<'a> {
     revision: u64,
     expires_at_unix_ms: u64,
     device_code: &'a str,
+    start_disposition: Option<DeviceAuthorizationStartDisposition>,
     poll_state: DeviceEnrollmentPollState,
 }
 
@@ -187,7 +188,7 @@ impl DeviceEnrollmentAuthorizationSnapshot {
             expires_at_unix_ms: fixture.expires_at_unix_ms,
             device_code_hash: device_code_hash(fixture.device_code)
                 .expect("valid test device code"),
-            start_disposition: None,
+            start_disposition: fixture.start_disposition,
             poll_state: fixture.poll_state,
         }
     }
@@ -1989,6 +1990,7 @@ mod tests {
                     revision: 0,
                     expires_at_unix_ms: 1,
                     device_code: &device_code,
+                    start_disposition: Some(DeviceAuthorizationStartDisposition::Created),
                     poll_state: DeviceEnrollmentPollState::Pending,
                 },
             );
@@ -2074,6 +2076,7 @@ mod tests {
                     revision: 1,
                     expires_at_unix_ms: 1,
                     device_code: &"a".repeat(64),
+                    start_disposition: None,
                     poll_state: DeviceEnrollmentPollState::DeliveryPending,
                 },
             ),
@@ -2175,6 +2178,7 @@ mod tests {
                         revision: 1,
                         expires_at_unix_ms: 1,
                         device_code,
+                        start_disposition: None,
                         poll_state: DeviceEnrollmentPollState::Pending,
                     },
                 ),
