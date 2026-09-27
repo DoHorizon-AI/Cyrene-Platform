@@ -2644,9 +2644,9 @@ impl StoredAuthorizationState {
                     && receipt.authorization_generation == binding.authorization_generation()
                     && certificate
                         .as_ref()
-                        .map_or(true, |value| value.matches_registration(binding))
+                        .is_none_or(|value| value.matches_registration(binding))
             }
-            Self::RegistrationRetired { receipt, .. } => receipt.as_ref().map_or(true, |value| {
+            Self::RegistrationRetired { receipt, .. } => receipt.as_ref().is_none_or(|value| {
                 value.device_id == binding.key().device_id
                     && value.authorization_generation == binding.authorization_generation()
             }),
@@ -2770,7 +2770,7 @@ impl StoredAuthorizationState {
                         StoredRetirementReason::RegistrationRotated => {
                             format_version == 4
                                 && delivery_id.is_some()
-                                && delivered_receipt.as_ref().map_or(true, |receipt| {
+                                && delivered_receipt.as_ref().is_none_or(|receipt| {
                                     stored_receipt_matches(
                                         receipt,
                                         authorization_id,
@@ -2831,7 +2831,7 @@ impl StoredAuthorizationState {
                 approver.is_valid()
                     && *certificate_sha256 != [0; 32]
                     && to_i64(*retired_at_unix_ms).is_ok()
-                    && receipt.as_ref().map_or(true, |receipt| {
+                    && receipt.as_ref().is_none_or(|receipt| {
                         stored_receipt_matches(
                             receipt,
                             authorization_id,
