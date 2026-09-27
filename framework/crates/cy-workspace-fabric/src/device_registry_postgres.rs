@@ -1842,7 +1842,7 @@ mod tests {
         let migration =
             include_str!("../migrations/device_registry/0001_device_certificate_registry.up.sql");
         assert!(migration.contains("NEW.state <> 'pending_ack'"));
-        assert!(migration.contains("auth_row.state_kind <> 'delivered'"));
+        assert!(migration.contains("auth_row.state_kind IS DISTINCT FROM 'delivered'"));
         assert!(migration.contains("current_authorization_generation"));
         assert!(migration.contains("receipt -> 'certificate_sha256'"));
         assert!(migration.contains("certificate ->> 'not_after_unix_ms'"));
