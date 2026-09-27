@@ -12,6 +12,7 @@
 mod catalog_loader;
 mod csrf;
 mod device_approval;
+mod fabric_device_approval;
 mod fabric_gateway;
 mod http;
 mod manifest;
@@ -27,6 +28,7 @@ pub use device_approval::{
     DeviceApprovalCompletion, DeviceApprovalDependencies, DeviceApprovalScope,
     DeviceApprovalService, DeviceApprovalServiceError,
 };
+pub use fabric_device_approval::FabricDeviceApprovalAdapter;
 pub use fabric_gateway::{
     FabricWorkspaceProductGateway, WorkspaceApiBinding, WorkspaceApiResolutionError,
     WorkspaceApiResolver,
