@@ -138,7 +138,10 @@ fn map_fabric_error(error: DeviceEnrollmentHttpError) -> DeviceApprovalServiceEr
             DeviceApprovalServiceError::NotFound
         }
         DeviceEnrollmentHttpError::Conflict => DeviceApprovalServiceError::Conflict,
-        DeviceEnrollmentHttpError::RateLimited { .. } => DeviceApprovalServiceError::RateLimited,
+        DeviceEnrollmentHttpError::RateLimited { .. }
+        | DeviceEnrollmentHttpError::FirstStartQuotaExceeded => {
+            DeviceApprovalServiceError::RateLimited
+        }
         DeviceEnrollmentHttpError::Unavailable => DeviceApprovalServiceError::Unavailable,
     }
 }
