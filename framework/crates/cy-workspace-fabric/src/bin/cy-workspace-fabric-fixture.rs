@@ -379,7 +379,7 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
     if connection.mode() != ConnectivityMode::Relay {
         return Err("unreachable direct candidate did not select the Relay route".into());
     }
-    let outcome = connection
+    let response = connection
         .execute(WorkspaceApiRequest {
             request_id: "fallback-get-operation-1".to_string(),
             workspace_id,
@@ -393,10 +393,11 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
                 },
             )),
         })
-        .await;
+        .await?;
     if !matches!(
-        outcome,
-        Err(ref error) if error.to_string().ends_with("WORKSPACE_CONNECTOR_OFFLINE")
+        response.outcome,
+        Some(workspace_api_response::Outcome::Error(error))
+            if error.code == 14 && error.message == "WORKSPACE_CONNECTOR_OFFLINE"
     ) {
         return Err("Relay did not reject a request while its Workspace connector was offline".into());
     }
