@@ -35,8 +35,13 @@ use crate::device_registry::WorkspaceDeviceKey;
 const MAX_TRUST_ROOTS: usize = 32;
 const MAX_TRUST_ROOT_BUNDLE_BYTES: usize = 1024 * 1024;
 const MAX_CHAIN_CERTIFICATES: usize = 8;
+// Trust-anchor input keeps its existing configuration limit; delivery uses the shared limits below.
 const MAX_CERTIFICATE_DER_BYTES: usize = 64 * 1024;
 const MAX_CHAIN_DER_BYTES: usize = 256 * 1024;
+/// Per-certificate DER limit accepted by validation and the HTTP projection.
+pub(crate) const MAX_DELIVERABLE_CERTIFICATE_DER_BYTES: usize = 16 * 1024;
+/// Aggregate leaf and CA-chain DER limit for one certificate delivery.
+pub(crate) const MAX_DELIVERABLE_CERTIFICATE_BUNDLE_BYTES: usize = 144 * 1024;
 const MAX_DEVICE_IDENTITY_URI_BYTES: usize = 8 * 1024;
 const CLIENT_AUTH_EKU_DER: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02];
 
@@ -214,13 +219,16 @@ impl DeviceCertificateResponseValidator {
         now_unix_ms: u64,
     ) -> Result<ValidatedIssuedDeviceCertificate, DeviceCertificateValidationError> {
         if issued.certificate_der.is_empty()
-            || issued.certificate_der.len() > MAX_CERTIFICATE_DER_BYTES
+            || issued.certificate_der.len() > MAX_DELIVERABLE_CERTIFICATE_DER_BYTES
             || issued.ca_chain_der.len() > MAX_CHAIN_CERTIFICATES
             || issued
                 .ca_chain_der
                 .iter()
-                .any(|der| der.is_empty() || der.len() > MAX_CERTIFICATE_DER_BYTES)
+                .any(|der| der.is_empty() || der.len() > MAX_DELIVERABLE_CERTIFICATE_DER_BYTES)
             || issued.ca_chain_der.iter().map(Vec::len).sum::<usize>() > MAX_CHAIN_DER_BYTES
+            || issued.certificate_der.len()
+                + issued.ca_chain_der.iter().map(Vec::len).sum::<usize>()
+                > MAX_DELIVERABLE_CERTIFICATE_BUNDLE_BYTES
             || !response_metadata_matches_binding(issued, binding)
         {
             return Err(DeviceCertificateValidationError::InvalidCertificate);

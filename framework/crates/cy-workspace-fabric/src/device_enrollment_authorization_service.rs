@@ -38,6 +38,7 @@ use crate::device_authorization::{
 use crate::device_authorization_postgres::PostgresDeviceAuthorizationStore;
 use crate::device_certificate_validation::{
     DeviceCertificateResponseValidator, DeviceCertificateRevocationChecker,
+    MAX_DELIVERABLE_CERTIFICATE_BUNDLE_BYTES, MAX_DELIVERABLE_CERTIFICATE_DER_BYTES,
 };
 use crate::device_enrollment_http::{
     AcknowledgeDeviceDeliveryCommand, CompleteApprovalHttpResponse,
@@ -1012,12 +1013,21 @@ fn project_poll_result(
             let record = &result.snapshot.record;
             let binding = &record.registration_binding;
             if delivery.certificate_der.is_empty()
-                || delivery.certificate_der.len() > 16 * 1024
+                || delivery.certificate_der.len() > MAX_DELIVERABLE_CERTIFICATE_DER_BYTES
                 || delivery.ca_chain_der.len() > 8
                 || delivery
                     .ca_chain_der
                     .iter()
-                    .any(|der| der.is_empty() || der.len() > 16 * 1024)
+                    .any(|der| der.is_empty() || der.len() > MAX_DELIVERABLE_CERTIFICATE_DER_BYTES)
+                || delivery
+                    .ca_chain_der
+                    .iter()
+                    .try_fold(delivery.certificate_der.len(), |total_bytes, der| {
+                        total_bytes.checked_add(der.len())
+                    })
+                    .is_none_or(|total_bytes| {
+                        total_bytes > MAX_DELIVERABLE_CERTIFICATE_BUNDLE_BYTES
+                    })
                 || <[u8; 32]>::from(Sha256::digest(&delivery.certificate_der))
                     != delivery.certificate_sha256
                 || delivery.authorization_id != record.id
