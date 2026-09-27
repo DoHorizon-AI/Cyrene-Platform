@@ -82,7 +82,7 @@ verified BFF workload certificate. Keep the BFF signing key outside Relay and
 never log either credential.
 
 ACA deployment notes and the current cross-environment network gates are in
-`infrastructure/azure/container-apps/workspace-relay.md`. The YAML remains a
+[`workspace-relay.md`](https://github.com/DoHorizon-AI/Cyrene-Client/blob/07a851624193f22c524b14c81f382e770fd63e0e/infrastructure/azure/container-apps/workspace-relay.md). The YAML remains a
 review-only template; this host is not deployed or ready for production traffic.
 
 ---
@@ -126,7 +126,7 @@ PostgreSQL CA 挂载路径必须与 secret-backed Directory URL 的 `sslrootcert
 BFF handoff 是最长 60 秒的 bearer credential，到期前可重放，不绑定 BFF 证书，也没有 replay-state storage。每个 Frontend RPC 仍必须单独通过 BFF workload 证书校验。BFF 签名私钥必须留在 Relay 之外，任何 credential 都不得写日志。
 
 ACA 部署说明和当前跨环境网络 gate 见
-`infrastructure/azure/container-apps/workspace-relay.md`。YAML 仍是仅供 review 的模板；host 未部署，也未达到生产流量就绪条件。
+[`workspace-relay.md`](https://github.com/DoHorizon-AI/Cyrene-Client/blob/07a851624193f22c524b14c81f382e770fd63e0e/infrastructure/azure/container-apps/workspace-relay.md)。YAML 仍是仅供 review 的模板；host 未部署，也未达到生产流量就绪条件。
 
 ## `cy-workspace-sidecar`
 
