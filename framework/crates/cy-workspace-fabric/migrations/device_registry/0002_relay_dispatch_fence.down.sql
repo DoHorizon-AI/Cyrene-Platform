@@ -14,6 +14,8 @@ BEGIN
 END
 $owner_membership$;
 
+GRANT CREATE ON SCHEMA cyrene_workspace_device_registry
+    TO cyrene_workspace_device_registry_owner;
 SET ROLE cyrene_workspace_device_registry_owner;
 
 CREATE OR REPLACE FUNCTION cyrene_workspace_device_registry.revoke_workspace_device(
@@ -54,6 +56,8 @@ DROP FUNCTION cyrene_workspace_device_registry.relay_dispatch_fence(
     TEXT, TEXT, TEXT, UUID, BIGINT, BYTEA, BYTEA, BYTEA, BYTEA, BIGINT
 );
 
+REVOKE CREATE ON SCHEMA cyrene_workspace_device_registry
+    FROM cyrene_workspace_device_registry_owner;
 RESET ROLE;
 
 DO $owner_membership_cleanup$

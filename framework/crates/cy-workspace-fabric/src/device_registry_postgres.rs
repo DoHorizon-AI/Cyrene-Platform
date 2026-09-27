@@ -296,22 +296,19 @@ impl WorkspaceDeviceRegistry for PostgresWorkspaceDeviceRegistry {
         let release_sender = self.release_sender.as_ref().cloned().ok_or_else(|| {
             WorkspaceDirectoryError::Storage("Workspace device registry is unavailable".to_owned())
         })?;
-        let mut fence = Box::new(PostgresRelayDispatchFence {
+        let fence = PostgresRelayDispatchFence {
             fence_id: None,
             release_sender,
-        });
+        };
         let (reply, result) = mpsc::sync_channel(1);
         match self
             .call(
-                Command::AcquireRelayDispatchFence(expected.clone(), reply),
+                Command::AcquireRelayDispatchFence(expected.clone(), fence, reply),
                 result,
             )
             .map_err(to_directory_error)?
         {
-            Some(fence_id) => {
-                fence.fence_id = Some(fence_id);
-                Ok(fence)
-            }
+            Some(fence) => Ok(Box::new(fence)),
             None => Err(WorkspaceDirectoryError::Identity(
                 "Workspace device certificate is no longer current".to_owned(),
             )),
@@ -355,7 +352,11 @@ enum Command {
     FindByKey(WorkspaceDeviceKey, Reply<Option<WorkspaceDeviceRecord>>),
     FindByFingerprint(String, Reply<Option<WorkspaceDeviceRecord>>),
     FindCurrentCertificateIdentity(String, Reply<Option<WorkspaceDeviceCertificateIdentity>>),
-    AcquireRelayDispatchFence(WorkspaceDeviceCertificateIdentity, Reply<Option<u64>>),
+    AcquireRelayDispatchFence(
+        WorkspaceDeviceCertificateIdentity,
+        PostgresRelayDispatchFence,
+        Reply<Option<PostgresRelayDispatchFence>>,
+    ),
 }
 
 enum RegistryWorkerControl {
@@ -453,7 +454,7 @@ fn worker_main(
                     &fingerprint,
                 )));
             }
-            Command::AcquireRelayDispatchFence(expected, reply) => {
+            Command::AcquireRelayDispatchFence(expected, mut fence, reply) => {
                 match runtime.block_on(acquire_relay_dispatch_fence(&pool, &expected)) {
                     Ok(Some(connection)) => {
                         let Some(next_id) = next_fence_id.checked_add(1) else {
@@ -466,16 +467,14 @@ fn worker_main(
                         };
                         let fence_id = next_fence_id;
                         next_fence_id = next_id;
+                        fence.fence_id = Some(fence_id);
                         active_fence = Some((fence_id, connection));
                         active_fences.fetch_add(1, Ordering::AcqRel);
-                        if reply.send(Ok(Some(fence_id))).is_err() {
-                            if let Some((_, mut connection)) = active_fence.take() {
-                                let _ =
-                                    runtime.block_on(finish_dispatch_fence(&mut connection, false));
-                                let _ = runtime.block_on(connection.close());
-                                active_fences.fetch_sub(1, Ordering::Release);
-                            }
-                        }
+                        // Sending the RAII lease transfers release responsibility to the
+                        // caller. If a timed-out receiver already disappeared, either send
+                        // returns the lease or dropping the queued reply drops it; both paths
+                        // enqueue release so the worker cannot remain fenced indefinitely.
+                        let _ = reply.send(Ok(Some(fence)));
                     }
                     Ok(None) => {
                         let _ = reply.send(Ok(None));
