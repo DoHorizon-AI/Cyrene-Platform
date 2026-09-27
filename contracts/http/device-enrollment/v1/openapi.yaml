@@ -31,9 +31,10 @@ paths:
         The server generates device_id and authorization_id. device_code is a
         256-bit poll bearer returned in each start response; user_code is a
         rate-limited human lookup value. The 256-bit registration_key is a separate
-        recovery credential used only to recover a lost start response. Directory
-        binds its domain-separated digest to the exact organization/workspace, CSR DER digest,
-        and SPKI digest tuple. A matching retry in a recoverable, unexpired state
+        recovery credential supplied when this authorization is created and used
+        only for exact-tuple start recovery. Directory binds its domain-separated
+        digest to the exact organization/workspace, CSR DER digest, and SPKI
+        digest tuple. A matching retry in a recoverable, unexpired state
         keeps the same device_id, authorization_id, authorization_generation,
         issuer idempotency key, and any already-issued certificate, while one CAS
         rotates device_code and user_code and increments device_code_generation.
@@ -43,8 +44,11 @@ paths:
         verifying or CA issuance is in progress, recovery must preserve that exact
         authorization and resolve to the same certificate or explicit pending;
         it must never create a second authorization or certificate. Clients discard
-        start responses with a lower device_code_generation. Active devices must
-        use the mTLS rotation route.
+        start responses with a lower device_code_generation. A fresh authorization
+        for an active device must use the mTLS rotation route. After a successful
+        rotation start, a lost response can be recovered here with the same new
+        registration_key and exact tuple; that recovery does not require the now-
+        stale previous mTLS generation and does not create another authorization.
         The HTTP adapter binds the start body to the exact committed Directory
         binding, authorization row revision, current code digest, and code
         generation returned by the atomic transaction. Poll responses are bound
@@ -278,11 +282,31 @@ paths:
       summary: Start a CSR-bound rotation for the same WorkspaceDevice identity
       description: >-
         Requires mTLS with the currently valid WorkspaceDevice certificate.
-        The new CSR must match the existing device scope. A new
-        authorization_id, higher authorization_generation, and device_code are
-        issued while device_id remains stable. The replacement follows the
-        normal trusted-user approval flow.
-        The old certificate remains active until replacement delivery is ACKed.
+        The verifier supplies trusted claims for its device key, current
+        authorization_generation, CSR/SPKI digests, leaf fingerprint, serial,
+        and expiry. The request body cannot assert the predecessor identity. A
+        new 256-bit registration_key is required and must differ from the prior
+        generation's key. The new CSR must match the existing device scope. A
+        new authorization_id and authorization_generation are created while
+        device_id remains stable; the new authorization follows the normal
+        interactive approval and delivery-ACK flow. Same-key exact-tuple retry
+        after a lost start response recovers that authorization and rotates
+        only device_code and user_code, incrementing device_code_generation; it
+        does not increment authorization_generation or issue a second certificate.
+
+        The transaction locks the Directory device identity and predecessor
+        authorization together. A current predecessor in Pending,
+        AwaitingWebAuthn, or VerifyingWebAuthn may be safely superseded before
+        CA issuance. Issuing, an unresolved retirement, a stale/expired peer,
+        or a legacy Delivered row without its immutable certificate snapshot
+        conflicts. For DeliveryPending or Delivered with a complete certificate
+        snapshot, the transaction persists RetirementPending with reason
+        RegistrationRotated and creates the next authorization generation in
+        one commit. A Delivered row retains its exact ACK receipt. The previous
+        mTLS certificate becomes stale as soon as that generation commits; the
+        retirement worker then retries CA/registry retirement until it is
+        confirmed. No second request authenticated by the old generation may
+        advance the Directory generation again.
       security:
         - WorkspaceDeviceCertificate: []
       parameters:
@@ -306,6 +330,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/StateConflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/workspace-devices/{device_id}/certificates:
     get:
@@ -844,7 +872,7 @@ components:
     BeginDeviceCertificateRotationRequest:
       type: object
       additionalProperties: false
-      required: [csrDer, csrSpkiSha256, csrSha256]
+      required: [csrDer, csrSpkiSha256, csrSha256, registrationKey]
       properties:
         csrDer:
           type: string
@@ -855,6 +883,15 @@ components:
           $ref: '#/components/schemas/Sha256Bytes'
         csrSha256:
           $ref: '#/components/schemas/Sha256Bytes'
+        registrationKey:
+          type: string
+          format: byte
+          minLength: 44
+          maxLength: 44
+          description: >-
+            Fresh client-generated 256-bit recovery key for this rotation. Its
+            domain-separated digest is stored; the raw value is never logged or
+            returned. It must differ from the prior generation's key.
     DeviceCertificateRotationMetadata:
       type: object
       additionalProperties: false
@@ -884,6 +921,9 @@ components:
             - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_EXPIRED
             - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REVOKED
             - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_RECOVERY_BLOCKED
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_RETIREMENT_PENDING
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_SUPERSEDED_FOR_REGISTRATION_ROTATION
+            - DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REGISTRATION_RETIRED
         startedAt:
           type: string
           format: date-time

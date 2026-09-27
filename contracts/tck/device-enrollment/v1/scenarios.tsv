@@ -48,10 +48,22 @@ poll_after_ack	ACK committed	poll	DELIVERY_CONSUMED; certificate never resent
 delivery_deadline_recovery	ACK absent at deadline	delivery worker	certificate revoked/retired before DELIVERY_EXPIRED; poll reports delivery_expired
 delivery_revoke_pending	CA revocation outcome pending	deadline recovery and poll	DELIVERY_RECOVERY_BLOCKED+REVOCATION_PENDING; never mark delivered
 delivery_revoke_unknown	CA revocation outcome ambiguous	deadline recovery and poll	DELIVERY_RECOVERY_BLOCKED+RECOVERY_BLOCKED; never mark delivered
-rotation_same_device	old mTLS cert+new valid CSR	rotation start	same device_id+new authorization_id+approval flow
-rotation_before_ack	new certificate not yet ACKed	certificate metadata	old certificate remains ACTIVE
-rotation_ack	new certificate ACKed	rotation completion	new serial active; old serial retired/revoked
-rotation_expired	new delivery deadline passed	rotation recovery	old certificate remains ACTIVE; new cert revoked or explicit blocker
+rotation_same_device	current mTLS cert+new valid CSR+fresh distinct 256-bit registration_key	rotation start	same device_id+new authorization_id+authorization_generation+approval flow
+rotation_recovery_after_lost_start	rotation start response lost; same new key+exact scope/CSR/SPKI retry	POST /v1/device-authorizations	same authorization_id+authorization_generation+CA idempotency key and certificate; new codes; device_code_generation increments only
+rotation_registration_key_reuse	new rotation reuses predecessor registration_key	rotation start	CONFLICT; key digest cannot bind a different CSR tuple or new generation
+rotation_pre_issuing_supersede	current peer generation; predecessor is Pending/AwaitingWebAuthn/VerifyingWebAuthn	rotation start	atomic SupersededForRegistrationRotation+new authorization; predecessor codes and approval cannot be used
+rotation_issuing_conflict	predecessor already Issuing or has unresolved retirement	rotation start	CONFLICT; do not supersede or create another CA issuance
+rotation_delivery_pending_retirement	predecessor DeliveryPending with full immutable cert snapshot	rotation transaction	old row RetirementPending(RegistrationRotated)+new Directory generation+new authorization commit atomically; old peer generation becomes stale
+rotation_delivered_retirement	predecessor Delivered with approver+full cert+exact ACK receipt	rotation transaction	old row RetirementPending(RegistrationRotated) preserves receipt+cert material; new generation commits atomically
+rotation_retirement_confirmed	rotation retirement worker confirms CA/registry retirement	retirement worker	old row becomes terminal RegistrationRetired; poll/approval cannot replay old enrollment
+rotation_legacy_v3_delivered	legacy Delivered has ACK receipt but no approver/cert snapshot	rotation start	CONFLICT; row remains readable and exact ACK replayable; never fabricate certificate material
+rotation_peer_claim_mismatch	stale/expired generation or mismatched CSR/SPKI/cert fingerprint/serial/notAfter claim	rotation start	CONFLICT; no Directory generation increment
+rotation_concurrent_stale_peer	two rotations race using same current mTLS generation	rotation transaction	one commit advances generation once; second stale peer conflicts; generation never advances twice
+rotation_old_ack_receipt_replay	old Delivered receipt replayed with exact old device_code/ACK tuple after rotation	ACK	SAME receipt result; does not reactivate or poll the old generation
+rotation_before_ack	new certificate not yet ACKed	certificate metadata	old mTLS generation already stale; old cert remains retirement-pending; new serial is not ACTIVE
+rotation_ack	new certificate ACKed and registry activation committed	rotation completion	new serial active; old serial retired/revoked
+rotation_expired	new delivery deadline passed after rotation commit	rotation recovery	new generation remains current; old generation is never restored; new cert revoked or explicit blocker
+http_rotation_without_atomic_transaction	valid CSR and peer but composite Directory/authorization/retirement transaction unavailable	POST /v1/workspace-devices/{device_id}/certificate-rotations	PENDING (route not mounted in this slice); once mounted, 503 with no generation change, authorization, or code response
 certificate_metadata	serial+fingerprint+issuer+validity+scope+authorization_id+CSR digests	certificate list	metadata present; no private key
 revocation_scope	revoker outside exact scope	certificate revocation	REJECTED
 revocation_idempotent	same serial and reason repeated	revocation endpoint	SAME revocation metadata

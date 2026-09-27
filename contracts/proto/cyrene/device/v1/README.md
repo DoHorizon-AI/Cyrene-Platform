@@ -13,7 +13,10 @@ and status mapping is specified in
 - `device_id` is the stable Directory-assigned `WorkspaceDevice` identity.
 - `authorization_id` identifies one enrollment or rotation attempt and binds its exact CSR and SPKI digests.
 - `authorization_generation` orders attempts for one device so clients can discard stale responses.
-- `registration_key` correlates initial enrollment retries; it is not an authentication credential.
+- `registration_key` is a fresh 256-bit recovery credential for one authorization;
+  the server stores only its domain-separated digest. A same-key, exact-tuple
+  retry can recover a lost start response, but the key is not a poll, approval,
+  or ACK credential.
 - `approval_id` identifies one WebAuthn challenge attempt.
 - `device_code` is the high-entropy bearer secret used only to poll and ACK.
 - `user_code` is a rate-limited human lookup value, not an authorization credential.
@@ -22,7 +25,9 @@ and status mapping is specified in
 - `device_id` 是 Directory 分配的稳定 `WorkspaceDevice` 身份。
 - `authorization_id` 标识一次注册或轮换尝试，并绑定精确 CSR 与 SPKI digest。
 - `authorization_generation` 按 device 顺序标识尝试，便于客户端丢弃迟到的旧响应。
-- `registration_key` 关联初始注册重试，不是认证凭证。
+- `registration_key` 是一次授权使用的全新 256-bit 恢复凭证；服务端只保存
+  其 domain-separated digest。同 key、精确 tuple 的重试可恢复丢失的 start
+  response，但它不能用于 poll、approval 或 ACK。
 - `approval_id` 标识一次 WebAuthn challenge 尝试。
 - `device_code` 是仅用于轮询与 ACK 的高熵 bearer secret。
 - `user_code` 是受速率限制的人类查找值，不是授权凭证。

@@ -147,6 +147,9 @@ enum DeviceAuthorizationLifecycleState {
   DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_EXPIRED = 8;
   DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REVOKED = 9;
   DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_RECOVERY_BLOCKED = 10;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_RETIREMENT_PENDING = 11;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_SUPERSEDED_FOR_REGISTRATION_ROTATION = 12;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REGISTRATION_RETIRED = 13;
 }
 
 // Approval returns ISSUING until a durable, scope- and key-bound certificate
@@ -282,13 +285,24 @@ message AcknowledgeDeviceCertificateDeliveryResponse {
 
 // A rotation creates a new authorization for the existing device_id. It is
 // accepted only over the currently valid WorkspaceDevice certificate; normal
-// user approval still applies. The old certificate remains active until ACK.
+// user approval still applies. A new 256-bit registration recovery key is
+// required and must differ from the previous generation's key. The exact-key
+// retry recovers a lost start response without another authorization or
+// generation; it rotates only device/user codes. When the current authorization
+// has a complete issued-certificate snapshot, rotation records retirement intent
+// atomically with the new generation, which immediately makes the old mTLS
+// generation stale. A legacy ACK receipt without a certificate snapshot cannot
+// be rotated.
 message BeginDeviceCertificateRotationRequest {
   string device_id = 1;
   bytes csr_der = 2;
   bytes csr_spki_sha256 = 3;
   // SHA-256 of the exact DER CSR, exactly 32 bytes.
   bytes csr_sha256 = 4;
+  // Fresh 256-bit recovery credential for this authorization. It is stored only
+  // as a domain-separated digest and must never be logged or returned.
+  // 本次授权使用新的 256-bit 恢复凭证；服务端只存 domain-separated digest。
+  bytes registration_key = 5;
 }
 
 message DeviceCertificateRotationMetadata {

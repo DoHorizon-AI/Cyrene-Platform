@@ -12,7 +12,7 @@ the OpenAPI file defines paths, JSON shapes, and HTTP status mappings.
 | `authorization_id` | One enrollment or rotation attempt; binds scope, exact CSR digest, and CSR SPKI digest. | No |
 | `authorization_generation` | Monotonic per-device generation for each new authorization or certificate rotation. | No |
 | `device_code_generation` | Monotonic same-authorization recovery revision; fences stale start responses after code rotation. | No |
-| `registration_key` | Client-generated 256-bit secret used only to recover a lost start response for the exact registration tuple. | Yes, recovery only |
+| `registration_key` | Fresh client-generated 256-bit secret bound to one exact authorization tuple and used to recover a lost start response. | Yes, start/recovery only |
 | `approval_id` | One server-stored WebAuthn challenge attempt. | No, without the trusted user session and assertion |
 | `device_code` | Current 256-bit secret returned to the device; recovery rotates it under the same authorization. | Yes, for poll and delivery ACK |
 | `user_code` | Human-entered, rate-limited authorization lookup value. | No; it cannot poll or approve |
@@ -21,9 +21,10 @@ the OpenAPI file defines paths, JSON shapes, and HTTP status mappings.
 
 `device_id`, `authorization_id`, and `approval_id` are opaque identifiers and
 must never be accepted as authentication. `registration_key` is a separate
-256-bit recovery credential; it is not accepted for poll, approval, or ACK. The
-server stores only its domain-separated digest and never logs or returns its
-raw value.
+256-bit recovery credential supplied when an authorization is created; it is
+not accepted for poll, approval, or ACK. Every new rotation uses a fresh key
+that differs from its predecessor's. The server stores only its
+domain-separated digest and never logs or returns its raw value.
 On HTTP, `authorization_id` is the canonical unpadded base64url encoding of
 the server-generated 128-bit value; reject any other encoding.
 `device_code` is never echoed by a poll response. The server binds its current
@@ -56,8 +57,10 @@ The canonical endpoint and schema mapping is
    a different scope or CSR, or after denial, delivery ACK, delivery expiry, or
    authorization expiry, is a conflict. Recovery is rate-limited and bounded
    by authorization TTL and configured attempt count. A new authorization or
-   rotation uses a new key and increments `authorization_generation`.
-   Active devices use the mTLS rotation route. The response contains
+   rotation uses a new key and increments `authorization_generation`; a
+   same-key retry after losing a rotation response only increments
+   `device_code_generation`. Active devices use the mTLS rotation route for a
+   fresh authorization. The response contains
    `device_id`, `authorization_id`, `authorization_generation`,
    `device_code_generation`, `csr_sha256`,
    `device_code`, `user_code`,
@@ -146,19 +149,52 @@ state machine, and the HTTP route layer now accepts explicit application ports
 and fails closed when the atomic registration transaction is absent. Production
 Directory identity mapping with same-authorization recovery-key code rotation,
 cross-process persistence, CA, registry activation, and host composition are
-still missing; end-to-end enrollment remains pending those adapters.
+still missing; end-to-end enrollment remains pending those adapters. The mTLS
+rotation handler is a target contract only and is not mounted by this state/
+poll slice. Once mounted, it must return 503 without verified-peer and atomic
+Directory/authorization transaction adapters; no registration state may change.
 
 ## Rotation and revocation
 
 A rotation is authorized by the currently valid WorkspaceDevice certificate,
 uses the same `device_id` and scope, and creates a new `authorization_id`,
-`authorization_generation`, CSR, SPKI digest, and certificate serial. Certificate
-and rotation metadata retain their `authorization_id` linkage. The old certificate remains active until
-the replacement delivery is ACKed. A failed or expired rotation leaves the old
-certificate active. Revocation targets one exact certificate serial, requires
-the configured trusted user permission in the same scope, is idempotent, and
-preserves serial, fingerprint, issuer, validity, revocation ID, reason, and
-revocation time for audit.
+`authorization_generation`, CSR, SPKI digest, and certificate serial. The request
+must carry a fresh 256-bit `registration_key`, different from the predecessor's
+key. Certificate and rotation metadata retain their `authorization_id`
+linkage. An exact retry with the new key and same scope/CSR/SPKI after a lost
+response recovers the same authorization, generation, CA idempotency key, and
+any certificate; it only rotates the codes and increments
+`device_code_generation`.
+
+The mTLS verifier must provide the exact current device generation, CSR/SPKI
+digests, leaf fingerprint, serial, and expiry as trusted claims. The body cannot
+assert predecessor identity. The Directory identity lock and predecessor auth
+row are checked in one transaction. A predecessor still in Pending,
+AwaitingWebAuthn, or VerifyingWebAuthn may be superseded before CA issuance.
+Issuing, unresolved retirement, stale or expired mTLS claims, and a legacy V3
+Delivered record with no certificate snapshot conflict. A DeliveryPending or
+Delivered predecessor can rotate only when its complete immutable certificate
+snapshot is present. In that same transaction its state becomes
+`RetirementPending(RegistrationRotated)` and the next Directory generation and
+authorization are committed. An ACKed predecessor retains its exact receipt.
+The old mTLS generation becomes invalid immediately when the transaction
+commits; it does not remain active while the replacement is pending. The
+retirement worker retries CA/registry retirement until confirmed, then records
+`RegistrationRetired`. A second request made with the old generation conflicts
+and cannot advance the generation again. If retirement is unresolved, clients
+must use the new authorization's recovery key; they cannot fall back to the old
+certificate. A legacy V3 `Delivered` row remains readable and its existing ACK
+receipt remains replayable, but the missing certificate snapshot prevents
+rotation.
+
+Rotation failures before commit leave the old generation current. After commit,
+the new generation remains current even if replacement delivery expires; the
+old generation is never silently restored. The replacement serial becomes
+Active only after its exact delivery ACK is durable and the registry performs
+its explicit activation transition. Revocation targets one exact certificate
+serial, requires the configured trusted user permission in the same scope, is
+idempotent, and preserves serial, fingerprint, issuer, validity, revocation ID,
+reason, and revocation time for audit.
 
 ## Secret handling and acceptance boundary
 
@@ -196,21 +232,21 @@ bash tooling/ci/check-public-proto-sync.sh
 | `authorization_id` | 一次注册或轮换记录；绑定 scope 和 CSR SPKI digest。 | 否 |
 | `authorization_generation` | 每个新授权或证书轮换时 per-device 单调递增。 | 否 |
 | `device_code_generation` | 同一授权内的恢复 revision，用于丢弃旧 start response。 | 否 |
-| `registration_key` | 客户端生成的 256-bit secret，仅用于恢复丢失的 start response。 | 是，仅用于恢复 |
+| `registration_key` | 每次授权新生成的 256-bit secret，绑定精确授权 tuple 并用于恢复丢失的 start response。 | 是，仅用于 start/recovery |
 | `approval_id` | 一次由服务端保存的 WebAuthn challenge 尝试。 | 否；单独不能替代可信用户 session 与 assertion |
 | `device_code` | 当前 start response 返回的 256-bit secret；恢复时在同一授权下轮换。 | 是，用于轮询和交付 ACK |
 | `user_code` | 受速率限制、由用户输入的授权查找值。 | 否；不能轮询或批准 |
 | `UserIdentityRef` | 从已认证交互式 session 得到的 issuer 与 subject。 | 仅代表用户身份 |
 | Workload identity | 独立的运行时身份与凭证 authority。 | 本协议不签发 |
 
-`device_id`、`authorization_id` 和 `approval_id` 是不透明标识符，不能作为认证凭证。`registration_key` 是独立的 256-bit 恢复凭证，只用于取回丢失的 start response，不能用于 poll、approval 或 ACK。服务端只保存其 domain-separated digest，不记录或回显原值。轮询响应不回显 `device_code`。服务端将当前 device-code digest 与确切的 `authorization_id`、`device_id`、organization、workspace、CSR DER digest、SPKI digest 和 expiry 绑定。服务端重算并返回 CSR SHA-256 与 SPKI SHA-256。Directory/identity adapter 必须分配并保存稳定 `device_id`；authorization state machine 的记录 ID 不能替代该 authority。
+`device_id`、`authorization_id` 和 `approval_id` 是不透明标识符，不能作为认证凭证。`registration_key` 是创建授权时提交的独立 256-bit 恢复凭证，不能用于 poll、approval 或 ACK。每次新轮换都必须使用与前任 key 不同的新值。服务端只保存其 domain-separated digest，不记录或回显原值。轮询响应不回显 `device_code`。服务端将当前 device-code digest 与确切的 `authorization_id`、`device_id`、organization、workspace、CSR DER digest、SPKI digest 和 expiry 绑定。服务端重算并返回 CSR SHA-256 与 SPKI SHA-256。Directory/identity adapter 必须分配并保存稳定 `device_id`；authorization state machine 的记录 ID 不能替代该 authority。
 HTTP 上的 `authorization_id` 是服务端生成的 128-bit 值的规范无填充 base64url 编码；非规范编码必须拒绝。
 
 ## HTTP 流程
 
 规范 endpoint 和 schema 映射见 [`openapi.yaml`](../../../http/device-enrollment/v1/openapi.yaml)。
 
-1. `POST /v1/device-authorizations` 校验确切的 organization/workspace、DER PKCS#10 CSR、proof of possession、调用方给出的 32-byte `csr_spki_sha256`，以及客户端生成的 256-bit secret `registration_key`。服务端重新解析 CSR；SPKI digest 不匹配时必须在保存授权之前拒绝，并自行计算精确 CSR digest。Directory 将 registration key 的 domain-separated digest 绑定到唯一的 scope/CSR/SPKI 元组并分配 `device_id`。若 start 响应丢失，使用同 key 和确切元组重试会保留相同 `authorization_id`、`authorization_generation`、CA 幂等键和已签证书；CAS 轮换 device/user codes 并递增 `device_code_generation`，使旧 codes 失效，但不重置审批或签发状态。若 WebAuthn 验证或 CA 签发正在进行，恢复必须保留原授权并返回同一证书或显式 pending，不能创建第二次签发。客户端忽略任何 `device_code_generation` 较低的迟到响应。key 若用于其他 scope/CSR，或在 denial、delivery ACK、delivery expiry 或授权 expiry 后重用，则返回 conflict。恢复受授权 TTL、频率与总次数限制。新授权/轮换使用新 registration key 并递增 `authorization_generation`。Active 设备使用 mTLS rotation route。响应包含 `device_id`、`authorization_id`、`authorization_generation`、`device_code_generation`、`csr_sha256`、`device_code`、`user_code`、`verification_uri`、可选的完整 URI、poll interval 和 expiry。
+1. `POST /v1/device-authorizations` 校验确切的 organization/workspace、DER PKCS#10 CSR、proof of possession、调用方给出的 32-byte `csr_spki_sha256`，以及客户端新生成的 256-bit secret `registration_key`。服务端重新解析 CSR；SPKI digest 不匹配时必须在保存授权之前拒绝，并自行计算精确 CSR digest。Directory 将 registration key 的 domain-separated digest 绑定到唯一的 scope/CSR/SPKI 元组并分配 `device_id`。若 start 响应丢失，使用同 key 和确切元组重试会保留相同 `authorization_id`、`authorization_generation`、CA 幂等键和已签证书；CAS 轮换 device/user codes 并递增 `device_code_generation`，使旧 codes 失效，但不重置审批或签发状态。若 WebAuthn 验证或 CA 签发正在进行，恢复必须保留原授权并返回同一证书或显式 pending，不能创建第二次签发。客户端忽略任何 `device_code_generation` 较低的迟到响应。key 若用于其他 scope/CSR，或在 denial、delivery ACK、delivery expiry 或授权 expiry 后重用，则返回 conflict。恢复受授权 TTL、频率与总次数限制。新授权/轮换使用新的 registration key 并递增 `authorization_generation`；同 key 的丢响应恢复只递增 `device_code_generation`。Active 设备创建新授权时使用 mTLS rotation route。响应包含 `device_id`、`authorization_id`、`authorization_generation`、`device_code_generation`、`csr_sha256`、`device_code`、`user_code`、`verification_uri`、可选的完整 URI、poll interval 和 expiry。
 2. 用户打开 verification URI，通过已配置的交互式身份边界登录，并提交 `user_code` 与确切 scope。服务端从 session 派生 `UserIdentityRef`，并重新检查当前 membership。请求 body 不能指定 approver。
 3. 配置的 WebAuthn verifier 创建浏览器 `PublicKeyCredentialRequestOptions` 与仅存于服务端的 opaque state，并将 state 绑定到 approval ID、user、authorization、scope、精确 CSR digest 和 SPKI digest。只有 options 会发送到浏览器。`approval_id` 仅用于查找已保存 state，不是凭证。首次 finish 必须包含 assertion；完成前必须重新检查 membership 与 CSR binding，并原子消费 WebAuthn state 和 assertion。durable `ISSUING` 后，同一 trusted session 可用相同 approval ID 省略已消费的 assertion，以恢复同一发行请求。
 4. Denial 需要可信 user session 和确切 scope 的 membership。基础 manager 要求 approval 使用 WebAuthn；denial 不要求 WebAuthn，因为它不会授予设备凭证。
@@ -234,7 +270,11 @@ Manager 已包含本地可测的 ACK-backed delivery/retirement state machine。
 
 ## 轮换与撤销
 
-轮换由当前有效的 WorkspaceDevice 证书授权，复用相同 `device_id` 和 scope，并创建新的 `authorization_id`、`authorization_generation`、CSR、SPKI digest 和证书 serial。证书与 rotation metadata 保留对应的 `authorization_id`。replacement delivery 获得 ACK 前，旧证书保持 active。轮换失败或过期时旧证书保持 active。撤销针对一个确切证书 serial，需要同一 scope 内配置好的可信用户权限，操作必须幂等，并保留 serial、fingerprint、issuer、validity、revocation ID、reason 和 revocation time 审计信息。
+轮换由当前有效的 WorkspaceDevice 证书授权，复用相同 `device_id` 和 scope，并创建新的 `authorization_id`、`authorization_generation`、CSR、SPKI digest 和证书 serial。请求必须携带与前任 key 不同的全新 256-bit `registration_key`。证书与 rotation metadata 保留对应的 `authorization_id`。使用新 key 和相同 scope/CSR/SPKI 的精确重试可以取回同一授权、generation、CA 幂等键和已签证书，只轮换 codes 并增加 `device_code_generation`。
+
+mTLS verifier 必须提供可信的当前 device generation、CSR/SPKI digest、leaf fingerprint、serial 和 expiry。请求 body 不能自称前任设备身份。Directory device identity 行与 predecessor authorization row 必须在同一事务中锁定并校验。Pending、AwaitingWebAuthn 或 VerifyingWebAuthn 的前任记录可在 CA 签发前 supersede。Issuing、尚未解决的 retirement、过期或 stale peer，以及缺少证书快照的 legacy V3 Delivered 记录均返回 conflict。DeliveryPending 或 Delivered 只有在完整不可变证书快照存在时才能轮换；同一事务把旧状态设为 `RetirementPending(RegistrationRotated)`，并提交新的 Directory generation 与 authorization。已 ACK 的前任还必须保留完全相同的 receipt。事务提交后旧 mTLS generation 立即失效，不会在 replacement pending 期间继续有效。retirement worker 重试 CA/registry retirement，确认后写入 `RegistrationRetired`。旧 generation 的并发重放不能再次推进 generation。retirement 尚未解决时客户端使用新授权的 recovery key，不回退到旧证书。legacy V3 `Delivered` 仍可读且旧 ACK receipt 可精确重放，但因缺少完整证书快照而不能轮换。
+
+提交前失败时旧 generation 仍然 current。提交后即使 replacement delivery 过期，新 generation 仍然 current，绝不静默恢复旧 generation。replacement serial 只有在精确 delivery ACK 持久化且 registry 明确激活后才能成为 Active。撤销针对一个确切证书 serial，需要同一 scope 内配置好的可信用户权限，操作必须幂等，并保留 serial、fingerprint、issuer、validity、revocation ID、reason 和 revocation time 审计信息。
 
 ## Secret 处理与验收边界
 
