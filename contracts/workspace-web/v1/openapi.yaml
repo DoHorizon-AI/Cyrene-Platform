@@ -78,13 +78,16 @@ paths:
         only `userCode` and `scope`; it never carries issuer, subject, organization
         identity, or roles. The BFF derives the approver from the verified web
         session, requires `scope.organizationId` to equal its server-verified
-        organization, then checks current Workspace membership and the required
-        approval role before resolving the code and creating a challenge.
+        organization, then checks current Workspace membership and the dedicated
+        Directory capability `workspace.device.enrollment.approve.v1` before
+        resolving the code and creating a challenge. This capability is granted
+        only by a trusted Directory operator for the exact Workspace; the
+        `workspace.member` marker and Product COMMAND roles do not grant approval.
 
-        The durable approval challenge is bound to the verified principal and the
-        digest of the current verified access-token session. The BFF does not
-        substitute an in-memory session or challenge store. Unknown or inaccessible
-        authorization details are not disclosed. The route returns HTTP 200 with
+        The durable WebAuthn HTTP binding is scoped to this verified principal,
+        exact Workspace, challenge expiry, and digest of the current access-token
+        session. The BFF does not substitute an in-memory binding store. Unknown
+        or inaccessible authorization details are not disclosed. The route returns HTTP 200 with
         the canonical begin response. If the Device Authorization, WebAuthn,
         Directory, or durable storage provider is absent, it returns a fixed 503
         problem without fabricating success.
@@ -98,10 +101,11 @@ paths:
         `CreateDeviceApprovalChallengeRequest` 与 `CreateDeviceApprovalChallengeResponse` schema。请求只含 `userCode` 和
         `scope`，不携带 issuer、subject、organization identity 或 roles。BFF 从已验证 web session 派生审批人，要求
         `scope.organizationId` 与服务端验证的 organization 相同，然后在解析 code、创建 challenge 前重新检查当前
-        Workspace membership 和所需审批角色。
+        Workspace membership 和专用 Directory capability `workspace.device.enrollment.approve.v1`。该 capability 只能由可信
+        Directory operator 按精确 Workspace 授予；`workspace.member` marker 与 Product COMMAND role 均不具备审批权限。
 
-        持久化 approval challenge 绑定已验证 principal 和当前已验证 access-token session 的 digest。BFF 不使用内存 session
-        或 challenge store 替代持久存储。未知或不可访问的 authorization 详情不得泄漏。成功时返回 HTTP 200 和规范 begin
+        持久化 WebAuthn HTTP binding 绑定已验证 principal、精确 Workspace、challenge expiry 和当前 access-token session digest。
+        BFF 不使用内存 binding store 替代持久存储。未知或不可访问的 authorization 详情不得泄漏。成功时返回 HTTP 200 和规范 begin
         response。Device Authorization、WebAuthn、Directory 或持久存储 provider 缺失时，返回固定 503 problem，不得伪造成功。
 
         规范的 `authorization` projection 包含精确目标 scope、authorization 与 device ID、CSR SPKI 和 CSR SHA-256 digest、过期时间及
@@ -135,6 +139,7 @@ paths:
         '403': { $ref: '#/components/responses/Problem403' }
         '404': { $ref: '#/components/responses/Problem404' }
         '406': { $ref: '#/components/responses/Problem406' }
+        '409': { $ref: '#/components/responses/Problem409' }
         '413': { $ref: '#/components/responses/Problem413' }
         '415': { $ref: '#/components/responses/Problem415' }
         '422': { $ref: '#/components/responses/Problem422' }
@@ -157,7 +162,11 @@ paths:
         accepts no approver, role, organization, or session identity from JSON.
         It requires the same verified principal and durable access-token session
         digest that began this approval, and rechecks the current Directory role
-        and exact Workspace membership before completion.
+        and exact Workspace membership before completion. All three approval
+        operations require the dedicated Directory capability
+        `workspace.device.enrollment.approve.v1`; a membership marker or Product
+        COMMAND role alone is insufficient. Only a trusted Directory operator
+        may grant that capability for a specific Workspace.
 
         The first completion requires `webauthnAssertion`. It returns HTTP 202
         only after the ISSUING transition is durable. A retry bound to the same
@@ -172,7 +181,9 @@ paths:
         请求和响应使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的
         `CompleteDeviceApprovalRequest` 与 `CompleteDeviceApprovalResponse` schema。BFF 不接受 JSON 中的审批人、role、organization
         或 session identity。完成操作必须使用开始审批时相同的已验证 principal 和持久 access-token session digest，并在完成前重新检查
-        当前 Directory role 与精确 Workspace membership。
+        当前 Directory role 与精确 Workspace membership。三个审批操作均要求专用 Directory capability
+        `workspace.device.enrollment.approve.v1`；仅有 membership marker 或 Product COMMAND role 不足。该 capability 只能由可信
+        Directory operator 按特定 Workspace 授予。
 
         首次完成必须携带 `webauthnAssertion`。只有在 ISSUING transition 已持久化后才返回 HTTP 202。绑定同一已验证 session 的重试可在
         恢复已持久化 ISSUING transition 时省略 assertion，并返回 HTTP 200。raw assertion 和 CSRF token 绝不记录或持久化。不同 subject、
@@ -236,13 +247,19 @@ paths:
         only `userCode` and `scope`; the approver identity and organization come
         from the verified web session and authoritative Directory mapping. The
         BFF requires exact organization agreement, current Workspace membership,
-        and the required role. It returns HTTP 200 with the canonical denial
+        and the dedicated Directory capability
+        `workspace.device.enrollment.approve.v1`. Membership and Product COMMAND
+        roles alone are insufficient; only a trusted Directory operator grants
+        the capability for a specific Workspace. Denial does not require a
+        WebAuthn assertion but still rechecks that current capability. It returns HTTP 200 with the canonical denial
         response and invalidates any active approval challenge for that
         authorization. Unknown or inaccessible details are not disclosed.
 
         此路由使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的 `DenyDeviceAuthorizationRequest` 和
         `DenyDeviceAuthorizationResponse` schema。JSON 只含 `userCode` 与 `scope`；审批人 identity 和 organization 来自已验证
-        web session 及权威 Directory 映射。BFF 要求 organization 完全匹配、当前 Workspace membership 有效且角色获准。成功时返回
+        web session 及权威 Directory 映射。BFF 要求 organization 完全匹配、当前 Workspace membership 有效且具有专用 Directory capability
+        `workspace.device.enrollment.approve.v1`。仅有 membership 或 Product COMMAND role 不足；该 capability 只能由可信 Directory operator
+        按特定 Workspace 授予。拒绝操作不要求 WebAuthn assertion，但仍会重新检查当前 capability。成功时返回
         HTTP 200 和规范 denial response，并使该 authorization 的活动 approval challenge 失效。未知或不可访问的详情不得泄漏。
       security:
         - webSession: []
@@ -273,6 +290,7 @@ paths:
         '403': { $ref: '#/components/responses/Problem403' }
         '404': { $ref: '#/components/responses/Problem404' }
         '406': { $ref: '#/components/responses/Problem406' }
+        '409': { $ref: '#/components/responses/Problem409' }
         '413': { $ref: '#/components/responses/Problem413' }
         '415': { $ref: '#/components/responses/Problem415' }
         '422': { $ref: '#/components/responses/Problem422' }

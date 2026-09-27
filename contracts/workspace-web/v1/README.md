@@ -155,7 +155,7 @@ The browser surface is deliberately limited to these three same-origin routes:
 
 | Route | Success response | Meaning |
 |---|---|---|
-| `POST /api/workspace/v1/device-authorizations/approval-challenges` | `200 CreateDeviceApprovalChallengeResponse` | Resolve `userCode` and exact `scope`, check the verified member's current role, and create a one-time WebAuthn challenge. |
+| `POST /api/workspace/v1/device-authorizations/approval-challenges` | `200 CreateDeviceApprovalChallengeResponse` | Resolve `userCode` and exact `scope`, check current membership and `workspace.device.enrollment.approve.v1`, and create a one-time WebAuthn challenge. |
 | `POST /api/workspace/v1/device-authorizations/approval-challenges/{approvalId}/complete` | `202 CompleteDeviceApprovalResponse` on first durable ISSUING; `200` on recovery | Verify the one-time assertion and durably begin issuance. A same-session retry may omit the assertion only after ISSUING was committed. |
 | `POST /api/workspace/v1/device-authorizations/denials` | `200 DenyDeviceAuthorizationResponse` | Deny the exact scoped authorization and invalidate any active approval challenge. |
 
@@ -169,18 +169,24 @@ Directory membership and the required approval role. Request JSON never carries
 identity, organization authority, or roles. Begin binds the durable approval to
 the verified principal and the digest of the current access-token session;
 complete requires that same binding. It never accepts the user's bearer token as
-a device credential. The begin `authorization` projection carries the canonical
-scope, authorization/device IDs, CSR SPKI and CSR digests, expiry, and generation;
-it contains no private key, device code, or issued certificate. The Device
-Authorization durable store owns the approval/session binding; the BFF adds no
-session or challenge table, and the digest itself is never returned or logged.
+a device credential. All three routes require the separate Directory capability
+`workspace.device.enrollment.approve.v1`, granted by a trusted Directory
+operator for the exact Workspace. `workspace.member` and Product COMMAND roles
+do not grant approval authority. The begin `authorization` projection carries
+the canonical scope, authorization/device IDs, CSR SPKI and CSR digests, expiry,
+and generation; it contains no private key, device code, or issued certificate.
+The existing durable WebAuthn HTTP binding store binds the challenge to the
+verified principal, Workspace, expiry, and access-token session digest. The BFF
+adds no new approval/session store, and the digest itself is never returned or
+logged.
 
 All three routes are commands: they require the exact configured `Origin`, a
 valid session-bound `X-CSRF-Token` matching the Secure HttpOnly
-`__Secure-cyrene-csrf` cookie, and the existing verified web session. CSRF
-validation and current role/membership checks happen before invoking Device
-Authorization. Raw WebAuthn assertions, CSRF tokens, device codes, and private
-device credentials are never logged. Every response carries a
+`__Secure-cyrene-csrf` cookie, and the existing verified web session. The
+begin, complete, and deny routes each recheck current membership and the
+dedicated Directory capability before invoking Device Authorization. Denial
+does not require WebAuthn step-up. Raw WebAuthn assertions, CSRF tokens, device
+codes, and private device credentials are never logged. Every response carries a
 `Cache-Control: no-store` header, and every JSON body stays within 4 MiB.
 Errors use the BFF's closed RFC 9457 schema and do not expose private
 authorization details.
@@ -199,7 +205,7 @@ closed.
 
 | 路由 | 成功响应 | 语义 |
 |---|---|---|
-| `POST /api/workspace/v1/device-authorizations/approval-challenges` | `200 CreateDeviceApprovalChallengeResponse` | 解析 `userCode` 和精确 `scope`，检查已验证成员的当前角色，并创建一次性 WebAuthn challenge。 |
+| `POST /api/workspace/v1/device-authorizations/approval-challenges` | `200 CreateDeviceApprovalChallengeResponse` | 解析 `userCode` 和精确 `scope`，检查当前 membership 与 `workspace.device.enrollment.approve.v1`，并创建一次性 WebAuthn challenge。 |
 | `POST /api/workspace/v1/device-authorizations/approval-challenges/{approvalId}/complete` | 首次持久化 ISSUING 时 `202 CompleteDeviceApprovalResponse`；恢复时 `200` | 验证一次性 assertion 并持久化启动签发。只有 ISSUING 已提交后，同 session 重试才可省略 assertion。 |
 | `POST /api/workspace/v1/device-authorizations/denials` | `200 DenyDeviceAuthorizationResponse` | 拒绝精确 scope 的 authorization，并使活动 approval challenge 失效。 |
 
@@ -208,11 +214,14 @@ closed.
 `scope` 只选择目标。BFF 从已验证 session 派生 issuer 和 subject，要求 scope organization 与服务端 identity mapping 相同，并重新检查当前
 Directory membership 与所需审批角色。请求 JSON 不携带 identity、organization authority 或 roles。Begin 将持久 approval 绑定到已验证 principal
 和当前 access-token session digest；complete 必须通过相同绑定。Begin 的 `authorization` projection 包含规范 scope、authorization/device ID、
-CSR SPKI 与 CSR digest、过期时间和 generation；不包含私钥、device code 或签发证书。持久化 binding 由 Device Authorization store 所有；BFF 不新增
-session 或 challenge table，digest 本身绝不返回或记录。用户 bearer token 绝不作为 device credential 接受。
+CSR SPKI 与 CSR digest、过期时间和 generation；不包含私钥、device code 或签发证书。三个路由均要求由可信 Directory operator 按精确
+Workspace 授予的独立 capability `workspace.device.enrollment.approve.v1`；`workspace.member` 和 Product COMMAND role 不具备审批权限。
+现有持久 WebAuthn HTTP binding store 将 challenge 绑定到已验证 principal、Workspace、过期时间和 access-token session digest。BFF 不新增
+approval/session store，digest 本身绝不返回或记录。用户 bearer token 绝不作为 device credential 接受。
 
 三个路由均为 command：必须提供与配置完全一致的 `Origin`、通过 session 绑定验证且与 Secure HttpOnly
-`__Secure-cyrene-csrf` cookie 匹配的 `X-CSRF-Token`，以及现有已验证 web session。调用 Device Authorization 前先验证 CSRF 和当前角色/membership。
+`__Secure-cyrene-csrf` cookie 匹配的 `X-CSRF-Token`，以及现有已验证 web session。调用 Device Authorization 前先验证 CSRF 和当前
+membership/capability。拒绝操作不要求 WebAuthn step-up。
 Raw WebAuthn assertion、CSRF token、device code 和私有 device credential 绝不记录。所有响应设置 `Cache-Control: no-store`，所有 JSON body
 不超过 4 MiB。错误使用 BFF 封闭的 RFC 9457 schema，不泄漏私有 authorization 详情。
 
