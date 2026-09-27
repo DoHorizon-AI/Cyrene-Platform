@@ -8,7 +8,7 @@ BEGIN
            OR state_kind IN (
                 'superseded_for_registration_rotation', 'registration_retired'
            )
-           OR convert_from(state_payload, 'UTF8')::JSONB ->> 'format_version' = '4'
+           OR convert_from(state_payload, 'UTF8')::JSONB ->> 'format_version' IN ('4', '5')
     ) THEN
         RAISE EXCEPTION 'cannot remove registration recovery state while it is in use';
     END IF;
