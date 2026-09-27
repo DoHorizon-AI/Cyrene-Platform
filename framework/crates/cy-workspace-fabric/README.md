@@ -169,6 +169,34 @@ raw device or user codes. New-key mTLS rotation stays unavailable until the
 predecessor supersede/retirement transition and Directory generation advance
 are committed together by the PostgreSQL adapter.
 
+`PostgresUserCodeAttemptReservation` provides the shared asynchronous limiter
+reservation used by the enrollment composite before it calls the synchronous
+state machine. It stores only the caller-derived 32-byte abuse digest, a
+database-clock window start, an attempt count, and that digest's window length
+and maximum. Expiry cleanup uses each row's persisted policy; presenting the
+same digest with different parameters while its stored window is active fails
+closed rather than resetting or relaxing its limit. Once that stored window
+expires by database time, the row can be reused under the new policy. A
+PostgreSQL transaction lock makes updates and the 4,096-active-key ceiling
+consistent across service instances. This global lock trades write throughput
+for a simple shared bound;
+the adapter admits at most 32 in-flight reservations and rejects excess load.
+`Ok(false)` refuses the request without incrementing beyond the configured
+maximum, matching the existing in-memory port. Timeout, database errors,
+invalid bounds, and capacity exhaustion fail closed. The composite must pass
+the exact same digest/window/maximum to its request-scoped one-shot
+`UserCodeAttemptLimiter`, and must not call `block_on` from a Tokio worker.
+
+The limiter shares the device-authorization database, TLS policy, migration
+history, and `cyrene_workspace_device_authorization_app` runtime role. Migration
+`0005_user_code_attempt_limiter` grants that role access only to the new
+attempt-window table; no raw IP address, pre-auth session, user code, or other
+identity value is stored. Run the existing device-authorization migrator with
+`CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_MIGRATION_DATABASE_URL` before deploying
+the composite. Runtime connections continue to use
+`CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL` and PostgreSQL
+`sslmode=verify-full`.
+
 ## Relay host security state
 
 `cy-workspace-relay-host` is the non-fixture process entrypoint around
@@ -380,6 +408,24 @@ unavailable；调用方传入的绑定快照不能证明 Directory 更新与授�
 证书确认，但不能用于 code 恢复或设备轮换。存储层不会补造缺失摘要，也不会持久化明文
 device/user code。在旧记录安全地进入 supersede/retirement 且同事务实现前，使用新 key 的
 mTLS 设备轮换保持不可用。
+
+`PostgresUserCodeAttemptReservation` 为 enrollment composite 提供共享异步尝试预留；composite
+在调用同步状态机前先预留。它只保存调用方派生的 32-byte abuse digest、数据库时钟窗口起点、计数、
+该 digest 的窗口长度和次数上限。过期清理由每行持久化的策略决定；同一 digest 使用不同参数时 fail closed，
+在旧窗口仍有效时不会重置或放宽限制；按数据库时钟确认旧窗口到期后，可用新策略复用该行。
+PostgreSQL transaction lock 让多实例共享固定窗口与 4,096 个活跃 digest 上限；
+超时、数据库错误、
+无效边界或容量耗尽均 fail closed。全局 lock 以写入吞吐换取简单共享上限；adapter 最多接收 32 个
+并发预留，超出后拒绝。`Ok(false)` 表示拒绝本次请求，并按现有 in-memory port 语义不再递增已达上限的计数。
+Composite 必须把完全相同的 digest/window/maximum 传给本次请求的 one-shot `UserCodeAttemptLimiter`，
+且不得在 Tokio worker 中调用 `block_on`。
+
+Limiter 与设备授权共用数据库、TLS 策略、迁移历史及
+`cyrene_workspace_device_authorization_app` runtime role。迁移
+`0005_user_code_attempt_limiter` 只向该 role 授予新尝试窗口表的访问权；不会存储原始 IP、pre-auth
+session、user code 或其他身份值。部署 composite 前，使用
+`CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_MIGRATION_DATABASE_URL` 运行现有设备授权迁移。Runtime
+仍使用 `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL`，并强制 PostgreSQL `sslmode=verify-full`。
 
 ## Relay host 安全状态
 
