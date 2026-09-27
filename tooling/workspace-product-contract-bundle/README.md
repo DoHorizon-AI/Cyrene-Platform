@@ -22,6 +22,12 @@ six sorted `{name, commit}` source pins, and a sorted inventory of every
 included `{path, sha256}`. Checksums cover raw file bytes. No timestamps, local
 paths, credentials, or environment variables are written to the bundle.
 
+The approved Stage 2 inputs are recorded in
+[`releases/product-contract-bundle-stage2.json`](releases/product-contract-bundle-stage2.json).
+That lock names the Platform TCK commit and digest plus the six exact Product
+commits. `workspacePath` values are relative to the Cyrene umbrella root and
+match the checkout layout listed by `Cyrene-Workspace/repositories.yaml`.
+
 ## Build
 
 Use Python 3.11 or newer and install the pinned parser dependency before an
@@ -33,12 +39,45 @@ python3 -m venv .venv
 python -m pip install -r tooling/workspace-product-contract-bundle/requirements.txt
 ```
 
-The six Product repositories must each be either a clean checkout at the exact
-supplied commit or a bare Git object store containing that commit. The origin
-URL must match the fixed canonical URL for that repository. The tool does not
-fetch, resolve branches, or read mutable worktree files. The output directory
-must not already exist, and its parent must already exist outside the Platform
-checkout and all six source repositories.
+For the locked Stage 2 release, run the builder from a clean Platform checkout
+whose TCK file hashes to `ec75c976afd7261e4043eff5c1e53510580b6e90a9af71a07c2371413a984855`.
+The six Product repositories must each be clean checkouts at the exact commits
+in the release lock, or bare Git object stores containing those commits. The
+origin URL must match the fixed canonical URL for that repository. The tool
+does not fetch, resolve branches, or read mutable worktree files. The output
+directory must not already exist, and its parent must already exist outside
+the Platform checkout and all six source repositories.
+
+Using a workspace root with the paths in the release lock, build the pinned
+sources and the bundle as follows. In CI, check out each Product repository at
+its locked SHA before invoking the builder; for a local build, use separate
+clean worktrees so the developer checkouts remain untouched.
+
+```sh
+WORKSPACE_ROOT=/path/to/Cyrene
+PLATFORM_ROOT="$WORKSPACE_ROOT/Cyrene-Platform"
+OUTPUT=/tmp/cyrene-product-contract-bundle-stage2
+
+python3 "$PLATFORM_ROOT/tooling/workspace-product-contract-bundle/build_bundle.py" \
+  --source "Cyrene-Catalyst=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Catalyst" \
+  --commit Cyrene-Catalyst=8aa3432fc17fb0b1de50a4e0d5eb0ca37f4f21c9 \
+  --source "Cyrene-Yield=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Yield" \
+  --commit Cyrene-Yield=6b90c62675a0b54134512471cf0d1680989cf184 \
+  --source "Cyrene-Reactor=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Reactor" \
+  --commit Cyrene-Reactor=5f211b3a1eaec05dd14b47f5a2341816f61bbf51 \
+  --source "Cyrene-Exchange=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Exchange" \
+  --commit Cyrene-Exchange=85e30c402151b8928ca2d17caaeef923b3669c77 \
+  --source "Cyrene-Echo=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Echo" \
+  --commit Cyrene-Echo=fcd641832d0d154c18e5ab5811ee7232d6d91fbc \
+  --source "Cyrene-Navigator=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Navigator" \
+  --commit Cyrene-Navigator=05d7d88f3d38c21b1cb0641c66dc81fd033d4d2f \
+  --output "$OUTPUT"
+```
+
+The locked build produces 36 contract files plus `product-contract-bundle.json`.
+Confirm its `canonicalTckSha256` equals the release lock before packaging. The
+builder fails if any Product checkout is dirty or its `HEAD` differs from the
+supplied SHA.
 
 Example (replace all six SHAs and paths with the release lock being approved):
 
@@ -67,6 +106,29 @@ Product schemas. A successfully built bundle can still fail the runtime
 loader's application-level schema policy. Rebuild after the approved Product
 owner commits are available, then validate the resulting bundle with the
 loader before treating it as a release artifact.
+
+## BFF image handoff
+
+Build the bundle before the BFF image and pass its directory as a BuildKit
+named context. The BFF image packages the immutable bundle at
+`/opt/cyrene/product-contracts`; the ACA app sets
+`CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT=/opt/cyrene/product-contracts`.
+The container image therefore carries the exact bundle whose source pins are
+recorded in its `product-contract-bundle.json`, without runtime downloads or a
+mutable schema mount.
+
+```sh
+docker buildx build \
+  --build-context product-contracts="$OUTPUT" \
+  --file "$PLATFORM_ROOT/framework/crates/cy-workspace-web-bff/Dockerfile" \
+  "$PLATFORM_ROOT"
+```
+
+The BFF Dockerfile must copy the named context to
+`/opt/cyrene/product-contracts` (for example, with `COPY --from=product-contracts`).
+This packaging contract does not make the service production-ready; the image
+and ACA environment still need the remaining BFF, Directory, Connector, and
+private-network gates cleared.
 
 ## Targeted checks
 
