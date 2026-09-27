@@ -2,6 +2,17 @@
 -- a Workspace device certificate. Legacy live records are held for explicit review.
 -- Workspace 设备证书必须带 authorization v5 的验证来源证明；旧活跃记录须先盘点。
 
+-- Reject stale transaction snapshots before any catalog reads or lock waits.
+DO $transactional_migration_guard$
+BEGIN
+    IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'PZ002',
+            MESSAGE = 'device registry 0003 requires READ COMMITTED';
+    END IF;
+END
+$transactional_migration_guard$;
+
 DO $dependencies$
 BEGIN
     IF to_regclass('cyrene_workspace_device_registry.certificate_records') IS NULL
@@ -28,7 +39,7 @@ SET ROLE cyrene_workspace_device_registry_owner;
 -- locks so its order does not invert the registry write paths.
 LOCK TABLE cyrene_workspace_device_registry.certificate_records
     IN SHARE ROW EXCLUSIVE MODE;
-DO $transactional_migration_guard$
+DO $transactional_migration_lock_guard$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
@@ -44,7 +55,7 @@ BEGIN
             'device registry 0003 requires a transactional migration retaining the certificate_records lock';
     END IF;
 END
-$transactional_migration_guard$;
+$transactional_migration_lock_guard$;
 
 -- Authorization v5 binds validator provenance to the immutable certificate snapshot.
 CREATE OR REPLACE FUNCTION cyrene_workspace_device_registry.certificate_validation_checked_at(

@@ -208,10 +208,10 @@ certificate revocation on every request.
 Registry migration `0003_certificate_validation_provenance` refuses to proceed
 while legacy `active` or `pending_ack` rows lack matching V5 provenance. It
 leaves those rows unchanged for controlled audit and recovery, and requires the
-SQLx transactional migration runner so its writer-blocking table lock spans the
-preflight and gate replacement. Legacy V1–V4 Delivered rows cannot be activated
-by Registry; V1–V3 also lack the certificate snapshot needed for automatic
-revalidation.
+SQLx transactional migration runner at `READ COMMITTED` isolation so its
+writer-blocking table lock spans a fresh preflight and gate replacement.
+Legacy V1–V4 Delivered rows cannot be activated by Registry; V1–V3 also lack
+the certificate snapshot needed for automatic revalidation.
 
 调用证书撤销 port 前，manager 会先请求 PostgreSQL claim 到期的精确
 `RetirementPending` revision。claim 事务使用主库时钟校验已持久化的状态和版本，写入
@@ -477,7 +477,8 @@ SHA-256 和 Directory registration binding 必须匹配。Stage 要求 PostgreSQ
 Relay 还会在每次请求上独立检查当前证书撤销状态。Registry 迁移
 `0003_certificate_validation_provenance` 遇到缺少匹配 V5 来源证明的旧
 `active` 或 `pending_ack` 行时会拒绝迁移，不会修改这些审计行，需在受控窗口盘点并恢复。
-迁移要求使用 SQLx transactional runner，使阻止写入的表锁覆盖旧行预检与 gate 替换。
+迁移要求使用 `READ COMMITTED` 隔离级别下的 SQLx transactional runner，使阻止写入的表锁覆盖
+基于新快照的旧行预检与 gate 替换。
 V1–V4 的 Delivered 记录不能由 Registry 激活；V1–V3 也缺少可供自动复验的证书快照。
 
 `PostgresUserCodeAttemptReservation` 为 enrollment composite 提供共享异步尝试预留；composite
