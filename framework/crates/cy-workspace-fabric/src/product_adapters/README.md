@@ -35,17 +35,33 @@ directory before starting this loader.
 }
 ```
 
-The dispatcher enables Catalyst, Yield, Echo, Exchange, and Reactor through
-fixed owner routes and caller-scoped endpoint credentials. Catalyst, Yield,
-Echo, and Reactor use `/internal/workspace/v1/...`; Exchange uses protected
-`/api/v1/workspace/...` aliases. Reactor permits only GET and POST
+The dispatcher enables Catalyst, Yield, Echo, Exchange, Reactor, and Navigator
+through fixed owner routes and caller-scoped endpoint credentials. Catalyst,
+Yield, Echo, and Reactor use `/internal/workspace/v1/...`; Exchange uses
+protected `/api/v1/workspace/...` aliases. Reactor permits only GET and POST
 `/internal/workspace/v1/model-imports`; its owner checks the configured
 workspace-to-serving-binding grant for POST and the adapter preserves an owner
-403 response. Legacy Reactor routes are rejected. Navigator operations return
-a fixed unavailable error regardless of configured endpoints, and Navigator
-append remains denied until a trusted Harness writer handoff exists. The
-Workspace adapter does not invent or forward a user as a Product actor, and the
-role policy grants only the exact configured user commands. Production
+403 response. Legacy Reactor routes are rejected.
+
+Navigator operation 11 sends the closed read request to
+`POST /api/v1/workspace-snapshots`; its nested Product reads are limited to the
+candidate contract's fixed internal routes and Exchange workspace alias. A
+successful response must match the closed `WorkspaceSnapshot` shape, including
+its source-operation labels and non-navigable digest summaries. Operation 12
+uses `GET
+/internal/workspace/v1/workspaces/{workspace_id}/sessions/{session_id}` and
+accepts only the closed `WorkspaceSessionSummary` and `ProductMetadata` fields;
+the returned Workspace and session identifiers must match the authenticated
+caller and requested resource. Both operations are READ-only. The private
+manifest supplies one Navigator bearer for an exact organization and
+Workspace; Navigator maps the bearer labels for both endpoints to the same
+server-owned principal. The browser bearer is never forwarded or accepted by
+this adapter, and the scoped bearer cannot be reused for another configured
+scope. Operation 13 always returns permission denied, even when an endpoint is
+configured, until a trusted Harness writer handoff exists.
+
+The Workspace adapter does not invent or forward a user as a Product actor,
+and the role policy grants only the exact configured user commands. Production
 composition and trusted caller audit provenance are still incomplete, so this
 aggregate is not yet a production-ready path.
 
@@ -78,11 +94,20 @@ the operation under review.
 
 建议阅读顺序：先读 `mod.rs`，再读 `http.rs`，最后按待审查操作阅读对应 owner 适配器。
 
-当前 dispatcher 通过固定 owner 路由与调用者范围 endpoint credential 启用 Catalyst、Yield、Echo、Exchange
-和 Reactor。Catalyst、Yield、Echo 与 Reactor 使用 `/internal/workspace/v1/...`；Exchange 使用受保护的
+当前 dispatcher 通过固定 owner 路由与调用者范围 endpoint credential 启用 Catalyst、Yield、Echo、Exchange、Reactor
+和 Navigator。Catalyst、Yield、Echo 与 Reactor 使用 `/internal/workspace/v1/...`；Exchange 使用受保护的
 `/api/v1/workspace/...` 别名。Reactor 仅允许 GET 与 POST
 `/internal/workspace/v1/model-imports`；owner 会检查 POST 对应的 workspace-to-serving-binding grant，适配器原样
-保留 owner 的 403 响应，并拒绝旧 Reactor 路由。即使配置了 endpoint，Navigator 操作仍返回固定 unavailable。
-可信 Harness writer handoff 接入前，Navigator append 也继续拒绝。Workspace adapter 不会伪造或转发用户作为
-Product actor，角色策略只授予精确配置的用户命令。生产组合与可信调用者审计来源仍未完成，因此此 aggregate 尚不是
-可用于生产的路径。
+保留 owner 的 403 响应，并拒绝旧 Reactor 路由。
+
+Navigator 操作 11 将封闭的只读请求发送到 `POST /api/v1/workspace-snapshots`；内部 Product reads 仅允许候选合同
+中的固定路由和 Exchange workspace 别名。成功响应必须符合封闭的 `WorkspaceSnapshot` 结构，包括固定来源 operation
+标签和不可导航的摘要 digest。操作 12 使用
+`GET /internal/workspace/v1/workspaces/{workspace_id}/sessions/{session_id}`，只接受封闭的
+`WorkspaceSessionSummary` 与 `ProductMetadata` 字段；返回的 Workspace 和 session ID 必须匹配已认证调用者与请求资源。
+两个操作都只读。私有 manifest 为精确的 organization 与 Workspace 配置一个 Navigator bearer；Navigator 服务将两个 endpoint
+的 bearer scheme label 映射到同一个服务端 principal。此适配器不会转发或接受浏览器 bearer，scope credential 也不能用于其他
+配置 scope。即使配置 endpoint，操作 13 仍始终返回 permission denied，直到接入可信 Harness writer handoff。
+
+Workspace adapter 不会伪造或转发用户作为 Product actor，角色策略只授予精确配置的用户命令。生产组合与可信调用者审计来源仍未完成，
+因此此 aggregate 尚不是可用于生产的路径。

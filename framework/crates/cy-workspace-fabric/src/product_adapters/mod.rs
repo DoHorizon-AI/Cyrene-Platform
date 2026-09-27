@@ -70,10 +70,13 @@ impl ProductInvocationPort for ProductHttpApiAdapter {
         caller: &WorkspaceCallerContext,
         request: ProductInvocationRequest,
     ) -> Result<ProductInvocationResponse, ProductInvocationError> {
-        // Navigator still lacks an authorized private Product route. Endpoint
-        // configuration alone must never re-enable its legacy request path.
-        if request.owner == WorkspaceProductApiOwner::Navigator {
-            return Err(ProductInvocationError::Unavailable);
+        // Navigator event append remains deny-only, even if a future caller or
+        // endpoint configuration would otherwise authorize a write.
+        if request.owner == WorkspaceProductApiOwner::Navigator
+            && request.operation
+                == cy_proto::workspace_v1::WorkspaceProductApiOperation::WorkspaceProductApiOperation13
+        {
+            return Err(ProductInvocationError::PermissionDenied);
         }
 
         authorize_product_invocation(caller, caller.workspace_id(), &request)?;
@@ -86,7 +89,12 @@ impl ProductInvocationPort for ProductHttpApiAdapter {
             WorkspaceProductApiOwner::Navigator => navigator::target(caller, &request)?,
             _ => return Err(ProductInvocationError::InvalidRequest),
         };
-        self.client.send(caller, target, &request).await
+        let response = self.client.send(caller, target, &request).await?;
+        if request.owner == WorkspaceProductApiOwner::Navigator {
+            navigator::validate_response(caller, &request, response)
+        } else {
+            Ok(response)
+        }
     }
 }
 
@@ -389,42 +397,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn navigator_operations_remain_unavailable_with_configured_endpoints() {
+    async fn navigator_append_remains_denied_with_configured_endpoint() {
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = adapter(calls.clone());
-        let requests = [
-            ProductInvocationRequest {
-                owner: Owner::Navigator,
-                operation: Operation::WorkspaceProductApiOperation11,
-                kind: Kind::Read,
-                resource_id: None,
-                json_body: br#"{"workspaceId":"workspace-1","reads":[{"product":"CATALYST","path":"/api/v1/datasets"}]}"#.to_vec(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Navigator,
-                operation: Operation::WorkspaceProductApiOperation12,
-                kind: Kind::Read,
-                resource_id: Some("session-1".to_string()),
-                json_body: Vec::new(),
-                idempotency_key: None,
-            },
-            ProductInvocationRequest {
-                owner: Owner::Navigator,
-                operation: Operation::WorkspaceProductApiOperation13,
-                kind: Kind::Command,
-                resource_id: Some("session-1".to_string()),
-                json_body: br#"{"events":[]}"#.to_vec(),
-                idempotency_key: Some("append-1".to_string()),
-            },
-        ];
+        let request = ProductInvocationRequest {
+            owner: Owner::Navigator,
+            operation: Operation::WorkspaceProductApiOperation13,
+            kind: Kind::Command,
+            resource_id: Some("session-1".to_string()),
+            json_body: br#"{"writerToken":"browser-secret","events":[]}"#.to_vec(),
+            idempotency_key: Some("append-1".to_string()),
+        };
 
-        for request in requests {
-            assert_eq!(
-                adapter.invoke(&member_caller(), request).await.unwrap_err(),
-                ProductInvocationError::Unavailable
-            );
-        }
+        assert_eq!(
+            adapter.invoke(&member_caller(), request).await.unwrap_err(),
+            ProductInvocationError::PermissionDenied
+        );
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
