@@ -2,7 +2,7 @@
 FROM rust:1.96.1-slim-bookworm AS build
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends protobuf-compiler pkg-config libssl-dev \
+    && apt-get install --yes --no-install-recommends protobuf-compiler pkg-config libssl-dev perl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /source
