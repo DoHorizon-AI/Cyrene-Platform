@@ -369,6 +369,45 @@ if [ -n "$product_private_state_matches" ]; then
   status=1
 fi
 
+# Reject new Product-shaped data declarations even when they use neutral names
+# such as `NavigatorSession` instead of a `Product*State` suffix. The listed
+# symbols are the existing bounded Workspace wire/HTTP contracts and read-only
+# Navigator view types; adding another Product DTO/schema requires review.
+workspace_product_private_type_pattern='^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(struct|enum|type|trait)[[:space:]]+((Catalyst|Echo|Exchange|Navigator|Reactor|Yield)[[:upper:]][[:alnum:]_]*|[[:alnum:]_]*Product[[:alnum:]_]*(State|Session|Store|Repository|Persistence|Database|Migration|Lifecycle|Workflow|Entity|Dto|DTO|Schema|Record|Event|Snapshot|Request|Response|Model|Payload|Document|Cache|Summary|View|Metadata))([[:space:]<{(:;=]|$)'
+workspace_product_private_type_candidates=$(
+  git grep -n -E "$workspace_product_private_type_pattern" -- \
+    "${workspace_host_semantic_sources[@]}" 2>/dev/null || true
+)
+is_existing_workspace_host_product_type() {
+  case "$1" in
+    CatalystEchoProductApiAdapter| \
+    ProductHttpRequest|ProductHttpResponse| \
+    ProductInvocationRequest|ProductInvocationResponse| \
+    ProductJsonSchema|ProductMetadata|ProductView|WorkspaceProductRequest| \
+    CompiledProductSchema)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+workspace_product_private_type_matches=""
+while IFS= read -r match; do
+  [ -z "$match" ] && continue
+  declared_type=$(printf '%s\n' "$match" | sed -E \
+    's/^[^:]+:[0-9]+:[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(struct|enum|type|trait)[[:space:]]+([[:alnum:]_]+).*/\4/')
+  if is_existing_workspace_host_product_type "$declared_type"; then
+    continue
+  fi
+  workspace_product_private_type_matches+="$match"$'\n'
+done <<< "$workspace_product_private_type_candidates"
+if [ -n "$workspace_product_private_type_matches" ]; then
+  echo "FORBIDDEN: Workspace host glue declares new Product-specific state, DTO, or schema types:"
+  printf '%s' "$workspace_product_private_type_matches" | sed 's/^/  - /'
+  status=1
+fi
+
 # Owner maps must use fixed operation routes and the central typed transport.
 # Caller values may enter a path only through the validated resource constructor.
 # owner map 只能使用固定 operation 路由和集中类型化 transport；调用方参数必须先校验。
@@ -387,6 +426,61 @@ direct_product_transport_matches=$(
 if [ -n "$direct_product_transport_matches" ]; then
   echo "FORBIDDEN: a Product owner map bypasses the typed Workspace HTTP transport:"
   echo "$direct_product_transport_matches" | sed 's/^/  - /'
+  status=1
+fi
+
+# Central HTTP I/O must send only the URL produced from ProductHttpTarget and
+# the server-configured owner endpoint. Keep reqwest centralized and reject
+# convenience methods or additional request/execute call sites in this file.
+workspace_product_http_source="framework/crates/cy-workspace-fabric/src/product_adapters/http.rs"
+expected_product_http_request_shape='\.request\([[:space:]]*request\.method\.as_reqwest\(\),[[:space:]]*request\.url\.clone\(\)[[:space:]]*\)'
+product_http_request_call_count=$(
+  { rg --no-filename --no-line-number --only-matching \
+    '\.(request|execute)[[:space:]]*\(' "$workspace_product_http_source" \
+    || true; } | wc -l | tr -d '[:space:]'
+)
+product_http_direct_method_matches=$(
+  git grep -n -E \
+    '(Client::new[[:space:]]*\(|(reqwest::|::)(get|post|put|delete|patch)[[:space:]]*\(|\.(get|post|put|delete|patch|execute)[[:space:]]*\()' -- \
+    "$workspace_product_http_source" 2>/dev/null \
+    | grep -v -F '.get(CONTENT_TYPE)' || true
+)
+product_http_url_overrides=$(
+  git grep -n -E 'request[.]url[[:space:]]*=' -- \
+    "$workspace_product_http_source" 2>/dev/null || true
+)
+product_http_target_mutations=$(
+  git grep -n -E \
+    'target[.]path_segments([[:space:]]*=|[[:space:]]*\[|[.][[:space:]]*(push|extend|insert|remove|clear|truncate|retain|as_mut|iter_mut)[[:space:]]*\()' -- \
+    "$workspace_product_http_source" 2>/dev/null || true
+)
+product_http_target_url_build_count=$(
+  { rg --no-filename --no-line-number --only-matching \
+    'target\.build_url\(&endpoint\.base_url\)' "$workspace_product_http_source" \
+    || true; } | wc -l | tr -d '[:space:]'
+)
+product_http_submission_count=$(
+  { git grep -h -E '\.send[[:space:]]*\(ProductHttpRequest[[:space:]]*\{' -- \
+      "$workspace_product_http_source" 2>/dev/null || true; } \
+    | wc -l | tr -d '[:space:]'
+)
+product_http_url_field_count=$(
+  { rg --no-filename --no-line-number --only-matching \
+    '^[[:space:]]*url,' "$workspace_product_http_source" || true; } \
+    | wc -l | tr -d '[:space:]'
+)
+if [ "$product_http_request_call_count" != "1" ] \
+  || ! rg --multiline -q "$expected_product_http_request_shape" "$workspace_product_http_source" \
+  || [ -n "$product_http_direct_method_matches" ] \
+  || [ -n "$product_http_url_overrides" ] \
+  || [ -n "$product_http_target_mutations" ] \
+  || [ "$product_http_target_url_build_count" != "1" ] \
+  || [ "$product_http_submission_count" != "1" ] \
+  || [ "$product_http_url_field_count" != "1" ]; then
+  echo "FORBIDDEN: central Product HTTP transport bypasses its single typed target URL."
+  printf '%s\n' "$product_http_direct_method_matches" "$product_http_url_overrides" \
+    "$product_http_target_mutations" \
+    | sed '/^$/d; s/^/  - /'
   status=1
 fi
 
