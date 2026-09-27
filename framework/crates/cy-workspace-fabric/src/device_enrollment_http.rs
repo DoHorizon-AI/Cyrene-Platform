@@ -29,10 +29,15 @@ use crate::device_authorization::{
     DeviceAuthorizationStartDisposition, DeviceAuthorizationState, DeviceCsrValidator,
     DeviceRegistrationKeyDigest,
 };
+use crate::relay_peer_certificate_validation::AuthenticatedRelayWorkspaceDevice;
 
 const MAX_CSR_DER_BYTES: usize = 16 * 1024;
 const MAX_WEBAUTHN_ASSERTION_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 128 * 1024;
+
+#[allow(dead_code)]
+#[path = "device_certificate_rotation_host.rs"]
+pub(crate) mod device_certificate_rotation_host;
 
 /// Directory-owned identity mapping for one registration binding.
 ///
@@ -219,6 +224,82 @@ pub trait DeviceEnrollmentRegistrationTransactionPort: Send + Sync {
         &self,
         request: DeviceAuthorizationRegistrationRequest,
     ) -> Result<DeviceEnrollmentStartResult, DeviceEnrollmentHttpError>;
+}
+
+/// Parsed command for the private mTLS certificate-rotation transaction.
+///
+/// The predecessor is an internal capability created only after certificate
+/// validation, current Directory binding match, and revocation checks. The
+/// body contributes CSR material and a new recovery-key digest; it cannot
+/// provide predecessor identity or registration scope.
+#[allow(dead_code)] // Consumed by the separately owned atomic PG rotation adapter.
+pub(crate) struct DeviceCertificateRotationCommand {
+    device_id: String,
+    registration_request: DeviceAuthorizationRegistrationRequest,
+    predecessor: Arc<AuthenticatedRelayWorkspaceDevice>,
+}
+
+impl DeviceCertificateRotationCommand {
+    #[allow(dead_code)]
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn registration_request(&self) -> &DeviceAuthorizationRegistrationRequest {
+        &self.registration_request
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn predecessor(&self) -> &AuthenticatedRelayWorkspaceDevice {
+        &self.predecessor
+    }
+}
+
+/// Atomic Directory/authorization rotation adapter. Implementations must use
+/// the manager-generated candidate and perform identity generation advancement,
+/// predecessor supersession/retirement, registration-key distinctness, and the
+/// new authorization insert in one database transaction. The committed start
+/// snapshot and rotation metadata must come from that same transaction.
+///
+/// Database time must prove the trusted predecessor is unexpired and its
+/// binding ID/generation/current record still match while holding the device
+/// identity lock. Only a fresh 256-bit key whose digest differs from the old
+/// generation's digest may create the next generation. A legacy
+/// `AuthenticatedDeviceRotation` without the full trusted relay marker is never
+/// sufficient evidence for this operation.
+#[async_trait]
+pub(crate) trait DeviceCertificateRotationTransactionPort: Send + Sync {
+    async fn begin_rotation(
+        &self,
+        command: DeviceCertificateRotationCommand,
+    ) -> Result<DeviceCertificateRotationStartResult, DeviceEnrollmentHttpError>;
+}
+
+/// Successful atomic rotation result. The application adapter returns the
+/// manager's public response and committed authorization projection from one
+/// transaction, together with its persisted rotation identifier and DB time.
+pub(crate) struct DeviceCertificateRotationStartResult {
+    pub(crate) start: DeviceEnrollmentStartResult,
+    pub(crate) rotation_id: String,
+    pub(crate) started_at: String,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct DeviceCertificateRotationHttpDependencies {
+    pub(crate) rotation: Option<Arc<dyn DeviceCertificateRotationTransactionPort>>,
+    pub(crate) csr_validator: Option<Arc<dyn DeviceCsrValidator>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DeviceCertificateRotationHttpState {
+    dependencies: DeviceCertificateRotationHttpDependencies,
+}
+
+impl DeviceCertificateRotationHttpState {
+    pub(crate) fn new(dependencies: DeviceCertificateRotationHttpDependencies) -> Self {
+        Self { dependencies }
+    }
 }
 
 /// Secret string wrapper that clears its buffer when the parsed request drops.
@@ -599,6 +680,33 @@ struct StartDeviceAuthorizationRequestWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BeginDeviceCertificateRotationRequestWire {
+    csr_der: String,
+    csr_spki_sha256: String,
+    csr_sha256: String,
+    registration_key: SecretString,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BeginDeviceCertificateRotationResponseWire {
+    authorization: DeviceAuthorizationReferenceWire,
+    codes: DeviceAuthorizationCodesWire,
+    rotation: DeviceCertificateRotationMetadataWire,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceCertificateRotationMetadataWire {
+    rotation_id: String,
+    device_id: String,
+    authorization_id: String,
+    state: &'static str,
+    started_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BeginDeviceApprovalRequestWire {
     user_code: SecretString,
     scope: DeviceScopeWire,
@@ -696,6 +804,171 @@ async fn start_device_authorization(
     validate_start_response(&start.response, &start.binding)?;
     validate_start_commit(&start.committed_snapshot, &start.binding, &start.response)?;
     Ok((StatusCode::CREATED, Json(start.response)))
+}
+
+/// Private mTLS-only rotation handler. It consumes an internal validated peer
+/// extension supplied by the host authentication layer; it never reads XFCC,
+/// forwarded certificate headers, request metadata, or body identity claims.
+#[allow(dead_code)] // The private router remains unmounted pending host proof.
+async fn begin_device_certificate_rotation(
+    State(state): State<DeviceCertificateRotationHttpState>,
+    Path(path_device_id): Path<String>,
+    predecessor: Option<Extension<Arc<AuthenticatedRelayWorkspaceDevice>>>,
+    payload: Result<
+        Json<BeginDeviceCertificateRotationRequestWire>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<(StatusCode, Json<BeginDeviceCertificateRotationResponseWire>), HttpApiFailure> {
+    let Extension(predecessor) = predecessor.ok_or(DeviceEnrollmentHttpError::Unauthorized)?;
+    let peer_key = predecessor.key();
+    if !(16..=128).contains(&path_device_id.len())
+        || path_device_id != peer_key.device_id
+        || peer_key.organization_id.trim().is_empty()
+        || peer_key.organization_id.len() > 256
+        || peer_key.workspace_id.trim().is_empty()
+        || peer_key.workspace_id.len() > 256
+        || predecessor.authorization_generation() == 0
+        || predecessor
+            .registration_binding_id()
+            .iter()
+            .all(|byte| *byte == 0)
+        || predecessor
+            .certificate_sha256()
+            .iter()
+            .all(|byte| *byte == 0)
+        || predecessor.serial_number().is_empty()
+        || predecessor.not_after_unix_ms() == 0
+    {
+        return Err(DeviceEnrollmentHttpError::Forbidden.into());
+    }
+
+    // Absence means the PG/Directory retirement transaction is not wired.
+    // This route must return the generic fixed 503 until a real adapter exists.
+    let rotation = state
+        .dependencies
+        .rotation
+        .as_ref()
+        .ok_or(DeviceEnrollmentHttpError::Unavailable)?;
+    let validator = state
+        .dependencies
+        .csr_validator
+        .as_ref()
+        .ok_or(DeviceEnrollmentHttpError::Unavailable)?;
+
+    let Json(request) = parse_json(payload)?;
+    let csr_der = STANDARD
+        .decode(request.csr_der)
+        .map_err(|_| DeviceEnrollmentHttpError::InvalidRequest)?;
+    if csr_der.is_empty() || csr_der.len() > MAX_CSR_DER_BYTES {
+        return Err(DeviceEnrollmentHttpError::InvalidRequest.into());
+    }
+
+    let declared_csr_sha256 = decode_sha256(&request.csr_sha256)?;
+    let actual_csr_sha256: [u8; 32] = Sha256::digest(&csr_der).into();
+    if declared_csr_sha256 != actual_csr_sha256 {
+        return Err(DeviceEnrollmentHttpError::InvalidRequest.into());
+    }
+
+    let declared_spki_sha256 = decode_sha256(&request.csr_spki_sha256)?;
+    let actual_spki_sha256 = validator
+        .validate_and_hash_spki(&csr_der)
+        .map_err(map_csr_error)?;
+    if actual_spki_sha256 != declared_spki_sha256 {
+        return Err(DeviceEnrollmentHttpError::InvalidRequest.into());
+    }
+
+    let registration_key_digest =
+        decode_registration_key_digest(request.registration_key.expose())?;
+    let scope = DeviceAuthorizationScope {
+        organization_id: peer_key.organization_id.clone(),
+        workspace_id: peer_key.workspace_id.clone(),
+    };
+    let registration_request = DeviceAuthorizationRegistrationRequest::new(
+        scope,
+        csr_der,
+        actual_csr_sha256,
+        actual_spki_sha256,
+        registration_key_digest,
+    )
+    .with_authenticated_relay_peer(Arc::clone(&predecessor))
+    .map_err(|_| DeviceEnrollmentHttpError::Forbidden)?;
+    let result = rotation
+        .begin_rotation(DeviceCertificateRotationCommand {
+            device_id: path_device_id.clone(),
+            registration_request,
+            predecessor: Arc::clone(&predecessor),
+        })
+        .await?;
+
+    let expected_generation = predecessor
+        .authorization_generation()
+        .checked_add(1)
+        .ok_or(DeviceEnrollmentHttpError::Conflict)?;
+    let start = result.start;
+    validate_directory_binding(
+        &start.binding,
+        &DeviceAuthorizationScope {
+            organization_id: peer_key.organization_id.clone(),
+            workspace_id: peer_key.workspace_id.clone(),
+        },
+        &actual_csr_sha256,
+        &actual_spki_sha256,
+    )?;
+    if start.binding.device_id != path_device_id
+        || start.binding.authorization_generation != expected_generation
+        || (start.committed_snapshot.start_disposition
+            != Some(DeviceAuthorizationStartDisposition::Created))
+    {
+        return Err(DeviceEnrollmentHttpError::Unavailable.into());
+    }
+    validate_start_response(&start.response, &start.binding)?;
+    validate_start_commit(&start.committed_snapshot, &start.binding, &start.response)?;
+    if result.rotation_id.trim().is_empty()
+        || !(16..=128).contains(&result.rotation_id.len())
+        || result.started_at.trim().is_empty()
+        || result.started_at.len() > 64
+    {
+        return Err(DeviceEnrollmentHttpError::Unavailable.into());
+    }
+
+    let authorization_id = start.response.authorization.authorization_id.clone();
+    Ok((
+        StatusCode::CREATED,
+        Json(BeginDeviceCertificateRotationResponseWire {
+            authorization: start.response.authorization,
+            codes: start.response.codes,
+            rotation: DeviceCertificateRotationMetadataWire {
+                rotation_id: result.rotation_id,
+                device_id: path_device_id,
+                authorization_id,
+                state: "DEVICE_AUTHORIZATION_LIFECYCLE_STATE_PENDING",
+                started_at: result.started_at,
+            },
+        }),
+    ))
+}
+
+fn decode_registration_key_digest(
+    encoded: &str,
+) -> Result<DeviceRegistrationKeyDigest, DeviceEnrollmentHttpError> {
+    if encoded.len() != 44 {
+        return Err(DeviceEnrollmentHttpError::InvalidRequest);
+    }
+    let mut key_bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| DeviceEnrollmentHttpError::InvalidRequest)?;
+    if key_bytes.len() != 32 || STANDARD.encode(&key_bytes) != encoded {
+        key_bytes.zeroize();
+        return Err(DeviceEnrollmentHttpError::InvalidRequest);
+    }
+
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(&key_bytes);
+    key_bytes.zeroize();
+    let credential = RecoveryCredential(key);
+    let digest = DeviceRegistrationKeyDigest::from_secret(credential.bytes_for_digest());
+    drop(credential);
+    Ok(digest)
 }
 
 async fn begin_device_approval(
