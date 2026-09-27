@@ -23,10 +23,11 @@ use cy_workspace_fabric::workspace_v1::{
 };
 use cy_workspace_fabric::{
     AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, FrontendRelayClient,
-    FrontendRelayClientConfig, FrontendRelayClientError, PostgresWorkspaceDirectory,
-    VerifiedWebPrincipal, WebIdentityDirectory, WebIdentityDirectoryError, WebPrincipalVerifier,
-    WebRelaySessionIssuer, WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal,
-    WorkspaceDirectory, WORKSPACE_MEMBER_ROLE,
+    FrontendRelayClientConfig, FrontendRelayClientError, PostgresWebAuthnHttpSessionBindingStore,
+    PostgresWorkspaceDirectory, VerifiedWebPrincipal, WebAuthnHttpSessionBindingStore,
+    WebIdentityDirectory, WebIdentityDirectoryError, WebPrincipalVerifier, WebRelaySessionIssuer,
+    WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceDirectory,
+    WORKSPACE_MEMBER_ROLE,
 };
 use http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use http::{Response, StatusCode};
@@ -36,9 +37,9 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 use cy_workspace_web_bff::{
-    load_product_operation_catalog_from_environment, router as bff_router,
-    FabricWorkspaceProductGateway, WebBffConfig, WebBffState, WorkspaceApiBinding,
-    WorkspaceApiResolutionError, WorkspaceApiResolver,
+    load_product_operation_catalog_from_environment, router_with_device_approval,
+    DeviceApprovalDependencies, FabricWorkspaceProductGateway, WebBffConfig, WebBffState,
+    WorkspaceApiBinding, WorkspaceApiResolutionError, WorkspaceApiResolver,
 };
 
 const MAX_CERTIFICATE_FILE_BYTES: u64 = 256 * 1024;
@@ -54,6 +55,8 @@ const RELAY_CLIENT_KEY_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_K
 const HANDOFF_ISSUER_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_ISSUER";
 const HANDOFF_AUDIENCE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_AUDIENCE";
 const HANDOFF_SIGNING_SEED_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_SIGNING_SEED_FILE";
+const WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL_ENV: &str =
+    "CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL";
 
 /// Fixed startup failures which never include credential values or backend diagnostics.
 ///
@@ -70,6 +73,8 @@ pub(crate) enum HostStartupError {
     Relay,
     #[error("trusted Product contract bundle could not be loaded")]
     ProductCatalog,
+    #[error("WebAuthn HTTP session-binding store could not be initialized")]
+    WebAuthnSessionBinding,
     #[error("Workspace Web BFF application state could not be initialized")]
     Application,
     #[error("Workspace Web BFF HTTP listener failed")]
@@ -237,6 +242,7 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
         handoff_issuer,
     });
     let workspace_directory: Arc<dyn WorkspaceDirectory> = directory;
+    let approval_directory = Arc::clone(&workspace_directory);
     let workspace_gateway = Arc::new(FabricWorkspaceProductGateway::new(
         Arc::clone(&workspace_directory),
         resolver,
@@ -252,7 +258,29 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     )
     .map_err(|_| HostStartupError::Application)?;
 
-    Ok(with_probes(bff_router(Arc::new(state))))
+    let session_bindings: Option<Arc<dyn WebAuthnHttpSessionBindingStore>> =
+        if env::var_os(WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL_ENV).is_some() {
+            Some(Arc::new(
+                PostgresWebAuthnHttpSessionBindingStore::connect_from_environment()
+                    .await
+                    .map_err(|_| HostStartupError::WebAuthnSessionBinding)?,
+            ))
+        } else {
+            None
+        };
+    let approval_dependencies = DeviceApprovalDependencies {
+        // No production DeviceEnrollmentAuthorizationPort composition exists yet.
+        // Keep approval unavailable until that real provider is supplied.
+        // 尚无生产级 DeviceEnrollmentAuthorizationPort 组合；真实 provider 接入前保持审批不可用。
+        service: None,
+        directory: Some(approval_directory),
+        session_bindings,
+    };
+
+    Ok(with_probes(router_with_device_approval(
+        Arc::new(state),
+        approval_dependencies,
+    )))
 }
 
 /// Start liveness after composition while keeping readiness closed until external trust paths

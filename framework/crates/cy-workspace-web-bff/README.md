@@ -156,6 +156,10 @@ without a real verified user token, the host cannot safely prove AAD JWKS,
 Directory query permissions, or the principal-scoped Relay service trust path.
 This executable is not eligible for live traffic yet. A Relay outage or a token/JWKS
 failure also fails the corresponding request closed.
+The three browser device-approval routes also stay unavailable (503) until a real
+`DeviceEnrollmentAuthorizationPort` production composition is supplied. The optional
+session-binding store below only provides durable ceremony/session binding; it is
+not an approval service.
 
 Required runtime configuration:
 
@@ -167,6 +171,13 @@ Required runtime configuration:
 - `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`: Directory reader connection URL;
   configure its login as the restricted `cyrene_workspace_directory_reader`
   role. The adapter enforces PostgreSQL TLS `verify-full`.
+- Optional `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL`: dedicated
+  runtime connection URL for the durable WebAuthn HTTP session-binding store. Its
+  login must use the restricted `cyrene_workspace_webauthn_http_binding_app` role;
+  PostgreSQL TLS `verify-full` is enforced. If absent, approval routes remain 503.
+  Schema migration uses the separate operator-only
+  `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_MIGRATION_DATABASE_URL`; the BFF
+  never applies migrations at startup.
 - `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`: read-only release bundle
   directory. Production packaging supplies the locked 36-file bundle at
   `/opt/cyrene/product-contracts`; the runtime verifies its TCK digest and all
@@ -207,6 +218,9 @@ bundle、Relay mTLS/handoff 配置均构造成功后才会绑定 `0.0.0.0:8080`�
 不完整或过期都会在 listener 打开前终止启动。`GET /healthz` 报告进程存活。`GET /readyz` 刻意保持 503：没有真实已验证用户
 token 时，host 无法安全证明 AAD JWKS、Directory 查询权限或 principal-scoped Relay 服务信任路径，因此当前 executable 不能接 live
 traffic。Relay outage 或 token/JWKS failure 也会使对应请求 fail closed。
+三个浏览器设备审批路由也会保持不可用（503），直到提供真实的
+`DeviceEnrollmentAuthorizationPort` production composition。下面的可选 session-binding store
+只负责持久化 ceremony/session 绑定，不是审批 service。
 
 Required runtime configuration:
 
@@ -215,6 +229,10 @@ Required runtime configuration:
 - `CYRENE_WORKSPACE_WEB_BFF_AAD_TENANT_ID` 与 `CYRENE_WORKSPACE_WEB_BFF_AAD_AUDIENCE`：固定 tenant UUID 与 API audience。
 - `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`：Directory reader 连接 URL；运维必须配置受限的
   `cyrene_workspace_directory_reader` 登录角色，adapter 强制 PostgreSQL TLS `verify-full`。
+- 可选 `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL`：WebAuthn HTTP session-binding store 的专用 runtime
+  连接 URL。登录角色必须为受限的 `cyrene_workspace_webauthn_http_binding_app`；adapter 强制 PostgreSQL TLS `verify-full`。
+  缺少此项时审批路由保持 503。schema migration 使用独立 operator-only
+  `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_MIGRATION_DATABASE_URL`；BFF 启动时不会执行 migration。
 - `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`：只读 release bundle 目录。生产 packaging 将锁定的 36-file bundle 放到
   `/opt/cyrene/product-contracts`；runtime 在服务前校验 TCK digest 与所有 repository/file pins。
 - `CYRENE_WORKSPACE_WEB_BFF_RELAY_ENDPOINT` 与 `CYRENE_WORKSPACE_WEB_BFF_RELAY_SERVER_NAME`：可信 HTTPS Relay origin 和精确 TLS SNI。
