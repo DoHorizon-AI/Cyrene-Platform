@@ -103,8 +103,8 @@ pub use device_enrollment_http::{
 };
 pub use device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
-    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey, WorkspaceDeviceRecord,
-    WorkspaceDeviceRegistry,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
+    WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
 };
 pub use device_registry_postgres::{
     DeviceCertificateRegistryActivation, DeviceRegistryPostgresError,

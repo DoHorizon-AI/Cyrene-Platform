@@ -5,20 +5,26 @@
 //! generation while holding row locks. Ordinary import is deliberately
 //! refused because it cannot prove device acknowledgement.
 //!
+//! Relay dispatch guards retain one PostgreSQL transaction on the worker. The
+//! worker services only the guard-release channel until that transaction commits,
+//! so queued revocations cannot overtake an admitted frame.
+//!
 //! PostgreSQL Workspace 设备证书注册表。
 //!
 //! 证书先以非活动元数据入库；只有在行锁保护下重新核对持久 Delivered 回执和当前
 //! Directory 代次后才能激活。普通导入接口无法证明设备 ACK，因此在该适配器中拒绝。
 
 use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::migrate::Migrator;
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
@@ -27,8 +33,8 @@ use uuid::Uuid;
 use crate::device_authorization::DeviceAuthorizationId;
 use crate::device_registry::{
     ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
-    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey, WorkspaceDeviceRecord,
-    WorkspaceDeviceRegistry,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
+    WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
 };
 use crate::directory::WorkspaceDirectoryError;
 
@@ -86,6 +92,8 @@ pub enum DeviceCertificateRegistryActivation {
 /// binding and authorization schema V2 are installed.
 pub struct PostgresWorkspaceDeviceRegistry {
     sender: Option<SyncSender<Command>>,
+    release_sender: Option<Sender<RegistryWorkerControl>>,
+    active_fences: Arc<AtomicUsize>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -154,15 +162,29 @@ impl PostgresWorkspaceDeviceRegistry {
             .application_name("cyrene-workspace-device-registry")
             .options([("statement_timeout", "5000"), ("lock_timeout", "3000")]);
         let (sender, commands) = mpsc::sync_channel(QUEUE_CAPACITY);
+        let (release_sender, releases) = mpsc::channel();
+        let active_fences = Arc::new(AtomicUsize::new(0));
+        let worker_active_fences = Arc::clone(&active_fences);
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("workspace-device-registry-postgres".to_owned())
-            .spawn(move || worker_main(options, commands, ready_sender, apply_migrations))
+            .spawn(move || {
+                worker_main(
+                    options,
+                    commands,
+                    releases,
+                    worker_active_fences,
+                    ready_sender,
+                    apply_migrations,
+                )
+            })
             .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
 
         match ready.recv_timeout(STARTUP_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
                 sender: Some(sender),
+                release_sender: Some(release_sender),
+                active_fences,
                 worker: Mutex::new(Some(worker)),
             }),
             Ok(Err(error)) => {
@@ -198,9 +220,12 @@ impl PostgresWorkspaceDeviceRegistry {
 impl Drop for PostgresWorkspaceDeviceRegistry {
     fn drop(&mut self) {
         self.sender.take();
+        self.release_sender.take();
         if let Ok(mut worker) = self.worker.lock() {
             if let Some(worker) = worker.take() {
-                let _ = worker.join();
+                if self.active_fences.load(Ordering::Acquire) == 0 {
+                    let _ = worker.join();
+                }
             }
         }
     }
@@ -263,7 +288,53 @@ impl WorkspaceDeviceRegistry for PostgresWorkspaceDeviceRegistry {
         )
         .map_err(to_directory_error)
     }
+
+    fn acquire_relay_dispatch_fence(
+        &self,
+        expected: &WorkspaceDeviceCertificateIdentity,
+    ) -> Result<Box<dyn WorkspaceDeviceDispatchFence>, WorkspaceDirectoryError> {
+        let release_sender = self.release_sender.as_ref().cloned().ok_or_else(|| {
+            WorkspaceDirectoryError::Storage("Workspace device registry is unavailable".to_owned())
+        })?;
+        let mut fence = Box::new(PostgresRelayDispatchFence {
+            fence_id: None,
+            release_sender,
+        });
+        let (reply, result) = mpsc::sync_channel(1);
+        match self
+            .call(
+                Command::AcquireRelayDispatchFence(expected.clone(), reply),
+                result,
+            )
+            .map_err(to_directory_error)?
+        {
+            Some(fence_id) => {
+                fence.fence_id = Some(fence_id);
+                Ok(fence)
+            }
+            None => Err(WorkspaceDirectoryError::Identity(
+                "Workspace device certificate is no longer current".to_owned(),
+            )),
+        }
+    }
 }
+
+struct PostgresRelayDispatchFence {
+    fence_id: Option<u64>,
+    release_sender: Sender<RegistryWorkerControl>,
+}
+
+impl Drop for PostgresRelayDispatchFence {
+    fn drop(&mut self) {
+        if let Some(fence_id) = self.fence_id {
+            let _ = self
+                .release_sender
+                .send(RegistryWorkerControl::ReleaseDispatchFence(fence_id));
+        }
+    }
+}
+
+impl WorkspaceDeviceDispatchFence for PostgresRelayDispatchFence {}
 
 fn to_directory_error(error: DeviceRegistryPostgresError) -> WorkspaceDirectoryError {
     match error {
@@ -284,11 +355,18 @@ enum Command {
     FindByKey(WorkspaceDeviceKey, Reply<Option<WorkspaceDeviceRecord>>),
     FindByFingerprint(String, Reply<Option<WorkspaceDeviceRecord>>),
     FindCurrentCertificateIdentity(String, Reply<Option<WorkspaceDeviceCertificateIdentity>>),
+    AcquireRelayDispatchFence(WorkspaceDeviceCertificateIdentity, Reply<Option<u64>>),
+}
+
+enum RegistryWorkerControl {
+    ReleaseDispatchFence(u64),
 }
 
 fn worker_main(
     options: PgConnectOptions,
     commands: Receiver<Command>,
+    releases: Receiver<RegistryWorkerControl>,
+    active_fences: Arc<AtomicUsize>,
     ready: SyncSender<RegistryResult<()>>,
     apply_migrations: bool,
 ) {
@@ -313,7 +391,42 @@ fn worker_main(
         return;
     }
 
-    while let Ok(command) = commands.recv() {
+    let mut active_fence: Option<(u64, PoolConnection<Postgres>)> = None;
+    let mut next_fence_id = 1_u64;
+    loop {
+        if let Some((active_id, _)) = active_fence.as_ref() {
+            // The single pool connection is fenced. Release/COMMIT stays on this
+            // worker and always runs before a queued revocation or Registry call.
+            match releases.recv() {
+                Ok(RegistryWorkerControl::ReleaseDispatchFence(released_id))
+                    if released_id == *active_id =>
+                {
+                    if let Some((_, mut connection)) = active_fence.take() {
+                        let committed =
+                            runtime.block_on(finish_dispatch_fence(&mut connection, true));
+                        if !committed {
+                            let _ = runtime.block_on(connection.close());
+                        }
+                        active_fences.fetch_sub(1, Ordering::Release);
+                    }
+                }
+                Ok(RegistryWorkerControl::ReleaseDispatchFence(_)) => {}
+                Err(_) => {
+                    if let Some((_, mut connection)) = active_fence.take() {
+                        let _ = runtime.block_on(finish_dispatch_fence(&mut connection, false));
+                        let _ = runtime.block_on(connection.close());
+                        active_fences.fetch_sub(1, Ordering::Release);
+                    }
+                    return;
+                }
+            }
+            continue;
+        }
+
+        let command = match commands.recv() {
+            Ok(command) => command,
+            Err(_) => return,
+        };
         match command {
             Command::Stage(id, reply) => {
                 let _ = reply.send(runtime.block_on(stage_pending_delivery(&pool, &id)));
@@ -340,8 +453,126 @@ fn worker_main(
                     &fingerprint,
                 )));
             }
+            Command::AcquireRelayDispatchFence(expected, reply) => {
+                match runtime.block_on(acquire_relay_dispatch_fence(&pool, &expected)) {
+                    Ok(Some(connection)) => {
+                        let Some(next_id) = next_fence_id.checked_add(1) else {
+                            let mut connection = connection;
+                            if !runtime.block_on(finish_dispatch_fence(&mut connection, false)) {
+                                let _ = runtime.block_on(connection.close());
+                            }
+                            let _ = reply.send(Err(DeviceRegistryPostgresError::Unavailable));
+                            continue;
+                        };
+                        let fence_id = next_fence_id;
+                        next_fence_id = next_id;
+                        active_fence = Some((fence_id, connection));
+                        active_fences.fetch_add(1, Ordering::AcqRel);
+                        if reply.send(Ok(Some(fence_id))).is_err() {
+                            if let Some((_, mut connection)) = active_fence.take() {
+                                let _ =
+                                    runtime.block_on(finish_dispatch_fence(&mut connection, false));
+                                let _ = runtime.block_on(connection.close());
+                                active_fences.fetch_sub(1, Ordering::Release);
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = reply.send(Ok(None));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
         }
     }
+}
+
+async fn acquire_relay_dispatch_fence(
+    pool: &PgPool,
+    expected: &WorkspaceDeviceCertificateIdentity,
+) -> RegistryResult<Option<PoolConnection<Postgres>>> {
+    let generation = i64::try_from(expected.authorization_generation)
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    let not_after_unix_ms = i64::try_from(expected.not_after_unix_ms)
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    let fingerprint = unhex_32(&expected.certificate_fingerprint_sha256)
+        .ok_or(DeviceRegistryPostgresError::Unavailable)?;
+    let binding_id = Uuid::from_bytes(expected.registration_binding_id);
+    let mut connection = pool
+        .try_acquire()
+        .ok_or(DeviceRegistryPostgresError::Unavailable)?;
+    if sqlx::query("BEGIN")
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    {
+        let _ = connection.close().await;
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
+
+    let check = sqlx::query(
+        "SELECT cyrene_workspace_device_registry.relay_dispatch_fence(\
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10\
+         ) AS admitted",
+    )
+    .bind(&expected.key.organization_id)
+    .bind(&expected.key.workspace_id)
+    .bind(&expected.key.device_id)
+    .bind(binding_id)
+    .bind(generation)
+    .bind(fingerprint.as_slice())
+    .bind(expected.csr_sha256.as_slice())
+    .bind(expected.spki_sha256.as_slice())
+    .bind(&expected.serial_number)
+    .bind(not_after_unix_ms)
+    .fetch_one(&mut *connection)
+    .await;
+
+    match check {
+        Ok(row) => {
+            let admitted: bool = match row.try_get("admitted") {
+                Ok(admitted) => admitted,
+                Err(_) => {
+                    if !finish_dispatch_fence(&mut connection, false).await {
+                        let _ = connection.close().await;
+                    }
+                    return Err(DeviceRegistryPostgresError::Unavailable);
+                }
+            };
+            if admitted {
+                Ok(Some(connection))
+            } else {
+                if !finish_dispatch_fence(&mut connection, true).await {
+                    let _ = connection.close().await;
+                    return Err(DeviceRegistryPostgresError::Unavailable);
+                }
+                Ok(None)
+            }
+        }
+        Err(_) => {
+            if !finish_dispatch_fence(&mut connection, false).await {
+                let _ = connection.close().await;
+            }
+            Err(DeviceRegistryPostgresError::Unavailable)
+        }
+    }
+}
+
+async fn finish_dispatch_fence(connection: &mut PoolConnection<Postgres>, commit: bool) -> bool {
+    let command = if commit { "COMMIT" } else { "ROLLBACK" };
+    if sqlx::query(command)
+        .execute(&mut **connection)
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    if commit {
+        let _ = sqlx::query("ROLLBACK").execute(&mut **connection).await;
+    }
+    false
 }
 
 async fn initialize_pool(
@@ -390,6 +621,19 @@ async fn verify_schema(pool: &PgPool) -> RegistryResult<()> {
             .fetch_all(pool)
             .await
             .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    }
+    let dispatch_fence_available: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure(\
+            'cyrene_workspace_device_registry.relay_dispatch_fence(\
+                text, text, text, uuid, bigint, bytea, bytea, bytea, bytea, bigint\
+            )'\
+        ) IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    if !dispatch_fence_available {
+        return Err(DeviceRegistryPostgresError::Unavailable);
     }
     Ok(())
 }

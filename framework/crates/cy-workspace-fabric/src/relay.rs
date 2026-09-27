@@ -7,6 +7,7 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,7 +35,8 @@ use crate::{
     AcaForwardedBffWorkloadCertificateAdapter, AcaForwardedCertificateAdapter,
     RegistryWorkspaceDeviceVerifier, RelayAuthenticator, RelaySessionClaims, SessionPrincipal,
     VerifiedClientCertificate, WorkspaceCallerContext, WorkspaceDeviceAuthenticationError,
-    WorkspaceDeviceRegistry, WorkspaceDirectory,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceDispatchFence, WorkspaceDeviceRegistry,
+    WorkspaceDirectory,
 };
 
 type RelayStream = Pin<Box<dyn Stream<Item = Result<RelayFrame, Status>> + Send + 'static>>;
@@ -66,6 +68,7 @@ struct WorkspaceDispatch {
     session_cancel: watch::Sender<bool>,
     relay_session_id: String,
     _dispatch_guard: tokio::sync::OwnedMutexGuard<()>,
+    _registry_dispatch_fence: Option<Box<dyn WorkspaceDeviceDispatchFence>>,
 }
 
 impl WorkspaceDispatch {
@@ -95,6 +98,7 @@ struct RelayState {
     directory: Arc<dyn WorkspaceDirectory>,
     authenticator: Arc<dyn RelayAuthenticator>,
     workspace_device_verifier: Option<Arc<RegistryWorkspaceDeviceVerifier>>,
+    workspace_device_registry: Option<Arc<dyn WorkspaceDeviceRegistry>>,
     workspace_peer_certificate_validator: Option<Arc<RelayPeerCertificateValidator>>,
     workspace_peer_revocation_checker: Option<Arc<dyn RelayPeerCertificateRevocationChecker>>,
     aca_forwarded_certificate_adapter: Option<AcaForwardedCertificateAdapter>,
@@ -215,15 +219,20 @@ impl WorkspaceRelay {
         validator: RelayPeerCertificateValidator,
         revocation_checker: Arc<dyn RelayPeerCertificateRevocationChecker>,
     ) -> Self {
-        Self::build(
+        let verifier = Arc::new(RegistryWorkspaceDeviceVerifier::new(registry.clone()));
+        let mut relay = Self::build(
             directory,
             authenticator,
-            Some(Arc::new(RegistryWorkspaceDeviceVerifier::new(registry))),
+            Some(verifier),
             None,
             None,
             Some(Arc::new(validator)),
             Some(revocation_checker),
-        )
+        );
+        Arc::get_mut(&mut relay.state)
+            .expect("new Relay state is uniquely owned")
+            .workspace_device_registry = Some(registry);
+        relay
     }
 
     fn build(
@@ -242,6 +251,7 @@ impl WorkspaceRelay {
                 directory,
                 authenticator,
                 workspace_device_verifier,
+                workspace_device_registry: None,
                 workspace_peer_certificate_validator,
                 workspace_peer_revocation_checker,
                 aca_forwarded_certificate_adapter,
@@ -456,14 +466,13 @@ impl WorkspaceRelay {
         Ok(())
     }
 
-    /// Revalidate the retained peer chain and current Registry binding for every new request.
+    /// Revalidate the retained peer chain and current Registry binding before the final fence.
     ///
-    /// The session gate remains held through synchronous dispatch. Registry and revocation reads
-    /// do not share a transaction with local enqueue, so a remote change can race after the read;
-    /// this bounds that window to the final local fence/send and does not claim cross-store
-    /// linearizability.
+    /// Certificate and external revocation checks run before the transaction guard is acquired.
+    /// The strict Registry check then holds the exact identity row through the synchronous local
+    /// queue admission, without carrying that guard across network I/O or an async wait.
     ///
-    /// 每次请求派发前重验对端证书与当前 binding；由于远端状态读取和本地入队没有共同事务，查询之后仍可能有极短并发窗口。
+    /// 每次派发先完成证书及外部撤销检查，再取得 Registry 行锁 guard；guard 只覆盖本地同步队列入队。
     async fn register_pending(
         &self,
         workspace_id: &str,
@@ -544,20 +553,50 @@ impl WorkspaceRelay {
                 &workspace_id_for_check,
                 &connection,
                 now_unix_ms(),
-            )
+            )?;
+
+            #[cfg(test)]
+            if connection.authenticated_device.is_none()
+                && connection.peer_certificate_chain.is_none()
+                && connection.session_cancel.is_some()
+                && relay.state.workspace_device_verifier.is_none()
+                && relay.state.workspace_peer_certificate_validator.is_none()
+                && relay.state.workspace_peer_revocation_checker.is_none()
+            {
+                // Test-only route fixtures have no authenticated device or durable Registry.
+                return Ok(None);
+            }
+
+            let authenticated_device = connection
+                .authenticated_device
+                .as_ref()
+                .ok_or(WorkspaceDeviceAuthenticationError::RegistryUnavailable)?;
+            let registry = relay
+                .state
+                .workspace_device_registry
+                .as_ref()
+                .ok_or(WorkspaceDeviceAuthenticationError::RegistryUnavailable)?;
+            let expected = registry_identity_for_authenticated_device(authenticated_device);
+            registry
+                .acquire_relay_dispatch_fence(&expected)
+                .map(Some)
+                .map_err(|_| WorkspaceDeviceAuthenticationError::RegistryUnavailable)
         })
         .await;
-        if !matches!(validation, Ok(Ok(()))) {
-            let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
-            tracing::warn!(
-                event.name = "platform.relay.workspace_session_invalidated",
-                error.code = "PLATFORM.RELAY.WORKSPACE_SESSION_AUTHORIZATION_STALE",
-                session_id = %workspace.relay_session_id,
-                workspace_id = %workspace_id,
-                message = "Relay removed a Connector session after current authorization revalidation failed",
-            );
-            return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
-        }
+        let registry_dispatch_fence = match validation {
+            Ok(Ok(fence)) => fence,
+            _ => {
+                let _ = self.invalidate_workspace_connection(workspace_id, &workspace);
+                tracing::warn!(
+                    event.name = "platform.relay.workspace_session_invalidated",
+                    error.code = "PLATFORM.RELAY.WORKSPACE_SESSION_AUTHORIZATION_STALE",
+                    session_id = %workspace.relay_session_id,
+                    workspace_id = %workspace_id,
+                    message = "Relay removed a Connector session after current authorization revalidation or dispatch fencing failed",
+                );
+                return Err((7, "WORKSPACE_DEVICE_SESSION_AUTHORIZATION_STALE"));
+            }
+        };
 
         let session_cancel = workspace
             .session_cancel
@@ -597,6 +636,7 @@ impl WorkspaceRelay {
             session_cancel,
             relay_session_id: workspace.relay_session_id,
             _dispatch_guard: dispatch_guard,
+            _registry_dispatch_fence: registry_dispatch_fence,
         }))
     }
 
@@ -1288,6 +1328,26 @@ fn now_unix_ms() -> u64 {
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
+}
+
+fn registry_identity_for_authenticated_device(
+    device: &AuthenticatedRelayWorkspaceDevice,
+) -> WorkspaceDeviceCertificateIdentity {
+    let mut certificate_fingerprint_sha256 = String::with_capacity(64);
+    for byte in device.certificate_sha256() {
+        write!(certificate_fingerprint_sha256, "{byte:02x}")
+            .expect("writing a digest into String cannot fail");
+    }
+    WorkspaceDeviceCertificateIdentity {
+        key: device.key().clone(),
+        certificate_fingerprint_sha256,
+        registration_binding_id: *device.registration_binding_id(),
+        authorization_generation: device.authorization_generation(),
+        csr_sha256: *device.csr_sha256(),
+        spki_sha256: *device.spki_sha256(),
+        serial_number: device.serial_number().to_vec(),
+        not_after_unix_ms: device.not_after_unix_ms(),
+    }
 }
 
 fn timestamp_from_ms(value: u64) -> prost_types::Timestamp {

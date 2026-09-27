@@ -80,6 +80,14 @@ pub struct WorkspaceDeviceCertificateIdentity {
     pub not_after_unix_ms: u64,
 }
 
+/// RAII guard that keeps a current Registry identity fenced until Relay queue admission ends.
+///
+/// Implementations release the fence when this value is dropped. Non-durable registries do not
+/// provide this guarantee and must leave the acquisition method below fail-closed.
+///
+/// 持有该 guard 会阻止 Registry 撤销或 Directory 代次变更越过本次本地 Relay 入队；释放由 Drop 完成。
+pub trait WorkspaceDeviceDispatchFence: Send {}
+
 /// Persistent Directory port for approved, externally issued Workspace device certificates.
 ///
 /// Implementations only store externally approved certificate metadata and
@@ -141,6 +149,22 @@ pub trait WorkspaceDeviceRegistry: Send + Sync {
     ) -> Result<Option<WorkspaceDeviceCertificateIdentity>, WorkspaceDirectoryError> {
         Err(WorkspaceDirectoryError::Storage(
             "Current Workspace device certificate identity is unavailable".to_owned(),
+        ))
+    }
+
+    /// Acquire a Registry transaction guard for one final Workspace Relay queue admission.
+    ///
+    /// The default denies admission because an ordinary current-state read cannot fence a later
+    /// revocation. Durable implementations must revalidate the complete identity while holding
+    /// the guard and keep it until the caller synchronously enqueues or abandons the frame.
+    ///
+    /// 默认拒绝派发；普通状态读取不能阻止随后发生的撤销。持久实现必须在 guard 生命周期内重验完整身份。
+    fn acquire_relay_dispatch_fence(
+        &self,
+        _expected: &WorkspaceDeviceCertificateIdentity,
+    ) -> Result<Box<dyn WorkspaceDeviceDispatchFence>, WorkspaceDirectoryError> {
+        Err(WorkspaceDirectoryError::Storage(
+            "Workspace Relay dispatch admission fence is unavailable".to_owned(),
         ))
     }
 }
