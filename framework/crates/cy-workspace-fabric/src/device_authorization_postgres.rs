@@ -692,11 +692,10 @@ async fn start_or_recover_registered(
     let binding = match existing_binding {
         Some(row) => {
             let binding = directory_binding_from_row(row)?;
-            if !candidate_matches_binding(&candidate, &binding)
-                || candidate
-                    .authenticated_device()
-                    .is_some_and(|device| device.key() != binding.key())
-            {
+            if !candidate_matches_binding(&candidate, &binding) {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+            if !candidate_peer_matches_current_binding(&candidate, &binding) {
                 return Err(DeviceAuthorizationStoreError::Conflict);
             }
             lock_and_validate_registration(&mut transaction, &binding).await?;
@@ -725,6 +724,12 @@ async fn start_or_recover_registered(
                     return Err(DeviceAuthorizationStoreError::Conflict);
                 }
                 let database_now = database_time_in_transaction(&mut transaction).await?;
+                if candidate
+                    .authenticated_relay_peer()
+                    .is_some_and(|peer| peer.not_after_unix_ms() <= database_now)
+                {
+                    return Err(DeviceAuthorizationStoreError::Conflict);
+                }
                 let record =
                     recover_authorization(&mut transaction, &candidate, current, database_now)
                         .await?;
@@ -857,10 +862,50 @@ fn candidate_matches_binding(
         && binding.spki_sha256() == candidate.spki_sha256()
 }
 
+/// Requires both the complete verified Relay marker and its legacy state-machine
+/// projection to agree with the locked current Directory binding. Missing,
+/// stale, or independently supplied claims cannot authorize recovery.
+fn candidate_peer_matches_current_binding(
+    candidate: &DeviceAuthorizationStartCandidate,
+    binding: &DeviceAuthorizationRegistrationBinding,
+) -> bool {
+    match (
+        candidate.authenticated_relay_peer(),
+        candidate.authenticated_device(),
+    ) {
+        (None, None) => true,
+        (Some(peer), Some(claim)) => {
+            let peer_key = peer.key();
+            let claim_key = claim.key();
+            let binding_key = binding.key();
+            peer.registration_binding_id() == binding.binding_id()
+                && peer_key.organization_id == binding_key.organization_id
+                && peer_key.workspace_id == binding_key.workspace_id
+                && peer_key.device_id == binding_key.device_id
+                && peer.authorization_generation() == binding.authorization_generation()
+                && peer.csr_sha256() == binding.csr_sha256()
+                && peer.spki_sha256() == binding.spki_sha256()
+                && claim_key.organization_id == peer_key.organization_id
+                && claim_key.workspace_id == peer_key.workspace_id
+                && claim_key.device_id == peer_key.device_id
+                && claim.authorization_generation() == peer.authorization_generation()
+                && claim.csr_sha256() == peer.csr_sha256()
+                && claim.spki_sha256() == peer.spki_sha256()
+                && claim.certificate_sha256() == peer.certificate_sha256()
+                && claim.serial_number() == peer.serial_number()
+                && claim.not_after_unix_ms() == peer.not_after_unix_ms()
+        }
+        _ => false,
+    }
+}
+
 fn validate_start_candidate(candidate: &DeviceAuthorizationStartCandidate) -> StoreResult<()> {
     let scope = candidate.scope();
     let csr_der = candidate.csr_der();
     let (_, user_code_mac) = candidate.user_code_digest_candidate().storage_parts();
+    if !candidate_rotation_markers_match(candidate) {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
     if scope.organization_id.trim().is_empty()
         || scope.organization_id.len() > 256
         || scope.workspace_id.trim().is_empty()
@@ -895,6 +940,29 @@ fn validate_start_candidate(candidate: &DeviceAuthorizationStartCandidate) -> St
         }
     }
     Ok(())
+}
+
+fn candidate_rotation_markers_match(candidate: &DeviceAuthorizationStartCandidate) -> bool {
+    match (
+        candidate.authenticated_relay_peer(),
+        candidate.authenticated_device(),
+    ) {
+        (None, None) => true,
+        (Some(peer), Some(claim)) => {
+            let peer_key = peer.key();
+            let claim_key = claim.key();
+            claim_key.organization_id == peer_key.organization_id
+                && claim_key.workspace_id == peer_key.workspace_id
+                && claim_key.device_id == peer_key.device_id
+                && claim.authorization_generation() == peer.authorization_generation()
+                && claim.csr_sha256() == peer.csr_sha256()
+                && claim.spki_sha256() == peer.spki_sha256()
+                && claim.certificate_sha256() == peer.certificate_sha256()
+                && claim.serial_number() == peer.serial_number()
+                && claim.not_after_unix_ms() == peer.not_after_unix_ms()
+        }
+        _ => false,
+    }
 }
 
 fn new_authorization_record(
