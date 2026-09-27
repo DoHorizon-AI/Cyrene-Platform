@@ -63,7 +63,7 @@ environment variables.
 
 ### 2.2 Platform fabric (the foundation)
 
-`Cyrene-Platform/framework/crates/cy-workspace-fabric` (1284 lines) implements:
+`Cyrene-Platform/framework/crates/cy-workspace-fabric` implements:
 
 - `directory.rs` — account membership and Workspace discovery (`WorkspaceMembership`).
 - `transport.rs` — outbound mTLS relay clients; `RelaySession::discover` / `execute` / `serve_workspace`.
@@ -80,8 +80,12 @@ Supporting facts:
   the existing mechanism for "prefer the best path, fall back".
 - `RelayHello` already carries a `DeviceEnrollmentRef device`
   (`workspace_fabric.proto:68`).
-- **Gap:** nothing consumes the fabric except its own fixture binary. No product
-  service is a Workspace connector; there is no production relay host; no real IAM.
+- **Gap:** no product service is a Workspace connector and no real IAM is wired.
+  A non-fixture `cy-workspace-relay-host` process now provides health, structured
+  logging, and graceful shutdown, and opens a private file-backed Directory
+  snapshot. It rejects every Relay session and stays unready until production
+  device IAM and directory administration are connected. It is a fail-closed
+  host scaffold, not a production relay deployment.
 
 ### 2.3 Artifact plane
 
@@ -132,6 +136,18 @@ Key architectural mechanics:
   and reconnect streams across ACA's HTTP request timeout. The reference Relay's in-process mTLS
   listener is not an ACA deployment entrypoint. See [ACA client certificate authentication](https://learn.microsoft.com/en-us/azure/container-apps/client-certificate-authorization)
   and [ACA ingress](https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview).
+  The current non-fixture host listens behind this boundary, does not read or trust
+  `X-Forwarded-Client-Cert`, and keeps readiness unavailable; its environment assertion
+  cannot verify the live ACA resource configuration.
+  An ACA configuration for this scaffold must explicitly set gRPC ingress
+  `targetPort: 8080` with HTTP/2 transport, bind the two listeners to the
+  container interface, and configure startup/liveness HTTP probes at
+  `8081/healthz` plus readiness at `8081/readyz`. Do not add `8081` to ingress
+  port mappings. ACA's default probes use the ingress target port; the explicit
+  health port is a container probe target, not another ingress port. Since
+  `/readyz` intentionally returns 503, ACA keeps the revision unready and
+  routes no traffic to this scaffold. No live ACA resource has been configured
+  or validated by this host change.
 
 ### 3.2 Artifact transfer and cloud storage gateway fallback
 
@@ -388,7 +404,7 @@ API 投影、Artifact 直连传输，以及必须最先完成的日志错误路�
 
 ### 2.2 Platform fabric（基础）
 
-`Cyrene-Platform/framework/crates/cy-workspace-fabric`（1284 行）已实现：
+`Cyrene-Platform/framework/crates/cy-workspace-fabric` 已实现：
 
 - `directory.rs` —— 账号成员关系与 Workspace 发现（`WorkspaceMembership`）。
 - `transport.rs` —— 出站 mTLS relay 客户端；`RelaySession::discover` / `execute` / `serve_workspace`。
@@ -405,8 +421,10 @@ API 投影、Artifact 直连传输，以及必须最先完成的日志错误路�
   “优先最优路径、失败回退”的既有机制。
 - `RelayHello` 已携带 `DeviceEnrollmentRef device`
   （`workspace_fabric.proto:68`）。
-- **缺口：** 除自身 fixture 二进制外没有任何消费者。没有产品服务是 Workspace
-  connector；没有生产 relay 宿主；没有真实 IAM。
+- **缺口：** 没有产品服务是 Workspace connector，也没有接通真实 IAM。新的非 fixture
+  `cy-workspace-relay-host` 已提供健康检查、结构化日志和优雅停止，并打开私有文件式 Directory
+  快照。它会拒绝所有 Relay session，并在生产设备 IAM 与目录管理集成完成前保持未就绪。它是
+  fail-closed host 脚手架，不是生产 Relay 部署。
 
 ### 2.3 Artifact 平面
 
@@ -448,6 +466,13 @@ API 投影、Artifact 直连传输，以及必须最先完成的日志错误路�
   重连流。参考 Relay 的进程内 mTLS 监听器不能原样作为 ACA 部署入口。参见
   [ACA 客户端证书认证](https://learn.microsoft.com/en-us/azure/container-apps/client-certificate-authorization)
   和 [ACA 入口说明](https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview)。
+  当前非 fixture host 在这一边界之后监听，不读取或信任 `X-Forwarded-Client-Cert`，并使 readiness
+  保持未就绪；host 的环境变量声明不能验证 ACA 实际资源配置。
+  ACA 部署此脚手架时，必须显式将 gRPC ingress `targetPort` 设为 `8080`，transport 设为
+  HTTP/2，让两个 listener 绑定容器网卡，并将启动/存活 HTTP probe 配到 `8081/healthz`、就绪 probe
+  配到 `8081/readyz`。不要把 `8081` 加入 ingress port mapping。ACA 默认 probe 使用 ingress target
+  port；单独的健康端口只是容器 probe 目标，不是额外 ingress port。`/readyz` 按设计返回 503，因此 ACA
+  会将该 revision 保持为未就绪，不会向该脚手架路由流量。本次 host 改动没有配置或验证任何实时 ACA 资源。
 
 ### 3.2 复用同一 fabric 的 Artifact 传输与云存储网关后备
 

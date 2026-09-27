@@ -27,9 +27,14 @@ verified_local_assignment	local placement quote+ArtifactLocalInput	CAS digest+si
 verified_local_mismatch	local placement quote+missing or mismatched CAS entry	assignment acknowledgement	REJECTED_NO_RUNNING_CHILD
 artifact_source_resolution	ArtifactId+policy	Peer Directory+Planner	TRANSFER_PLAN
 artifact_policy_first	unauthorized low-latency Peer+authorized slower Peer	policy before quality score	AUTHORIZED_PEER
+artifact_lan_direct_preferred	reachable LAN_DIRECT+user object-store candidate	path priority	LAN_DIRECT
+artifact_user_object_store_fallback	no reachable LAN_DIRECT+user-bound expiring URL	path priority	USER_PROVIDED_OBJECT_STORE
+artifact_no_route_fail_closed	no reachable LAN_DIRECT+no configured user store	assignment admission	CONFIG_REQUIRED_NEVER_RELAY
+artifact_unspecified_path	legacy/default UNSPECIFIED source path	assignment admission	ARTIFACT_TRANSFER_PATH_UNSPECIFIED
+artifact_expired_store_url	user object-store URL expiry at or before admission	assignment admission	OBJECT_STORE_LOCATOR_EXPIRED
 artifact_ticket	Artifact+source+destination+allowed chunks+expiry+max bytes	reference signer	SCOPED_TICKET
 artifact_ticket_tamper	signed ticket+mutated destination	Runtime verifier	REJECTED_BEFORE_TRANSFER
-artifact_legacy_uri_only	legacy replica URI+no authorized source/ticket	assignment admission	ARTIFACT_TRANSFER_INVALID
+artifact_legacy_uri_only	legacy replica URI+no authorized source/ticket	assignment admission	LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED
 artifact_multi_source	parts 0 and 1+two Peers	per-part routes	ADMITTED
 artifact_resume	verified completed parts+checkpoint	restarted Agent	REUSE_VERIFIED_PARTS
 artifact_atomic_publish	all parts+whole digest	publish rename	PUBLISHED

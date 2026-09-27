@@ -1,0 +1,104 @@
+id	request	expected
+principal_verified	valid Azure AD access token with exact configured iss/aud, nonempty sub, current exp/nbf, required Workspace.Web.Access scp, and one server Directory organization mapping	ACCEPT_SESSION
+principal_missing	missing Authorization Bearer access token on private BFF origin	REJECT_401
+principal_spoofed	public request supplies Authorization, X-MS-CLIENT-PRINCIPAL, X-MS-TOKEN-*, X-Cyrene-Verified-Principal, or X-Cyrene-Principal-*	INGRESS_STRIP_SPOOFED_HEADERS_AND_REWRITE_BEARER_FROM_TOKEN_STORE
+principal_unsigned_header	unsigned X-MS-CLIENT-PRINCIPAL or forwarded identity header is the only identity input	REJECT_401
+principal_invalid	wrong access-token signature, issuer, audience, subject, malformed claims, or invalid algorithm	REJECT_401
+principal_scope_missing	valid access token omits required Workspace.Web.Access in scp	REJECT_403
+principal_ambiguous	duplicate or malformed Authorization Bearer values, any remaining X-MS-TOKEN-* header, or token-provided jku/x5u	REJECT_401
+principal_expired	exp is elapsed or nbf is in the future	REJECT_401
+principal_directory_missing	verified iss+sub has no unique server-side organization mapping	REJECT_403
+principal_gate_closed	Easy Auth token store or Workspace.Web.Access API scope is not configured	FAIL_CLOSED_NO_ROUTE
+origin_bypass	direct public request to BFF container/app origin or a route bypassing the trusted ingress	DENY_NETWORK
+session_minimal	GET /api/workspace/v1/session with valid validated access token and Directory mapping	RETURN_ISS_SUB_ORG_EXPIRY_ONLY
+session_no_credentials	session response inspected for OIDC token, device certificate, relay credential, Product token, or API key	REJECT_LEAK
+discovery_derived_identity	GET /api/workspace/v1/workspaces	USE_VERIFIED_ISS_SUB_ORG
+discovery_override	query/header attempts to override issuer, subject, or organization	REJECT_400
+discovery_member_scope	directory returns only Workspaces where verified iss+sub belongs to verified organization	RETURN_MEMBER_WORKSPACES_ONLY
+discovery_response_limit	member discovery response would exceed the 4 MiB JSON limit	PROBLEM_503_NO_PARTIAL_RESULT
+workspace_recheck	Product call names a Workspace not in current authoritative member discovery	REJECT_404_OR_403
+discovery_no_transport	searched discovery output for candidate URI, routing hint, enrollment credential, relay secret	OMIT_PRIVATE_CONNECTION_DATA
+operation_enum_parity	Web BFF operation keys compared with WorkspaceProductApiOperation enum and product-projections.tsv	EXACT_ONE_TO_ONE
+operation_unknown	unknown or unspecified operation key	PROBLEM_422_NO_UPSTREAM_CALL
+operation_method_closed	GET or any unsupported method on Product operation route	PROBLEM_405_NO_UPSTREAM_CALL
+operation_kind_derived	operation key resolves to manifest row with owner, operationId, and READ/COMMAND kind	DERIVE_ALL_FIELDS_SERVER_SIDE
+operation_owner_derived	request attempts to supply or override Product owner, URL, host, path, or HTTP method	IGNORE_OR_REJECT_BEFORE_UPSTREAM
+product_method_derived	allowlisted operation has Product upstream method declared in owner OpenAPI	MAP_METHOD_SERVER_SIDE
+product_path_mapping	owner path has zero or one workspace_id/workspaceId parameter and at most one remaining required path parameter	MAP_WORKSPACE_AND_OPAQUE_RESOURCE_ID
+product_path_ambiguous	owner operation has multiple non-Workspace path parameters or unsupported query/header input	PROBLEM_422_NO_UPSTREAM_CALL
+request_content_type	invocation carries a body with a media type other than application/json	PROBLEM_415
+request_accept	Accept excludes both application/json and application/problem+json	PROBLEM_406
+request_invalid_json	invocation body is malformed or invalid UTF-8	PROBLEM_400
+request_body_schema	body is valid JSON but does not match owner request schema	PROBLEM_422_NO_UPSTREAM_CALL
+request_body_limit	invocation body exceeds 4 MiB	PROBLEM_413_NO_UPSTREAM_CALL
+read_has_no_csrf	POST invocation for manifest READ operation has matching Origin and no CSRF token	ALLOW_IF_AUTHORIZED
+read_body_required	READ operation observeWorkspaceSnapshot omits its owner-required JSON body	PROBLEM_422_NO_UPSTREAM_CALL
+csrf_session_issue	GET session returns an opaque signed csrfToken and sets matching Secure HttpOnly SameSite=Strict Path=/api/workspace/v1 __Secure-cyrene-csrf cookie	RETURN_NO_STORE_AND_NO_BEARER
+csrf_refresh_stable	Concurrent GET session refreshes use the same verified principal and opaque access-token session	RETURN_IDENTICAL_CSRF_TOKEN_AND_COOKIE
+csrf_token_signed	CSRF token MAC is bound to verified iss, sub, organization, access-token session, and bounded expiry	ACCEPT_ONLY_CURRENT_SESSION
+csrf_subject_changed	A valid CSRF token is replayed with a different verified subject	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_organization_changed	A valid CSRF token is replayed with a different verified organization	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_session_changed	A valid CSRF token is replayed with a different access-token session	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_expired	A valid CSRF token or verified principal has expired	PROBLEM_403_NO_UPSTREAM_CALL
+csrf_key_missing	CSRF MAC secret is not injected into router composition	FAIL_CLOSED_NO_ROUTER
+command_missing_csrf	POST invocation for manifest COMMAND lacks X-CSRF-Token or __Secure-cyrene-csrf cookie	PROBLEM_403_NO_UPSTREAM_CALL
+command_csrf_mismatch	CSRF header differs from cookie or fails the session MAC	PROBLEM_403_NO_UPSTREAM_CALL
+invocation_missing_origin	Product invocation omits Origin	PROBLEM_403_NO_UPSTREAM_CALL
+invocation_cross_origin	Product invocation Origin differs from exact configured Client origin	PROBLEM_403_NO_UPSTREAM_CALL
+command_idempotency	Exchange route-draft command omits Idempotency-Key	PROBLEM_400_NO_UPSTREAM_CALL
+traceparent_valid	valid W3C Trace Context v00 traceparent	PROPAGATE_THROUGH_WORKSPACE_FABRIC
+traceparent_invalid	malformed traceparent	PROBLEM_400_NO_UPSTREAM_CALL
+traceparent_zero_ids	traceparent has an all-zero trace-id or parent-id	PROBLEM_400_NO_UPSTREAM_CALL
+traceparent_missing	traceparent absent	GENERATE_TRUSTED_CONTEXT_AND_PROPAGATE
+product_body_limit	Product response JSON exceeds 4 MiB	PROBLEM_502_NO_BODY_FORWARD
+all_response_limits	session, discovery, Product, and error JSON responses exceed 4 MiB	NEVER_RETURN_OVERSIZED_BODY
+product_media_type	Product response is not application/json or application/problem+json	PROBLEM_502_NO_BODY_FORWARD
+product_status_body	Product response has valid JSON within limit	RETURN_STATUS_AND_BODY_UNCHANGED
+error_bounded	BFF-owned error uses closed RFC 9457 schema, field limits, application/problem+json, and 4 MiB byte cap	RETURN_BOUNDED_PROBLEM_JSON
+cache_control_no_store	success and error response from any Web BFF route	SET_CACHE_CONTROL_NO_STORE
+product_headers	Product response contains Location, Content-Location, Set-Cookie, Authorization, hop-by-hop, or server-identifying headers	STRIP_UNSAFE_HEADERS
+product_url_hidden	Product response resource-link field contains a raw service URL, raw Product path, or internal routing address	PROBLEM_502_NO_BODY_FORWARD
+resource_ref_relative	owner-declared ProductResourceReference contains an allowlisted READ operation and opaque resourceId only	ACCEPT_SAME_ORIGIN_RELATIVE_REFERENCE
+resource_ref_command	ProductResourceReference names an allowlisted COMMAND operation	PROBLEM_502_NO_BODY_FORWARD
+resource_ref_absolute	resource reference contains href, scheme, authority, raw Product path, or network-path prefix	PROBLEM_502_NO_BODY_FORWARD
+resource_ref_schema_missing	allowlisted operation has no accepted owner response schema identifying resource-reference fields	PROBLEM_502_NO_BODY_FORWARD
+product_domain_authority	Product read or command is proxied	PRODUCT_REMAINS_STATE_AUTHORITY
+runtime_absent	real OIDC/BFF/Workspace integration is not deployed	FAIL_CLOSED_NOT_IMPLEMENTED
+relay_handoff_config_missing	BFF signing seed or Relay expected issuer/audience/public key is missing	FAIL_CLOSED_NO_FRONTEND_SESSION_VERIFIER
+relay_handoff_source_unverified	issuer is asked to mint from request-provided identity or organization instead of VerifiedWebPrincipal	DO_NOT_ISSUE
+relay_handoff_format	valid handoff credential	EXACT_V1_BASE64URL_CLAIMS_AND_ED25519_SIGNATURE
+relay_handoff_claims_closed	credential contains role, Workspace ID, device, endpoint URL, resource path, or unknown claim	REJECT_INVALID_CREDENTIAL
+relay_handoff_ttl	credential lifetime exceeds 60 seconds or source principal expiry	REJECT_INVALID_CREDENTIAL
+relay_handoff_expired	credential exp_ms is not in the future	REJECT_EXPIRED
+relay_handoff_wrong_issuer_audience	credential iss or aud differs from fixed Relay configuration	REJECT_INVALID_CREDENTIAL
+relay_handoff_bad_signature	credential payload or signature is modified	REJECT_INVALID_CREDENTIAL
+relay_handoff_hello_identity	RelayHello user or organization differs from signed sub_iss/sub/org	REJECT_PRINCIPAL_MISMATCH
+relay_handoff_hello_scope	RelayHello is not Frontend, has a Workspace ID, or carries a device identity	REJECT_PRINCIPAL_MISMATCH
+relay_handoff_credentials_private	BFF-to-Relay handoff credential appears in browser response, log, or trace	REJECT_LEAK
+relay_handoff_transport_identity	BFF connects to Relay	REQUIRE_SEPARATE_TRUSTED_WORKLOAD_MTLS_CERTIFICATE
+relay_handoff_no_device_reuse	BFF uses user bearer or device-registry certificate as its workload identity	REJECT_TRANSPORT_IDENTITY
+relay_handoff_replay_window	valid signed credential is replayed before its exp_ms over an authorized BFF mTLS path	BEARER_REMAINS_VALID_UNTIL_EXPIRY_NO_HOLDER_BINDING
+relay_payload_transport	Relay/control plane reads authenticated projected payload during first rollout phase	REQUIRE_TLS_MTLS_AUTHENTICATION_AND_AUDIT_NO_E2E_GATE
+device_approval_begin_route	POST /api/workspace/v1/device-authorizations/approval-challenges with verified session, exact Origin, and valid session-bound CSRF	200_CANONICAL_CREATE_DEVICE_APPROVAL_CHALLENGE_RESPONSE
+device_approval_begin_dto	Browser begin JSON contains canonical userCode and scope only	REJECT_UNKNOWN_OR_IDENTITY_FIELDS_BEFORE_DEVICE_API
+device_approval_scope_org	begin or deny scope.organizationId differs from verified Directory organization	PROBLEM_403_NO_DEVICE_API_CALL
+device_approval_membership_role	Verified principal lacks current Workspace membership or the dedicated workspace.device.enrollment.approve.v1 Directory capability for exact scope	PROBLEM_403_OR_OPAQUE_404_NO_CHALLENGE
+device_approval_member_marker_only	Verified principal has workspace.member but lacks workspace.device.enrollment.approve.v1	PROBLEM_403_NO_DEVICE_API_CALL
+device_approval_product_role_only	Verified principal has a Product COMMAND role but lacks workspace.device.enrollment.approve.v1	PROBLEM_403_NO_DEVICE_API_CALL
+device_approval_role_rechecked	begin, complete, or deny is invoked after the Directory approval capability was revoked	PROBLEM_403_NO_DEVICE_API_CALL
+device_approval_role_provider_missing	Authoritative Directory membership or capability lookup is unavailable	PROBLEM_503_FIXED_PROBLEM_NO_DEVICE_API_CALL
+device_approval_session_digest	Begin durably binds approval to the verified access-token session digest	REQUIRE_SAME_DIGEST_ON_COMPLETE_NO_BFF_SESSION_STORE
+device_approval_complete_binding	complete uses a different subject, organization, or access-token session digest from begin	PROBLEM_403_OR_OPAQUE_404_NO_CERTIFICATE_ISSUANCE
+device_approval_binding_provider_missing	Durable WebAuthn HTTP session-binding store is absent or unavailable	PROBLEM_503_NO_CHALLENGE_OR_CERTIFICATE_ISSUANCE
+device_approval_complete_assertion	First complete omits WebAuthn assertion or submits an invalid assertion	REJECT_BEFORE_CERTIFICATE_ISSUANCE
+device_approval_complete_first	First complete durably commits ISSUING	202_CANONICAL_COMPLETE_DEVICE_APPROVAL_RESPONSE
+device_approval_complete_recovery	Same verified session retries after durable ISSUING and omits consumed assertion	200_CANONICAL_COMPLETE_DEVICE_APPROVAL_RESPONSE
+device_approval_deny_route	POST /api/workspace/v1/device-authorizations/denials uses canonical userCode and scope body	200_CANONICAL_DENY_DEVICE_AUTHORIZATION_RESPONSE
+device_approval_deny_effect	Denial commits successfully	INVALIDATE_ACTIVE_APPROVAL_CHALLENGE
+device_approval_deny_no_step_up	Approver has current membership and workspace.device.enrollment.approve.v1 but submits no WebAuthn assertion for denial	ALLOW_DENIAL_AFTER_CSRF_AND_ROLE_CHECK
+device_approval_csrf_all_commands	begin, complete, and deny are each invoked	REQUIRE_EXACT_ORIGIN_AND_VALID_X_CSRF_TOKEN_MATCHING_HTTPONLY_COOKIE_BEFORE_UPSTREAM
+device_approval_no_identity_body	Browser submits issuer, subject, role, or approver identity in approval JSON	REJECT_UNKNOWN_FIELDS_AND_DERIVE_FROM_VERIFIED_SESSION
+device_approval_canonical_dto_parity	Workspace Web refs resolve to device-enrollment/v1 canonical request and response schemas	EXACT_SCHEMA_PARITY
+device_approval_private_lifecycle	Browser attempts device start, poll, delivery, or acknowledgement route	NO_BROWSER_ROUTE
+device_approval_runtime_absent	Device Authorization, Directory, membership, WebAuthn, or durable provider is unavailable	503_FIXED_PROBLEM_NO_FABRICATED_SUCCESS
+device_approval_session_changed	Verified session identity changes between begin and complete	REJECT_AND_REQUIRE_NEW_CHALLENGE

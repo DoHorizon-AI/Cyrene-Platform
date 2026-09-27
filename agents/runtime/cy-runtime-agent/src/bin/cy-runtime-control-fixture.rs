@@ -550,6 +550,8 @@ fn make_assignment(
                 replica_id: "seed-replica-1".to_string(),
                 locator: state.artifact.replica_uri.clone(),
                 transfer_ticket: transfer_ticket_json(state, runtime),
+                path: core_v1::ArtifactTransferPath::LanDirect as i32,
+                locator_expires_at_unix_ms: 0,
             }],
             part_sources: state
                 .artifact

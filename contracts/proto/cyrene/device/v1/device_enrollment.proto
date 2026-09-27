@@ -1,0 +1,374 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 device_enrollment.proto                                         │
+// │  Package: cyrene.device.v1                                          │
+// │  Role: Cyrene-owned WorkspaceDevice enrollment and certificate API. │
+// │                                                                     │
+// │  协议职责：Cyrene WorkspaceDevice 注册与证书 API。                    │
+// │  · User、WorkspaceDevice 与 Workload 身份保持独立。                   │
+// └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.device.v1;
+
+import "cyrene/workspace/v1/workspace_fabric.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "CyreneDeviceEnrollmentProto";
+option java_package = "io.cyrene.proto.device.v1";
+
+// Exact tenant boundary for one WorkspaceDevice enrollment.
+message DeviceScope {
+  string organization_id = 1;
+  string workspace_id = 2;
+}
+
+// Non-secret references bind one authorization attempt to a stable
+// WorkspaceDevice identity, scope, exact CSR, and public key. Neither ID
+// authenticates a caller; only the device_code authorizes pre-certificate poll.
+message DeviceAuthorizationRef {
+  // Unique, non-secret ID for this enrollment attempt.
+  string authorization_id = 1;
+  // Stable, non-secret WorkspaceDevice identity across certificate rotations.
+  string device_id = 2;
+  DeviceScope scope = 3;
+  // SHA-256 of the CSR SubjectPublicKeyInfo, exactly 32 bytes.
+  bytes csr_spki_sha256 = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  // Monotonic generation for each new authorization or certificate rotation.
+  uint64 authorization_generation = 6;
+  // SHA-256 of the exact DER CSR, exactly 32 bytes.
+  bytes csr_sha256 = 7;
+}
+
+// Starts an RFC 8628-style flow. The request sends a public CSR, never private
+// key material. The server reparses it, verifies CSR proof of possession, and
+// compares the recomputed SPKI digest with csr_spki_sha256 before persistence.
+// It computes and returns csr_sha256 over the exact DER request.
+message StartDeviceAuthorizationRequest {
+  DeviceScope scope = 1;
+  // DER-encoded PKCS#10 request; JSON uses standard base64 encoding.
+  bytes csr_der = 2;
+  // SHA-256 of SubjectPublicKeyInfo extracted from csr_der; exactly 32 bytes.
+  bytes csr_spki_sha256 = 3;
+  // 256-bit secret recovery credential. Directory binds its domain-separated
+  // digest to one exact device identity, scope, CSR digest tuple, and
+  // authorization. A repeated
+  // start may rotate device/user codes for that same authorization; this value
+  // is never a poll or approval credential and must never be logged or returned.
+  bytes registration_key = 4;
+}
+
+// The two codes are separate bearer/lookup values. The device_code is a
+// high-entropy secret returned in the current start response; recovery rotates
+// it and stores only its digest. user_code is rate-limited human input and never
+// authorizes device polling.
+message DeviceAuthorizationCodes {
+  string device_code = 1;
+  string user_code = 2;
+  string verification_uri = 3;
+  // May contain user_code in a query parameter; clients and proxies must redact it.
+  string verification_uri_complete = 4;
+  uint32 interval_seconds = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  // Monotonic code-recovery revision within this authorization. Replayed start
+  // requests rotate codes and increment this value without changing the
+  // authorization_id, authorization_generation, or CA idempotency key.
+  uint64 device_code_generation = 7;
+}
+
+// Returns the current code generation. A matching recovery request may rotate
+// codes under the same authorization while preserving CA idempotency and any
+// issued certificate. The server stores only HMAC digests, never raw codes.
+message StartDeviceAuthorizationResponse {
+  DeviceAuthorizationRef authorization = 1;
+  DeviceAuthorizationCodes codes = 2;
+}
+
+// An authenticated human submits the displayed user_code and exact scope. The
+// caller identity is derived from the validated interactive user session, not
+// from request fields.
+message CreateDeviceApprovalChallengeRequest {
+  string user_code = 1;
+  DeviceScope scope = 2;
+}
+
+// Browser credential options are produced by the configured WebAuthn verifier.
+// The verifier's opaque state is server-side and is never returned to clients.
+message WebAuthnCredentialDescriptor {
+  string type = 1;
+  // Base64url-encoded credential ID, as required by the WebAuthn JSON API.
+  string id = 2;
+  repeated string transports = 3;
+}
+
+message WebAuthnPublicKeyCredentialRequestOptions {
+  // Base64url-encoded challenge from the configured verifier.
+  string challenge = 1;
+  optional string rp_id = 2;
+  optional uint32 timeout = 3;
+  repeated WebAuthnCredentialDescriptor allow_credentials = 4;
+  optional string user_verification = 5;
+  google.protobuf.Struct extensions = 6;
+  repeated string hints = 7;
+}
+
+// The opaque approval handle correlates the browser finish step with the
+// server-stored challenge, user, scope, authorization, and CSR digest. It is
+// not a substitute for the authenticated user session or WebAuthn assertion.
+message CreateDeviceApprovalChallengeResponse {
+  DeviceAuthorizationRef authorization = 1;
+  string approval_id = 2;
+  WebAuthnPublicKeyCredentialRequestOptions webauthn_options = 3;
+  google.protobuf.Timestamp challenge_expires_at = 4;
+}
+
+// Completes an approval using the same trusted user session that started the
+// challenge. The assertion is one-time and is verified against the saved user,
+// relying-party ID, origin, challenge, authorization scope, and CSR digest.
+message CompleteDeviceApprovalRequest {
+  string approval_id = 1;
+  // UTF-8 JSON serialization of the HTTP WebAuthnAssertion object.
+  // Never log or persist the raw assertion.
+  bytes webauthn_assertion = 2;
+}
+
+enum DeviceAuthorizationLifecycleState {
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_PENDING = 1;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_AWAITING_APPROVAL = 2;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_ISSUING = 3;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_PENDING = 4;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERED = 5;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DENIED = 6;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_EXPIRED = 7;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_EXPIRED = 8;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REVOKED = 9;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_DELIVERY_RECOVERY_BLOCKED = 10;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_RETIREMENT_PENDING = 11;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_SUPERSEDED_FOR_REGISTRATION_ROTATION = 12;
+  DEVICE_AUTHORIZATION_LIFECYCLE_STATE_REGISTRATION_RETIRED = 13;
+}
+
+// Approval returns ISSUING until a durable, scope- and key-bound certificate
+// is ready for the enrollment device to retrieve.
+message CompleteDeviceApprovalResponse {
+  DeviceAuthorizationRef authorization = 1;
+  DeviceAuthorizationLifecycleState state = 2;
+  cyrene.workspace.v1.UserIdentityRef approved_by = 3;
+  google.protobuf.Timestamp approved_at = 4;
+}
+
+// Denial is limited to a trusted user with membership in the exact scope. The
+// current manager requires WebAuthn for approval; denial does not issue a cert.
+message DenyDeviceAuthorizationRequest {
+  string user_code = 1;
+  DeviceScope scope = 2;
+}
+
+message DenyDeviceAuthorizationResponse {
+  DeviceAuthorizationRef authorization = 1;
+  cyrene.workspace.v1.UserIdentityRef denied_by = 2;
+  google.protobuf.Timestamp denied_at = 3;
+}
+
+enum DeviceAuthorizationPollStatus {
+  DEVICE_AUTHORIZATION_POLL_STATUS_UNSPECIFIED = 0;
+  DEVICE_AUTHORIZATION_POLL_STATUS_PENDING = 1;
+  DEVICE_AUTHORIZATION_POLL_STATUS_SLOW_DOWN = 2;
+  DEVICE_AUTHORIZATION_POLL_STATUS_DENIED = 3;
+  DEVICE_AUTHORIZATION_POLL_STATUS_EXPIRED = 4;
+  DEVICE_AUTHORIZATION_POLL_STATUS_APPROVED = 5;
+  DEVICE_AUTHORIZATION_POLL_STATUS_DELIVERY_CONSUMED = 6;
+  DEVICE_AUTHORIZATION_POLL_STATUS_DELIVERY_EXPIRED = 7;
+  DEVICE_AUTHORIZATION_POLL_STATUS_DELIVERY_RECOVERY_BLOCKED = 8;
+}
+
+enum DeviceDeliveryRecoveryStatus {
+  DEVICE_DELIVERY_RECOVERY_STATUS_UNSPECIFIED = 0;
+  DEVICE_DELIVERY_RECOVERY_STATUS_CERTIFICATE_REVOKED = 1;
+  DEVICE_DELIVERY_RECOVERY_STATUS_CERTIFICATE_RETIRED = 2;
+  DEVICE_DELIVERY_RECOVERY_STATUS_REVOCATION_PENDING = 3;
+  DEVICE_DELIVERY_RECOVERY_STATUS_RECOVERY_BLOCKED = 4;
+}
+
+enum WorkspaceDeviceCertificateStatus {
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_UNSPECIFIED = 0;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_DELIVERY_PENDING = 1;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_ACTIVE = 2;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_ROTATION_PENDING = 3;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_RETIRED = 4;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_REVOKED = 5;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_EXPIRED = 6;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_REVOCATION_PENDING = 7;
+  WORKSPACE_DEVICE_CERTIFICATE_STATUS_RECOVERY_BLOCKED = 8;
+}
+
+enum WorkspaceDeviceCertificatePurpose {
+  WORKSPACE_DEVICE_CERTIFICATE_PURPOSE_UNSPECIFIED = 0;
+  WORKSPACE_DEVICE_CERTIFICATE_PURPOSE_CONTROL_CLIENT_AUTH = 1;
+}
+
+// Public certificate metadata only. Cyrene never returns a CA private key.
+message WorkspaceDeviceCertificateMetadata {
+  string device_id = 1;
+  DeviceScope scope = 2;
+  string serial_number = 3;
+  // SHA-256 of the DER certificate, exactly 32 bytes.
+  bytes certificate_sha256 = 4;
+  // SHA-256 of the CSR SubjectPublicKeyInfo, exactly 32 bytes.
+  bytes csr_spki_sha256 = 5;
+  string issuer_id = 6;
+  google.protobuf.Timestamp not_before = 7;
+  google.protobuf.Timestamp not_after = 8;
+  WorkspaceDeviceCertificateStatus status = 9;
+  WorkspaceDeviceCertificatePurpose purpose = 10;
+  string revocation_id = 11;
+  google.protobuf.Timestamp revoked_at = 12;
+  WorkspaceDeviceCertificateRevocationReason revocation_reason = 13;
+  // SHA-256 of the exact DER CSR, exactly 32 bytes.
+  bytes csr_sha256 = 14;
+  string authorization_id = 15;
+}
+
+// One logical delivery can be retried for a bounded interval. Every retry
+// returns the same delivery_id, certificate bytes, serial, and fingerprints;
+// the device ACK makes the delivery terminal and prevents further disclosure.
+message DeviceCertificateDelivery {
+  string delivery_id = 1;
+  bytes certificate_der = 2;
+  repeated bytes ca_chain_der = 3;
+  WorkspaceDeviceCertificateMetadata certificate = 4;
+  google.protobuf.Timestamp acknowledgement_deadline = 5;
+}
+
+message PollDeviceAuthorizationRequest {
+  // The only pre-certificate poll credential. Device IDs and authorization IDs
+  // are intentionally not accepted as credentials.
+  string device_code = 1;
+}
+
+// RFC-style outcomes. PENDING includes an active WebAuthn challenge or durable
+// ISSUING work; APPROVED carries a retryable, byte-identical certificate
+// delivery until its acknowledgement deadline.
+message PollDeviceAuthorizationResponse {
+  DeviceAuthorizationRef authorization = 1;
+  DeviceAuthorizationPollStatus status = 2;
+  uint32 interval_seconds = 3;
+  uint32 retry_after_seconds = 4;
+  google.protobuf.Timestamp next_poll_at = 5;
+  google.protobuf.Timestamp decided_at = 6;
+  DeviceCertificateDelivery delivery = 7;
+  DeviceDeliveryRecoveryStatus delivery_recovery_status = 8;
+}
+
+// ACK proves possession of device_code and binds receipt to the exact
+// authorization, delivery, certificate, CSR, and CSR SPKI. Retries are idempotent.
+message AcknowledgeDeviceCertificateDeliveryRequest {
+  string authorization_id = 1;
+  string device_code = 2;
+  string delivery_id = 3;
+  bytes certificate_sha256 = 4;
+  bytes csr_spki_sha256 = 5;
+  bytes csr_sha256 = 6;
+}
+
+message AcknowledgeDeviceCertificateDeliveryResponse {
+  DeviceAuthorizationRef authorization = 1;
+  string delivery_id = 2;
+  bytes certificate_sha256 = 3;
+  google.protobuf.Timestamp acknowledged_at = 4;
+  DeviceAuthorizationLifecycleState state = 5;
+}
+
+// A rotation creates a new authorization for the existing device_id. It is
+// accepted only over the currently valid WorkspaceDevice certificate; normal
+// user approval still applies. A new 256-bit registration recovery key is
+// required and must differ from the previous generation's key. A committed
+// rotation immediately makes the predecessor certificate stale, and this key
+// does not authorize replay or recovery. A retry is safe only after a known
+// pre-commit failure while the predecessor remains current. V1 defines no
+// automatic recovery endpoint for a lost or ambiguous post-commit response;
+// recovery then requires a trusted manual/device process outside this contract.
+// When the current authorization has a complete issued-certificate snapshot,
+// rotation records retirement intent atomically with the new generation. A
+// legacy ACK receipt without a certificate snapshot cannot be rotated.
+message BeginDeviceCertificateRotationRequest {
+  string device_id = 1;
+  bytes csr_der = 2;
+  bytes csr_spki_sha256 = 3;
+  // SHA-256 of the exact DER CSR, exactly 32 bytes.
+  bytes csr_sha256 = 4;
+  // Fresh 256-bit recovery credential for this authorization. It is stored only
+  // as a domain-separated digest and must never be logged or returned.
+  // 本次授权使用新的 256-bit 恢复凭证；服务端只存 domain-separated digest。
+  bytes registration_key = 5;
+}
+
+message DeviceCertificateRotationMetadata {
+  string rotation_id = 1;
+  string device_id = 2;
+  string previous_serial_number = 3;
+  string replacement_serial_number = 4;
+  DeviceAuthorizationLifecycleState state = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp completed_at = 7;
+  // Authorization attempt that issued the replacement certificate.
+  string authorization_id = 8;
+}
+
+message BeginDeviceCertificateRotationResponse {
+  DeviceAuthorizationRef authorization = 1;
+  DeviceAuthorizationCodes codes = 2;
+  DeviceCertificateRotationMetadata rotation = 3;
+}
+
+message ListWorkspaceDeviceCertificatesRequest {
+  string device_id = 1;
+}
+
+message ListWorkspaceDeviceCertificatesResponse {
+  string device_id = 1;
+  DeviceScope scope = 2;
+  repeated WorkspaceDeviceCertificateMetadata certificates = 3;
+  repeated DeviceCertificateRotationMetadata rotations = 4;
+}
+
+enum WorkspaceDeviceCertificateRevocationReason {
+  WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_UNSPECIFIED = 0;
+  WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_DEVICE_LOST = 1;
+  WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_KEY_COMPROMISE = 2;
+  WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_ADMINISTRATIVE = 3;
+  WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_REPLACED = 4;
+  WORKSPACE_DEVICE_CERTIFICATE_REVOCATION_REASON_DELIVERY_UNACKNOWLEDGED = 5;
+}
+
+message RevokeWorkspaceDeviceCertificateRequest {
+  string device_id = 1;
+  string serial_number = 2;
+  WorkspaceDeviceCertificateRevocationReason reason = 3;
+}
+
+message RevokeWorkspaceDeviceCertificateResponse {
+  WorkspaceDeviceCertificateMetadata certificate = 1;
+  cyrene.workspace.v1.UserIdentityRef revoked_by = 2;
+  google.protobuf.Timestamp revoked_at = 3;
+}
+
+// Cyrene device-enrollment REST routes and JSON/status mappings are defined by
+// contracts/http/device-enrollment/v1/openapi.yaml. These typed messages are
+// the shared wire schema; service handlers and external security ports are
+// separate runtime implementations.
+service DeviceEnrollmentService {
+  rpc StartDeviceAuthorization(StartDeviceAuthorizationRequest) returns (StartDeviceAuthorizationResponse);
+  rpc CreateDeviceApprovalChallenge(CreateDeviceApprovalChallengeRequest) returns (CreateDeviceApprovalChallengeResponse);
+  rpc CompleteDeviceApproval(CompleteDeviceApprovalRequest) returns (CompleteDeviceApprovalResponse);
+  rpc DenyDeviceAuthorization(DenyDeviceAuthorizationRequest) returns (DenyDeviceAuthorizationResponse);
+  rpc PollDeviceAuthorization(PollDeviceAuthorizationRequest) returns (PollDeviceAuthorizationResponse);
+  rpc AcknowledgeDeviceCertificateDelivery(AcknowledgeDeviceCertificateDeliveryRequest) returns (AcknowledgeDeviceCertificateDeliveryResponse);
+  rpc BeginDeviceCertificateRotation(BeginDeviceCertificateRotationRequest) returns (BeginDeviceCertificateRotationResponse);
+  rpc ListWorkspaceDeviceCertificates(ListWorkspaceDeviceCertificatesRequest) returns (ListWorkspaceDeviceCertificatesResponse);
+  rpc RevokeWorkspaceDeviceCertificate(RevokeWorkspaceDeviceCertificateRequest) returns (RevokeWorkspaceDeviceCertificateResponse);
+}

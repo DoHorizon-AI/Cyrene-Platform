@@ -19,6 +19,10 @@ The matrix covers Node persistence, restart capability, four-evidence Runtime
 reconciliation, generation fencing, Welcome/credential ordering, canonical
 Lease acquisition and rollback, post-start assignment acknowledgement,
 policy-first Peer selection, verified scoped tickets, and resumable publication.
+Artifact source routing also requires an explicit path: reachable `LAN_DIRECT`
+is preferred, an expiring user-bound object-store URL is used only when direct
+is unavailable, and missing or unspecified routes fail closed without Relay
+payload transfer.
 The Docker command is mandatory for release acceptance. A Docker daemon outage
 is reported as a blocker; it is never converted into a skipped or mocked pass.
 
@@ -40,3 +44,7 @@ bash tooling/acceptance/distributed-execution-fabric/run-container-proof.sh
 ```
 
 该矩阵覆盖 Node persistence、restart capability、四类证据的 Runtime reconciliation、generation fencing、Welcome/credential 顺序、规范 Lease 获取与 rollback、启动后的 assignment acknowledgement、policy-first Peer 选择、验证过的 scoped ticket，以及可恢复的 publication。发布验收必须执行 Docker 命令。Docker daemon 不可用时只能报告 blocker，不能转换成 skip 或 mock pass。
+
+Artifact 来源必须显式声明路径：优先使用当前可达的 `LAN_DIRECT`；仅在直连不可用时使用
+用户绑定且会过期的对象存储 URL；缺少或未指定路径时立即 fail-closed，绝不通过 Relay
+传输 Artifact 载荷。

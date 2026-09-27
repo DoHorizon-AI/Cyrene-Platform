@@ -13,6 +13,7 @@ use cy_proto::workspace_v1::{UserIdentityRef, WorkspaceConnectionDescriptor};
 use thiserror::Error;
 
 use crate::auth::same_user;
+use crate::durable_directory::{DurableDirectoryError, PostgresWorkspaceDirectory};
 
 /// Directory-owned membership. It carries no Product or execution state.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,16 +35,49 @@ pub enum WorkspaceDirectoryError {
     Storage(String),
 }
 
+impl WorkspaceDirectoryError {
+    /// Stable gRPC status code and public message without backend diagnostics.
+    pub(crate) fn rpc_error(&self) -> (i32, &'static str) {
+        match self {
+            Self::Identity(_) => (3, "WORKSPACE_DIRECTORY_INVALID_REQUEST"),
+            Self::Descriptor(_) => (13, "WORKSPACE_DIRECTORY_DATA_INVALID"),
+            Self::Storage(_) => (14, "WORKSPACE_DIRECTORY_UNAVAILABLE"),
+        }
+    }
+}
+
 /// Account/Directory port. Implementations own membership and descriptors only.
+#[tonic::async_trait]
 pub trait WorkspaceDirectory: Send + Sync {
-    fn discover(
+    async fn discover(
         &self,
         user: &UserIdentityRef,
         organization_id: &str,
         now_unix_ms: u64,
     ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError>;
 
-    fn is_member(&self, user: &UserIdentityRef, organization_id: &str, workspace_id: &str) -> bool;
+    async fn is_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<bool, WorkspaceDirectoryError>;
+
+    /// Returns Directory-owned roles only when the user is a current member.
+    ///
+    /// Adapters that only expose membership can leave the role set empty;
+    /// membership remains distinct from optional assigned roles.
+    async fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+        Ok(self
+            .is_member(user, organization_id, workspace_id)
+            .await?
+            .then(BTreeSet::new))
+    }
 }
 
 /// Development/reference Directory with explicit membership records.
@@ -66,25 +100,25 @@ impl InMemoryWorkspaceDirectory {
             descriptors,
         })
     }
-}
 
-impl WorkspaceDirectory for InMemoryWorkspaceDirectory {
-    fn discover(
+    pub(crate) fn discover_sync(
         &self,
         user: &UserIdentityRef,
         organization_id: &str,
         now_unix_ms: u64,
     ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError> {
-        if user.issuer.is_empty() || user.subject.is_empty() || organization_id.is_empty() {
-            return Err(WorkspaceDirectoryError::Identity(
-                "issuer, subject, and organization are required".to_string(),
-            ));
-        }
+        validate_identity(user)?;
+        validate_scope_part(organization_id, "organization")?;
+
         self.descriptors
             .iter()
             .filter(|descriptor| {
                 descriptor.organization_id == organization_id
-                    && self.is_member(user, organization_id, &descriptor.workspace_id)
+                    && self.memberships.iter().any(|membership| {
+                        same_user(&membership.user, user)
+                            && membership.organization_id == organization_id
+                            && membership.workspace_id == descriptor.workspace_id
+                    })
             })
             .map(|descriptor| {
                 validate_descriptor(descriptor, now_unix_ms)?;
@@ -93,13 +127,154 @@ impl WorkspaceDirectory for InMemoryWorkspaceDirectory {
             .collect()
     }
 
-    fn is_member(&self, user: &UserIdentityRef, organization_id: &str, workspace_id: &str) -> bool {
-        self.memberships.iter().any(|membership| {
+    pub(crate) fn is_member_sync(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<bool, WorkspaceDirectoryError> {
+        validate_identity(user)?;
+        validate_scope_part(organization_id, "organization")?;
+        validate_scope_part(workspace_id, "workspace")?;
+        Ok(self.memberships.iter().any(|membership| {
             same_user(&membership.user, user)
                 && membership.organization_id == organization_id
                 && membership.workspace_id == workspace_id
-        })
+        }))
     }
+
+    pub(crate) fn roles_for_member_sync(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+        validate_identity(user)?;
+        validate_scope_part(organization_id, "organization")?;
+        validate_scope_part(workspace_id, "workspace")?;
+        Ok(self
+            .memberships
+            .iter()
+            .find(|membership| {
+                same_user(&membership.user, user)
+                    && membership.organization_id == organization_id
+                    && membership.workspace_id == workspace_id
+            })
+            .map(|membership| membership.roles.clone()))
+    }
+}
+
+#[tonic::async_trait]
+impl WorkspaceDirectory for InMemoryWorkspaceDirectory {
+    async fn discover(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError> {
+        self.discover_sync(user, organization_id, now_unix_ms)
+    }
+
+    async fn is_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<bool, WorkspaceDirectoryError> {
+        self.is_member_sync(user, organization_id, workspace_id)
+    }
+
+    async fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+        self.roles_for_member_sync(user, organization_id, workspace_id)
+    }
+}
+
+#[tonic::async_trait]
+impl WorkspaceDirectory for PostgresWorkspaceDirectory {
+    async fn discover(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError> {
+        PostgresWorkspaceDirectory::discover(self, user, organization_id, now_unix_ms)
+            .await
+            .map_err(map_durable_directory_error)
+    }
+
+    async fn is_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<bool, WorkspaceDirectoryError> {
+        PostgresWorkspaceDirectory::is_member(self, user, organization_id, workspace_id)
+            .await
+            .map_err(map_durable_directory_error)
+    }
+
+    async fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+        PostgresWorkspaceDirectory::roles_for_member(self, user, organization_id, workspace_id)
+            .await
+            .map_err(map_durable_directory_error)
+    }
+}
+
+fn map_durable_directory_error(error: DurableDirectoryError) -> WorkspaceDirectoryError {
+    match error {
+        DurableDirectoryError::InvalidIdentity | DurableDirectoryError::InvalidScope => {
+            WorkspaceDirectoryError::Identity("invalid identity or scope".to_string())
+        }
+        DurableDirectoryError::InvalidDescriptor => {
+            WorkspaceDirectoryError::Descriptor("stored descriptor is invalid".to_string())
+        }
+        DurableDirectoryError::Configuration | DurableDirectoryError::Storage => {
+            WorkspaceDirectoryError::Storage("Directory backend unavailable".to_string())
+        }
+        DurableDirectoryError::NoMembershipMapping => {
+            WorkspaceDirectoryError::Identity("identity has no organization mapping".to_string())
+        }
+        DurableDirectoryError::AmbiguousOrganizations => {
+            WorkspaceDirectoryError::Identity("identity organization is ambiguous".to_string())
+        }
+        DurableDirectoryError::UnsupportedRole
+        | DurableDirectoryError::AuditReasonRequired
+        | DurableDirectoryError::MembershipNotFound => {
+            WorkspaceDirectoryError::Identity("invalid Directory operation".to_string())
+        }
+    }
+}
+
+fn validate_identity(user: &UserIdentityRef) -> Result<(), WorkspaceDirectoryError> {
+    if user.issuer.trim().is_empty()
+        || user.subject.trim().is_empty()
+        || user.issuer.len() > 2048
+        || user.subject.len() > 2048
+    {
+        return Err(WorkspaceDirectoryError::Identity(
+            "issuer and subject are required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scope_part(value: &str, label: &str) -> Result<(), WorkspaceDirectoryError> {
+    if value.trim().is_empty() || value.len() > 256 {
+        return Err(WorkspaceDirectoryError::Identity(format!(
+            "{label} scope is invalid"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate transport-neutral descriptor shape and expiry.
@@ -243,7 +418,23 @@ mod tests {
     }
 
     #[test]
-    fn discovery_is_membership_scoped_and_contains_no_product_state() {
+    fn directory_rpc_errors_preserve_availability_class_without_backend_details() {
+        assert_eq!(
+            WorkspaceDirectoryError::Storage("postgres://secret".into()).rpc_error(),
+            (14, "WORKSPACE_DIRECTORY_UNAVAILABLE")
+        );
+        assert_eq!(
+            WorkspaceDirectoryError::Identity("invalid input".into()).rpc_error(),
+            (3, "WORKSPACE_DIRECTORY_INVALID_REQUEST")
+        );
+        assert_eq!(
+            WorkspaceDirectoryError::Descriptor("bad row".into()).rpc_error(),
+            (13, "WORKSPACE_DIRECTORY_DATA_INVALID")
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_is_membership_scoped_and_contains_no_product_state() {
         let user = UserIdentityRef {
             issuer: "https://identity.test".to_string(),
             subject: "user-1".to_string(),
@@ -258,8 +449,46 @@ mod tests {
             vec![descriptor()],
         )
         .unwrap();
-        let discovered = directory.discover(&user, "organization-1", 1).unwrap();
+        let discovered = directory
+            .discover(&user, "organization-1", 1)
+            .await
+            .unwrap();
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].workspace_id, "workspace-1");
+    }
+
+    #[tokio::test]
+    async fn membership_reads_keep_invalid_input_distinct_from_non_membership() {
+        let directory = InMemoryWorkspaceDirectory::new(Vec::new(), Vec::new()).unwrap();
+        let invalid_user = UserIdentityRef {
+            issuer: String::new(),
+            subject: String::new(),
+        };
+
+        assert!(matches!(
+            directory
+                .is_member(&invalid_user, "organization-1", "workspace-1")
+                .await,
+            Err(WorkspaceDirectoryError::Identity(_))
+        ));
+        assert!(matches!(
+            directory
+                .roles_for_member(&invalid_user, "organization-1", "workspace-1")
+                .await,
+            Err(WorkspaceDirectoryError::Identity(_))
+        ));
+        assert_eq!(
+            directory
+                .is_member(
+                    &UserIdentityRef {
+                        issuer: "https://identity.test".to_string(),
+                        subject: "missing-user".to_string(),
+                    },
+                    "organization-1",
+                    "workspace-1"
+                )
+                .await,
+            Ok(false)
+        );
     }
 }

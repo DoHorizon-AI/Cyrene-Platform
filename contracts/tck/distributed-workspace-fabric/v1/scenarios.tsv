@@ -22,3 +22,15 @@ artifact_frontend_boundary	remote Operation view	Artifact URI	NO_LOCAL_PATH_OR_P
 workspace_inbound_port	outbound Workspace connector	Docker port bindings	ZERO
 identity_separation	User+device+workload credentials	relay and Runtime sessions	NOT_INTERCHANGEABLE
 relay_authority_boundary	Relay restart	Workspace/Product state	UNCHANGED
+product_projection_allowlisted_read	owner+wire operation+READ from product-projections.tsv	Workspace Control Plane	OWNER_RESPONSE_NO_PLATFORM_STATE
+product_projection_allowlisted_command	owner+wire operation+COMMAND+idempotency key from product-projections.tsv	Workspace Control Plane	OWNER_COMMIT_ONLY
+product_projection_owner_operation_mismatch	owner does not match the TCK allowlist entry	Workspace Control Plane	REJECT_BEFORE_PRODUCT
+product_projection_kind_mismatch	READ or COMMAND does not match the TCK allowlist entry	Workspace Control Plane	REJECT_BEFORE_PRODUCT
+product_projection_unknown_enum	unspecified or unknown WorkspaceProductApiOperation	Workspace Control Plane	REJECT_UNSUPPORTED
+product_projection_json_bounds	valid application/json bodies at most 4 MiB; oversized or non-JSON bodies	Workspace Control Plane	ACCEPT_BOUNDED_JSON_OR_REJECT
+product_projection_response_safety	Product JSON response with status and owner resource identity	Workspace Control Plane	PRESERVE_STATUS_BODY_AND_REPLAY; NO_DOCKER_ADDRESS_LOCAL_PATH_CONTAINER_ID_OR_LOCATION_URL
+navigator_observe_query	NAVIGATOR observeWorkspaceSnapshot as READ	Navigator Product API	READ_ONLY_OBSERVATION
+navigator_harness_session_read	NAVIGATOR get_session with authenticated Workspace member context	Navigator Persistence API	OWNER_SESSION_VIEW
+navigator_harness_append_trusted_writer	NAVIGATOR append_events with trusted Harness/service writer auth context, bearer principal membership, writerToken+epoch fencing, and batchId	Navigator Persistence API	ATOMIC_APPEND_OR_SAME_BATCH_REPLAY; WRITER_TOKEN_NEVER_TO_BROWSER
+navigator_harness_append_frontend_denied	NAVIGATOR append_events from Frontend role or without authenticated service writer handoff	Workspace Control Plane	PERMISSION_DENIED_OR_UNIMPLEMENTED
+exchange_route_draft_idempotency	EXCHANGE create_draft with required Idempotency-Key	Exchange Product API	OWNER_DRAFT_AND_REPLAY_SEMANTICS; NO_AUTO_CONFIRM

@@ -12,6 +12,7 @@ workspace_proto=contracts/proto/cyrene/workspace/v1/workspace_fabric.proto
 workspace_crate=framework/crates/cy-workspace-fabric
 tck_root=contracts/tck/distributed-workspace-fabric/v1
 acceptance_root=tooling/acceptance/distributed-workspace-fabric
+projection_manifest=${tck_root}/product-projections.tsv
 
 for path in \
   "${workspace_proto}" \
@@ -20,6 +21,7 @@ for path in \
   "${workspace_crate}/src/bin/README.md" \
   "${tck_root}/README.md" \
   "${tck_root}/scenarios.tsv" \
+  "${projection_manifest}" \
   "${acceptance_root}/README.md"; do
   test -f "${path}" || {
     printf 'missing Workspace Fabric artifact: %s\n' "${path}" >&2
@@ -38,6 +40,8 @@ for message in \
   DiscoverWorkspacesResponse \
   WorkspaceApiRequest \
   WorkspaceApiResponse \
+  WorkspaceProductApiRequest \
+  WorkspaceProductApiResponse \
   WorkspaceDirectRequest \
   WorkspaceOperationView \
   RelayForwardedRequest \
@@ -48,6 +52,129 @@ for message in \
     exit 1
   }
 done
+
+for enum in WorkspaceProductApiOwner WorkspaceProductApiOperation WorkspaceProductApiRequestKind; do
+  rg -q "enum ${enum}" "${workspace_proto}" || {
+    printf 'missing Workspace Product API closed enum: %s\n' "${enum}" >&2
+    exit 1
+  }
+done
+rg -q 'enum WorkspaceProductApiContentType' "${workspace_proto}"
+
+python3 - "${workspace_proto}" "${projection_manifest}" <<'PY'
+import csv
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+proto_path, manifest_path = map(Path, sys.argv[1:])
+proto = proto_path.read_text(encoding="utf-8")
+
+
+def enum_values(name: str) -> dict[str, int]:
+    match = re.search(rf"enum\s+{name}\s*\{{(.*?)\}}", proto, re.DOTALL)
+    if match is None:
+        raise SystemExit(f"missing enum definition: {name}")
+    return {
+        value: int(number)
+        for value, number in re.findall(r"^\s*(\w+)\s*=\s*(\d+)\s*;", match.group(1), re.MULTILINE)
+    }
+
+
+expected_owners = {
+    f"WORKSPACE_PRODUCT_API_OWNER_{name}": number
+    for number, name in enumerate(("UNSPECIFIED", "CATALYST", "YIELD", "REACTOR", "EXCHANGE", "ECHO", "NAVIGATOR"))
+}
+if enum_values("WorkspaceProductApiOwner") != expected_owners:
+    raise SystemExit("Workspace Product API owner enum does not match the TCK owner set")
+
+expected_operations = {
+    "WORKSPACE_PRODUCT_API_OPERATION_UNSPECIFIED": 0,
+    **{f"WORKSPACE_PRODUCT_API_OPERATION_{number:02d}": number for number in range(1, 14)},
+}
+if enum_values("WorkspaceProductApiOperation") != expected_operations:
+    raise SystemExit("Workspace Product API operation enum does not match the closed TCK operation set")
+
+expected_kinds = {
+    "WORKSPACE_PRODUCT_API_REQUEST_KIND_UNSPECIFIED": 0,
+    "WORKSPACE_PRODUCT_API_REQUEST_KIND_READ": 1,
+    "WORKSPACE_PRODUCT_API_REQUEST_KIND_COMMAND": 2,
+}
+if enum_values("WorkspaceProductApiRequestKind") != expected_kinds:
+    raise SystemExit("Workspace Product API request-kind enum has an unexpected value set")
+expected_content_types = {
+    "WORKSPACE_PRODUCT_API_CONTENT_TYPE_UNSPECIFIED": 0,
+    "WORKSPACE_PRODUCT_API_CONTENT_TYPE_APPLICATION_JSON": 1,
+    "WORKSPACE_PRODUCT_API_CONTENT_TYPE_APPLICATION_PROBLEM_JSON": 2,
+}
+if enum_values("WorkspaceProductApiContentType") != expected_content_types:
+    raise SystemExit("Workspace Product API content type is not restricted to JSON")
+
+expected_header = ["owner", "wire_operation", "product_operation_id", "kind", "product_contract"]
+with manifest_path.open(encoding="utf-8", newline="") as manifest_file:
+    reader = csv.DictReader(manifest_file, delimiter="\t")
+    if reader.fieldnames != expected_header:
+        raise SystemExit("Product projection TCK has an unexpected header")
+    rows = list(reader)
+
+if len(rows) != 13:
+    raise SystemExit(f"Product projection TCK must contain 13 operations; found {len(rows)}")
+
+owner_repositories = {
+    "CATALYST": "Cyrene-Catalyst",
+    "YIELD": "Cyrene-Yield",
+    "REACTOR": "Cyrene-Reactor",
+    "EXCHANGE": "Cyrene-Exchange",
+    "ECHO": "Cyrene-Echo",
+    "NAVIGATOR": "Cyrene-Navigator",
+}
+owner_kinds: dict[str, Counter[str]] = defaultdict(Counter)
+wire_operations: set[str] = set()
+owner_operation_pairs: set[tuple[str, str]] = set()
+for row in rows:
+    owner = row["owner"]
+    operation = row["wire_operation"]
+    product_operation = row["product_operation_id"]
+    kind = row["kind"]
+    contract = row["product_contract"]
+    if owner not in owner_repositories:
+        raise SystemExit(f"unknown Product API owner in TCK: {owner}")
+    if operation not in expected_operations or operation.endswith("UNSPECIFIED"):
+        raise SystemExit(f"unknown Product API wire operation in TCK: {operation}")
+    if operation in wire_operations:
+        raise SystemExit(f"duplicate Product API wire operation in TCK: {operation}")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", product_operation):
+        raise SystemExit(f"invalid Product OpenAPI operationId in TCK: {product_operation}")
+    if (owner, product_operation) in owner_operation_pairs:
+        raise SystemExit(f"duplicate Product operation for owner {owner}: {product_operation}")
+    if kind not in {"READ", "COMMAND"}:
+        raise SystemExit(f"invalid Product API request kind in TCK: {kind}")
+    expected_contracts = {f"{owner_repositories[owner]}/contracts/product/v1/openapi.yaml"}
+    if owner == "NAVIGATOR":
+        expected_contracts.add("Cyrene-Navigator/contracts/product/v1/persistence.openapi.yaml")
+    if contract not in expected_contracts:
+        raise SystemExit(f"unexpected Product contract pointer for {owner}: {contract}")
+    wire_operations.add(operation)
+    owner_operation_pairs.add((owner, product_operation))
+    owner_kinds[owner][kind] += 1
+
+if wire_operations != set(expected_operations) - {"WORKSPACE_PRODUCT_API_OPERATION_UNSPECIFIED"}:
+    raise SystemExit("Product projection TCK must map every admitted wire operation exactly once")
+for owner in ("CATALYST", "YIELD", "REACTOR", "EXCHANGE", "ECHO"):
+    if owner_kinds[owner] != Counter({"READ": 1, "COMMAND": 1}):
+        raise SystemExit(f"Product projection TCK must contain one read and one command for {owner}")
+if owner_kinds["NAVIGATOR"] != Counter({"READ": 2, "COMMAND": 1}):
+    raise SystemExit("Navigator projection must contain snapshot/session reads and one Harness command")
+PY
+
+rg -q 'Valid application/json body, at most 4 MiB' "${workspace_proto}"
+rg -q 'Valid JSON body, at most 4 MiB' "${workspace_proto}"
+rg -q 'navigator_harness_append_frontend_denied' "${tck_root}/scenarios.tsv"
+rg -q 'WRITER_TOKEN_NEVER_TO_BROWSER' "${tck_root}/scenarios.tsv"
+
+rg -q 'WorkspaceProductApiRequest product_api = 12;' "${workspace_proto}"
+rg -q 'WorkspaceProductApiResponse product_api = 12;' "${workspace_proto}"
 
 for mode in LOCAL LAN_DIRECT DIRECT OVERLAY RELAY; do
   rg -q "CONNECTIVITY_MODE_${mode}" contracts/proto/cyrene/core/v1/node_control.proto || {

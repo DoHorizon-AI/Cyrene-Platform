@@ -8,6 +8,9 @@ wire schemas and language libraries are projections of that authority.
 - the remaining `proto/` packages define transport-specific Platform control
   messages that import or map to that vocabulary.
 - `schemas/` defines manifests and canonical resources.
+- `workspace-web/v1/` defines the versioned, same-origin HTTP/JSON contract for
+  authenticated browser access to Workspaces and the closed Product API
+  projection. It does not claim an implemented BFF runtime.
 - `rust/` contains Rust mirrors and generated bindings.
 - `tck/kernel-semantic/v1/` contains the Python/Kotlin/Rust acceptance vectors
   for revision negotiation, validation, matching, lifecycle, authority and
@@ -48,6 +51,8 @@ protocols remain outside Platform and are not part of Core RPC.
 - `proto/cyrene/semantic/v1/` 定义与语言无关的 Kernel 词汇。
 - 其余 `proto/` package 定义特定传输方式的 Platform control message，这些消息会导入或映射到上述词汇。
 - `schemas/` 定义 manifest 和规范资源。
+- `workspace-web/v1/` 定义浏览器通过同源 HTTP/JSON 访问 Workspace 与封闭 Product API projection 的版本化契约；该目录不代表
+  BFF runtime 已实现。
 - `rust/` 包含 Rust 镜像和生成的绑定。
 - `tck/kernel-semantic/v1/` 包含 Python/Kotlin/Rust 验收向量，用于验证 revision 协商、校验、匹配、生命周期、authority 和事件 replay。`tck/worker-control/v1/` 单独覆盖 Kernel Worker control channel；客户端使用配套的 `KernelAuthorityService` 和受限的 `WorkerControlService` 投影。
 

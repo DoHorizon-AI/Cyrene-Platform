@@ -300,11 +300,16 @@ pub(crate) fn validate_assignment_payload(
         if artifact.artifact_uri != format!("artifact://sha256/{}", &artifact.digest[7..])
             || artifact.size_bytes == 0
             || artifact.part_size_bytes == 0
-            || artifact.sources.is_empty()
         {
             return Err(FabricContractError::new(
                 "ARTIFACT_TRANSFER_INVALID",
-                "Artifact transfer identity, size, part size, and replica are required",
+                "Artifact transfer identity, size, and part size are required",
+            ));
+        }
+        if artifact.sources.is_empty() {
+            return Err(FabricContractError::new(
+                "LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED",
+                "no reachable direct source or user-provided object-store candidate is available; supply an active, short-lived pre-signed HTTPS URL from user-owned object storage; Artifact bytes are never sent through the control Relay",
             ));
         }
         if !artifact.manifest_digest.is_empty() {
@@ -312,6 +317,31 @@ pub(crate) fn validate_assignment_payload(
         }
         crate::assignment::artifact_kind_from_proto(&artifact.artifact_kind)?;
         if !artifact.sources.is_empty() {
+            for source in &artifact.sources {
+                let path = core_v1::ArtifactTransferPath::try_from(source.path).map_err(|_| {
+                    FabricContractError::new(
+                        "ARTIFACT_TRANSFER_PATH_INVALID",
+                        "Artifact source path is unknown; control Relay is not a bulk Artifact route",
+                    )
+                })?;
+                match path {
+                    core_v1::ArtifactTransferPath::Unspecified => {
+                        return Err(FabricContractError::new(
+                            "ARTIFACT_TRANSFER_PATH_UNSPECIFIED",
+                            "Artifact source must name LAN_DIRECT or USER_PROVIDED_OBJECT_STORE; control Relay is not a bulk Artifact route",
+                        ));
+                    }
+                    core_v1::ArtifactTransferPath::UserProvidedObjectStore
+                        if source.locator_expires_at_unix_ms <= now_unix_ms =>
+                    {
+                        return Err(FabricContractError::new(
+                            "OBJECT_STORE_LOCATOR_EXPIRED",
+                            "user-provided object-store URL must have a future expiry",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             if artifact.destination_peer_id.is_empty()
                 || artifact.part_sources.len() != artifact.part_digests.len()
                 || artifact.sources.iter().any(|source| {
@@ -603,6 +633,36 @@ mod tests {
         }
     }
 
+    fn transfer_spec(
+        path: core_v1::ArtifactTransferPath,
+        locator_expires_at_unix_ms: u64,
+    ) -> core_v1::ArtifactTransferSpec {
+        core_v1::ArtifactTransferSpec {
+            artifact_uri: format!("artifact://sha256/{}", "a".repeat(64)),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 1,
+            manifest_digest: String::new(),
+            part_size_bytes: 1,
+            part_digests: vec![format!("sha256:{}", "b".repeat(64))],
+            sources: vec![core_v1::ArtifactTransferSource {
+                peer_id: "source-peer".to_string(),
+                replica_id: "replica-1".to_string(),
+                locator: "https://source.example/artifact".to_string(),
+                transfer_ticket: "opaque-ticket".to_string(),
+                path: path as i32,
+                locator_expires_at_unix_ms,
+            }],
+            part_sources: vec![core_v1::ArtifactPartSource {
+                part_index: 0,
+                peer_id: "source-peer".to_string(),
+                replica_id: "replica-1".to_string(),
+            }],
+            destination_peer_id: "destination-peer".to_string(),
+            artifact_kind: "generic".to_string(),
+            ..Default::default()
+        }
+    }
+
     fn hello(
         attachment: core_v1::ExecutionAttachmentType,
         persistent: bool,
@@ -793,6 +853,8 @@ mod tests {
                 replica_id: "replica-1".to_string(),
                 locator: "https://source.example/artifact".to_string(),
                 transfer_ticket: "opaque-ticket".to_string(),
+                path: core_v1::ArtifactTransferPath::LanDirect as i32,
+                locator_expires_at_unix_ms: 0,
             }],
             part_sources: vec![core_v1::ArtifactPartSource {
                 part_index: 0,
@@ -850,7 +912,75 @@ mod tests {
             )
             .unwrap_err()
             .reason_code,
-            "ARTIFACT_TRANSFER_INVALID"
+            "LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn unspecified_artifact_transfer_path_fails_closed() {
+        let mut value = assignment(1);
+        value
+            .artifacts
+            .push(transfer_spec(core_v1::ArtifactTransferPath::Unspecified, 0));
+
+        assert_eq!(
+            validate_assignment_payload(
+                &semantic::Identity {
+                    id: "runtime-1".to_string(),
+                    generation: 1,
+                },
+                &value,
+                10_000,
+            )
+            .unwrap_err()
+            .reason_code,
+            "ARTIFACT_TRANSFER_PATH_UNSPECIFIED"
+        );
+    }
+
+    #[test]
+    fn object_store_path_requires_a_future_locator_expiry() {
+        let mut value = assignment(1);
+        value.artifacts.push(transfer_spec(
+            core_v1::ArtifactTransferPath::UserProvidedObjectStore,
+            9_999,
+        ));
+
+        assert_eq!(
+            validate_assignment_payload(
+                &semantic::Identity {
+                    id: "runtime-1".to_string(),
+                    generation: 1,
+                },
+                &value,
+                10_000,
+            )
+            .unwrap_err()
+            .reason_code,
+            "OBJECT_STORE_LOCATOR_EXPIRED"
+        );
+    }
+
+    #[test]
+    fn missing_artifact_route_requires_object_storage_instead_of_relay() {
+        let mut value = assignment(1);
+        let mut spec = transfer_spec(core_v1::ArtifactTransferPath::LanDirect, 0);
+        spec.sources.clear();
+        spec.part_sources.clear();
+        value.artifacts.push(spec);
+
+        assert_eq!(
+            validate_assignment_payload(
+                &semantic::Identity {
+                    id: "runtime-1".to_string(),
+                    generation: 1,
+                },
+                &value,
+                10_000,
+            )
+            .unwrap_err()
+            .reason_code,
+            "LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED"
         );
     }
 }

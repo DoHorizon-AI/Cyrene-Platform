@@ -1,0 +1,81 @@
+scenario	input	endpoint_or_boundary	expected
+server_generated_device_id	new scope+valid CSR+SPKI digest	POST /v1/device-authorizations	stable Directory device_id distinct from authorization_id
+registration_key_recovery_only	registration_key without device_code	poll/approval/ACK	REJECTED; recovery credential cannot poll, approve, or acknowledge delivery
+start_retry_same_registration_key	lost start response; same key+scope+CSR+SPKI in recoverable state	POST /v1/device-authorizations	same device_id+authorization_id+authorization_generation+CA key; CAS rotates codes and increments device_code_generation
+start_retry_stale_response	response has lower device_code_generation than client’s newest	start response	client discards stale device/user codes
+registration_key_binding_conflict	same key with changed scope or CSR/SPKI digest	POST /v1/device-authorizations	CONFLICT; no rebinding
+registration_key_terminal_conflict	same key after denial, delivery ACK/expiry, or authorization expiry	POST /v1/device-authorizations	CONFLICT; no reopening terminal intent
+registration_recovery_rate_limit	too many same-key recoveries in the configured window/count	POST /v1/device-authorizations	RATE_LIMITED; prior authorization and codes remain unchanged
+registration_recovery_ttl	same key after authorization TTL	POST /v1/device-authorizations	CONFLICT/EXPIRED; no TTL extension or new CA issue
+recovery_generation_independent	valid same-authorization code recovery	start response	authorization_generation unchanged; device_code_generation increments exactly once per committed rotation
+recovery_cas_poll_race	old device_code poll or ACK races recovery CAS	poll/ACK response	old code cannot authorize after CAS; response re-reads revision before returning certificate or receipt
+lost_start_response_concurrent_approval_ca	lost start reply; exact-key retry races WebAuthn verification or CA acceptance	start + approval + CA recovery	same authorization_id and CA idempotency tuple; no second issuance; same DER/delivery_id or explicit pending; new code generation only
+registration_key_not_echoed	valid start or recovery request	start response/logs	registration_key never returned or logged; server stores only domain-separated digest
+superseded_device_code	poll with code from lower authorization_generation	poll	invalid_grant; only latest committed attempt remains active
+identifier_separation	device_id+authorization_id+authorization_generation+approval_id+device_code	start response	IDs/generation are non-secret; device_code is 256-bit bearer
+csr_digest_recomputed	CSR with matching declared SPKI digest	start authorization	persist recomputed CSR and SPKI digests
+csr_digest_mismatch	CSR+different declared SPKI digest	start authorization	REJECTED before persistence
+scope_binding	org+workspace+CSR+device_code	all transitions	exact scope retained
+user_code_not_credential	user_code without trusted user session	approval challenge	REJECTED
+http_approval_requires_session	missing trusted interactive session	POST /v1/device-authorizations/approval-challenges	401; application approval port is not called
+http_forged_approver_rejected	request body includes caller-supplied approver	POST /v1/device-authorizations/approval-challenges	400; user identity is accepted only from trusted middleware
+http_approval_finish_issuing	valid session plus accepted WebAuthn assertion; durable state is ISSUING	POST /v1/device-authorizations/approval-challenges/{approval_id}/complete	202 with authorization ref and approvedBy bound to trusted session
+user_code_rate_limit	repeated invalid user_code	approval challenge	RATE_LIMITED
+device_id_not_poll_credential	device_id without device_code	poll	REJECTED
+authorization_id_not_poll_credential	authorization_id without device_code	poll	REJECTED
+trusted_user_from_session	body includes forged approver fields	approval challenge	identity derived only from authenticated session
+membership_scope_recheck	trusted user loses membership before finish	approval finish	REJECTED; challenge consumed or invalidated
+webauthn_start_bound_state	verifier options+opaque server state	approval challenge	state binds user+approval+scope+CSR/SPKI and stays server-side
+webauthn_finish_one_time	valid assertion+approval_id	approval finish	atomic one-time completion
+webauthn_replay	assertion reused after finish	approval finish	REJECTED
+denial_trusted_member	trusted workspace member+user_code	denial	DENIED; outstanding challenge invalidated
+poll_pending	pending or WebAuthn challenge active	poll	authorization_pending+current interval
+poll_issuing_recovery	durable ISSUING+ambiguous CA outcome	poll and signer recovery	PENDING; same authorization_id request returns same certificate
+poll_slow_down	poll before current interval	poll	slow_down+interval increased by 5 seconds up to 60 seconds
+http_poll_retry_after	application returns slow_down with retryAfterSeconds	POST /v1/device-authorizations/poll	400 slow_down and matching Retry-After header
+poll_denied	denied authorization	poll	access_denied; no certificate
+poll_expired	expired authorization	poll	expired_token; codes and challenges invalid
+poll_approved	certificate durable and delivery pending	poll	approved+certificate+delivery_id+deadline
+http_poll_certificate_binding	application poll response has certificate DER and metadata	POST /v1/device-authorizations/poll	200 only when Directory device_id, authorization, CSR/SPKI digests, and certificate fingerprint agree
+delivery_retry_before_ack	approved but unacknowledged authorization	repeated poll	byte-identical certificate+same delivery_id before deadline
+ack_binding_mismatch	wrong authorization or delivery ID or cert fingerprint or CSR or SPKI digest	ACK	REJECTED; remains delivery pending
+http_ack_receipt_binding	ACK adapter returns a receipt for a different authorization, delivery, or certificate	POST /v1/device-authorizations/delivery-acknowledgements	503; response is not reported as a successful receipt
+http_ack_conflict_not_success	ACK application reports a tuple/state conflict	POST /v1/device-authorizations/delivery-acknowledgements	409 state_conflict; no receipt success response
+ack_idempotent	exact ACK repeated	ACK	SAME receipt result
+ack_replay_after_deadline	identical receipt committed before deadline; retry after deadline	ACK	SAME receipt result; does not reopen delivery
+ack_first_after_deadline	no prior receipt; first ACK at or after deadline	ACK	REJECTED; recovery/revocation outcome remains explicit
+poll_after_ack	ACK committed	poll	DELIVERY_CONSUMED; certificate never resent
+delivery_deadline_recovery	ACK absent at deadline	delivery worker	certificate revoked/retired before DELIVERY_EXPIRED; poll reports delivery_expired
+delivery_revoke_pending	CA revocation outcome pending	deadline recovery and poll	DELIVERY_RECOVERY_BLOCKED+REVOCATION_PENDING; never mark delivered
+delivery_revoke_unknown	CA revocation outcome ambiguous	deadline recovery and poll	DELIVERY_RECOVERY_BLOCKED+RECOVERY_BLOCKED; never mark delivered
+rotation_same_device	current mTLS cert+new valid CSR+fresh distinct 256-bit registration_key	rotation start	same device_id+new authorization_id+authorization_generation+approval flow
+rotation_precommit_retry	transaction is known not committed; predecessor mTLS generation remains current; retry with same fresh key+exact tuple	POST /v1/workspace-devices/{device_id}/certificate-rotations	one committed authorization/generation; no earlier state change or duplicate authorization
+rotation_lost_start_response	rotation committed but start response was lost; retry with same key and stale predecessor certificate	POST /v1/workspace-devices/{device_id}/certificate-rotations	REJECTED as stale peer; no automatic v1 recovery endpoint; no second authorization or generation; trusted manual/device recovery is out of scope
+rotation_key_on_initial_start	committed rotation key submitted to the initial-enrollment endpoint	POST /v1/device-authorizations	409 state_conflict; no code rotation or authorization-state change
+rotation_registration_key_reuse	new rotation reuses predecessor registration_key	rotation start	CONFLICT; key digest cannot bind a different CSR tuple or new generation
+rotation_pre_issuing_supersede	current peer generation; predecessor is Pending/AwaitingWebAuthn/VerifyingWebAuthn	rotation start	atomic SupersededForRegistrationRotation+new authorization; predecessor codes and approval cannot be used
+rotation_issuing_conflict	predecessor already Issuing or has unresolved retirement	rotation start	CONFLICT; do not supersede or create another CA issuance
+rotation_delivery_pending_retirement	predecessor DeliveryPending with full immutable cert snapshot	rotation transaction	old row RetirementPending(RegistrationRotated)+new Directory generation+new authorization commit atomically; old peer generation becomes stale
+rotation_delivered_retirement	predecessor Delivered with approver+full cert+exact ACK receipt	rotation transaction	old row RetirementPending(RegistrationRotated) preserves receipt+cert material; new generation commits atomically
+rotation_retirement_confirmed	rotation retirement worker confirms CA/registry retirement	retirement worker	old row becomes terminal RegistrationRetired; poll/approval cannot replay old enrollment
+rotation_legacy_v3_delivered	legacy Delivered has ACK receipt but no approver/cert snapshot	rotation start	CONFLICT; row remains readable and exact ACK replayable; never fabricate certificate material
+rotation_peer_claim_mismatch	stale/expired generation or mismatched CSR/SPKI/cert fingerprint/serial/notAfter claim	rotation start	CONFLICT; no Directory generation increment
+rotation_concurrent_stale_peer	two rotations race using same current mTLS generation	rotation transaction	one commit advances generation once; second stale peer conflicts; generation never advances twice
+rotation_old_ack_receipt_replay	old Delivered receipt replayed with exact old device_code/ACK tuple after rotation	ACK	SAME receipt result; does not reactivate or poll the old generation
+rotation_before_ack	new certificate not yet ACKed	certificate metadata	old mTLS generation already stale; old cert remains retirement-pending; new serial is not ACTIVE
+rotation_ack	new certificate ACKed and registry activation committed	rotation completion	new serial active; old serial retired/revoked
+rotation_expired	new delivery deadline passed after rotation commit	rotation recovery	new generation remains current; old generation is never restored; new cert revoked or explicit blocker
+http_rotation_without_atomic_transaction	valid CSR and peer but composite Directory/authorization/retirement transaction unavailable	POST /v1/workspace-devices/{device_id}/certificate-rotations	PENDING (route not mounted in this slice); once mounted, 503 with no generation change, authorization, or code response
+certificate_metadata	serial+fingerprint+issuer+validity+scope+authorization_id+CSR digests	certificate list	metadata present; no private key
+revocation_scope	revoker outside exact scope	certificate revocation	REJECTED
+revocation_idempotent	same serial and reason repeated	revocation endpoint	SAME revocation metadata
+identity_roles_separate	UserIdentityRef+WorkspaceDevice+Workload	certificate issue	no identity substitution; no Workload identity minted
+no_provider_token_to_device	approved enrollment	poll response	Cyrene WorkspaceDevice certificate only; no Microsoft/OAuth token
+secret_redaction	device_code+user_code+assertion+CA key	logs and responses	secrets redacted; CA key absent
+http_secret_response_rejected	injected adapter returns device_code, opaque WebAuthn state, recovery key, assertion, private key, or provider token	protected HTTP response	503; sensitive material is never serialized
+http_start_without_atomic_transaction	CSR is valid but composite Directory+manager transaction port is absent	POST /v1/device-authorizations	503; no identity binding or authorization is started
+http_start_directory_identity	composite transaction returns Directory binding and authorization	POST /v1/device-authorizations	201; stable device_id differs from authorization_id and matches returned binding
+http_start_snapshot_mismatch	start port returns body inconsistent with its committed Directory binding, authorization row, code digest, revision, or generation	POST /v1/device-authorizations	503; no mixed-revision response or codes are returned
+http_poll_snapshot_mismatch	poll port returns body inconsistent with the final committed authorization snapshot or presented device-code digest	POST /v1/device-authorizations/poll	503; no stale-code poll outcome or certificate delivery is returned
+http_authorization_id_canonical	start, poll, ACK, or certificate metadata uses a non-canonical authorization ID	HTTP enrollment routes	REJECTED; ID is canonical unpadded base64url of the server-generated 128-bit authorization ID
+poll_recovery_commit_race	old-code poll begins before a registration-key recovery CAS; recovery commits first	poll response	final poll snapshot re-read rejects old code; old code cannot authorize a response

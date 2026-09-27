@@ -14,9 +14,9 @@ use cy_proto::workspace_v1::relay_frame;
 use cy_proto::workspace_v1::workspace_direct_service_client::WorkspaceDirectServiceClient;
 use cy_proto::workspace_v1::workspace_relay_service_client::WorkspaceRelayServiceClient;
 use cy_proto::workspace_v1::{
-    DiscoverWorkspacesRequest, RelayForwardedResponse, RelayFrame, RelayHello, UserIdentityRef,
-    WorkspaceApiRequest, WorkspaceApiResponse, WorkspaceConnectionCandidate,
-    WorkspaceConnectionDescriptor, WorkspaceDirectRequest,
+    DiscoverWorkspacesRequest, RelayForwardedResponse, RelayFrame, RelayHello,
+    RelayParticipantRole, UserIdentityRef, WorkspaceApiRequest, WorkspaceApiResponse,
+    WorkspaceConnectionCandidate, WorkspaceConnectionDescriptor, WorkspaceDirectRequest,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -24,7 +24,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::{Request, Streaming};
 
-use crate::{validate_descriptor, WorkspaceApi};
+use crate::{
+    validate_descriptor, WorkspaceApi, WorkspaceCallerContext, WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES,
+};
 
 const RELAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -41,8 +43,11 @@ const RELAY_QUEUE_FRAMES: usize = 8;
 #[derive(Clone)]
 pub struct RelayClientConfig {
     pub control_endpoint: String,
+    /// Expected TLS server name, such as the Relay service identity.
     pub server_name: String,
+    /// Roots used to authenticate the remote TLS server, independently of the client certificate.
     pub ca_certificate_pem: Vec<u8>,
+    /// Client identity presented to the endpoint; a Workspace device cert does not identify Relay.
     pub client_certificate_pem: Vec<u8>,
     pub client_key_pem: Vec<u8>,
 }
@@ -148,7 +153,9 @@ pub async fn connect_discovered_workspace(
                             message = "Workspace direct connection established",
                         );
                         return Ok(WorkspaceConnection::Direct {
-                            client: WorkspaceDirectServiceClient::new(channel),
+                            client: WorkspaceDirectServiceClient::new(channel)
+                                .max_decoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+                                .max_encoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES),
                             hello,
                             workspace_id: descriptor.workspace_id.clone(),
                         });
@@ -208,6 +215,7 @@ async fn connect_candidate(
 /// One authenticated bidirectional relay session.
 pub struct RelaySession {
     relay_session_id: String,
+    participant_role: RelayParticipantRole,
     outbound: mpsc::Sender<RelayFrame>,
     inbound: Streaming<RelayFrame>,
 }
@@ -275,15 +283,31 @@ impl RelaySession {
         mut self,
         api: Arc<dyn WorkspaceApi>,
     ) -> Result<(), RelayTransportError> {
+        if self.participant_role != RelayParticipantRole::WorkspaceConnector {
+            return Err(RelayTransportError::Protocol(
+                "only an authenticated Workspace connector stream may serve requests".to_string(),
+            ));
+        }
         loop {
             let frame = self.next().await?;
             let Some(relay_frame::Body::ForwardedRequest(forwarded)) = frame.body else {
                 continue;
             };
+            let caller = WorkspaceCallerContext::from_relay_forwarded(&forwarded);
             let Some(request) = forwarded.request else {
                 continue;
             };
-            let response = api.handle(request).await;
+            let response = match caller {
+                Ok(caller) => {
+                    crate::api::dispatch_authenticated_workspace_request(
+                        api.as_ref(),
+                        request,
+                        caller,
+                    )
+                    .await
+                }
+                Err(_) => crate::api::unauthenticated_workspace_response(request.request_id),
+            };
             self.send(RelayFrame {
                 frame_id: frame.frame_id,
                 body: Some(relay_frame::Body::ForwardedResponse(
@@ -297,7 +321,7 @@ impl RelaySession {
         }
     }
 
-    async fn send(&self, frame: RelayFrame) -> Result<(), RelayTransportError> {
+    async fn send(&mut self, frame: RelayFrame) -> Result<(), RelayTransportError> {
         self.outbound
             .send(frame)
             .await
@@ -331,8 +355,13 @@ pub async fn connect_relay_session(
     config: &RelayClientConfig,
     hello: RelayHello,
 ) -> Result<RelaySession, RelayTransportError> {
+    let participant_role = RelayParticipantRole::try_from(hello.role).map_err(|_| {
+        RelayTransportError::Protocol("relay participant role is invalid".to_string())
+    })?;
     let channel = connect_channel(config).await?;
-    let mut client = WorkspaceRelayServiceClient::new(channel);
+    let mut client = WorkspaceRelayServiceClient::new(channel)
+        .max_decoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES);
     let (outbound, receiver) = mpsc::channel(RELAY_QUEUE_FRAMES);
     outbound
         .send(RelayFrame {
@@ -358,6 +387,7 @@ pub async fn connect_relay_session(
     };
     Ok(RelaySession {
         relay_session_id: ready.relay_session_id,
+        participant_role,
         outbound,
         inbound,
     })

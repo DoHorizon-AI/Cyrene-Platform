@@ -11,12 +11,20 @@ use std::collections::BTreeSet;
 use cy_manifest::ArtifactRef;
 
 use crate::{
-    ArtifactSourceCandidate, TransferError, TransferManifest, TransferPartSource, TransferPlan,
-    TransferSource, TransferTicketIssuer, TransferTicketRequest,
+    ArtifactSourceCandidate, ArtifactTransferPath, TransferError, TransferManifest,
+    TransferPartSource, TransferPlan, TransferSource, TransferTicketIssuer, TransferTicketRequest,
 };
 
 /// Source-directory seam owned by the Artifact Plane implementation.
 pub trait ArtifactSourceResolver: Send + Sync {
+    /// Return currently reachable, policy-bearing source candidates.
+    ///
+    /// A `LanDirect` result must be reachable over the private LAN at resolution
+    /// time. A `UserProvidedObjectStore` result must come from an explicit user
+    /// binding and contain an expiring pre-signed HTTPS URL. A control Relay is
+    /// never a valid bulk Artifact candidate.
+    ///
+    /// 返回当前可达且已附带策略事实的传输候选。不得将控制 Relay 作为批量 Artifact 来源。
     fn resolve_sources(
         &self,
         artifact: &ArtifactRef,
@@ -151,7 +159,14 @@ where
     }
 }
 
-/// MVP planner: all parts use the best policy-admitted seed/source Peer.
+/// Selects LAN_DIRECT sources before user-provided object-store fallback.
+///
+/// Candidate resolvers report only currently addressable paths. The planner
+/// never invents a Relay route: when neither path is usable, it fails with an
+/// actionable object-store configuration error.
+///
+/// 候选解析器只报告当前可达路径。规划器优先选择 LAN_DIRECT；两种允许路径均不可用时，
+/// 明确要求配置用户自备对象存储，绝不把批量 Artifact 回退到 Relay。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SeedFirstTransferPlanner;
 
@@ -170,11 +185,47 @@ impl TransferPlanner for SeedFirstTransferPlanner {
             now_unix_ms,
         } = request;
         manifest.validate()?;
-        let mut eligible = candidates
-            .into_iter()
-            .filter(|source| policy.admit(source).is_ok())
-            .filter(|source| source.peer.healthy)
-            .collect::<Vec<_>>();
+        let candidate_count = candidates.len();
+        let mut any_policy_admitted = false;
+        let mut eligible = Vec::new();
+        for source in candidates {
+            source.validate()?;
+            let policy_admitted = policy.admit(&source).is_ok();
+            any_policy_admitted |= policy_admitted;
+            let replica_is_live = source
+                .replica
+                .expires_at_unix_ms
+                .is_none_or(|expires_at| now_unix_ms < expires_at);
+            if policy_admitted && source.peer.healthy && replica_is_live {
+                eligible.push(source);
+            }
+        }
+
+        // ── Phase 1: Choose an available LAN_DIRECT candidate ─────────────
+        // 第一阶段：先选择可用的 LAN_DIRECT 候选，不比较对象存储的成本或延迟。
+        let selected_path = if eligible
+            .iter()
+            .any(|source| source.path == ArtifactTransferPath::LanDirect)
+        {
+            Some(ArtifactTransferPath::LanDirect)
+        } else if eligible
+            .iter()
+            .any(|source| source.path == ArtifactTransferPath::UserProvidedObjectStore)
+        {
+            // ── Phase 2: Use only the explicitly user-provided store ───────
+            // 第二阶段：没有可用直连时，只允许显式配置的用户对象存储。
+            Some(ArtifactTransferPath::UserProvidedObjectStore)
+        } else if candidate_count == 0 || any_policy_admitted {
+            return Err(TransferError::Policy(
+                "LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED: provide a short-lived pre-signed HTTPS URL from a user-owned object store for cross-network Artifact transfer; Artifact bytes are never sent through the control Relay".to_string(),
+            ));
+        } else {
+            return Err(TransferError::Policy(
+                "NO_POLICY_COMPLIANT_ARTIFACT_PEER".to_string(),
+            ));
+        };
+        let selected_path = selected_path.expect("a selected route returns above");
+        eligible.retain(|source| source.path == selected_path);
         eligible.sort_by(|left, right| {
             left.peer
                 .latency_ms
@@ -183,9 +234,10 @@ impl TransferPlanner for SeedFirstTransferPlanner {
                 .then_with(|| left.peer.cost_microunits.cmp(&right.peer.cost_microunits))
                 .then_with(|| left.peer.peer_id.cmp(&right.peer.peer_id))
         });
-        let source = eligible.into_iter().next().ok_or_else(|| {
-            TransferError::Policy("NO_POLICY_COMPLIANT_ARTIFACT_PEER".to_string())
-        })?;
+        let source = eligible
+            .into_iter()
+            .next()
+            .expect("route selection requires an eligible source");
         let ticket = ticket_issuer.issue(TransferTicketRequest {
             ticket_id: format!("{plan_id}-{}", source.peer.peer_id),
             artifact: manifest.artifact.clone(),
@@ -267,7 +319,16 @@ mod tests {
                 priority: 0,
                 expires_at_unix_ms: None,
             },
+            path: ArtifactTransferPath::LanDirect,
         }
+    }
+
+    fn object_store_source(id: &str, latency_ms: u64) -> ArtifactSourceCandidate {
+        let mut candidate = source(id, true, latency_ms);
+        candidate.peer.kind = ArtifactPeerKind::ObjectStoreGateway;
+        candidate.replica.expires_at_unix_ms = Some(u64::MAX);
+        candidate.path = ArtifactTransferPath::UserProvidedObjectStore;
+        candidate
     }
 
     fn manifest() -> TransferManifest {
@@ -293,7 +354,12 @@ mod tests {
 
     fn policy() -> PeerSelectionPolicy {
         PeerSelectionPolicy {
-            allowed_peer_ids: BTreeSet::from(["denied-fast".to_string(), "allowed".to_string()]),
+            allowed_peer_ids: BTreeSet::from([
+                "denied-fast".to_string(),
+                "allowed".to_string(),
+                "lan-source".to_string(),
+                "user-store".to_string(),
+            ]),
             allowed_residencies: BTreeSet::from(["us".to_string()]),
             allowed_trust_domains: BTreeSet::from(["workspace".to_string()]),
             classification: "internal".to_string(),
@@ -315,6 +381,96 @@ mod tests {
             .part_sources
             .iter()
             .all(|route| route.peer_id == "allowed"));
+    }
+
+    #[test]
+    fn lan_direct_is_preferred_over_a_faster_user_object_store() {
+        let directory = InMemoryArtifactPeerDirectory::new(vec![
+            source("lan-source", true, 25),
+            object_store_source("user-store", 1),
+        ]);
+        let issuer = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+
+        let plan = ArtifactTransferCoordinator::new(directory, SeedFirstTransferPlanner, issuer)
+            .resolve_and_plan("lan-first", &manifest(), "destination", &policy(), 1)
+            .unwrap();
+
+        assert_eq!(plan.sources[0].peer.peer_id, "lan-source");
+        assert_eq!(
+            plan.sources[0].transfer_path(),
+            ArtifactTransferPath::LanDirect
+        );
+    }
+
+    #[test]
+    fn user_object_store_is_selected_when_no_lan_direct_candidate_exists() {
+        let directory =
+            InMemoryArtifactPeerDirectory::new(vec![object_store_source("user-store", 12)]);
+        let issuer = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+
+        let plan = ArtifactTransferCoordinator::new(directory, SeedFirstTransferPlanner, issuer)
+            .resolve_and_plan("store-fallback", &manifest(), "destination", &policy(), 1)
+            .unwrap();
+
+        assert_eq!(
+            plan.sources[0].peer.kind,
+            ArtifactPeerKind::ObjectStoreGateway
+        );
+        assert_eq!(
+            plan.sources[0].transfer_path(),
+            ArtifactTransferPath::UserProvidedObjectStore
+        );
+    }
+
+    #[test]
+    fn missing_direct_and_user_store_fails_closed_with_configuration_guidance() {
+        let directory = InMemoryArtifactPeerDirectory::default();
+        let issuer = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+
+        let error = ArtifactTransferCoordinator::new(directory, SeedFirstTransferPlanner, issuer)
+            .resolve_and_plan("no-route", &manifest(), "destination", &policy(), 1)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransferError::Policy(message)
+                if message.starts_with("LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED:")
+                    && message.contains("never sent through the control Relay")
+        ));
+    }
+
+    #[test]
+    fn expired_object_store_url_is_not_selected() {
+        let mut object_store = object_store_source("user-store", 12);
+        object_store.replica.expires_at_unix_ms = Some(1);
+        let directory = InMemoryArtifactPeerDirectory::new(vec![object_store]);
+        let issuer = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+
+        let error = ArtifactTransferCoordinator::new(directory, SeedFirstTransferPlanner, issuer)
+            .resolve_and_plan("expired-store", &manifest(), "destination", &policy(), 1)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransferError::Policy(message)
+                if message.starts_with("LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED:")
+        ));
+    }
+
+    #[test]
+    fn object_store_cannot_be_mislabeled_as_a_lan_direct_peer() {
+        let mut object_store = object_store_source("user-store", 12);
+        object_store.path = ArtifactTransferPath::LanDirect;
+        let directory = InMemoryArtifactPeerDirectory::new(vec![object_store]);
+        let issuer = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+
+        let error = ArtifactTransferCoordinator::new(directory, SeedFirstTransferPlanner, issuer)
+            .resolve_and_plan("wrong-path", &manifest(), "destination", &policy(), 1)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TransferError::Contract(message) if message.contains("cannot be routed as LAN_DIRECT"))
+        );
     }
 
     #[test]

@@ -27,13 +27,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cy_observability::TraceContext;
 use cy_proto::core_v1::ConnectivityMode;
 use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::semantic_v1::Identity as OperationIdentity;
 use cy_proto::workspace_v1::workspace_api_request;
 use cy_proto::workspace_v1::workspace_api_response;
-use cy_proto::workspace_v1::workspace_direct_service_server::WorkspaceDirectServiceServer;
-use cy_proto::workspace_v1::workspace_relay_service_server::WorkspaceRelayServiceServer;
 use cy_proto::workspace_v1::{
     DeviceEnrollmentRef, GetWorkspaceOperationRequest, RelayHello, RelayParticipantRole,
     StartWorkspaceOperationRequest, UserIdentityRef, WorkspaceApiRequest, WorkspaceApiResponse,
@@ -41,12 +40,17 @@ use cy_proto::workspace_v1::{
     WorkspaceOperationState, WorkspaceOperationView,
 };
 use cy_workspace_fabric::{
-    connect_discovered_workspace, connect_relay_session, DevelopmentSessionVerifier,
-    DirectWorkspaceServer, InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims,
-    SessionPrincipal, WorkspaceApi, WorkspaceConnection, WorkspaceMembership, WorkspaceRelay,
+    bounded_workspace_direct_server, bounded_workspace_relay_server, connect_discovered_workspace,
+    connect_relay_session, ApprovedWorkspaceDeviceCertificate, DevelopmentSessionVerifier,
+    DeviceAuthorizationStatus, DirectWorkspaceServer, FileWorkspaceDirectory,
+    InMemoryWorkspaceDirectory, RelayClientConfig, RelaySessionClaims, SessionPrincipal,
+    WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceConnection,
+    WorkspaceDeviceKey, WorkspaceDeviceRegistry, WorkspaceMembership, WorkspaceRelay,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::Code;
+
+const FIXTURE_TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,7 +104,8 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
         ],
         expires_at: Some(timestamp_from_ms(expires_at_unix_ms)),
     };
-    let directory = Arc::new(InMemoryWorkspaceDirectory::new(
+    let directory = FileWorkspaceDirectory::open(required("CYRENE_WORKSPACE_RELAY_DIRECTORY")?)?;
+    directory.replace(
         vec![WorkspaceMembership {
             user: user.clone(),
             organization_id: organization_id.clone(),
@@ -108,31 +113,37 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
             roles: BTreeSet::from(["workspace.member".to_string()]),
         }],
         vec![descriptor],
-    )?);
-    let authenticator = Arc::new(DevelopmentSessionVerifier::new([
-        (
-            required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
-            RelaySessionClaims {
-                principal: SessionPrincipal::User(user),
-                organization_id: organization_id.clone(),
-                workspace_id: String::new(),
-                expires_at_unix_ms,
-            },
-        ),
-        (
-            required("CYRENE_WORKSPACE_SESSION_CREDENTIAL")?,
-            RelaySessionClaims {
-                principal: SessionPrincipal::WorkspaceDevice {
-                    workspace_id,
-                    device_id: required("CYRENE_WORKSPACE_DEVICE_ID")?,
-                },
-                organization_id,
-                workspace_id: required("CYRENE_WORKSPACE_ID")?,
-                expires_at_unix_ms,
-            },
-        ),
-    ]));
-    let relay = WorkspaceRelay::new(directory, authenticator);
+    )?;
+    let device_key = WorkspaceDeviceKey {
+        organization_id: organization_id.clone(),
+        workspace_id: workspace_id.clone(),
+        device_id: required("CYRENE_WORKSPACE_DEVICE_ID")?,
+    };
+    let device_fingerprint = required("CYRENE_WORKSPACE_DEVICE_CERTIFICATE_SHA256")?;
+    if let Some(record) = directory.find_device(&device_key)? {
+        if record.authorization_status != DeviceAuthorizationStatus::Approved
+            || record.certificate_fingerprint_sha256 != device_fingerprint
+        {
+            return Err("fixture Workspace device record does not match its certificate".into());
+        }
+    } else {
+        directory.import_approved_device_certificate(ApprovedWorkspaceDeviceCertificate {
+            key: device_key,
+            certificate_fingerprint_sha256: device_fingerprint,
+        })?;
+    }
+    let authenticator = Arc::new(DevelopmentSessionVerifier::new([(
+        required("CYRENE_FRONTEND_SESSION_CREDENTIAL")?,
+        RelaySessionClaims {
+            principal: SessionPrincipal::User(user),
+            organization_id: organization_id.clone(),
+            workspace_id: String::new(),
+            expires_at_unix_ms,
+        },
+    )]));
+    let directory = Arc::new(directory);
+    let registry: Arc<dyn WorkspaceDeviceRegistry> = directory.clone();
+    let relay = WorkspaceRelay::with_workspace_device_registry(directory, authenticator, registry);
     trace(
         Path::new(&required("CYRENE_WORKSPACE_RELAY_TRACE")?),
         &format!("RELAY_STARTED bind={bind}"),
@@ -147,7 +158,7 @@ async fn run_relay() -> Result<(), Box<dyn std::error::Error>> {
         )?)?));
     Server::builder()
         .tls_config(tls)?
-        .add_service(WorkspaceRelayServiceServer::new(relay))
+        .add_service(bounded_workspace_relay_server(relay))
         .serve(bind)
         .await?;
     Ok(())
@@ -168,14 +179,14 @@ async fn run_connector() -> Result<(), Box<dyn std::error::Error>> {
     let config = relay_client_config()?;
     let hello = RelayHello {
         role: RelayParticipantRole::WorkspaceConnector as i32,
-        session_credential: required("CYRENE_WORKSPACE_SESSION_CREDENTIAL")?,
+        session_credential: String::new(),
         user: None,
         organization_id,
         workspace_id: workspace_id.clone(),
         device: Some(DeviceEnrollmentRef {
             device_id: required("CYRENE_WORKSPACE_DEVICE_ID")?,
             workspace_id,
-            enrollment_state: "approved".to_string(),
+            enrollment_state: String::new(),
         }),
     };
     let direct_server = run_direct_server(api.clone(), trace_path.clone());
@@ -245,7 +256,7 @@ async fn run_direct_server(
     );
     Server::builder()
         .tls_config(tls)?
-        .add_service(WorkspaceDirectServiceServer::new(direct))
+        .add_service(bounded_workspace_direct_server(direct))
         .serve(bind)
         .await?;
     Ok(())
@@ -288,6 +299,7 @@ async fn run_frontend_direct() -> Result<(), Box<dyn std::error::Error>> {
         .execute(WorkspaceApiRequest {
             request_id: "direct-get-operation-1".to_string(),
             workspace_id,
+            traceparent: FIXTURE_TRACEPARENT.to_string(),
             request: Some(workspace_api_request::Request::GetOperation(
                 GetWorkspaceOperationRequest {
                     operation: Some(OperationIdentity {
@@ -313,6 +325,7 @@ async fn run_frontend_direct() -> Result<(), Box<dyn std::error::Error>> {
             request: Some(WorkspaceApiRequest {
                 request_id: "direct-denied-operation-1".to_string(),
                 workspace_id: required("CYRENE_WORKSPACE_ID")?,
+                traceparent: String::new(),
                 request: Some(workspace_api_request::Request::GetOperation(
                     GetWorkspaceOperationRequest {
                         operation: Some(OperationIdentity {
@@ -366,6 +379,7 @@ async fn run_frontend_fallback() -> Result<(), Box<dyn std::error::Error>> {
         .execute(WorkspaceApiRequest {
             request_id: "fallback-get-operation-1".to_string(),
             workspace_id,
+            traceparent: FIXTURE_TRACEPARENT.to_string(),
             request: Some(workspace_api_request::Request::GetOperation(
                 GetWorkspaceOperationRequest {
                     operation: Some(OperationIdentity {
@@ -425,6 +439,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
             .execute(WorkspaceApiRequest {
                 request_id: "start-operation-1".to_string(),
                 workspace_id: workspace_id.clone(),
+                traceparent: FIXTURE_TRACEPARENT.to_string(),
                 request: Some(workspace_api_request::Request::StartOperation(
                     StartWorkspaceOperationRequest {
                         operation: Some(operation.clone()),
@@ -442,6 +457,7 @@ async fn run_frontend(start: bool) -> Result<(), Box<dyn std::error::Error>> {
             .execute(WorkspaceApiRequest {
                 request_id: format!("get-operation-{}", now_unix_ms()),
                 workspace_id: workspace_id.clone(),
+                traceparent: FIXTURE_TRACEPARENT.to_string(),
                 request: Some(workspace_api_request::Request::GetOperation(
                     GetWorkspaceOperationRequest {
                         operation: Some(operation.clone()),
@@ -513,6 +529,9 @@ fn operation_view(
     match response.outcome {
         Some(workspace_api_response::Outcome::Operation(operation)) => Ok(operation),
         Some(workspace_api_response::Outcome::Error(error)) => Err(error.message.into()),
+        Some(workspace_api_response::Outcome::ProductApi(_)) => {
+            Err("Product API response is not a Workspace operation view".into())
+        }
         None => Err("Workspace API response has no outcome".into()),
     }
 }
@@ -688,7 +707,31 @@ impl FileWorkspaceApi {
 
 #[tonic::async_trait]
 impl WorkspaceApi for FileWorkspaceApi {
-    async fn handle(&self, request: WorkspaceApiRequest) -> WorkspaceApiResponse {
+    async fn handle_authenticated(
+        &self,
+        request: WorkspaceApiRequest,
+        caller: WorkspaceCallerContext,
+    ) -> WorkspaceApiResponse {
+        // The fixture keeps one explicitly authenticated start path for relay proof;
+        // production command authorization remains fail-closed in WorkspaceControlPlane.
+        if caller.workspace_id() != self.workspace_id
+            || caller.organization_id().trim().is_empty()
+            || !caller.is_member()
+            || !matches!(caller.principal(), WorkspaceCallerPrincipal::User(_))
+        {
+            return workspace_error(request.request_id, 7, "WORKSPACE_MEMBERSHIP_DENIED");
+        }
+        if let Ok(context) = TraceContext::parse_traceparent(&request.traceparent) {
+            trace(
+                &self.connector_trace,
+                &format!(
+                    "WORKSPACE_API_TRACE request_id={} trace_id={} span_id={}",
+                    request.request_id,
+                    context.trace_id_hex(),
+                    context.span_id_hex()
+                ),
+            );
+        }
         if request.workspace_id != self.workspace_id {
             return workspace_error(request.request_id, 5, "WORKSPACE_NOT_FOUND");
         }
@@ -699,6 +742,11 @@ impl WorkspaceApi for FileWorkspaceApi {
             Some(workspace_api_request::Request::GetOperation(get)) => {
                 self.get(request.request_id, get)
             }
+            Some(workspace_api_request::Request::ProductApi(_)) => workspace_error(
+                request.request_id,
+                12,
+                "PRODUCT_API_PROJECTION_NOT_IMPLEMENTED",
+            ),
             None => workspace_error(request.request_id, 3, "WORKSPACE_REQUEST_REQUIRED"),
         }
     }

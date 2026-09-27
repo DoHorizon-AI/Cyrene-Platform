@@ -1,0 +1,756 @@
+openapi: 3.1.2
+info:
+  title: Cyrene Workspace Web BFF API
+  version: 1.0.0
+  summary: Same-origin browser contract for authenticated Workspace and Product access.
+  description: |
+    The browser-facing BFF authenticates a trusted ingress principal, discovers only
+    the caller's member Workspaces, and proxies a closed Product operation set.
+    It owns no Workspace, Product, membership, or session state. Every JSON request
+    and response body is capped at 4 MiB; BFF-owned RFC 9457 errors use a closed,
+    length-bounded schema. Device approval routes expose only the interactive
+    begin, WebAuthn completion, and denial DTOs from the private Device Authorization
+    contract; device start, poll, and delivery acknowledgement remain unavailable
+    to browsers.
+
+    浏览器 BFF 验证可信入口 principal，仅发现当前用户所属的 Workspace，并代理封闭的
+    Product operation 集合。BFF 不拥有 Workspace、Product、membership 或 session 状态。所有 JSON 请求和响应 body
+    均限制为 4 MiB；BFF 自身 RFC 9457 error 使用封闭且有长度上限的 schema。设备审批路由仅暴露私有 Device Authorization
+    契约中的交互式 begin、WebAuthn complete 和 deny DTO；浏览器不能访问设备 start、poll 或 delivery acknowledgement。
+  x-cyrene-json-bounds:
+    request-max-bytes: 4194304
+    response-max-bytes: 4194304
+servers:
+  - url: /
+    description: Same origin that serves the static Cyrene Client.
+tags:
+  - name: Session
+  - name: Workspace
+  - name: Product
+  - name: Device authorization
+paths:
+  /api/workspace/v1/session:
+    get:
+      operationId: getWebSession
+      tags: [Session]
+      summary: Return the verified identity context for the current browser session.
+      description: Unknown query parameters are rejected.
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      responses:
+        '200':
+          description: Verified session identity; no bearer, device, or Product credentials are returned.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+            Set-Cookie:
+              description: HttpOnly signed CSRF token bound to the verified access-token session.
+              schema: { type: string, maxLength: 512 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSession' }
+          x-cyrene-csrf-cookie:
+            name: __Secure-cyrene-csrf
+            path: /api/workspace/v1
+            secure: true
+            httpOnly: true
+            sameSite: Strict
+            domain: forbidden
+            expiresAt: verified-principal-expiry
+            concurrentRefresh: stable-for-same-principal-and-access-token
+        '401': { $ref: '#/components/responses/Problem401' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '503': { $ref: '#/components/responses/Problem503' }
+  /api/workspace/v1/device-authorizations/approval-challenges:
+    post:
+      operationId: beginBrowserDeviceApproval
+      tags: [Device authorization]
+      summary: Begin an authenticated member's device approval challenge.
+      description: |
+        This browser route uses the canonical `CreateDeviceApprovalChallengeRequest`
+        and `CreateDeviceApprovalChallengeResponse` schemas from
+        `contracts/http/device-enrollment/v1/openapi.yaml`. The request contains
+        only `userCode` and `scope`; it never carries issuer, subject, organization
+        identity, or roles. The BFF derives the approver from the verified web
+        session, requires `scope.organizationId` to equal its server-verified
+        organization, then checks current Workspace membership and the dedicated
+        Directory capability `workspace.device.enrollment.approve.v1` before
+        resolving the code and creating a challenge. This capability is granted
+        only by a trusted Directory operator for the exact Workspace; the
+        `workspace.member` marker and Product COMMAND roles do not grant approval.
+
+        The durable WebAuthn HTTP binding is scoped to this verified principal,
+        exact Workspace, challenge expiry, and digest of the current access-token
+        session. The BFF does not substitute an in-memory binding store. Unknown
+        or inaccessible authorization details are not disclosed. The route returns HTTP 200 with
+        the canonical begin response. If the Device Authorization, WebAuthn,
+        Directory, or durable storage provider is absent, it returns a fixed 503
+        problem without fabricating success.
+
+        The canonical `authorization` projection includes the exact target
+        scope, authorization and device IDs, CSR SPKI and CSR SHA-256 digests,
+        expiry, and authorization generation. It contains no device private key,
+        device code, or certificate.
+
+        此浏览器路由使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的
+        `CreateDeviceApprovalChallengeRequest` 与 `CreateDeviceApprovalChallengeResponse` schema。请求只含 `userCode` 和
+        `scope`，不携带 issuer、subject、organization identity 或 roles。BFF 从已验证 web session 派生审批人，要求
+        `scope.organizationId` 与服务端验证的 organization 相同，然后在解析 code、创建 challenge 前重新检查当前
+        Workspace membership 和专用 Directory capability `workspace.device.enrollment.approve.v1`。该 capability 只能由可信
+        Directory operator 按精确 Workspace 授予；`workspace.member` marker 与 Product COMMAND role 均不具备审批权限。
+
+        持久化 WebAuthn HTTP binding 绑定已验证 principal、精确 Workspace、challenge expiry 和当前 access-token session digest。
+        BFF 不使用内存 binding store 替代持久存储。未知或不可访问的 authorization 详情不得泄漏。成功时返回 HTTP 200 和规范 begin
+        response。Device Authorization、WebAuthn、Directory 或持久存储 provider 缺失时，返回固定 503 problem，不得伪造成功。
+
+        规范的 `authorization` projection 包含精确目标 scope、authorization 与 device ID、CSR SPKI 和 CSR SHA-256 digest、过期时间及
+        authorization generation；不含 device private key、device code 或 certificate。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequiredCsrfToken'
+      requestBody:
+        required: true
+        description: Canonical Device Authorization JSON request; limited to 4 MiB.
+        content:
+          application/json:
+            schema:
+              $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CreateDeviceApprovalChallengeRequest'
+      responses:
+        '200':
+          description: One-time challenge created and bound to this verified principal and session digest.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CreateDeviceApprovalChallengeResponse'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '409': { $ref: '#/components/responses/Problem409' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+  /api/workspace/v1/device-authorizations/approval-challenges/{approvalId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    post:
+      operationId: completeBrowserDeviceApproval
+      tags: [Device authorization]
+      summary: Complete or recover an approval using its WebAuthn assertion.
+      description: |
+        The request and response use the canonical
+        `CompleteDeviceApprovalRequest` and `CompleteDeviceApprovalResponse`
+        schemas from `contracts/http/device-enrollment/v1/openapi.yaml`. The BFF
+        accepts no approver, role, organization, or session identity from JSON.
+        It requires the same verified principal and durable access-token session
+        digest that began this approval, and rechecks the current Directory role
+        and exact Workspace membership before completion. All three approval
+        operations require the dedicated Directory capability
+        `workspace.device.enrollment.approve.v1`; a membership marker or Product
+        COMMAND role alone is insufficient. Only a trusted Directory operator
+        may grant that capability for a specific Workspace.
+
+        The first completion requires `webauthnAssertion`. It returns HTTP 202
+        only after the ISSUING transition is durable. A retry bound to the same
+        verified session may omit the assertion only to recover an already
+        durable ISSUING transition; that recovery returns HTTP 200. The raw
+        assertion and CSRF token are never logged or persisted. A different
+        subject, organization, session digest, expired challenge, or invalid
+        assertion is rejected before certificate issuance. A missing Device
+        Authorization, WebAuthn, Directory, or durable storage provider returns
+        a fixed 503 problem.
+
+        请求和响应使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的
+        `CompleteDeviceApprovalRequest` 与 `CompleteDeviceApprovalResponse` schema。BFF 不接受 JSON 中的审批人、role、organization
+        或 session identity。完成操作必须使用开始审批时相同的已验证 principal 和持久 access-token session digest，并在完成前重新检查
+        当前 Directory role 与精确 Workspace membership。三个审批操作均要求专用 Directory capability
+        `workspace.device.enrollment.approve.v1`；仅有 membership marker 或 Product COMMAND role 不足。该 capability 只能由可信
+        Directory operator 按特定 Workspace 授予。
+
+        首次完成必须携带 `webauthnAssertion`。只有在 ISSUING transition 已持久化后才返回 HTTP 202。绑定同一已验证 session 的重试可在
+        恢复已持久化 ISSUING transition 时省略 assertion，并返回 HTTP 200。raw assertion 和 CSRF token 绝不记录或持久化。不同 subject、
+        organization、session digest、已过期 challenge 或无效 assertion 必须在签发证书前拒绝。Device Authorization、WebAuthn、Directory
+        或持久存储 provider 缺失时返回固定 503 problem。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequiredCsrfToken'
+      requestBody:
+        required: true
+        description: Canonical Device Authorization JSON request; limited to 4 MiB.
+        content:
+          application/json:
+            schema:
+              $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CompleteDeviceApprovalRequest'
+      responses:
+        '202':
+          description: First completion; approval and ISSUING transition are durable.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CompleteDeviceApprovalResponse'
+        '200':
+          description: Existing durable ISSUING transition or issuance result recovered idempotently.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/CompleteDeviceApprovalResponse'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '409': { $ref: '#/components/responses/Problem409' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+  /api/workspace/v1/device-authorizations/denials:
+    post:
+      operationId: denyBrowserDeviceAuthorization
+      tags: [Device authorization]
+      summary: Deny a device authorization as an authenticated Workspace member.
+      description: |
+        This route uses the canonical `DenyDeviceAuthorizationRequest` and
+        `DenyDeviceAuthorizationResponse` schemas from
+        `contracts/http/device-enrollment/v1/openapi.yaml`. Its JSON contains
+        only `userCode` and `scope`; the approver identity and organization come
+        from the verified web session and authoritative Directory mapping. The
+        BFF requires exact organization agreement, current Workspace membership,
+        and the dedicated Directory capability
+        `workspace.device.enrollment.approve.v1`. Membership and Product COMMAND
+        roles alone are insufficient; only a trusted Directory operator grants
+        the capability for a specific Workspace. Denial does not require a
+        WebAuthn assertion but still rechecks that current capability. It returns HTTP 200 with the canonical denial
+        response and invalidates any active approval challenge for that
+        authorization. Unknown or inaccessible details are not disclosed.
+
+        此路由使用 `contracts/http/device-enrollment/v1/openapi.yaml` 中规范的 `DenyDeviceAuthorizationRequest` 和
+        `DenyDeviceAuthorizationResponse` schema。JSON 只含 `userCode` 与 `scope`；审批人 identity 和 organization 来自已验证
+        web session 及权威 Directory 映射。BFF 要求 organization 完全匹配、当前 Workspace membership 有效且具有专用 Directory capability
+        `workspace.device.enrollment.approve.v1`。仅有 membership 或 Product COMMAND role 不足；该 capability 只能由可信 Directory operator
+        按特定 Workspace 授予。拒绝操作不要求 WebAuthn assertion，但仍会重新检查当前 capability。成功时返回
+        HTTP 200 和规范 denial response，并使该 authorization 的活动 approval challenge 失效。未知或不可访问的详情不得泄漏。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/RequiredCsrfToken'
+      requestBody:
+        required: true
+        description: Canonical Device Authorization JSON request; limited to 4 MiB.
+        content:
+          application/json:
+            schema:
+              $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/DenyDeviceAuthorizationRequest'
+      responses:
+        '200':
+          description: Denial is durable; any active approval challenge is invalidated.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema:
+                $ref: '../../http/device-enrollment/v1/openapi.yaml#/components/schemas/DenyDeviceAuthorizationResponse'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '409': { $ref: '#/components/responses/Problem409' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+  /api/workspace/v1/workspaces:
+    get:
+      operationId: listMemberWorkspaces
+      tags: [Workspace]
+      summary: Discover Workspaces for the verified issuer, subject, and organization.
+      description: |
+        The BFF derives issuer, subject, and organization from the authenticated
+        principal. Callers cannot submit or override those values. Connection
+        candidates, connection URIs, routing hints, enrollment data, and relay
+        credentials are never returned.
+
+        BFF 从已认证 principal 派生 issuer、subject 和 organization；调用方不能提交或覆盖这些值。
+        不返回 connection candidate、connection URI、routing hint、enrollment 数据或 relay credential。
+        Unknown query parameters are rejected.
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/Accept'
+      responses:
+        '200':
+          description: Workspaces for which the verified identity has current membership.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceList' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+  /api/workspace/v1/workspaces/{workspaceId}/products/{operation}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/ProductOperation'
+      - $ref: '#/components/parameters/Traceparent'
+      - $ref: '#/components/parameters/Accept'
+    post:
+      operationId: invokeWorkspaceProductOperation
+      tags: [Product]
+      summary: Invoke one closed Product operation through a member Workspace.
+      description: |
+        HTTP POST is the BFF invocation envelope for both semantic READ and
+        COMMAND operations. The BFF derives owner, Product `operationId`,
+        semantic kind, and upstream HTTP method from the exact operation row in
+        `contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv`
+        and that owner's Product OpenAPI document. The browser cannot choose or
+        override any of those values. This permits a safe Product READ whose
+        owner contract uses POST and requires JSON input. The BFF rejects a
+        request body unless the owner operation declares a JSON body, validates
+        any supplied body against that schema, and forwards its original bytes.
+        It rechecks Workspace membership before each invocation.
+
+        The `workspaceId` route value maps only to an owner path parameter named
+        `workspace_id` or `workspaceId`, when declared. `resourceId` maps only
+        to the single remaining owner path parameter, when present, and is
+        validated by that parameter's Product schema. If the mapping is
+        ambiguous, has multiple remaining path parameters, or requires an
+        unsupported query/header parameter, the BFF fails closed before calling
+        Workspace. Unknown BFF query parameters are rejected.
+
+        Every invocation requires `Origin` to exactly match the configured
+        Client origin. For a manifest kind of COMMAND, the BFF also requires
+        `X-CSRF-Token` to match the HttpOnly `__Secure-cyrene-csrf` cookie byte for
+        byte before any Workspace call. The cookie MAC binds the token to the
+        verified issuer, subject, organization, current access-token session,
+        and expiration. GET /session returns the opaque token in its JSON body
+        for same-origin JavaScript; the access token and its fingerprint are
+        never returned. READ operations do not require a CSRF token.
+        `Idempotency-Key` is forwarded only when allowed by the owner
+        operation and is required when that Product operation's OpenAPI contract
+        marks it required.
+
+        HTTP POST 是 BFF 对语义 READ 和 COMMAND operation 的统一 invocation envelope。BFF 根据
+        `contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv` 中 operation 对应行及 owner 的
+        Product OpenAPI 文档，派生 owner、Product `operationId`、语义类型和上游 HTTP method。浏览器不能选择或覆盖这些值。
+        因此 Product owner 即使用 POST 且要求 JSON 输入，安全的 READ 也可以被代理。只有 owner operation 声明 JSON body
+        时 BFF 才接受 body；BFF 按 owner schema 校验，并原样转发原始 body bytes。每次调用前重新检查 Workspace membership。
+
+        `workspaceId` route value 仅在 owner path 参数名为 `workspace_id` 或 `workspaceId` 时映射至该参数。
+        `resourceId` 仅映射到唯一剩余 owner path 参数（如果存在），并按 Product 参数 schema 校验。映射有歧义、存在多个剩余
+        path 参数或需要本契约未支持的 query/header 参数时，BFF 必须在调用 Workspace 前 fail closed。拒绝未知 BFF query 参数。
+
+        每次 invocation 都要求 `Origin` 精确匹配配置的 Client origin。对于 manifest 中类型为 COMMAND 的 operation，BFF 还必须在
+        任何 Workspace 调用前检查 `X-CSRF-Token` 与 HttpOnly `__Secure-cyrene-csrf` cookie 的字节值完全一致，并校验其 MAC、
+        当前 verified issuer、subject、organization、access-token session 与过期时间。GET /session 在 JSON body 返回同源 JavaScript
+        使用的不透明 token；access token 及其 fingerprint 绝不返回。READ operation 不要求 CSRF token。只有 owner operation 允许
+        `Idempotency-Key` 时才转发；Product OpenAPI 标记为 required 时必须提供。
+      security:
+        - webSession: []
+          trustedIngressBearer: []
+      parameters:
+        - name: resourceId
+          in: query
+          required: false
+          description: Opaque Product-issued identifier from the owning Product contract.
+          schema: { type: string, minLength: 1, maxLength: 512 }
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        description: |
+          When the Product operation declares a request body, provide valid
+          UTF-8 JSON of at most 4 MiB and validate it against that Product
+          schema. Omit the body only when the Product operation has no body.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductJson' }
+      responses:
+        default:
+          $ref: '#/components/responses/ProductJson'
+        '400': { $ref: '#/components/responses/Problem400' }
+        '406': { $ref: '#/components/responses/Problem406' }
+        '401': { $ref: '#/components/responses/Problem401' }
+        '403': { $ref: '#/components/responses/Problem403' }
+        '404': { $ref: '#/components/responses/Problem404' }
+        '405': { $ref: '#/components/responses/Problem405' }
+        '413': { $ref: '#/components/responses/Problem413' }
+        '415': { $ref: '#/components/responses/Problem415' }
+        '422': { $ref: '#/components/responses/Problem422' }
+        '429': { $ref: '#/components/responses/Problem429' }
+        '500': { $ref: '#/components/responses/Problem500' }
+        '502': { $ref: '#/components/responses/Problem502' }
+        '503': { $ref: '#/components/responses/Problem503' }
+        '504': { $ref: '#/components/responses/Problem504' }
+components:
+  headers:
+    NoStore:
+      description: Authenticated browser API responses are never stored by shared or private caches.
+      schema: { type: string, const: no-store }
+  securitySchemes:
+    webSession:
+      type: apiKey
+      in: cookie
+      name: __Host-cyrene-session
+      description: |
+        Secure, HttpOnly, host-only cookie established by the configured OIDC ingress.
+        It is never accepted as a Product or device credential.
+    trustedIngressBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Private-hop credential installed by the trusted same-origin ingress.
+        Ingress strips caller Authorization and X-MS-TOKEN-* headers, then
+        rewrites exactly one Authorization value from the Easy Auth token store.
+        The BFF rejects duplicates, malformed values, and remaining X-MS-TOKEN-*.
+  parameters:
+    ApprovalId:
+      name: approvalId
+      in: path
+      required: true
+      description: Opaque approval challenge identifier returned by the begin route.
+      schema: { type: string, minLength: 16, maxLength: 128 }
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      description: Workspace identifier returned by member-scoped discovery.
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    ProductOperation:
+      name: operation
+      in: path
+      required: true
+      description: |
+        Closed wire key for `cyrene.workspace.v1.WorkspaceProductApiOperation`.
+        The authoritative owner, Product operationId, and READ/COMMAND kind are
+        the matching row in the Workspace Product projection TCK manifest.
+      schema: { $ref: '#/components/schemas/ProductOperationKey' }
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: Valid W3C Trace Context v00. It is correlation metadata and never an identity or authorization input.
+      schema:
+        type: string
+        pattern: '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+    Accept:
+      name: Accept
+      in: header
+      required: false
+      description: If supplied, must permit application/json or application/problem+json.
+      schema: { type: string, maxLength: 512 }
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      description: Must exactly equal the configured public Client origin; never derive the allowlist from this header.
+      schema: { type: string, format: uri, maxLength: 512 }
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required for COMMAND; must byte-match the HttpOnly `__Secure-cyrene-csrf` cookie and verify against the current principal and access-token session.
+      schema: { type: string, minLength: 32, maxLength: 256 }
+    RequiredCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Required for every device-authorization POST; must byte-match the HttpOnly `__Secure-cyrene-csrf` cookie and verify its MAC against the current verified issuer, subject, organization, access-token session, and expiry.
+      schema: { type: string, minLength: 32, maxLength: 256, pattern: '^v1\.[0-9]+\.[A-Za-z0-9_-]+$' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Opaque owner-defined replay key; required for operations whose Product contract requires it.
+      schema: { type: string, minLength: 1, maxLength: 200 }
+  schemas:
+    WebSession:
+      type: object
+      additionalProperties: false
+      required: [issuer, subject, organizationId, expiresAt, csrfToken]
+      properties:
+        issuer:
+          type: string
+          format: uri
+          description: Exact OIDC issuer from the verified identity token.
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Opaque OIDC subject; email and display name are not identity keys.
+        organizationId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Organization identifier established by a verified claim or server-side identity mapping.
+        expiresAt:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset; exact verified access-token expiry.
+        csrfToken:
+          type: string
+          minLength: 32
+          maxLength: 256
+          pattern: '^v1\.[0-9]+\.[A-Za-z0-9_-]+$'
+          description: |
+            Signed session-bound CSRF token; expiry equals expiresAt, making concurrent
+            session refreshes for the same principal and access-token session return the
+            same token and cookie. Never contains the access token or its fingerprint.
+    WorkspaceList:
+      type: object
+      additionalProperties: false
+      required: [workspaces]
+      properties:
+        workspaces:
+          type: array
+          items: { $ref: '#/components/schemas/WorkspaceSummary' }
+    WorkspaceSummary:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, organizationId, displayName]
+      properties:
+        workspaceId: { type: string, minLength: 1, maxLength: 200 }
+        organizationId: { type: string, minLength: 1, maxLength: 200 }
+        displayName: { type: string, minLength: 1, maxLength: 256 }
+    ProductOperationKey:
+      type: string
+      enum:
+        - WORKSPACE_PRODUCT_API_OPERATION_01
+        - WORKSPACE_PRODUCT_API_OPERATION_02
+        - WORKSPACE_PRODUCT_API_OPERATION_03
+        - WORKSPACE_PRODUCT_API_OPERATION_04
+        - WORKSPACE_PRODUCT_API_OPERATION_05
+        - WORKSPACE_PRODUCT_API_OPERATION_06
+        - WORKSPACE_PRODUCT_API_OPERATION_07
+        - WORKSPACE_PRODUCT_API_OPERATION_08
+        - WORKSPACE_PRODUCT_API_OPERATION_09
+        - WORKSPACE_PRODUCT_API_OPERATION_10
+        - WORKSPACE_PRODUCT_API_OPERATION_11
+        - WORKSPACE_PRODUCT_API_OPERATION_12
+        - WORKSPACE_PRODUCT_API_OPERATION_13
+      x-cyrene-wire-enum: cyrene.workspace.v1.WorkspaceProductApiOperation
+      description: |
+        This closed set must equal the Workspace API enum and have exactly one
+        owner/operation/kind row per key in
+        `contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv`.
+    ProductReadOperationKey:
+      type: string
+      enum:
+        - WORKSPACE_PRODUCT_API_OPERATION_01
+        - WORKSPACE_PRODUCT_API_OPERATION_03
+        - WORKSPACE_PRODUCT_API_OPERATION_05
+        - WORKSPACE_PRODUCT_API_OPERATION_07
+        - WORKSPACE_PRODUCT_API_OPERATION_09
+        - WORKSPACE_PRODUCT_API_OPERATION_11
+        - WORKSPACE_PRODUCT_API_OPERATION_12
+      x-cyrene-wire-enum: cyrene.workspace.v1.WorkspaceProductApiOperation
+      x-cyrene-kind: READ
+      description: The subset whose matching Product projection manifest row has kind READ.
+    ProductJson:
+      description: Any valid Product-owned JSON value. Raw body size is limited to 4 MiB; Product resource links use ProductResourceReference.
+      oneOf:
+        - { type: object }
+        - { type: array }
+        - { type: string }
+        - { type: number }
+        - { type: boolean }
+        - { type: 'null' }
+    ProductResourceReference:
+      type: object
+      additionalProperties: false
+      required: [operation, resourceId]
+      description: |
+        Logical, same-origin relative reference to a Product-owned resource.
+        Resolve it through this BFF using the current Workspace, `operation`,
+        and opaque `resourceId`; it contains no href, URL, path, host,
+        connection URI, or credential.
+      properties:
+        operation: { $ref: '#/components/schemas/ProductReadOperationKey' }
+        resourceId: { type: string, minLength: 1, maxLength: 512 }
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      additionalProperties: false
+      properties:
+        type: { type: string, format: uri-reference, maxLength: 2048 }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string, maxLength: 2048 }
+        instance: { type: string, format: uri-reference, maxLength: 2048 }
+        code:
+          type: string
+          enum:
+            - unauthenticated
+            - invalid_principal
+            - forbidden
+            - workspace_not_found
+            - invalid_request
+            - unsupported_media_type
+            - payload_too_large
+            - unsupported_operation
+            - internal_error
+            - csrf_failed
+            - rate_limited
+            - invalid_upstream_response
+            - upstream_unavailable
+            - upstream_timeout
+            - state_conflict
+        traceId: { type: string, pattern: '^[0-9a-f]{32}$', maxLength: 32 }
+  responses:
+    ProductJson:
+      description: |
+        The owning Product HTTP status and valid JSON body are returned unchanged.
+        The BFF never forwards Product `Location`, `Content-Location`, `Set-Cookie`,
+        authorization, or hop-by-hop headers. Product resource links are relative
+        per the owning Product contract. No Product service URL, raw Product path,
+        or internal routing address may appear in a declared link field.
+        `Cache-Control` is always `no-store`. The BFF validates resource-link
+        fields identified by the owner OpenAPI schema without reserializing the
+        body; absent owner schema or an unsafe reference fails closed with 502.
+      headers:
+        Cache-Control:
+          schema: { type: string, const: no-store }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ProductJson' }
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProductJson' }
+      x-cyrene-response-mode: preserve-product-status-and-body
+    Problem400:
+      description: Malformed JSON, invalid traceparent, or otherwise invalid request syntax.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem406:
+      description: Accept does not permit application/json or application/problem+json.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem401:
+      description: Missing, expired, or invalid authenticated session. API requests are never redirected to HTML login pages.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem403:
+      description: CSRF or policy rejection. Membership denial may be returned as 404 to prevent enumeration.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem409:
+      description: Approval challenge is stale, already finalized, or in a state that cannot be transitioned. Details are generic.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem404:
+      description: Resource is absent from the caller's current authorized scope; used to avoid disclosing inaccessible authorizations.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem405:
+      description: HTTP method is not supported by the BFF route.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem413:
+      description: Client request body exceeds the 4 MiB JSON limit.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem415:
+      description: Request media type is not application/json.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem422:
+      description: Request JSON does not satisfy the closed route or owner request schema; no upstream action is performed.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem429:
+      description: BFF ingress rate limit exceeded.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem500:
+      description: BFF internal failure. Details are generic and do not reveal internal state.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem502:
+      description: Workspace, Product, or Device Authorization returned an invalid response that cannot be safely forwarded.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem503:
+      description: A trusted OIDC ingress, Workspace Directory, Device Authorization, WebAuthn, durable storage, or Workspace relay dependency is unavailable; the request fails closed.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+    Problem504:
+      description: Workspace/Product request timed out.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+      content:
+        application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }

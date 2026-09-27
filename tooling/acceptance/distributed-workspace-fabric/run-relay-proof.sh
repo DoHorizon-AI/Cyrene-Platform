@@ -79,6 +79,7 @@ issue_client_certificate() {
 issue_client_certificate frontend
 issue_client_certificate workspace
 issue_client_certificate runtime
+workspace_certificate_fingerprint=$(openssl x509 -in "${proof_root}/certs/workspace.crt" -outform DER | sha256sum | cut -d ' ' -f 1)
 openssl rand -hex 32 > "${proof_root}/certs/artifact-ticket.key"
 chmod 600 "${proof_root}/certs/"*.key
 
@@ -111,8 +112,9 @@ start_relay() {
   CYRENE_WORKSPACE_RELAY_SERVER_CERT="${proof_root}/certs/server.crt" \
   CYRENE_WORKSPACE_RELAY_SERVER_KEY="${proof_root}/certs/server.key" \
   CYRENE_WORKSPACE_RELAY_CLIENT_CA="${proof_root}/certs/ca.crt" \
+  CYRENE_WORKSPACE_RELAY_DIRECTORY="${proof_root}/state/relay-directory" \
+  CYRENE_WORKSPACE_DEVICE_CERTIFICATE_SHA256="${workspace_certificate_fingerprint}" \
   CYRENE_FRONTEND_SESSION_CREDENTIAL=development-frontend-session \
-  CYRENE_WORKSPACE_SESSION_CREDENTIAL=development-workspace-session \
   CYRENE_WORKSPACE_DEVICE_ID=device-fixture \
   CYRENE_WORKSPACE_ID=workspace-fixture \
   CYRENE_ORGANIZATION_ID=organization-fixture \
@@ -162,7 +164,6 @@ docker run -d --name "${container_name}" \
   -e "CYRENE_RUNTIME_CONTROL_PORT=${runtime_control_port}" \
   -e "CYRENE_WORKSPACE_DIRECT_PORT=${direct_port}" \
   -e CYRENE_FRONTEND_SESSION_CREDENTIAL=development-frontend-session \
-  -e CYRENE_WORKSPACE_SESSION_CREDENTIAL=development-workspace-session \
   -e CYRENE_WORKSPACE_DEVICE_ID=device-fixture \
   -e CYRENE_WORKSPACE_ID=workspace-fixture \
   -e CYRENE_ORGANIZATION_ID=organization-fixture \
@@ -225,6 +226,14 @@ grep -q LAN_DIRECT_NO_RELAY=PASS "${proof_root}/frontend-direct.out"
 grep -q LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS "${proof_root}/frontend-direct.out"
 grep -q WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-direct.out"
 
+expected_trace_context='trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7'
+grep -qF "WORKSPACE_API_TRACE request_id=start-operation-1 ${expected_trace_context}" "${proof_root}/state/workspace-connector.trace"
+grep -qF "WORKSPACE_API_TRACE request_id=direct-get-operation-1 ${expected_trace_context}" "${proof_root}/state/workspace-connector.trace"
+if grep -qF '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' "${proof_root}/state/workspace-connector.trace"; then
+  printf '%s\n' 'raw traceparent header was written to Workspace trace output' >&2
+  exit 1
+fi
+
 test "$(sha256sum "${published_path}" | cut -d ' ' -f 1)" = "${source_digest}"
 test "$(docker inspect -f '{{.HostConfig.Privileged}}' "${container_name}")" = false
 test "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "${container_name}")" = 0
@@ -237,6 +246,7 @@ printf '%s\n' \
   'LAN_DIRECT_NO_RELAY=PASS' \
   'LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS' \
   'LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS' \
+  'WORKSPACE_TRACE_CONTEXT_RELAY_DIRECT_CORRELATED=PASS' \
   'MANUAL_IP_REQUIRED=NO' \
   'WORKSPACE_INBOUND_PORT_REQUIRED=NO' \
   'REMOTE_FRONTEND_E2E=PASS' \

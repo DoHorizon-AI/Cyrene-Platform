@@ -1,0 +1,19 @@
+{
+  "identityProviders": {
+    "azureActiveDirectory": {
+      "login": {
+        "loginParameters": [
+          "scope=openid profile email offline_access api://<BFF_API_CLIENT_ID>/Workspace.Web.Access"
+        ]
+      }
+    }
+  },
+  "login": {
+    "tokenStore": {
+      "enabled": true,
+      "azureBlobStorage": {
+        "sasUrlSettingName": "workspace-web-token-store-sas"
+      }
+    }
+  }
+}

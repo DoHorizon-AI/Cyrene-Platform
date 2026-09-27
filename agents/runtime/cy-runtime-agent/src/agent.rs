@@ -852,13 +852,38 @@ fn build_transfer_sources(
 ) -> Result<Vec<TransferSource>, RuntimeAgentError> {
     if spec.sources.is_empty() {
         return Err(RuntimeAgentError::Artifact(
-            "Artifact transfer requires an Artifact Plane-authorized source Peer and ticket"
-                .to_string(),
+            "LAN_DIRECT_UNAVAILABLE_USER_OBJECT_STORE_REQUIRED: no reachable direct source or user-provided object-store candidate is available; supply a short-lived pre-signed HTTPS URL from a user-owned object store; Artifact bytes are never sent through the control Relay".to_string(),
         ));
     }
     spec.sources
         .iter()
         .map(|source| {
+            let source_path = core_v1::ArtifactTransferPath::try_from(source.path).map_err(|_| {
+                RuntimeAgentError::Artifact(
+                    "ARTIFACT_TRANSFER_PATH_INVALID: assignment source path is unknown".to_string(),
+                )
+            })?;
+            let (peer_kind, transfer_path) = match source_path {
+                core_v1::ArtifactTransferPath::LanDirect => {
+                    (ArtifactPeerKind::Generic, cy_artifact_transfer::ArtifactTransferPath::LanDirect)
+                }
+                core_v1::ArtifactTransferPath::UserProvidedObjectStore => {
+                    if source.locator_expires_at_unix_ms <= now_unix_ms() {
+                        return Err(RuntimeAgentError::Artifact(
+                            "OBJECT_STORE_LOCATOR_EXPIRED: user-provided object-store URL is missing or expired".to_string(),
+                        ));
+                    }
+                    (
+                        ArtifactPeerKind::ObjectStoreGateway,
+                        cy_artifact_transfer::ArtifactTransferPath::UserProvidedObjectStore,
+                    )
+                }
+                core_v1::ArtifactTransferPath::Unspecified => {
+                    return Err(RuntimeAgentError::Artifact(
+                        "ARTIFACT_TRANSFER_PATH_UNSPECIFIED: assignment must name LAN_DIRECT or USER_PROVIDED_OBJECT_STORE; control Relay is not a bulk Artifact path".to_string(),
+                    ));
+                }
+            };
             let ticket: TransferTicket = serde_json::from_str(&source.transfer_ticket)
                 .map_err(|error| RuntimeAgentError::Artifact(error.to_string()))?;
             ticket_verifier
@@ -867,7 +892,7 @@ fn build_transfer_sources(
             Ok(TransferSource {
                 peer: ArtifactPeer {
                     peer_id: source.peer_id.clone(),
-                    kind: ArtifactPeerKind::Generic,
+                    kind: peer_kind,
                     authorized: true,
                     residency: "control-plane-authorized".to_string(),
                     trust_domain: "workspace".to_string(),
@@ -886,7 +911,16 @@ fn build_transfer_sources(
                     locator: source.locator.clone(),
                     region: None,
                     priority: 0,
-                    expires_at_unix_ms: Some(ticket.expires_at_unix_ms),
+                    expires_at_unix_ms: Some(match transfer_path {
+                        cy_artifact_transfer::ArtifactTransferPath::LanDirect => {
+                            ticket.expires_at_unix_ms
+                        }
+                        cy_artifact_transfer::ArtifactTransferPath::UserProvidedObjectStore => {
+                            ticket
+                                .expires_at_unix_ms
+                                .min(source.locator_expires_at_unix_ms)
+                        }
+                    }),
                 },
                 ticket,
             })
@@ -1862,6 +1896,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn user_object_store_wire_source_uses_its_url_expiry_and_gateway_path() {
+        let authority = DevelopmentTransferTicketAuthority::new([7_u8; 32]).unwrap();
+        let artifact = ArtifactRef {
+            uri: format!("artifact://sha256/{}", "a".repeat(64)),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size_bytes: 1,
+            kind: ArtifactKind::generic(),
+            manifest_digest: None,
+        };
+        let now = now_unix_ms();
+        let locator_expiry = now + 60_000;
+        let mut ticket = TransferTicket {
+            ticket_id: "ticket-user-store".to_string(),
+            artifact: artifact.clone(),
+            source_peer_id: "user-store-1".to_string(),
+            destination_peer_id: "runtime-cache-1".to_string(),
+            allowed_parts: BTreeSet::from([0]),
+            expires_at_unix_ms: now + 120_000,
+            max_bytes: 1,
+            signature: String::new(),
+        };
+        authority.sign(&mut ticket).unwrap();
+        let mut spec = authorized_transfer_spec();
+        spec.destination_peer_id = "runtime-cache-1".to_string();
+        spec.sources[0].peer_id = "user-store-1".to_string();
+        spec.sources[0].transfer_ticket = serde_json::to_string(&ticket).unwrap();
+        spec.sources[0].path = core_v1::ArtifactTransferPath::UserProvidedObjectStore as i32;
+        spec.sources[0].locator_expires_at_unix_ms = locator_expiry;
+
+        let sources = build_transfer_sources(&spec, &artifact, &authority).unwrap();
+
+        assert_eq!(sources[0].peer.kind, ArtifactPeerKind::ObjectStoreGateway);
+        assert_eq!(
+            sources[0].transfer_path(),
+            cy_artifact_transfer::ArtifactTransferPath::UserProvidedObjectStore
+        );
+        assert_eq!(sources[0].replica.expires_at_unix_ms, Some(locator_expiry));
+    }
+
     fn test_config(root: &Path, workload: Vec<String>) -> RuntimeAgentConfig {
         RuntimeAgentConfig {
             control_plane_endpoint: "https://control.example".to_string(),
@@ -1975,6 +2049,8 @@ mod tests {
                 replica_id: "replica-1".to_string(),
                 locator: "https://artifact.example/blob".to_string(),
                 transfer_ticket: "not-read-before-ca".to_string(),
+                path: core_v1::ArtifactTransferPath::LanDirect as i32,
+                locator_expires_at_unix_ms: 0,
             }],
             part_sources: vec![core_v1::ArtifactPartSource {
                 part_index: 0,

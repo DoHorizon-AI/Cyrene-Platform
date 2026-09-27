@@ -66,8 +66,22 @@ pub mod cyrene {
     }
 
     pub mod workspace {
+        pub mod local {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.workspace.local.v1");
+            }
+        }
+
         pub mod v1 {
             tonic::include_proto!("cyrene.workspace.v1");
+        }
+    }
+
+    /// Versioned WorkspaceDevice enrollment and certificate metadata protocol.
+    /// 中文：版本化 WorkspaceDevice 注册与证书元数据协议。
+    pub mod device {
+        pub mod v1 {
+            tonic::include_proto!("cyrene.device.v1");
         }
     }
 }
@@ -77,6 +91,9 @@ pub use cyrene::core::v1 as core_v1;
 /// Core v2 authority projection with explicit namespace scope.
 /// 中文：显式限定命名空间范围的 Core v2 权限投影。
 pub use cyrene::core::v2 as core_v2;
+/// Cyrene-owned device enrollment, approval, delivery, rotation, and revocation contract.
+/// 中文：Cyrene 自有的设备注册、审批、交付、轮换与撤销契约。
+pub use cyrene::device::v1 as device_v1;
 /// Versioned local protocol between the Kernel and external hardware adapters.
 /// 中文：Kernel 与外部硬件适配器之间的带版本本地协议。
 pub use cyrene::hardware::v1 as hardware_v1;
@@ -89,6 +106,8 @@ pub use cyrene::sandbox::v1 as sandbox_v1;
 /// Transport projection of the Kernel Semantic Contract v1 nouns.
 /// 中文：Kernel Semantic Contract v1 术语的传输投影。
 pub use cyrene::semantic::v1 as semantic_v1;
+/// Loopback cross-language Workspace sidecar boundary.
+pub use cyrene::workspace::local::v1 as workspace_local_v1;
 /// Transport-neutral Workspace discovery and relay API projection.
 /// 中文：与传输方式无关的 Workspace 发现与中继 API 投影。
 pub use cyrene::workspace::v1 as workspace_v1;

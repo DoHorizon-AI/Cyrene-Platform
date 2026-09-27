@@ -19,21 +19,28 @@ use cy_proto::workspace_v1::{UserIdentityRef, WorkspaceConnectionDescriptor};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
+use crate::device_registry::{
+    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus, WorkspaceDeviceKey,
+    WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
+};
 use crate::directory::{
     InMemoryWorkspaceDirectory, WorkspaceDirectory, WorkspaceDirectoryError, WorkspaceMembership,
 };
 
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
+const CURRENT_SNAPSHOT_VERSION: u32 = 2;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
     version: u32,
     memberships: Vec<MembershipRecord>,
     descriptors: Vec<Vec<u8>>,
+    #[serde(default)]
+    devices: Vec<WorkspaceDeviceRecord>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembershipRecord {
     issuer: String,
@@ -118,9 +125,10 @@ impl FileWorkspaceDirectory {
                     .map_err(|_| storage_error("invalid directory snapshot"))?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Snapshot {
-                version: 1,
+                version: CURRENT_SNAPSHOT_VERSION,
                 memberships: Vec::new(),
                 descriptors: Vec::new(),
+                devices: Vec::new(),
             },
             Err(error) => return Err(storage_error(error)),
         };
@@ -140,8 +148,12 @@ impl FileWorkspaceDirectory {
         memberships: Vec<WorkspaceMembership>,
         descriptors: Vec<WorkspaceConnectionDescriptor>,
     ) -> Result<(), WorkspaceDirectoryError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| storage_error("directory state poisoned"))?;
         let snapshot = Snapshot {
-            version: 1,
+            version: CURRENT_SNAPSHOT_VERSION,
             memberships: memberships
                 .into_iter()
                 .map(|membership| MembershipRecord {
@@ -156,27 +168,9 @@ impl FileWorkspaceDirectory {
                 .into_iter()
                 .map(|descriptor| descriptor.encode_to_vec())
                 .collect(),
+            devices: state.snapshot.devices.clone(),
         };
-        let index = build_index(&snapshot)?;
-        let bytes = serde_json::to_vec(&snapshot).map_err(storage_error)?;
-        if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
-            return Err(storage_error("directory snapshot exceeds 16 MiB"));
-        }
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| storage_error("directory state poisoned"))?;
-        persist(&self.path, &bytes)?;
-        *state = DirectoryState { snapshot, index };
-        #[cfg(unix)]
-        File::open(self.path.parent().expect("directory snapshot has a parent"))
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| {
-                WorkspaceDirectoryError::Storage(
-                    "directory revision published; durability not confirmed".into(),
-                )
-            })?;
-        Ok(())
+        publish_snapshot(&self.path, &mut state, snapshot)
     }
 
     /// Return the count of currently published memberships.
@@ -189,8 +183,9 @@ impl FileWorkspaceDirectory {
     }
 }
 
+#[tonic::async_trait]
 impl WorkspaceDirectory for FileWorkspaceDirectory {
-    fn discover(
+    async fn discover(
         &self,
         user: &UserIdentityRef,
         organization_id: &str,
@@ -200,20 +195,162 @@ impl WorkspaceDirectory for FileWorkspaceDirectory {
             .state
             .read()
             .map_err(|_| storage_error("directory state poisoned"))?;
-        state.index.discover(user, organization_id, now_unix_ms)
+        state
+            .index
+            .discover_sync(user, organization_id, now_unix_ms)
     }
 
-    fn is_member(&self, user: &UserIdentityRef, organization_id: &str, workspace_id: &str) -> bool {
+    async fn is_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<bool, WorkspaceDirectoryError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| storage_error("directory state poisoned"))?;
+        state
+            .index
+            .is_member_sync(user, organization_id, workspace_id)
+    }
+
+    async fn roles_for_member(
+        &self,
+        user: &UserIdentityRef,
+        organization_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<BTreeSet<String>>, WorkspaceDirectoryError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| storage_error("directory state poisoned"))?;
+        state
+            .index
+            .roles_for_member_sync(user, organization_id, workspace_id)
+    }
+}
+
+impl WorkspaceDeviceRegistry for FileWorkspaceDirectory {
+    fn import_approved_device_certificate(
+        &self,
+        certificate: ApprovedWorkspaceDeviceCertificate,
+    ) -> Result<WorkspaceDeviceRecord, WorkspaceDirectoryError> {
+        let record = WorkspaceDeviceRecord {
+            key: certificate.key,
+            certificate_fingerprint_sha256: certificate.certificate_fingerprint_sha256,
+            authorization_status: DeviceAuthorizationStatus::Approved,
+        };
+        validate_device_records(std::slice::from_ref(&record))?;
+
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| storage_error("directory state poisoned"))?;
+        if state
+            .snapshot
+            .devices
+            .iter()
+            .any(|stored| stored.key == record.key)
+        {
+            return Err(WorkspaceDirectoryError::Identity(
+                "Workspace device record already exists".to_string(),
+            ));
+        }
+        if state.snapshot.devices.iter().any(|stored| {
+            stored.certificate_fingerprint_sha256 == record.certificate_fingerprint_sha256
+        }) {
+            return Err(WorkspaceDirectoryError::Identity(
+                "device certificate fingerprint is already recorded".to_string(),
+            ));
+        }
+
+        let mut snapshot = state.snapshot.clone();
+        snapshot.version = CURRENT_SNAPSHOT_VERSION;
+        snapshot.devices.push(record.clone());
+        publish_snapshot(&self.path, &mut state, snapshot)?;
+        Ok(record)
+    }
+
+    fn revoke_device(
+        &self,
+        key: &WorkspaceDeviceKey,
+    ) -> Result<WorkspaceDeviceRecord, WorkspaceDirectoryError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| storage_error("directory state poisoned"))?;
+        let mut snapshot = state.snapshot.clone();
+        let record = snapshot
+            .devices
+            .iter_mut()
+            .find(|record| &record.key == key)
+            .ok_or_else(|| {
+                WorkspaceDirectoryError::Identity(
+                    "Workspace device record was not found".to_string(),
+                )
+            })?;
+        if record.authorization_status == DeviceAuthorizationStatus::Revoked {
+            return Ok(record.clone());
+        }
+        if record.authorization_status != DeviceAuthorizationStatus::Approved {
+            return Err(WorkspaceDirectoryError::Identity(
+                "invalid Workspace device authorization transition".to_string(),
+            ));
+        }
+        record.authorization_status = DeviceAuthorizationStatus::Revoked;
+        let updated = record.clone();
+        snapshot.version = CURRENT_SNAPSHOT_VERSION;
+        publish_snapshot(&self.path, &mut state, snapshot)?;
+        Ok(updated)
+    }
+
+    fn find_device(
+        &self,
+        key: &WorkspaceDeviceKey,
+    ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError> {
         self.state
             .read()
-            .is_ok_and(|state| state.index.is_member(user, organization_id, workspace_id))
+            .map(|state| {
+                state
+                    .snapshot
+                    .devices
+                    .iter()
+                    .find(|record| &record.key == key)
+                    .cloned()
+            })
+            .map_err(|_| storage_error("directory state poisoned"))
+    }
+
+    fn find_device_by_certificate_fingerprint(
+        &self,
+        fingerprint_sha256: &str,
+    ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError> {
+        if !is_sha256_fingerprint(fingerprint_sha256) {
+            return Err(WorkspaceDirectoryError::Identity(
+                "device certificate fingerprint must be 64 lowercase SHA-256 hex characters"
+                    .to_string(),
+            ));
+        }
+        self.state
+            .read()
+            .map(|state| {
+                state
+                    .snapshot
+                    .devices
+                    .iter()
+                    .find(|record| record.certificate_fingerprint_sha256 == fingerprint_sha256)
+                    .cloned()
+            })
+            .map_err(|_| storage_error("directory state poisoned"))
     }
 }
 
 fn build_index(snapshot: &Snapshot) -> Result<InMemoryWorkspaceDirectory, WorkspaceDirectoryError> {
-    if snapshot.version != 1 {
+    if !matches!(snapshot.version, 1 | CURRENT_SNAPSHOT_VERSION) {
         return Err(storage_error("unsupported directory snapshot version"));
     }
+    validate_device_records(&snapshot.devices)?;
     let mut memberships = Vec::with_capacity(snapshot.memberships.len());
     let mut seen_memberships = BTreeSet::new();
     for record in &snapshot.memberships {
@@ -265,6 +402,82 @@ fn build_index(snapshot: &Snapshot) -> Result<InMemoryWorkspaceDirectory, Worksp
         descriptors.push(descriptor);
     }
     InMemoryWorkspaceDirectory::new(memberships, descriptors)
+}
+
+/// Validate persisted device identity and certificate-fingerprint uniqueness.
+///
+/// The complete directory snapshot is rejected on ambiguity so a fingerprint
+/// cannot silently identify more than one device.
+///
+/// 校验持久设备记录唯一性，避免一个证书指纹映射到多个设备。
+fn validate_device_records(
+    records: &[WorkspaceDeviceRecord],
+) -> Result<(), WorkspaceDirectoryError> {
+    let mut seen_keys = BTreeSet::new();
+    let mut seen_fingerprints = BTreeSet::new();
+    for record in records {
+        if record.key.organization_id.is_empty()
+            || record.key.workspace_id.is_empty()
+            || record.key.device_id.is_empty()
+        {
+            return Err(WorkspaceDirectoryError::Identity(
+                "device organization, Workspace, and device IDs are required".to_string(),
+            ));
+        }
+        if !is_sha256_fingerprint(&record.certificate_fingerprint_sha256) {
+            return Err(WorkspaceDirectoryError::Identity(
+                "device certificate fingerprint must be 64 lowercase SHA-256 hex characters"
+                    .to_string(),
+            ));
+        }
+        if !seen_keys.insert(&record.key) {
+            return Err(WorkspaceDirectoryError::Identity(
+                "duplicate Workspace device identity".to_string(),
+            ));
+        }
+        if !seen_fingerprints.insert(&record.certificate_fingerprint_sha256) {
+            return Err(WorkspaceDirectoryError::Identity(
+                "duplicate device certificate fingerprint".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// Atomically persist and publish a validated complete Directory revision.
+///
+/// The caller holds the state write lock so concurrent membership and device
+/// updates cannot overwrite one another.
+///
+/// 调用方持有写锁，保证成员与设备的并发更新不会互相覆盖。
+fn publish_snapshot(
+    path: &Path,
+    state: &mut DirectoryState,
+    snapshot: Snapshot,
+) -> Result<(), WorkspaceDirectoryError> {
+    let index = build_index(&snapshot)?;
+    let bytes = serde_json::to_vec(&snapshot).map_err(storage_error)?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err(storage_error("directory snapshot exceeds 16 MiB"));
+    }
+    persist(path, &bytes)?;
+    *state = DirectoryState { snapshot, index };
+    #[cfg(unix)]
+    File::open(path.parent().expect("directory snapshot has a parent"))
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| {
+            WorkspaceDirectoryError::Storage(
+                "directory revision published; durability not confirmed".into(),
+            )
+        })?;
+    Ok(())
 }
 
 fn verify_private_directory(directory: &Path) -> Result<(), WorkspaceDirectoryError> {
@@ -349,8 +562,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn restart_preserves_authorized_discovery_only() {
+    fn device_key(device_id: &str) -> WorkspaceDeviceKey {
+        WorkspaceDeviceKey {
+            organization_id: "org-1".into(),
+            workspace_id: "workspace-1".into(),
+            device_id: device_id.into(),
+        }
+    }
+
+    fn approved_certificate(
+        device_id: &str,
+        fingerprint: char,
+    ) -> ApprovedWorkspaceDeviceCertificate {
+        ApprovedWorkspaceDeviceCertificate {
+            key: device_key(device_id),
+            certificate_fingerprint_sha256: std::iter::repeat_n(fingerprint, 64).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_preserves_authorized_discovery_only() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("directory");
         {
@@ -362,9 +593,12 @@ mod tests {
             assert!(FileWorkspaceDirectory::open(&path).is_err());
         }
         let directory = FileWorkspaceDirectory::open(&path).unwrap();
-        assert!(directory.is_member(&user(), "org-1", "workspace-1"));
+        assert!(directory
+            .is_member(&user(), "org-1", "workspace-1")
+            .await
+            .unwrap());
         assert_eq!(
-            directory.discover(&user(), "org-1", 1).unwrap(),
+            directory.discover(&user(), "org-1", 1).await.unwrap(),
             vec![descriptor()]
         );
         let stranger = UserIdentityRef {
@@ -373,12 +607,13 @@ mod tests {
         };
         assert!(directory
             .discover(&stranger, "org-1", 1)
+            .await
             .unwrap()
             .is_empty());
     }
 
-    #[test]
-    fn invalid_replacement_preserves_previous_revision() {
+    #[tokio::test]
+    async fn invalid_replacement_preserves_previous_revision() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("directory");
         let directory = FileWorkspaceDirectory::open(&path).unwrap();
@@ -390,7 +625,10 @@ mod tests {
             .replace(vec![membership(), membership()], vec![descriptor()])
             .is_err());
         assert_eq!(fs::read(path.join("directory.json")).unwrap(), before);
-        assert!(directory.is_member(&user(), "org-1", "workspace-1"));
+        assert!(directory
+            .is_member(&user(), "org-1", "workspace-1")
+            .await
+            .unwrap());
     }
 
     #[test]
@@ -407,5 +645,153 @@ mod tests {
         fs::write(&snapshot, b"{bad json").unwrap();
         assert!(FileWorkspaceDirectory::open(&path).is_err());
         assert_eq!(fs::read(&snapshot).unwrap(), b"{bad json");
+    }
+
+    #[tokio::test]
+    async fn approved_device_certificate_and_revocation_survive_restart_and_directory_replace() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("directory");
+        let expected;
+        {
+            let directory = FileWorkspaceDirectory::open(&path).unwrap();
+            let enrolled = directory
+                .import_approved_device_certificate(approved_certificate("device-1", 'a'))
+                .unwrap();
+            assert_eq!(
+                enrolled.authorization_status,
+                DeviceAuthorizationStatus::Approved
+            );
+            expected = directory.revoke_device(&enrolled.key).unwrap();
+
+            directory
+                .replace(vec![membership()], vec![descriptor()])
+                .unwrap();
+        }
+
+        let directory = FileWorkspaceDirectory::open(&path).unwrap();
+        assert_eq!(
+            directory.find_device(&device_key("device-1")).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            directory
+                .find_device_by_certificate_fingerprint(&expected.certificate_fingerprint_sha256)
+                .unwrap(),
+            Some(expected)
+        );
+        assert!(directory
+            .is_member(&user(), "org-1", "workspace-1")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn poisoned_snapshot_reads_return_storage_errors_not_empty_authorization() {
+        let root = TempDir::new().unwrap();
+        let directory = FileWorkspaceDirectory::open(root.path().join("directory")).unwrap();
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = directory.state.write().unwrap();
+            panic!("poison Directory state for fail-closed test");
+        }));
+        assert!(poison_result.is_err());
+
+        assert!(matches!(
+            directory.is_member(&user(), "org-1", "workspace-1").await,
+            Err(WorkspaceDirectoryError::Storage(_))
+        ));
+        assert!(matches!(
+            directory
+                .roles_for_member(&user(), "org-1", "workspace-1")
+                .await,
+            Err(WorkspaceDirectoryError::Storage(_))
+        ));
+        assert!(matches!(
+            directory.discover(&user(), "org-1", 1).await,
+            Err(WorkspaceDirectoryError::Storage(_))
+        ));
+    }
+
+    #[test]
+    fn approved_device_import_rejects_duplicate_identity_fingerprint_and_malformed_digest() {
+        let root = TempDir::new().unwrap();
+        let directory = FileWorkspaceDirectory::open(root.path().join("directory")).unwrap();
+        directory
+            .import_approved_device_certificate(approved_certificate("device-1", 'a'))
+            .unwrap();
+
+        assert!(directory
+            .import_approved_device_certificate(approved_certificate("device-1", 'b'))
+            .is_err());
+        assert!(directory
+            .import_approved_device_certificate(approved_certificate("device-2", 'a'))
+            .is_err());
+        assert!(directory
+            .import_approved_device_certificate(ApprovedWorkspaceDeviceCertificate {
+                key: device_key("device-3"),
+                certificate_fingerprint_sha256: "A".repeat(64),
+            })
+            .is_err());
+        assert!(directory
+            .find_device(&device_key("device-2"))
+            .unwrap()
+            .is_none());
+        assert!(directory
+            .find_device_by_certificate_fingerprint("not-a-fingerprint")
+            .is_err());
+    }
+
+    #[test]
+    fn approved_device_revocation_is_idempotent() {
+        let root = TempDir::new().unwrap();
+        let directory = FileWorkspaceDirectory::open(root.path().join("directory")).unwrap();
+        let enrolled = directory
+            .import_approved_device_certificate(approved_certificate("device-1", 'a'))
+            .unwrap();
+        let revoked = directory.revoke_device(&enrolled.key).unwrap();
+        assert_eq!(
+            revoked.authorization_status,
+            DeviceAuthorizationStatus::Revoked
+        );
+        assert_eq!(directory.revoke_device(&revoked.key).unwrap(), revoked);
+        assert!(directory
+            .import_approved_device_certificate(approved_certificate("device-1", 'a'))
+            .is_err());
+    }
+
+    #[test]
+    fn version_one_directory_snapshot_loads_and_upgrades_on_device_write() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("directory");
+        fs::create_dir(&path).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let snapshot_path = path.join("directory.json");
+        fs::write(
+            &snapshot_path,
+            br#"{"version":1,"memberships":[],"descriptors":[]}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let directory = FileWorkspaceDirectory::open(&path).unwrap();
+        directory
+            .import_approved_device_certificate(approved_certificate("device-1", 'a'))
+            .unwrap();
+        drop(directory);
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(snapshot_path).unwrap()).unwrap();
+        assert_eq!(stored["version"], CURRENT_SNAPSHOT_VERSION);
+        assert_eq!(stored["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            FileWorkspaceDirectory::open(&path)
+                .unwrap()
+                .find_device(&device_key("device-1"))
+                .unwrap()
+                .unwrap()
+                .authorization_status,
+            DeviceAuthorizationStatus::Approved
+        );
     }
 }
