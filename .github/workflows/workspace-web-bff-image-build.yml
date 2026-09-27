@@ -55,7 +55,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Platform
-          ref: 1fee72ff09558aa2cf8b641458aecf519c5207cd
+          ref: 52732036c10898db23de7b4e20970a2896ddca70
           path: Cyrene-Platform
           fetch-depth: 0
           persist-credentials: false
@@ -116,7 +116,7 @@ jobs:
           tck_commit="267d48ebf42a89e2ebf11c7ea6d035e7c0985593"
           tck_sha256="ec75c976afd7261e4043eff5c1e53510580b6e90a9af71a07c2371413a984855"
 
-          test "$(git -C "$platform_root" rev-parse HEAD)" = "1fee72ff09558aa2cf8b641458aecf519c5207cd"
+          test "$(git -C "$platform_root" rev-parse HEAD)" = "52732036c10898db23de7b4e20970a2896ddca70"
           git -C "$platform_root" cat-file -e "$tck_commit^{commit}"
           locked_tck_sha256="$(git -C "$platform_root" show "$tck_commit:$tck_path" | sha256sum | cut -d ' ' -f 1)"
           builder_tck_sha256="$(sha256sum "$platform_root/$tck_path" | cut -d ' ' -f 1)"
@@ -184,6 +184,6 @@ jobs:
           set -euo pipefail
           {
             printf 'Source commit: `%s`\n\n' "$SOURCE_SHA"
-            printf 'Product bundle: Stage 2 lock `1fee72ff09558aa2cf8b641458aecf519c5207cd` with a BuildKit `product-contracts` context.\n\n'
+            printf 'Product bundle: Stage 2 lock `52732036c10898db23de7b4e20970a2896ddca70` with a BuildKit `product-contracts` context.\n\n'
             printf 'This workflow builds locally on the runner only. It does not log in to GHCR, publish an image, deploy to Azure, or assert production readiness.\n'
           } >> "$GITHUB_STEP_SUMMARY"
