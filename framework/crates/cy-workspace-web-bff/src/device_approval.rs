@@ -438,6 +438,7 @@ type RequiredProviders = (
     Arc<dyn WorkspaceDirectory>,
     Arc<dyn WebAuthnHttpSessionBindingStore>,
 );
+type RequiredServiceDirectory = (Arc<dyn DeviceApprovalService>, Arc<dyn WorkspaceDirectory>);
 
 fn required_dependencies(
     dependencies: &DeviceApprovalDependencies,
@@ -456,7 +457,7 @@ fn required_dependencies(
 
 fn required_service_and_directory(
     dependencies: &DeviceApprovalDependencies,
-) -> Result<(Arc<dyn DeviceApprovalService>, Arc<dyn WorkspaceDirectory>), ApprovalHttpError> {
+) -> Result<RequiredServiceDirectory, ApprovalHttpError> {
     Ok((
         dependencies
             .service
@@ -719,14 +720,14 @@ fn validate_complete_response(
     if !has_exact_keys(
         value,
         &["authorization", "state", "approvedBy", "approvedAt"],
-    ) || !validate_authorization_ref(
+    ) || validate_authorization_ref(
         value.get("authorization").ok_or_else(invalid_upstream)?,
         &DeviceApprovalScope {
             organization_id: binding.organization_id().to_owned(),
             workspace_id: binding.workspace_id().to_owned(),
         },
     )
-    .is_ok()
+    .is_err()
         || !validate_identity(
             value.get("approvedBy").ok_or_else(invalid_upstream)?,
             principal,
