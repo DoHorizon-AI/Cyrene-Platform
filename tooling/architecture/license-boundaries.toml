@@ -28,6 +28,7 @@ core_copyleft = [
 ]
 
 separate_decision = [
+    "cy-workspace-web-bff",
     "cyrene-linux-sys-adapter",
     "cyrene-nvidia-adapter",
 ]
