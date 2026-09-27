@@ -44,6 +44,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_SCAN_LIMIT: usize = 1_000;
+// Retry failures with a capped exponential delay to keep poison rows off the due page.
+// 失败撤销采用有上限的指数退避，避免长期故障记录持续占据扫描页。
+const RETIREMENT_RETRY_BASE_DELAY_MS: u64 = 1_000;
+const RETIREMENT_RETRY_MAX_DELAY_MS: u64 = 60 * 60 * 1_000;
 const MAX_CSR_BYTES: usize = 16 * 1024;
 const MAX_WEBAUTHN_STATE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_OPTIONS_BYTES: usize = 1024 * 1024;
@@ -162,7 +166,7 @@ impl PostgresDeviceAuthorizationStore {
         )
     }
 
-    /// Return a bounded page of unresolved certificate retirement records.
+    /// Return a bounded page of certificate retirements whose retry time is due.
     ///
     /// A worker must retry the idempotent retirement operation with the
     /// authorization ID and certificate fingerprint from each record.
@@ -413,19 +417,16 @@ impl crate::device_authorization_sweeper::DeviceCertificateRetirementSweepSource
         database_now_unix_ms: u64,
         limit: usize,
     ) -> StoreResult<Vec<DeviceAuthorizationId>> {
-        Ok(self
-            .due_certificate_deliveries(database_now_unix_ms, limit)?
-            .into_iter()
-            .map(|record| record.id)
-            .collect())
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::DueCertificateDeliveryIds(database_now_unix_ms, limit, reply),
+            result,
+        )
     }
 
     fn recoverable_retirement_ids(&self, limit: usize) -> StoreResult<Vec<DeviceAuthorizationId>> {
-        Ok(self
-            .recoverable_retirements(limit)?
-            .into_iter()
-            .map(|record| record.id)
-            .collect())
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(Command::RecoverableRetirementIds(limit, reply), result)
     }
 }
 
@@ -469,6 +470,8 @@ enum Command {
     RecoverableIssuances(usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
     DueCertificateDeliveries(u64, usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
     RecoverableRetirements(usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
+    DueCertificateDeliveryIds(u64, usize, StoreReply<Vec<DeviceAuthorizationId>>),
+    RecoverableRetirementIds(usize, StoreReply<Vec<DeviceAuthorizationId>>),
     DatabaseTime(StoreReply<u64>),
 }
 
@@ -603,6 +606,13 @@ fn worker_main(
             Command::RecoverableRetirements(limit, reply) => {
                 let _ = reply.send(runtime.block_on(recoverable_retirements(&pool, limit)));
             }
+            Command::DueCertificateDeliveryIds(now, limit, reply) => {
+                let _ = reply
+                    .send(runtime.block_on(due_certificate_delivery_id_page(&pool, now, limit)));
+            }
+            Command::RecoverableRetirementIds(limit, reply) => {
+                let _ = reply.send(runtime.block_on(recoverable_retirement_id_page(&pool, limit)));
+            }
             Command::DatabaseTime(reply) => {
                 let _ = reply.send(runtime.block_on(database_time_unix_ms(&pool)));
             }
@@ -640,7 +650,8 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
     } else {
         sqlx::query(
             "SELECT state_deadline_unix_ms, delivery_certificate_not_after_unix_ms, \
-                    registration_key_digest, device_code_generation \
+                    registration_key_digest, device_code_generation, \
+                    retirement_attempt_count, retirement_next_attempt_at_unix_ms \
              FROM cyrene_workspace_device_authorization.authorizations LIMIT 0",
         )
         .fetch_all(&pool)
@@ -969,7 +980,9 @@ async fn rotate_registration_binding(
             let update = sqlx::query(&format!(
                 "UPDATE {TABLE} SET revision = $3, state_kind = $4, approval_id = $5, \
                  state_deadline_unix_ms = $6, delivery_certificate_not_after_unix_ms = $7, \
-                 state_payload = $8 \
+                 state_payload = $8, retirement_attempt_count = 0, \
+                 retirement_next_attempt_at_unix_ms = \
+                    CASE WHEN $4 = 'retirement_pending' THEN $14 ELSE NULL END \
                  WHERE id = $1 AND revision = $2 AND registration_binding_id = $9 \
                    AND organization_id = $10 AND workspace_id = $11 AND device_id = $12 \
                    AND authorization_generation = $13"
@@ -987,6 +1000,7 @@ async fn rotate_registration_binding(
             .bind(&encoded.workspace_id)
             .bind(&encoded.device_id)
             .bind(encoded.authorization_generation)
+            .bind(to_i64(database_now_unix_ms)?)
             .execute(&mut **transaction)
             .await
             .map_err(map_database_error)?;
@@ -1646,6 +1660,33 @@ async fn due_certificate_deliveries(
     rows.into_iter().map(decode_record).collect()
 }
 
+/// Returns a bounded ID-only page; the manager reloads full state before its CAS.
+/// 只扫描有界 ID 页；状态机随后重新读取完整记录并执行 CAS。
+async fn due_certificate_delivery_id_page(
+    pool: &PgPool,
+    now_unix_ms: u64,
+    limit: usize,
+) -> StoreResult<Vec<DeviceAuthorizationId>> {
+    let now = i64::try_from(now_unix_ms).map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let limit = bounded_limit(limit)?;
+    let rows = sqlx::query(&format!(
+        "SELECT id FROM {TABLE} \
+         WHERE state_kind = 'delivery_pending' AND ( \
+             state_deadline_unix_ms <= $1 OR \
+             delivery_certificate_not_after_unix_ms <= $1 \
+         ) \
+         ORDER BY LEAST( \
+             state_deadline_unix_ms, delivery_certificate_not_after_unix_ms \
+         ), id LIMIT $2"
+    ))
+    .bind(now)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(map_database_error)?;
+    authorization_ids_from_rows(rows)
+}
+
 async fn recoverable_issuances(
     pool: &PgPool,
     limit: usize,
@@ -1671,13 +1712,49 @@ async fn recoverable_retirements(
     let rows = sqlx::query(&format!(
         "SELECT {SELECT_COLUMNS} FROM {TABLE} \
          WHERE state_kind = 'retirement_pending' \
-         ORDER BY created_at_unix_ms, id LIMIT $1"
+           AND retirement_next_attempt_at_unix_ms <= \
+               FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
+         ORDER BY retirement_next_attempt_at_unix_ms, id LIMIT $1"
     ))
     .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(map_database_error)?;
     rows.into_iter().map(decode_record).collect()
+}
+
+/// Returns retry-due IDs using the authorization primary database clock.
+/// 使用授权主库时钟，仅返回已到重试时间的有界 ID 页。
+async fn recoverable_retirement_id_page(
+    pool: &PgPool,
+    limit: usize,
+) -> StoreResult<Vec<DeviceAuthorizationId>> {
+    let limit = bounded_limit(limit)?;
+    let rows = sqlx::query(&format!(
+        "SELECT id FROM {TABLE} \
+         WHERE state_kind = 'retirement_pending' \
+           AND retirement_next_attempt_at_unix_ms <= \
+               FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
+         ORDER BY retirement_next_attempt_at_unix_ms, id LIMIT $1"
+    ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(map_database_error)?;
+    authorization_ids_from_rows(rows)
+}
+
+/// Validates the fixed-size authorization IDs returned by an indexed scan.
+/// 校验索引扫描结果中的定长授权 ID。
+fn authorization_ids_from_rows(rows: Vec<PgRow>) -> StoreResult<Vec<DeviceAuthorizationId>> {
+    rows.into_iter()
+        .map(|row| {
+            let id: Vec<u8> = row
+                .try_get("id")
+                .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+            fixed::<16>(id)
+        })
+        .collect()
 }
 
 async fn database_time_unix_ms(pool: &PgPool) -> StoreResult<u64> {
@@ -1695,6 +1772,29 @@ fn bounded_limit(limit: usize) -> StoreResult<i64> {
         return Err(DeviceAuthorizationStoreError::Unavailable);
     }
     i64::try_from(limit).map_err(|_| DeviceAuthorizationStoreError::Unavailable)
+}
+
+/// Advances the persisted failure count and computes its next DB-clock retry time.
+/// 递增持久化失败次数，并按数据库时钟计算下一次重试时间。
+fn next_retirement_retry_schedule(
+    current_attempt_count: i64,
+    database_now_unix_ms: u64,
+) -> StoreResult<(i64, i64)> {
+    if current_attempt_count < 0 {
+        return Err(DeviceAuthorizationStoreError::Unavailable);
+    }
+    let exponent = u32::try_from(current_attempt_count.min(12))
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let delay_ms = RETIREMENT_RETRY_BASE_DELAY_MS
+        .saturating_mul(1_u64 << exponent)
+        .min(RETIREMENT_RETRY_MAX_DELAY_MS);
+    let next_attempt_at_unix_ms = database_now_unix_ms
+        .checked_add(delay_ms)
+        .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
+    Ok((
+        current_attempt_count.saturating_add(1),
+        to_i64(next_attempt_at_unix_ms)?,
+    ))
 }
 
 async fn compare_and_swap(
@@ -1719,14 +1819,32 @@ async fn compare_and_swap(
         lock_and_validate_registration(&mut transaction, &replacement.registration_binding).await?;
     }
     let row = sqlx::query(&format!(
-        "SELECT {SELECT_COLUMNS} FROM {TABLE} WHERE id = $1 FOR UPDATE"
+        "SELECT {SELECT_COLUMNS}, retirement_attempt_count, retirement_next_attempt_at_unix_ms \
+         FROM {TABLE} WHERE id = $1 FOR UPDATE"
     ))
     .bind(replacement.id.to_vec())
     .fetch_optional(&mut *transaction)
     .await
     .map_err(map_database_error)?
     .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+    let current_retirement_attempt_count: i64 = row
+        .try_get("retirement_attempt_count")
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    let current_retirement_next_attempt_at_unix_ms: Option<i64> = row
+        .try_get("retirement_next_attempt_at_unix_ms")
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+    if current_retirement_attempt_count < 0 {
+        return Err(DeviceAuthorizationStoreError::Unavailable);
+    }
     let current = decode_record(row)?;
+    if matches!(
+        &current.state,
+        DeviceAuthorizationState::RetirementPending { .. }
+    ) != current_retirement_next_attempt_at_unix_ms.is_some()
+        || current_retirement_next_attempt_at_unix_ms.is_some_and(|value| value < 0)
+    {
+        return Err(DeviceAuthorizationStoreError::Unavailable);
+    }
     if current.revision != expected_revision || !same_immutable_fields(&current, replacement) {
         return Err(DeviceAuthorizationStoreError::Conflict);
     }
@@ -1743,6 +1861,47 @@ async fn compare_and_swap(
         return Err(DeviceAuthorizationStoreError::Conflict);
     }
 
+    // Initial retirement becomes immediately eligible; a failed retry moves to backoff.
+    // 首次进入待撤销状态立即可执行；已失败的重试推进到退避时间。
+    let (retirement_attempt_count, retirement_next_attempt_at_unix_ms) =
+        match (&current.state, &replacement.state) {
+            (
+                DeviceAuthorizationState::RetirementPending { .. },
+                DeviceAuthorizationState::RetirementPending {
+                    last_failure: Some(_),
+                    ..
+                },
+            ) if !registered => {
+                let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+                let (attempt_count, next_attempt_at) = next_retirement_retry_schedule(
+                    current_retirement_attempt_count,
+                    database_now_unix_ms,
+                )?;
+                (attempt_count, Some(next_attempt_at))
+            }
+            (
+                DeviceAuthorizationState::RetirementPending { .. },
+                DeviceAuthorizationState::RetirementPending { .. },
+            ) if registered => {
+                let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+                let next_attempt_at = current_retirement_next_attempt_at_unix_ms
+                    .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
+                if from_i64(next_attempt_at)? > database_now_unix_ms {
+                    return Err(DeviceAuthorizationStoreError::Conflict);
+                }
+                (current_retirement_attempt_count, Some(next_attempt_at))
+            }
+            (
+                DeviceAuthorizationState::RetirementPending { .. },
+                DeviceAuthorizationState::RetirementPending { .. },
+            ) => return Err(DeviceAuthorizationStoreError::Conflict),
+            (_, DeviceAuthorizationState::RetirementPending { .. }) => {
+                let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
+                (0, Some(to_i64(database_now_unix_ms)?))
+            }
+            (_, _) => (current_retirement_attempt_count, None),
+        };
+
     let encoded = EncodedRecord::new(replacement)?;
     let deadline_guard = if delivery_ack {
         " AND state_kind = 'delivery_pending' \
@@ -1754,7 +1913,8 @@ async fn compare_and_swap(
         "UPDATE {TABLE} SET \
          poll_interval_ms = $3, last_poll_at_unix_ms = $4, revision = $5, \
          state_kind = $6, approval_id = $7, state_deadline_unix_ms = $8, \
-         delivery_certificate_not_after_unix_ms = $9, state_payload = $10 \
+         delivery_certificate_not_after_unix_ms = $9, state_payload = $10, \
+         retirement_attempt_count = $11, retirement_next_attempt_at_unix_ms = $12 \
          WHERE id = $1 AND revision = $2{deadline_guard}"
     ))
     .bind(encoded.id)
@@ -1767,6 +1927,8 @@ async fn compare_and_swap(
     .bind(encoded.state_deadline_unix_ms)
     .bind(encoded.delivery_certificate_not_after_unix_ms)
     .bind(encoded.state_payload)
+    .bind(retirement_attempt_count)
+    .bind(retirement_next_attempt_at_unix_ms)
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
@@ -1815,8 +1977,11 @@ async fn compare_and_swap_due_delivery_to_retirement(
     let update = sqlx::query(&format!(
         "UPDATE {TABLE} SET revision = $3, state_kind = $4, approval_id = $5, \
          state_deadline_unix_ms = NULL, delivery_certificate_not_after_unix_ms = NULL, \
-         state_payload = $6 \
+         state_payload = $6, retirement_attempt_count = 0, \
+         retirement_next_attempt_at_unix_ms = \
+             FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
          WHERE id = $1 AND revision = $2 AND state_kind = 'delivery_pending' \
+           AND retirement_next_attempt_at_unix_ms IS NULL \
            AND registration_binding_id = $7 AND device_id = $8 \
            AND authorization_generation = $9 \
            AND $10 <= FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT \
@@ -3459,6 +3624,7 @@ mod tests {
             state: DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver: identity(),
+                approved_at_unix_ms: Some(decided_at_unix_ms),
                 decided_at_unix_ms,
                 certificate,
                 delivery_id,
@@ -3603,6 +3769,7 @@ mod tests {
         let DeviceAuthorizationState::DeliveryPending {
             approval_id,
             approver,
+            approved_at_unix_ms,
             certificate,
             delivery_id,
             certificate_sha256,
@@ -3623,6 +3790,7 @@ mod tests {
                 csr_spki_sha256: record.spki_sha256,
                 acknowledged_at_unix_ms,
             },
+            approved_at_unix_ms: *approved_at_unix_ms,
             approver: Some(approver.clone()),
             certificate: Some(certificate.clone()),
         }
@@ -3656,6 +3824,7 @@ mod tests {
             DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver: identity(),
+                approved_at_unix_ms: Some(3_000),
                 decided_at_unix_ms: 4_000,
                 certificate: certificate(),
                 delivery_id: [8; 16],
@@ -3674,6 +3843,7 @@ mod tests {
                     csr_spki_sha256: [4; 32],
                     acknowledged_at_unix_ms: 5_000,
                 },
+                approved_at_unix_ms: Some(3_000),
                 approver: Some(identity()),
                 certificate: Some(certificate()),
             },
@@ -3766,6 +3936,7 @@ mod tests {
             StoredAuthorizationState::from_domain(&DeviceAuthorizationState::DeliveryPending {
                 approval_id: [13; 16],
                 approver: identity(),
+                approved_at_unix_ms: Some(3_000),
                 decided_at_unix_ms: 4_000,
                 certificate: certificate(),
                 delivery_id: [14; 16],
@@ -3901,6 +4072,7 @@ mod tests {
             state: DeviceAuthorizationState::DeliveryPending {
                 approval_id: [7; 16],
                 approver: identity(),
+                approved_at_unix_ms: Some(3_000),
                 decided_at_unix_ms: 4_000,
                 certificate: certificate(),
                 delivery_id: [8; 16],
@@ -3922,6 +4094,7 @@ mod tests {
                 csr_spki_sha256: current.spki_sha256,
                 acknowledged_at_unix_ms: 5_999,
             },
+            approved_at_unix_ms: Some(3_000),
             approver: Some(identity()),
             certificate: Some(certificate()),
         };
@@ -4094,6 +4267,7 @@ mod tests {
                 csr_spki_sha256: open_record.spki_sha256,
                 acknowledged_at_unix_ms: now,
             },
+            approved_at_unix_ms: Some(now),
             approver: match &open_record.state {
                 DeviceAuthorizationState::DeliveryPending { approver, .. } => {
                     Some(approver.clone())
@@ -4155,6 +4329,7 @@ mod tests {
                 csr_spki_sha256: expired_record.spki_sha256,
                 acknowledged_at_unix_ms: expired_deadline.saturating_sub(1),
             },
+            approved_at_unix_ms: Some(now.saturating_sub(5_000)),
             approver: match &expired_record.state {
                 DeviceAuthorizationState::DeliveryPending { approver, .. } => {
                     Some(approver.clone())

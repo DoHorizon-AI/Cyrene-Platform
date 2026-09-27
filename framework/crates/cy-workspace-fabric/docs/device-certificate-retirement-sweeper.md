@@ -44,3 +44,43 @@ cargo test --manifest-path framework/crates/cy-workspace-fabric/Cargo.toml devic
 cargo test --manifest-path framework/crates/cy-workspace-fabric/Cargo.toml retirement_worker_entrypoint_reserves_before_revoke_and_retries_unknown_result
 cargo fmt --manifest-path framework/crates/cy-workspace-fabric/Cargo.toml -- --check
 ```
+
+<!-- device-certificate-retirement-postgres-retry -->
+## PostgreSQL retry schedule addendum
+
+Migration `device_authorization/0006_retirement_retry_schedule` adds
+`retirement_attempt_count` and `retirement_next_attempt_at_unix_ms`. Existing
+`RetirementPending` rows become eligible immediately at migration time because
+their pre-migration failure count is unknown. The counter records persisted CA
+retirement failures; `state_payload` remains the source of the latest failure
+kind.
+
+The production source reads candidate authorization IDs only. Due deliveries
+and retries use bounded adapter pages. The retry scan filters by the primary
+database clock and orders by retry time and ID. A failed result is persisted
+with the record revision CAS and receives exponential delay from one second up
+to one hour. Failed rows leave the current due page so later pending rows can
+be scanned. The delivery-to-retirement CAS checks row revision, registration
+binding, device identity, authorization generation, and deadline against the
+database clock, then initializes retry eligibility.
+
+This provides PostgreSQL scanning and durable retry state only. The real CA
+revoker and production scheduler are still absent, so hosts must keep this
+worker disabled.
+
+## PostgreSQL 重试计划补充
+
+迁移 `device_authorization/0006_retirement_retry_schedule` 为授权记录增加
+`retirement_attempt_count` 和 `retirement_next_attempt_at_unix_ms`。升级时，已有的
+`RetirementPending` 记录按数据库时钟立即进入可重试队列；其迁移前失败次数未知，计数从
+零开始。此计数记录已持久化的失败撤销调用，不替代 `state_payload` 中保存的最后失败类型。
+
+生产 source 只读取候选授权 ID。due delivery 和重试候选都受 adapter 页大小限制；重试扫描用
+数据库时钟过滤 `retirement_next_attempt_at_unix_ms`，并按重试时间和 ID 排序。失败结果通过
+记录 revision CAS 持久化，重试延迟从 1 秒指数增长、最长 1 小时；失败记录离开当前 due 页，
+后续 pending 记录可以继续被扫描。delivery 转入 `RetirementPending` 时，在同一 CAS 中校验
+行 revision、registration binding、设备身份、授权代次及数据库截止时间，并初始化重试计划。
+
+这只完成 PostgreSQL 扫描与持久重试状态。真实 CA revoker 和生产调度器仍未配置，host 必须继续
+禁用此 worker。
+<!-- /device-certificate-retirement-postgres-retry -->
