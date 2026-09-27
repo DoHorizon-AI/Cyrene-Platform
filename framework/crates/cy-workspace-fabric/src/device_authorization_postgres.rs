@@ -21,15 +21,18 @@ use sqlx::{PgPool, Postgres, Row};
 use thiserror::Error;
 
 use crate::device_authorization::{
-    DeviceAuthorizationCodeHash, DeviceAuthorizationCommittedSnapshot,
-    DeviceAuthorizationDeviceKey, DeviceAuthorizationId, DeviceAuthorizationPollSnapshot,
-    DeviceAuthorizationRecord, DeviceAuthorizationRegistrationBinding, DeviceAuthorizationScope,
-    DeviceAuthorizationStartCandidate, DeviceAuthorizationStartDisposition,
-    DeviceAuthorizationState, DeviceAuthorizationStore, DeviceAuthorizationStoreError,
-    DeviceCertificateDeliveryReceipt, DeviceCertificateIssuanceFailure,
-    DeviceCertificateRetirementError, DeviceCertificateRetirementReason,
-    DeviceRegistrationKeyDigest, IssuedDeviceCertificate, VerifiedDirectoryRegistrationBinding,
+    registration_rotation_transition, DeviceAuthorizationCodeHash,
+    DeviceAuthorizationCommittedSnapshot, DeviceAuthorizationDeviceKey, DeviceAuthorizationId,
+    DeviceAuthorizationPollSnapshot, DeviceAuthorizationRecord,
+    DeviceAuthorizationRegistrationBinding, DeviceAuthorizationRegistrationRotation,
+    DeviceAuthorizationScope, DeviceAuthorizationStartCandidate,
+    DeviceAuthorizationStartDisposition, DeviceAuthorizationState, DeviceAuthorizationStore,
+    DeviceAuthorizationStoreError, DeviceCertificateDeliveryReceipt,
+    DeviceCertificateIssuanceFailure, DeviceCertificateRetirementError,
+    DeviceCertificateRetirementReason, DeviceRegistrationKeyDigest, IssuedDeviceCertificate,
+    VerifiedDirectoryRegistrationBinding,
 };
+use crate::relay_peer_certificate_validation::AuthenticatedRelayWorkspaceDevice;
 use crate::VersionedUserCodeDigest;
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL";
@@ -658,8 +661,8 @@ async fn insert_record(_pool: &PgPool, _record: &DeviceAuthorizationRecord) -> S
 /// lock and writing both schemas through the same PostgreSQL transaction.
 ///
 /// Legacy rows without a registration digest can still be read and ACKed, but
-/// they are never treated as recovery evidence. New-key mTLS rotation remains
-/// fail-closed until the certificate-retirement transition is available.
+/// they are never treated as recovery evidence. A new-key mTLS rotation advances
+/// the Directory generation and supersedes or retires its predecessor atomically.
 async fn start_or_recover_registered(
     pool: &PgPool,
     candidate: DeviceAuthorizationStartCandidate,
@@ -689,6 +692,7 @@ async fn start_or_recover_registered(
     .await
     .map_err(map_database_error)?;
 
+    let mut transaction_database_now = None;
     let binding = match existing_binding {
         Some(row) => {
             let binding = directory_binding_from_row(row)?;
@@ -741,7 +745,7 @@ async fn start_or_recover_registered(
                 });
             }
 
-            if candidate.authenticated_device().is_some() {
+            if candidate.authenticated_relay_peer().is_some() {
                 // A verified mTLS device cannot rotate without a persisted
                 // predecessor authorization to supersede or retire atomically.
                 return Err(DeviceAuthorizationStoreError::Conflict);
@@ -750,16 +754,21 @@ async fn start_or_recover_registered(
             binding
         }
         None => {
-            if candidate.authenticated_device().is_some() {
-                // mTLS rotation requires a same-transaction predecessor fence.
-                // This path is enabled once the rotation transition is wired.
-                return Err(DeviceAuthorizationStoreError::Conflict);
+            if let Some(peer) = candidate.authenticated_relay_peer() {
+                let (binding, database_now) =
+                    rotate_registration_binding(&mut transaction, &candidate, peer).await?;
+                transaction_database_now = Some(database_now);
+                binding
+            } else {
+                create_initial_registration_binding(&mut transaction, &candidate).await?
             }
-            create_initial_registration_binding(&mut transaction, &candidate).await?
         }
     };
 
-    let database_now = database_time_in_transaction(&mut transaction).await?;
+    let database_now = match transaction_database_now {
+        Some(database_now) => database_now,
+        None => database_time_in_transaction(&mut transaction).await?,
+    };
     let record = new_authorization_record(&candidate, binding, database_now)?;
     let encoded = EncodedRecord::new(&record)?;
     insert_encoded(&mut transaction, &encoded).await?;
@@ -818,6 +827,231 @@ async fn create_initial_registration_binding(
         spki_sha256: *candidate.spki_sha256(),
     };
     Ok(DeviceAuthorizationRegistrationBinding::from_verified_directory_binding(&snapshot))
+}
+
+/// Rotates the current Directory registration and predecessor authorization in
+/// the caller's transaction. The identity row is the serialization point for
+/// two concurrent rotations using different registration keys.
+async fn rotate_registration_binding(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    candidate: &DeviceAuthorizationStartCandidate,
+    peer: &AuthenticatedRelayWorkspaceDevice,
+) -> StoreResult<(DeviceAuthorizationRegistrationBinding, u64)> {
+    let peer_claim = candidate
+        .authenticated_device()
+        .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+    let peer_key = peer.key();
+    let scope = candidate.scope();
+    if peer_key.organization_id != scope.organization_id
+        || peer_key.workspace_id != scope.workspace_id
+        || peer.authorization_generation() == 0
+    {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+
+    // Lock the stable Directory identity before any authorization row. Every
+    // registered CAS and rotation follows this same identity -> auth-row order.
+    let current_generation = sqlx::query_scalar::<_, i64>(
+        "SELECT current_authorization_generation \
+         FROM cyrene_workspace_directory.workspace_device_identities \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 FOR UPDATE",
+    )
+    .bind(&peer_key.organization_id)
+    .bind(&peer_key.workspace_id)
+    .bind(&peer_key.device_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(DeviceAuthorizationStoreError::Conflict)
+    .and_then(from_i64)?;
+    if current_generation != peer.authorization_generation() {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+
+    // Binding rows are immutable. Locking the identity serializes their current
+    // generation, so this exact-generation read needs only the registrar's
+    // SELECT privilege on the binding table.
+    let binding_rows = sqlx::query(
+        "SELECT uuid_send(binding_id) AS binding_id, registration_key_digest, \
+                organization_id, workspace_id, device_id, authorization_generation, \
+                csr_sha256, spki_sha256 \
+         FROM cyrene_workspace_directory.device_registration_bindings \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 \
+           AND authorization_generation = $4",
+    )
+    .bind(&peer_key.organization_id)
+    .bind(&peer_key.workspace_id)
+    .bind(&peer_key.device_id)
+    .bind(to_i64(current_generation)?)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    if binding_rows.len() != 1 {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    let binding_row = binding_rows
+        .into_iter()
+        .next()
+        .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+    let predecessor_registration_digest = fixed::<32>(
+        binding_row
+            .try_get("registration_key_digest")
+            .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?,
+    )?;
+    if predecessor_registration_digest == *candidate.registration_key_digest().as_bytes()
+        || predecessor_registration_digest
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    let predecessor_binding = directory_binding_from_row(binding_row)?;
+    if !candidate_peer_matches_current_binding(candidate, &predecessor_binding)
+        || predecessor_binding.key().organization_id != peer_key.organization_id
+        || predecessor_binding.key().workspace_id != peer_key.workspace_id
+        || predecessor_binding.key().device_id != peer_key.device_id
+        || predecessor_binding.authorization_generation() != peer.authorization_generation()
+        || predecessor_binding.csr_sha256() != peer.csr_sha256()
+        || predecessor_binding.spki_sha256() != peer.spki_sha256()
+    {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    lock_and_validate_registration(transaction, &predecessor_binding).await?;
+
+    // Query by Directory-owned identity and generation rather than digest so a
+    // legacy V3 authorization cannot be silently skipped during rotation.
+    let predecessor_rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM {TABLE} \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 \
+           AND authorization_generation = $4 FOR UPDATE"
+    ))
+    .bind(&peer_key.organization_id)
+    .bind(&peer_key.workspace_id)
+    .bind(&peer_key.device_id)
+    .bind(to_i64(peer.authorization_generation())?)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    if predecessor_rows.len() != 1 {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    let predecessor = decode_record(
+        predecessor_rows
+            .into_iter()
+            .next()
+            .ok_or(DeviceAuthorizationStoreError::Conflict)?,
+    )?;
+    if predecessor.id == *candidate.authorization_id_candidate()
+        || predecessor.registration_binding != predecessor_binding
+        || predecessor.scope != *scope
+        || predecessor
+            .registration_key_digest
+            .as_ref()
+            .is_some_and(|digest| digest.as_bytes() != &predecessor_registration_digest)
+    {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+
+    // Sample time after waiting for both locks so an expiring verified peer is
+    // never authorized using a timestamp from before the lock was acquired.
+    let database_now_unix_ms = database_time_in_transaction(transaction).await?;
+    match registration_rotation_transition(&predecessor, peer_claim, database_now_unix_ms)? {
+        DeviceAuthorizationRegistrationRotation::Supersede(state)
+        | DeviceAuthorizationRegistrationRotation::Retire(state) => {
+            let next_revision = predecessor
+                .revision
+                .checked_add(1)
+                .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+            let mut replacement = predecessor.clone();
+            replacement.state = state;
+            replacement.revision = next_revision;
+            let encoded = EncodedRecord::new(&replacement)?;
+            let update = sqlx::query(&format!(
+                "UPDATE {TABLE} SET revision = $3, state_kind = $4, approval_id = $5, \
+                 state_deadline_unix_ms = $6, delivery_certificate_not_after_unix_ms = $7, \
+                 state_payload = $8 \
+                 WHERE id = $1 AND revision = $2 AND registration_binding_id = $9 \
+                   AND organization_id = $10 AND workspace_id = $11 AND device_id = $12 \
+                   AND authorization_generation = $13"
+            ))
+            .bind(encoded.id)
+            .bind(to_i64(predecessor.revision)?)
+            .bind(encoded.revision)
+            .bind(encoded.state_kind)
+            .bind(encoded.approval_id)
+            .bind(encoded.state_deadline_unix_ms)
+            .bind(encoded.delivery_certificate_not_after_unix_ms)
+            .bind(encoded.state_payload)
+            .bind(encoded.registration_binding_id)
+            .bind(&encoded.organization_id)
+            .bind(&encoded.workspace_id)
+            .bind(&encoded.device_id)
+            .bind(encoded.authorization_generation)
+            .execute(&mut **transaction)
+            .await
+            .map_err(map_database_error)?;
+            if update.rows_affected() != 1 {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
+        }
+        DeviceAuthorizationRegistrationRotation::AlreadyTerminal => {}
+    }
+
+    let next_generation = current_generation
+        .checked_add(1)
+        .ok_or(DeviceAuthorizationStoreError::Conflict)?;
+    let generation_update = sqlx::query(
+        "UPDATE cyrene_workspace_directory.workspace_device_identities \
+         SET current_authorization_generation = $4, updated_at = clock_timestamp() \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 \
+           AND current_authorization_generation = $5 \
+           AND $6 > FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT",
+    )
+    .bind(&peer_key.organization_id)
+    .bind(&peer_key.workspace_id)
+    .bind(&peer_key.device_id)
+    .bind(to_i64(next_generation)?)
+    .bind(to_i64(current_generation)?)
+    .bind(to_i64(peer.not_after_unix_ms())?)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    if generation_update.rows_affected() != 1 {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+
+    let binding_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO cyrene_workspace_directory.device_registration_bindings \
+             (binding_id, registration_key_digest, organization_id, workspace_id, device_id, \
+              authorization_generation, csr_sha256, spki_sha256) \
+         VALUES ($1::UUID, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(binding_id.to_string())
+    .bind(candidate.registration_key_digest().as_bytes().as_slice())
+    .bind(&scope.organization_id)
+    .bind(&scope.workspace_id)
+    .bind(&peer_key.device_id)
+    .bind(to_i64(next_generation)?)
+    .bind(candidate.csr_sha256().as_slice())
+    .bind(candidate.spki_sha256().as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    let snapshot = PersistedDirectoryBinding {
+        binding_id: *binding_id.as_bytes(),
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        device_id: peer_key.device_id.clone(),
+        authorization_generation: next_generation,
+        csr_sha256: *candidate.csr_sha256(),
+        spki_sha256: *candidate.spki_sha256(),
+    };
+    Ok((
+        DeviceAuthorizationRegistrationBinding::from_verified_directory_binding(&snapshot),
+        database_now_unix_ms,
+    ))
 }
 
 fn directory_binding_from_row(row: PgRow) -> StoreResult<DeviceAuthorizationRegistrationBinding> {
