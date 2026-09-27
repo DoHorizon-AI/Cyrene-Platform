@@ -1933,6 +1933,7 @@ fn valid_delivery_ack_transition(
                 receipt,
                 approver: Some(next_approver),
                 certificate: Some(next_certificate),
+                ..
             },
         ) => {
             current_approval_id == next_approval_id
@@ -2323,6 +2324,10 @@ enum StoredAuthorizationState {
     DeliveryPending {
         approval_id: DeviceAuthorizationId,
         approver: StoredIdentity,
+        /// Legacy JSON rows omit the approval reservation time and decode as `None`.
+        /// 旧 JSON 记录不含审批预留时间，解码为 `None`。
+        #[serde(default)]
+        approved_at_unix_ms: Option<u64>,
         decided_at_unix_ms: u64,
         certificate: StoredCertificate,
         delivery_id: DeviceAuthorizationId,
@@ -2338,6 +2343,10 @@ enum StoredAuthorizationState {
         approver: Option<StoredIdentity>,
         #[serde(default)]
         certificate: Option<StoredCertificate>,
+        /// Legacy JSON rows omit the approval reservation time and decode as `None`.
+        /// 旧 JSON 记录不含审批预留时间，解码为 `None`。
+        #[serde(default)]
+        approved_at_unix_ms: Option<u64>,
     },
     RetirementPending {
         approval_id: DeviceAuthorizationId,
@@ -2740,6 +2749,7 @@ impl StoredAuthorizationState {
             DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver,
+                approved_at_unix_ms,
                 decided_at_unix_ms,
                 certificate,
                 delivery_id,
@@ -2748,6 +2758,7 @@ impl StoredAuthorizationState {
             } => Self::DeliveryPending {
                 approval_id: *approval_id,
                 approver: StoredIdentity::from_domain(approver),
+                approved_at_unix_ms: *approved_at_unix_ms,
                 decided_at_unix_ms: *decided_at_unix_ms,
                 certificate: StoredCertificate::from_domain(certificate),
                 delivery_id: *delivery_id,
@@ -2757,6 +2768,7 @@ impl StoredAuthorizationState {
             DeviceAuthorizationState::Delivered {
                 approval_id,
                 receipt,
+                approved_at_unix_ms,
                 approver,
                 certificate,
             } => Self::Delivered {
@@ -2764,6 +2776,7 @@ impl StoredAuthorizationState {
                 receipt: receipt.into(),
                 approver: approver.as_ref().map(StoredIdentity::from_domain),
                 certificate: certificate.as_ref().map(StoredCertificate::from_domain),
+                approved_at_unix_ms: *approved_at_unix_ms,
             },
             DeviceAuthorizationState::RetirementPending {
                 approval_id,
@@ -3007,6 +3020,7 @@ impl StoredAuthorizationState {
             } => approver.is_valid() && to_i64(*issued_at_unix_ms).is_ok(),
             Self::DeliveryPending {
                 approver,
+                approved_at_unix_ms,
                 certificate,
                 decided_at_unix_ms,
                 certificate_sha256,
@@ -3020,6 +3034,7 @@ impl StoredAuthorizationState {
                     && delivery_deadline_unix_ms.saturating_sub(*decided_at_unix_ms)
                         <= crate::device_authorization::MAX_CERTIFICATE_DELIVERY_TTL_MS
                     && *delivery_deadline_unix_ms <= certificate.not_after_unix_ms
+                    && approved_at_unix_ms.is_none_or(|value| to_i64(value).is_ok())
                     && to_i64(*decided_at_unix_ms).is_ok()
                     && to_i64(*delivery_deadline_unix_ms).is_ok()
             }
@@ -3027,6 +3042,7 @@ impl StoredAuthorizationState {
                 receipt,
                 approver,
                 certificate,
+                approved_at_unix_ms,
                 ..
             } => {
                 let receipt_valid = receipt.authorization_id == *authorization_id
@@ -3046,7 +3062,9 @@ impl StoredAuthorizationState {
                     }
                     _ => false,
                 };
-                receipt_valid && snapshot_valid
+                receipt_valid
+                    && snapshot_valid
+                    && approved_at_unix_ms.is_none_or(|value| to_i64(value).is_ok())
             }
             Self::RetirementPending {
                 approver,
@@ -3184,6 +3202,7 @@ impl StoredAuthorizationState {
             Self::DeliveryPending {
                 approval_id,
                 approver,
+                approved_at_unix_ms,
                 decided_at_unix_ms,
                 certificate,
                 delivery_id,
@@ -3192,6 +3211,7 @@ impl StoredAuthorizationState {
             } => DeviceAuthorizationState::DeliveryPending {
                 approval_id,
                 approver: approver.into_domain()?,
+                approved_at_unix_ms,
                 decided_at_unix_ms,
                 certificate: certificate.into_domain(),
                 delivery_id,
@@ -3201,11 +3221,13 @@ impl StoredAuthorizationState {
             Self::Delivered {
                 approval_id,
                 receipt,
+                approved_at_unix_ms,
                 approver,
                 certificate,
             } => DeviceAuthorizationState::Delivered {
                 approval_id,
                 receipt: receipt.into(),
+                approved_at_unix_ms,
                 approver: approver.map(StoredIdentity::into_domain).transpose()?,
                 certificate: certificate.map(StoredCertificate::into_domain),
             },
