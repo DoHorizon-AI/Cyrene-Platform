@@ -20,6 +20,7 @@ use openssl::nid::Nid;
 use openssl::pkey::{Id, PKey};
 use openssl::x509::X509Req;
 use sha2::{Digest, Sha256};
+use x509_parser::asn1_rs::ToDer;
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::cri_attributes::ParsedCriAttribute;
 use x509_parser::prelude::FromDer;
@@ -255,11 +256,32 @@ fn rsa_pss_parameters_are_strong(signature: &AlgorithmIdentifier<'_>) -> Result<
     let Some(mask_generation) = pss.mask_gen_algorithm_raw() else {
         return Ok(false);
     };
-    let mask_hash_oid = oid_parameter(mask_generation);
+    let mask_hash_oid = mask_generation_hash_oid(mask_generation);
     Ok(mask_generation.algorithm.to_id_string() == OID_MGF1
         && mask_hash_oid.as_deref() == Some(hash_oid.as_str())
         && pss.salt_length() == hash_size
         && pss.trailer_field() == 1)
+}
+
+fn mask_generation_hash_oid(algorithm: &AlgorithmIdentifier<'_>) -> Option<String> {
+    if algorithm.algorithm.to_id_string() != OID_MGF1 {
+        return None;
+    }
+    let parameters = algorithm.parameters.as_ref()?;
+    if !parameters.header.is_universal()
+        || !parameters.header.is_constructed()
+        || parameters.tag().0 != 16
+    {
+        return None;
+    }
+
+    // id-mgf1 parameters encode a nested HashAlgorithm AlgorithmIdentifier SEQUENCE.
+    let encoded_parameters = parameters.to_der_vec().ok()?;
+    let (remaining, hash_algorithm) = AlgorithmIdentifier::from_der(&encoded_parameters).ok()?;
+    if !remaining.is_empty() || !hash_parameters_are_canonical(&hash_algorithm) {
+        return None;
+    }
+    Some(hash_algorithm.algorithm.to_id_string())
 }
 
 fn pss_fields_are_canonical(mut fields: &[u8]) -> bool {
