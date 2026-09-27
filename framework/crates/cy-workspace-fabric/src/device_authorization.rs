@@ -1048,6 +1048,18 @@ pub trait DeviceAuthorizationStore: Send + Sync {
     ) -> Result<(), DeviceAuthorizationStoreError> {
         Err(DeviceAuthorizationStoreError::Unavailable)
     }
+    /// Reserves `VerifyingWebAuthn -> Issuing` only while the exact approver
+    /// membership row for the authorization's organization and workspace is
+    /// locked in the same transaction as the revision and registration CAS.
+    /// Returns `Ok(false)` when that membership is no longer present. The
+    /// default deliberately fails closed for stores without this fence.
+    fn compare_and_swap_registered_issuance(
+        &self,
+        _expected_revision: u64,
+        _replacement: DeviceAuthorizationRecord,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        Err(DeviceAuthorizationStoreError::Unavailable)
+    }
     /// Commits `DeliveryPending -> Delivered` only if the current stored
     /// deadline is still open. Durable adapters must check database time and
     /// perform this transition in one transaction; caller time alone is not
@@ -1324,7 +1336,7 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
-        self.compare_and_swap_inner(expected_revision, replacement, false, false)
+        self.compare_and_swap_inner(expected_revision, replacement, false, false, false)
     }
 
     fn compare_and_swap_due_delivery_to_retirement(
@@ -1375,7 +1387,18 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
-        self.compare_and_swap_inner(expected_revision, replacement, false, true)
+        self.compare_and_swap_inner(expected_revision, replacement, false, true, false)
+    }
+
+    fn compare_and_swap_registered_issuance(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        // This store is a deterministic state-machine fixture without a
+        // Directory database; successful CAS models an authorized fixture.
+        self.compare_and_swap_inner(expected_revision, replacement, false, true, true)
+            .map(|()| true)
     }
 
     fn compare_and_swap_delivery_ack(
@@ -1383,7 +1406,7 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
-        self.compare_and_swap_inner(expected_revision, replacement, true, false)
+        self.compare_and_swap_inner(expected_revision, replacement, true, false, false)
     }
 
     fn compare_and_swap_registered_delivery_ack(
@@ -1391,7 +1414,7 @@ impl DeviceAuthorizationStore for InMemoryDeviceAuthorizationStore {
         expected_revision: u64,
         replacement: DeviceAuthorizationRecord,
     ) -> Result<(), DeviceAuthorizationStoreError> {
-        self.compare_and_swap_inner(expected_revision, replacement, true, true)
+        self.compare_and_swap_inner(expected_revision, replacement, true, true, false)
     }
 }
 
@@ -1402,6 +1425,7 @@ impl InMemoryDeviceAuthorizationStore {
         replacement: DeviceAuthorizationRecord,
         delivery_ack: bool,
         registered: bool,
+        membership_fenced_issuance: bool,
     ) -> Result<(), DeviceAuthorizationStoreError> {
         let mut records = self
             .records
@@ -1441,6 +1465,29 @@ impl InMemoryDeviceAuthorizationStore {
             || current.registration_binding != replacement.registration_binding
         {
             return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+        if membership_fenced_issuance {
+            let valid_issuance_reservation = match (&current.state, &replacement.state) {
+                (
+                    DeviceAuthorizationState::VerifyingWebAuthn {
+                        approval_id: current_approval_id,
+                        approver: current_approver,
+                        ..
+                    },
+                    DeviceAuthorizationState::Issuing {
+                        approval_id: replacement_approval_id,
+                        approver: replacement_approver,
+                        ..
+                    },
+                ) => {
+                    current_approval_id == replacement_approval_id
+                        && current_approver == replacement_approver
+                }
+                _ => false,
+            };
+            if !valid_issuance_reservation {
+                return Err(DeviceAuthorizationStoreError::Conflict);
+            }
         }
         if delivery_ack {
             let valid_ack_transition = match (&current.state, &replacement.state) {
@@ -2654,22 +2701,29 @@ where
                 } if current == approval_id => return Ok(record),
                 state => return Err(state_error(state)),
             }
-            match self.replace(record.clone()) {
-                Ok(()) => {
-                    record.revision = record
-                        .revision
-                        .checked_add(1)
-                        .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+            // This reservation is the approval linearization point. Durable
+            // stores must serialize it against exact-scope membership revoke;
+            // the lock ends at commit and does not cover the external CA call.
+            let expected_revision = record.revision;
+            record.revision = expected_revision
+                .checked_add(1)
+                .ok_or(DeviceAuthorizationError::RevisionExhausted)?;
+            match self
+                .store
+                .compare_and_swap_registered_issuance(expected_revision, record.clone())
+            {
+                Ok(true) => {
                     return Ok(record);
                 }
-                Err(DeviceAuthorizationError::ConcurrentTransition) => {
+                Ok(false) => return Err(DeviceAuthorizationError::MembershipRequired),
+                Err(DeviceAuthorizationStoreError::Conflict) => {
                     record = self
                         .store
                         .by_device_code_hash(&record.device_code_hash)
                         .map_err(map_store_error)?
                         .ok_or(DeviceAuthorizationError::ConcurrentTransition)?;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(map_store_error(error)),
             }
         }
         Err(DeviceAuthorizationError::ConcurrentTransition)
@@ -2688,6 +2742,9 @@ where
             } => (*approval_id, approver.clone(), *issued_at_unix_ms),
             state => return Err(state_error(state)),
         };
+        // Membership was serialized with the durable Issuing reservation, but
+        // that transaction has ended; a later membership revoke does not
+        // cancel this already-reserved external CA operation.
         let certificate = match ports.issue_device_certificate(
             &record.id,
             &record.registration_binding,

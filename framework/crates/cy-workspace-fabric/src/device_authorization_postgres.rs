@@ -392,6 +392,18 @@ impl DeviceAuthorizationStore for PostgresDeviceAuthorizationStore {
         )
     }
 
+    fn compare_and_swap_registered_issuance(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> StoreResult<bool> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(
+            Command::CompareAndSwapRegisteredIssuance(expected_revision, replacement, reply),
+            result,
+        )
+    }
+
     fn compare_and_swap_delivery_ack(
         &self,
         expected_revision: u64,
@@ -477,6 +489,7 @@ enum Command {
     CompareAndSwap(u64, DeviceAuthorizationRecord, StoreReply<()>),
     CompareAndSwapDueDeliveryToRetirement(u64, DeviceAuthorizationRecord, StoreReply<bool>),
     CompareAndSwapRegistered(u64, DeviceAuthorizationRecord, StoreReply<()>),
+    CompareAndSwapRegisteredIssuance(u64, DeviceAuthorizationRecord, StoreReply<bool>),
     CompareAndSwapDeliveryAck(u64, DeviceAuthorizationRecord, StoreReply<()>),
     CompareAndSwapRegisteredDeliveryAck(u64, DeviceAuthorizationRecord, StoreReply<()>),
     ExpiredRecords(u64, usize, StoreReply<Vec<DeviceAuthorizationRecord>>),
@@ -587,6 +600,13 @@ fn worker_main(
                     true,
                 )));
             }
+            Command::CompareAndSwapRegisteredIssuance(expected, replacement, reply) => {
+                let _ = reply.send(runtime.block_on(compare_and_swap_registered_issuance(
+                    &pool,
+                    expected,
+                    &replacement,
+                )));
+            }
             Command::CompareAndSwapDeliveryAck(expected, replacement, reply) => {
                 let _ = reply.send(runtime.block_on(compare_and_swap(
                     &pool,
@@ -677,6 +697,34 @@ async fn initialize_pool(options: PgConnectOptions, apply_migrations: bool) -> S
         .fetch_all(&pool)
         .await
         .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        let membership_fence_ready = sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(( \
+                 SELECT p.prorettype = 'boolean'::regtype \
+                    AND p.prosecdef \
+                    AND p.proowner = to_regrole( \
+                        'cyrene_workspace_device_approval_fence_owner'\
+                    )::oid \
+                    AND p.proconfig @> ARRAY['search_path=pg_catalog'] \
+                    AND has_schema_privilege( \
+                        current_user, \
+                        'cyrene_workspace_device_authorization', \
+                        'USAGE' \
+                    ) \
+                    AND has_function_privilege(current_user, p.oid, 'EXECUTE') \
+                 FROM pg_catalog.pg_proc AS p \
+                 WHERE p.oid = to_regprocedure( \
+                    'cyrene_workspace_device_authorization.lock_approval_membership( \
+                        text, text, text, text\
+                    )'\
+                 ) \
+             ), FALSE)",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| DeviceAuthorizationStoreError::Unavailable)?;
+        if !membership_fence_ready {
+            return Err(DeviceAuthorizationStoreError::Unavailable);
+        }
     }
     Ok(pool)
 }
@@ -1842,6 +1890,52 @@ fn next_retirement_retry_schedule(
     ))
 }
 
+fn valid_membership_fenced_issuance_transition(
+    current: &DeviceAuthorizationRecord,
+    replacement: &DeviceAuthorizationRecord,
+) -> bool {
+    match (&current.state, &replacement.state) {
+        (
+            DeviceAuthorizationState::VerifyingWebAuthn {
+                approval_id: current_approval_id,
+                approver: current_approver,
+                ..
+            },
+            DeviceAuthorizationState::Issuing {
+                approval_id: replacement_approval_id,
+                approver: replacement_approver,
+                ..
+            },
+        ) => {
+            current_approval_id == replacement_approval_id
+                && current_approver == replacement_approver
+        }
+        _ => false,
+    }
+}
+
+/// Locks the exact persisted approver membership until this transaction ends.
+/// Membership revoke takes `FOR UPDATE` on the same row, so whichever lock is
+/// acquired first determines whether this Issuing reservation can commit.
+async fn lock_approval_membership(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    approver: &UserIdentityRef,
+    scope: &DeviceAuthorizationScope,
+) -> StoreResult<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT cyrene_workspace_device_authorization.lock_approval_membership(\
+             $1, $2, $3, $4\
+         )",
+    )
+    .bind(&approver.issuer)
+    .bind(&approver.subject)
+    .bind(&scope.organization_id)
+    .bind(&scope.workspace_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_database_error)
+}
+
 async fn compare_and_swap(
     pool: &PgPool,
     expected_revision: u64,
@@ -1849,6 +1943,34 @@ async fn compare_and_swap(
     delivery_ack: bool,
     registered: bool,
 ) -> StoreResult<()> {
+    compare_and_swap_inner(
+        pool,
+        expected_revision,
+        replacement,
+        delivery_ack,
+        registered,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn compare_and_swap_registered_issuance(
+    pool: &PgPool,
+    expected_revision: u64,
+    replacement: &DeviceAuthorizationRecord,
+) -> StoreResult<bool> {
+    compare_and_swap_inner(pool, expected_revision, replacement, false, true, true).await
+}
+
+async fn compare_and_swap_inner(
+    pool: &PgPool,
+    expected_revision: u64,
+    replacement: &DeviceAuthorizationRecord,
+    delivery_ack: bool,
+    registered: bool,
+    report_missing_issuance_membership: bool,
+) -> StoreResult<bool> {
     let Some(next_revision) = expected_revision.checked_add(1) else {
         return Err(DeviceAuthorizationStoreError::Conflict);
     };
@@ -1892,6 +2014,35 @@ async fn compare_and_swap(
     }
     if current.revision != expected_revision || !same_immutable_fields(&current, replacement) {
         return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    let is_issuance_transition = matches!(
+        (&current.state, &replacement.state),
+        (
+            DeviceAuthorizationState::VerifyingWebAuthn { .. },
+            DeviceAuthorizationState::Issuing { .. }
+        )
+    );
+    if is_issuance_transition && !registered {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    if report_missing_issuance_membership && !is_issuance_transition {
+        return Err(DeviceAuthorizationStoreError::Conflict);
+    }
+    if is_issuance_transition {
+        if !valid_membership_fenced_issuance_transition(&current, replacement) {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        }
+        let DeviceAuthorizationState::VerifyingWebAuthn { approver, .. } = &current.state else {
+            return Err(DeviceAuthorizationStoreError::Conflict);
+        };
+        if !lock_approval_membership(&mut transaction, approver, &current.scope).await? {
+            transaction.rollback().await.map_err(map_database_error)?;
+            return if report_missing_issuance_membership {
+                Ok(false)
+            } else {
+                Err(DeviceAuthorizationStoreError::Conflict)
+            };
+        }
     }
     if delivery_ack {
         if !valid_delivery_ack_transition(&current, replacement) {
@@ -1984,7 +2135,8 @@ async fn compare_and_swap(
     if update.rows_affected() != 1 {
         return Err(DeviceAuthorizationStoreError::Conflict);
     }
-    transaction.commit().await.map_err(map_database_error)
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(true)
 }
 
 async fn compare_and_swap_due_delivery_to_retirement(

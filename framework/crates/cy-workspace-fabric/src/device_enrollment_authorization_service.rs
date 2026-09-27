@@ -211,6 +211,14 @@ where
         (**self).compare_and_swap_registered(expected_revision, replacement)
     }
 
+    fn compare_and_swap_registered_issuance(
+        &self,
+        expected_revision: u64,
+        replacement: DeviceAuthorizationRecord,
+    ) -> Result<bool, DeviceAuthorizationStoreError> {
+        (**self).compare_and_swap_registered_issuance(expected_revision, replacement)
+    }
+
     fn compare_and_swap_delivery_ack(
         &self,
         expected_revision: u64,
