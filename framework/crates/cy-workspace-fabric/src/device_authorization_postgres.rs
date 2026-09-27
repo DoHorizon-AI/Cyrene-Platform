@@ -1925,15 +1925,19 @@ async fn compare_and_swap(
                 (attempt_count, Some(next_attempt_at))
             }
             (
-                DeviceAuthorizationState::RetirementPending { .. },
-                DeviceAuthorizationState::RetirementPending { .. },
+                current_state @ DeviceAuthorizationState::RetirementPending { .. },
+                replacement_state @ DeviceAuthorizationState::RetirementPending { .. },
             ) if registered => {
-                let database_now_unix_ms = database_time_in_transaction(&mut transaction).await?;
-                let next_attempt_at = current_retirement_next_attempt_at_unix_ms
-                    .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
-                if from_i64(next_attempt_at)? > database_now_unix_ms {
+                // Registered Pending -> Pending is only used to persist poll
+                // metadata. Keep the retirement payload and retry schedule
+                // unchanged; `try_retirement` checks due state before any CA call.
+                // 已注册的 Pending -> Pending 仅用于保存 poll 元数据；保留撤销状态和重试计划，
+                // 所有 CA 调用仍由 try_retirement 的到期检查统一拦截。
+                if current_state != replacement_state {
                     return Err(DeviceAuthorizationStoreError::Conflict);
                 }
+                let next_attempt_at = current_retirement_next_attempt_at_unix_ms
+                    .ok_or(DeviceAuthorizationStoreError::Unavailable)?;
                 (current_retirement_attempt_count, Some(next_attempt_at))
             }
             (
