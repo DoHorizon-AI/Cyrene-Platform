@@ -333,6 +333,34 @@ impl Drop for PostgresRelayDispatchFence {
 
 impl WorkspaceDeviceDispatchFence for PostgresRelayDispatchFence {}
 
+/// Checked-out pool connection retained by the Registry worker between dispatch lock and release.
+///
+/// Normal paths consume it with an explicit close inside the Tokio runtime. If the worker
+/// unwinds unexpectedly while retaining the connection, the fallback Drop enters that runtime
+/// before dropping PoolConnection so SQLx can safely schedule its return-to-pool cleanup.
+struct RuntimeFenceConnection {
+    connection: Option<PoolConnection<Postgres>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl RuntimeFenceConnection {
+    fn new(connection: PoolConnection<Postgres>, runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            connection: Some(connection),
+            runtime,
+        }
+    }
+}
+
+impl Drop for RuntimeFenceConnection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            let _runtime_context = self.runtime.enter();
+            drop(connection);
+        }
+    }
+}
+
 fn to_directory_error(error: DeviceRegistryPostgresError) -> WorkspaceDirectoryError {
     match error {
         DeviceRegistryPostgresError::Configuration | DeviceRegistryPostgresError::Unavailable => {
@@ -392,7 +420,7 @@ fn worker_main(
         return;
     }
 
-    let mut active_fence: Option<(u64, PoolConnection<Postgres>)> = None;
+    let mut active_fence: Option<(u64, RuntimeFenceConnection)> = None;
     let mut next_fence_id = 1_u64;
     loop {
         if let Some((active_id, _)) = active_fence.as_ref() {
@@ -402,20 +430,19 @@ fn worker_main(
                 Ok(RegistryWorkerControl::ReleaseDispatchFence(released_id))
                     if released_id == *active_id =>
                 {
-                    if let Some((_, mut connection)) = active_fence.take() {
-                        let committed =
-                            runtime.block_on(finish_dispatch_fence(&mut connection, true));
-                        if !committed {
-                            let _ = runtime.block_on(connection.close());
-                        }
+                    if let Some((_, connection)) = active_fence.take() {
+                        // PoolConnection::drop schedules asynchronous return-to-pool work and
+                        // must not run on this plain worker thread. Close explicitly inside the
+                        // runtime whether COMMIT succeeded or failed.
+                        let _ = runtime.block_on(finish_and_close_dispatch_fence(connection, true));
                         active_fences.fetch_sub(1, Ordering::Release);
                     }
                 }
                 Ok(RegistryWorkerControl::ReleaseDispatchFence(_)) => {}
                 Err(_) => {
-                    if let Some((_, mut connection)) = active_fence.take() {
-                        let _ = runtime.block_on(finish_dispatch_fence(&mut connection, false));
-                        let _ = runtime.block_on(connection.close());
+                    if let Some((_, connection)) = active_fence.take() {
+                        let _ =
+                            runtime.block_on(finish_and_close_dispatch_fence(connection, false));
                         active_fences.fetch_sub(1, Ordering::Release);
                     }
                     return;
@@ -457,11 +484,11 @@ fn worker_main(
             Command::AcquireRelayDispatchFence(expected, mut fence, reply) => {
                 match runtime.block_on(acquire_relay_dispatch_fence(&pool, &expected)) {
                     Ok(Some(connection)) => {
+                        let connection =
+                            RuntimeFenceConnection::new(connection, runtime.handle().clone());
                         let Some(next_id) = next_fence_id.checked_add(1) else {
-                            let mut connection = connection;
-                            if !runtime.block_on(finish_dispatch_fence(&mut connection, false)) {
-                                let _ = runtime.block_on(connection.close());
-                            }
+                            let _ = runtime
+                                .block_on(finish_and_close_dispatch_fence(connection, false));
                             let _ = reply.send(Err(DeviceRegistryPostgresError::Unavailable));
                             continue;
                         };
@@ -534,29 +561,48 @@ async fn acquire_relay_dispatch_fence(
             let admitted: bool = match row.try_get("admitted") {
                 Ok(admitted) => admitted,
                 Err(_) => {
-                    if !finish_dispatch_fence(&mut connection, false).await {
-                        let _ = connection.close().await;
-                    }
+                    let _ = finish_and_close_pool_connection(connection, false).await;
                     return Err(DeviceRegistryPostgresError::Unavailable);
                 }
             };
             if admitted {
                 Ok(Some(connection))
             } else {
-                if !finish_dispatch_fence(&mut connection, true).await {
-                    let _ = connection.close().await;
+                if !finish_and_close_pool_connection(connection, true).await {
                     return Err(DeviceRegistryPostgresError::Unavailable);
                 }
                 Ok(None)
             }
         }
         Err(_) => {
-            if !finish_dispatch_fence(&mut connection, false).await {
-                let _ = connection.close().await;
-            }
+            let _ = finish_and_close_pool_connection(connection, false).await;
             Err(DeviceRegistryPostgresError::Unavailable)
         }
     }
+}
+
+async fn finish_and_close_dispatch_fence(
+    mut connection: RuntimeFenceConnection,
+    commit: bool,
+) -> bool {
+    let Some(pool_connection) = connection.connection.as_mut() else {
+        return false;
+    };
+    let finished = finish_dispatch_fence(pool_connection, commit).await;
+    let Some(pool_connection) = connection.connection.take() else {
+        return false;
+    };
+    let closed = pool_connection.close().await.is_ok();
+    finished && closed
+}
+
+async fn finish_and_close_pool_connection(
+    mut connection: PoolConnection<Postgres>,
+    commit: bool,
+) -> bool {
+    let finished = finish_dispatch_fence(&mut connection, commit).await;
+    let closed = connection.close().await.is_ok();
+    finished && closed
 }
 
 async fn finish_dispatch_fence(connection: &mut PoolConnection<Postgres>, commit: bool) -> bool {
