@@ -335,9 +335,10 @@ impl WorkspaceDeviceDispatchFence for PostgresRelayDispatchFence {}
 
 /// Checked-out pool connection retained by the Registry worker between dispatch lock and release.
 ///
-/// Normal paths consume it with an explicit close inside the Tokio runtime. If the worker
-/// unwinds unexpectedly while retaining the connection, the fallback Drop enters that runtime
-/// before dropping PoolConnection so SQLx can safely schedule its return-to-pool cleanup.
+/// Normal paths consume it by explicitly returning committed connections or closing failed ones
+/// inside the Tokio runtime. If the worker unwinds unexpectedly while retaining the connection,
+/// the fallback Drop enters that runtime before dropping PoolConnection so SQLx can safely
+/// schedule its return-to-pool cleanup.
 struct RuntimeFenceConnection {
     connection: Option<PoolConnection<Postgres>>,
     runtime: tokio::runtime::Handle,
@@ -431,10 +432,10 @@ fn worker_main(
                     if released_id == *active_id =>
                 {
                     if let Some((_, connection)) = active_fence.take() {
-                        // PoolConnection::drop schedules asynchronous return-to-pool work and
-                        // must not run on this plain worker thread. Close explicitly inside the
-                        // runtime whether COMMIT succeeded or failed.
-                        let _ = runtime.block_on(finish_and_close_dispatch_fence(connection, true));
+                        // Return explicitly while the worker runtime is driving SQLx. The
+                        // connection then has no live checkout lease, so its later Drop cannot
+                        // schedule pool work from this plain worker thread.
+                        let _ = runtime.block_on(finish_and_return_dispatch_fence(connection));
                         active_fences.fetch_sub(1, Ordering::Release);
                     }
                 }
@@ -526,9 +527,13 @@ async fn acquire_relay_dispatch_fence(
     let fingerprint = unhex_32(&expected.certificate_fingerprint_sha256)
         .ok_or(DeviceRegistryPostgresError::Unavailable)?;
     let binding_id = Uuid::from_bytes(expected.registration_binding_id);
-    let mut connection = pool
-        .try_acquire()
-        .ok_or(DeviceRegistryPostgresError::Unavailable)?;
+    // An earlier ordinary query may have dropped its PoolConnection and queued
+    // SQLx's asynchronous return-to-pool task just before this command arrived.
+    // Await acquisition so the runtime can drive that task; keep the wait bounded.
+    let mut connection = tokio::time::timeout(DATABASE_TIMEOUT, pool.acquire())
+        .await
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)?
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
     if sqlx::query("BEGIN")
         .execute(&mut *connection)
         .await
@@ -596,6 +601,24 @@ async fn finish_and_close_dispatch_fence(
     finished && closed
 }
 
+async fn finish_and_return_dispatch_fence(mut connection: RuntimeFenceConnection) -> bool {
+    let finished = match connection.connection.as_mut() {
+        Some(pool_connection) => finish_dispatch_fence(pool_connection, true).await,
+        None => return false,
+    };
+    if !finished {
+        if let Some(pool_connection) = connection.connection.take() {
+            let _ = pool_connection.close().await;
+        }
+        return false;
+    }
+    let Some(pool_connection) = connection.connection.as_mut() else {
+        return false;
+    };
+    pool_connection.return_to_pool().await;
+    true
+}
+
 async fn finish_and_close_pool_connection(
     mut connection: PoolConnection<Postgres>,
     commit: bool,
@@ -626,6 +649,7 @@ async fn initialize_pool(
 ) -> RegistryResult<PgPool> {
     let connect = PgPoolOptions::new()
         .max_connections(1)
+        .min_connections(0)
         .acquire_timeout(DATABASE_TIMEOUT)
         .after_connect(|connection, _| {
             Box::pin(async move {
