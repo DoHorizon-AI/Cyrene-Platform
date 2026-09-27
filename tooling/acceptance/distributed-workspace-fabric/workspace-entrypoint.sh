@@ -78,18 +78,17 @@ CYRENE_RUNTIME_CONTROL_TRACE=/state/runtime-control.trace \
 /runtime/cy-workspace-fabric-fixture connector &
 connector_pid=$!
 
-# Start the Runtime Agent after Workspace routing is ready. The control
-# fixture issues a short lease when the Agent enrolls; Relay discovery must
-# not consume that lease while the container waits for its private address.
-# 在 Workspace 路由就绪后启动 Runtime Agent，避免等待发现私网地址时耗尽短租约。
-for _ in $(seq 1 450); do
+# Start the Runtime Agent after the private direct endpoint is ready. Relay
+# device authentication remains fail-closed until its trust providers exist.
+# 在私网直连端点就绪后启动 Runtime Agent；Relay 设备认证会保持 fail-closed。
+for _ in $(seq 1 200); do
   if [[ -f /state/workspace-connector.trace ]] &&
-     grep -q WORKSPACE_RELAY_CONNECTED /state/workspace-connector.trace; then
+     grep -q WORKSPACE_DIRECT_STARTED /state/workspace-connector.trace; then
     break
   fi
-  sleep 0.1
+  sleep 0.05
 done
-grep -q WORKSPACE_RELAY_CONNECTED /state/workspace-connector.trace
+grep -q WORKSPACE_DIRECT_STARTED /state/workspace-connector.trace
 
 # The Runtime Agent receives only its Node/workload enrollment scope. It does
 # not inherit the frontend or Workspace relay session credentials.

@@ -2,18 +2,30 @@
 
 This TCK freezes the authority boundaries and observable outcomes of
 identity-based Workspace discovery, transport-neutral connection selection,
-direct-first private access with Relay fallback. `scenarios.tsv` is the language-neutral matrix;
-Rust unit tests and the real Docker relay acceptance are executable adapters.
+direct-first private access and Relay fallback semantics. `scenarios.tsv` is the language-neutral matrix.
+The executable Docker proof covers Relay discovery, fail-closed Connector admission,
+private direct access, Runtime Agent, and Artifact transfer. Positive Workspace Connector
+traffic through Relay remains unimplemented until certificate validation, revocation,
+and current Registry binding are composed.
+
+The proof records the Workspace-device peer validator, signed current revocation, current
+Registry binding validation, and the dispatch fence as `NOT_CONFIGURED`. TLS client
+certificate trust remains configured. The observed Connector denial occurs at the first
+missing application-level validator gate; later gates are not exercised independently.
 
 本 TCK 冻结基于身份的 Workspace 发现、transport-neutral 连接选择、私网直连优先与 Relay 回退的
-远程访问的权威边界与可观察结果。`scenarios.tsv` 是跨语言矩阵，Rust 单元测试与
-真实 Docker Relay acceptance 是其可执行 adapter。
+远程访问的权威边界与可观察结果。`scenarios.tsv` 是跨语言矩阵。Docker proof 会验证
+Relay discovery、Connector fail-closed admission、私网直连、Runtime Agent 与 Artifact transfer。
+Workspace Connector 经 Relay 传输的正向路径仍未实现，需先组合证书验证、撤销检查和当前 Registry binding。
+Proof 会记录 Workspace-device peer validator、签名的当前撤销证据、当前 Registry binding
+validation 和 dispatch fence 均为 `NOT_CONFIGURED`。TLS client-certificate trust 仍然配置。
+观察到的 Connector 拒绝发生在首个缺失的应用层 validator gate；后续 gate 不会被单独执行。
 
 Run:
 
 ```bash
 bash tooling/ci/check-distributed-workspace-fabric.sh
-bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh
+bash tooling/acceptance/distributed-workspace-fabric/run-workspace-fail-closed-proof.sh
 ```
 
 The Docker proof is mandatory for release acceptance. A Docker/WSL transport
@@ -59,13 +71,13 @@ runs have already passed.
 
 # Distributed Workspace Fabric v1 TCK
 
-此 TCK 冻结基于身份的 Workspace 发现、与 transport 无关的连接选择、私网直连优先和 Relay 回退的 authority 边界与可观测结果。`scenarios.tsv` 是跨语言矩阵；Rust 单元测试和真实 Docker 验收是可执行 adapter。
+此 TCK 冻结基于身份的 Workspace 发现、与 transport 无关的连接选择、私网直连优先和 Relay 回退语义的 authority 边界与可观察结果。`scenarios.tsv` 是跨语言矩阵。Docker proof 会验证 Relay discovery、Connector fail-closed admission、私网直连、Runtime Agent 与 Artifact transfer。Workspace Connector 经 Relay 传输的正向路径仍未实现，需先接通证书验证、撤销检查和当前 Registry binding。Proof 会记录 Workspace-device peer validator、签名的当前撤销证据、当前 Registry binding validation 和 dispatch fence 均为 `NOT_CONFIGURED`；TLS client-certificate trust 仍然配置。观察到的 Connector 拒绝发生在首个缺失的应用层 validator gate，后续 gate 不会被单独执行。
 
 运行：
 
 ```bash
 bash tooling/ci/check-distributed-workspace-fabric.sh
-bash tooling/acceptance/distributed-workspace-fabric/run-relay-proof.sh
+bash tooling/acceptance/distributed-workspace-fabric/run-workspace-fail-closed-proof.sh
 ```
 
 发布验收必须执行 Docker proof。Docker/WSL transport 故障只能报告 blocker，不得转换成 skip 或 fake pass。

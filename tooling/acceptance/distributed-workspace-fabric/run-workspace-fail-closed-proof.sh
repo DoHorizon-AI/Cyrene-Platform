@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ┌─────────────────────────────────────────────────────────────────────┐
-# │  📄 run-relay-proof.sh                                              │
-# │  Role: Real distributed Workspace discovery and relay proof.        │
+# │  📄 run-workspace-fail-closed-proof.sh                              │
+# │  Role: Workspace direct, runtime, artifact, and Relay denial proof.  │
 # │                                                                     │
-# │  脚本职责：真实 Workspace 发现、Relay、Execution 与 Artifact 纵向验收。   │
+# │  脚本职责：验收 Workspace 直连、Runtime、Artifact 与 Relay 拒绝策略。    │
 # └─────────────────────────────────────────────────────────────────────┘
 
 set -euo pipefail
@@ -186,8 +186,15 @@ workspace_private_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.
 test -n "${workspace_private_ip}"
 start_relay
 wait_for 'relay startup' "kill -0 '${relay_pid}' && grep -q RELAY_STARTED '${proof_root}/relay.trace'"
+wait_for 'Workspace Connector trust providers are explicitly unconfigured' \
+  "grep -qF 'RELAY_CONNECTOR_TRUST_PIPELINE workspace_device_peer_certificate_validator=NOT_CONFIGURED signed_current_revocation=NOT_CONFIGURED current_registry_binding_validation=NOT_CONFIGURED dispatch_fence=NOT_CONFIGURED' '${proof_root}/relay.trace'"
 wait_for 'private Workspace endpoint' "test -f '${proof_root}/state/workspace-connector.trace' && grep -q WORKSPACE_DIRECT_STARTED '${proof_root}/state/workspace-connector.trace'"
-wait_for 'outbound Workspace relay registration' "grep -q WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace'"
+wait_for 'unconfigured Workspace peer validation rejects the connector' \
+  "grep -q WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED '${proof_root}/state/workspace-connector.trace'"
+if grep -q WORKSPACE_RELAY_CONNECTED "${proof_root}/state/workspace-connector.trace"; then
+  printf '%s\n' 'Relay accepted a Workspace connector without peer validation' >&2
+  exit 1
+fi
 run_frontend frontend-start > "${proof_root}/frontend-start.out"
 grep -q WORKSPACE_DISCOVERED_BY_IDENTITY=PASS "${proof_root}/frontend-start.out"
 grep -q REMOTE_FRONTEND_OPERATION=operation-1@1 "${proof_root}/frontend-start.out"
@@ -197,21 +204,13 @@ wait_for 'Artifact Plane transfer' "test -f '${published_path}' && grep -q RANGE
 wait_for 'Runtime Agent progress' "grep -q 'PROGRESS generation=1 completed=1 total=10 unit=steps' '${proof_root}/state/runtime-control.trace'"
 wait_for 'Runtime Agent control reconnect' "test \$(grep -c 'ENROLLED runtime=runtime-workspace-fixture generation=1' '${proof_root}/state/runtime-control.trace') -ge 2"
 
-kill "${relay_pid}"
-wait "${relay_pid}" 2>/dev/null || true
-relay_pid=""
-wait_for 'Workspace connector detects relay loss' "grep -q WORKSPACE_RELAY_DISCONNECTED '${proof_root}/state/workspace-connector.trace'"
-start_relay
-wait_for 'relay restart' "kill -0 '${relay_pid}' && test \$(grep -c RELAY_STARTED '${proof_root}/relay.trace') -ge 2"
-wait_for 'Workspace connector reconnect' "test \$(grep -c WORKSPACE_RELAY_CONNECTED '${proof_root}/state/workspace-connector.trace') -ge 2"
-
 run_frontend frontend-observe > "${proof_root}/frontend-observe.out"
-grep -q RELAY_DISCONNECT_RECONNECT=PASS "${proof_root}/frontend-observe.out"
-grep -q WORKSPACE_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-observe.out"
+grep -q WORKSPACE_DISCOVERY_OVER_RELAY=PASS "${proof_root}/frontend-observe.out"
+grep -q WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-observe.out"
 grep -q REMOTE_FRONTEND_ARTIFACT="${artifact_uri}" "${proof_root}/frontend-observe.out"
 
 run_frontend frontend-fallback > "${proof_root}/frontend-fallback.out"
-grep -q LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS "${proof_root}/frontend-fallback.out"
+grep -q LAN_DIRECT_UNREACHABLE_RELAY_DENIED=PASS "${proof_root}/frontend-fallback.out"
 
 run_frontend frontend-direct > "${proof_root}/frontend-direct.out" &
 frontend_pid=$!
@@ -225,6 +224,22 @@ frontend_pid=""
 grep -q LAN_DIRECT_NO_RELAY=PASS "${proof_root}/frontend-direct.out"
 grep -q LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS "${proof_root}/frontend-direct.out"
 grep -q WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-direct.out"
+
+relay_peer_validation_denials=$(grep -c WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED \
+  "${proof_root}/state/workspace-connector.trace")
+start_relay
+wait_for 'relay restart' "kill -0 '${relay_pid}' && test \$(grep -c RELAY_STARTED '${proof_root}/relay.trace') -ge 2"
+wait_for 'Relay restart retains the unconfigured Connector trust pipeline' \
+  "test \$(grep -c 'RELAY_CONNECTOR_TRUST_PIPELINE workspace_device_peer_certificate_validator=NOT_CONFIGURED signed_current_revocation=NOT_CONFIGURED current_registry_binding_validation=NOT_CONFIGURED dispatch_fence=NOT_CONFIGURED' '${proof_root}/relay.trace') -ge 2"
+wait_for 'unconfigured Workspace peer validation rejects the connector after restart' \
+  "test \$(grep -c WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED '${proof_root}/state/workspace-connector.trace') -gt ${relay_peer_validation_denials}"
+if grep -q WORKSPACE_RELAY_CONNECTED "${proof_root}/state/workspace-connector.trace"; then
+  printf '%s\n' 'Relay accepted a Workspace connector after restart without peer validation' >&2
+  exit 1
+fi
+run_frontend frontend-observe > "${proof_root}/frontend-restarted-observe.out"
+grep -q WORKSPACE_DISCOVERY_OVER_RELAY=PASS "${proof_root}/frontend-restarted-observe.out"
+grep -q WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS "${proof_root}/frontend-restarted-observe.out"
 
 expected_trace_context='trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7'
 grep -qF "WORKSPACE_API_TRACE request_id=start-operation-1 ${expected_trace_context}" "${proof_root}/state/workspace-connector.trace"
@@ -241,17 +256,20 @@ test "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "${container_name}"
 printf '%s\n' \
   'WORKSPACE_DIRECTORY_MODEL=PASS' \
   'WORKSPACE_CONNECTION_DESCRIPTOR=PASS' \
-  'LOCAL_CONNECTIVITY=PASS' \
-  'RELAY_CONNECTIVITY=PASS' \
+  'WORKSPACE_DISCOVERY_OVER_RELAY=PASS' \
+  'RELAY_CONNECTOR_FAIL_CLOSED=PASS' \
+  'RELAY_CONNECTOR_TRUST_PIPELINE=workspace_device_peer_certificate_validator:NOT_CONFIGURED,signed_current_revocation:NOT_CONFIGURED,current_registry_binding_validation:NOT_CONFIGURED,dispatch_fence:NOT_CONFIGURED' \
+  'RELAY_CONNECTOR_DENIAL_REASON=WORKSPACE_DEVICE_PEER_CERTIFICATE_VALIDATION_NOT_CONFIGURED' \
+  'RELAY_RESTART_FAIL_CLOSED=PASS' \
+  'RELAY_POSITIVE_CONNECTOR_E2E=NOT_CONFIGURED' \
   'LAN_DIRECT_NO_RELAY=PASS' \
   'LAN_DIRECT_INVALID_CREDENTIAL_DENIED=PASS' \
-  'LAN_DIRECT_UNREACHABLE_RELAY_FALLBACK=PASS' \
-  'WORKSPACE_TRACE_CONTEXT_RELAY_DIRECT_CORRELATED=PASS' \
+  'LAN_DIRECT_UNREACHABLE_RELAY_DENIED=PASS' \
+  'WORKSPACE_TRACE_CONTEXT_DIRECT_CORRELATED=PASS' \
   'MANUAL_IP_REQUIRED=NO' \
   'WORKSPACE_INBOUND_PORT_REQUIRED=NO' \
-  'REMOTE_FRONTEND_E2E=PASS' \
-  'RELAY_DISCONNECT_RECONNECT=PASS' \
-  'WORKSPACE_AUTHORITY_PRESERVED=PASS' \
+  'REMOTE_FRONTEND_DIRECT_E2E=PASS' \
+  'WORKSPACE_DIRECT_AUTHORITY_PRESERVED=PASS' \
   'EXECUTION_FABRIC_REUSED=YES' \
   'RUNTIME_AGENT_PROGRESS=PASS' \
   'RUNTIME_CONTROL_RECONNECT=PASS' \
