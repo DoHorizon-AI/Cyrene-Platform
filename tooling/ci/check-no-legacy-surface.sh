@@ -439,11 +439,15 @@ product_http_request_call_count=$(
     '\.(request|execute)[[:space:]]*\(' "$workspace_product_http_source" \
     || true; } | wc -l | tr -d '[:space:]'
 )
+product_http_direct_method_pattern='(Client::new[[:space:]]*\(|(reqwest::|::)(get|post|put|delete|patch)[[:space:]]*\(|\.(get|post|put|delete|patch|execute)[[:space:]]*\()'
+product_http_direct_method_candidates=$(
+  git grep -n -E "$product_http_direct_method_pattern" -- \
+    "$workspace_product_http_source" 2>/dev/null || true
+)
 product_http_direct_method_matches=$(
-  git grep -n -E \
-    '(Client::new[[:space:]]*\(|(reqwest::|::)(get|post|put|delete|patch)[[:space:]]*\(|\.(get|post|put|delete|patch|execute)[[:space:]]*\()' -- \
-    "$workspace_product_http_source" 2>/dev/null \
-    | grep -v -F '.get(CONTENT_TYPE)' || true
+  printf '%s\n' "$product_http_direct_method_candidates" \
+    | sed 's/\.get(CONTENT_TYPE)//g' \
+    | grep -E "$product_http_direct_method_pattern" || true
 )
 product_http_url_overrides=$(
   git grep -n -E 'request[.]url[[:space:]]*=' -- \
