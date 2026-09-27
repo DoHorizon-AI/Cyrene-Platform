@@ -285,7 +285,10 @@ audit rows in one database transaction. Revoking a membership cascades its
 roles and records the removed roles in that transaction. Only the five current
 Product user-command roles can be assigned; membership and workload roles come
 from separate authorities. The audit table rejects UPDATE and DELETE, and the
-reader role has SELECT-only access.
+reader role has SELECT-only access. The operator role has column-level UPDATE
+on `memberships.provisioned_at`, which PostgreSQL requires to use
+`SELECT FOR UPDATE` on membership rows; it has no UPDATE privilege on other
+membership columns.
 
 Configure four separate trusted process URLs:
 
@@ -459,6 +462,7 @@ Relay 只传输 Workspace request。Product、Kernel/Lease、Runtime 和 Artifac
 `PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organizations_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject 并返回候选 organization；无候选或多个候选由调用方拒绝。严格便利方法 `organization_for_verified_identity` 在无映射或多 organization 时返回错误。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它实现 object-safe async `WorkspaceDirectory` port；Relay 和 Direct await 目录读取，并区分存储错误与非成员。适配器可注入这些服务，不使用 `block_on` 或同步数据库调用。Relay host 使用此异步 port，并要求 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`；没有文件存储回退。数据库服务、凭据、TLS 信任、网络路径和部署不会由本 crate 或当前 ACA 模板创建。
 
 迁移创建 `memberships`、`roles`、`descriptors` 和只追加的 `audit_events` 表。Operator 授权/撤销与审计行在同一数据库事务中提交；撤销成员时级联删除其角色，并在同一事务记录被移除角色。仅允许分配当前五种 Product 用户命令角色；成员标记和 workload 角色由其他 authority 管理。审计表拒绝 UPDATE/DELETE，reader 角色仅有 SELECT 权限。
+Operator role 仅对 `memberships.provisioned_at` 具有列级 UPDATE 权限，这是 PostgreSQL 对成员行使用 `SELECT FOR UPDATE` 的要求；其不能 UPDATE 其他成员列。
 
 使用四个独立的可信运行时 URL：
 
