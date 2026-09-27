@@ -48,6 +48,8 @@ pub enum ProblemCode {
     UpstreamUnavailable,
     /// Workspace API request exceeded its deadline.
     UpstreamTimeout,
+    /// A durable device-approval ceremony is no longer in the expected state.
+    StateConflict,
 }
 
 impl ProblemCode {
@@ -68,6 +70,27 @@ impl ProblemCode {
             Self::InvalidUpstreamResponse => "invalid_upstream_response",
             Self::UpstreamUnavailable => "upstream_unavailable",
             Self::UpstreamTimeout => "upstream_timeout",
+            Self::StateConflict => "state_conflict",
+        }
+    }
+
+    /// Contract status associated with this stable problem code.
+    pub const fn status(self) -> StatusCode {
+        match self {
+            Self::Unauthenticated => StatusCode::UNAUTHORIZED,
+            Self::InvalidPrincipal | Self::InvalidRequest | Self::UnsupportedOperation => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::Forbidden | Self::CsrfFailed => StatusCode::FORBIDDEN,
+            Self::WorkspaceNotFound => StatusCode::NOT_FOUND,
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::StateConflict => StatusCode::CONFLICT,
+            Self::InvalidUpstreamResponse => StatusCode::BAD_GATEWAY,
+            Self::UpstreamUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
+            Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
