@@ -18,6 +18,7 @@ use cy_proto::workspace_v1::UserIdentityRef;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
@@ -48,6 +49,11 @@ use crate::user_code_attempt_limiter_postgres::PostgresUserCodeAttemptReservatio
 
 type AuthorizationManager =
     DeviceAuthorizationManager<Arc<PostgresDeviceAuthorizationStore>, RequestScopedLimiter>;
+
+// The authorization Postgres worker has a 32-command queue. Keep anonymous
+// poll work below it so approval and acknowledgement commands retain capacity.
+// This is process-local admission and deliberately stores no per-code state.
+const MAX_CONCURRENT_DEVICE_AUTHORIZATION_POLLS: usize = 8;
 
 /// Non-secret public certificate metadata supplied by a trusted issuer parser.
 /// `issuer_id` must come from the configured issuer authority, and
@@ -225,7 +231,12 @@ where
 /// Full approval runtime. Each constructor argument is mandatory so a partial
 /// or development-only provider cannot silently enable browser approvals.
 pub struct DeviceEnrollmentAuthorizationService {
-    manager: Arc<Mutex<AuthorizationManager>>,
+    /// Immutable coordinator; durable transitions are fenced by storage revisions.
+    manager: Arc<AuthorizationManager>,
+    /// Serializes interactive operations that share the request-scoped attempt slot.
+    manager_gate: Arc<Mutex<()>>,
+    /// Admits only a fixed number of anonymous polls into blocking storage work.
+    poll_admission: Arc<Semaphore>,
     store: Arc<PostgresDeviceAuthorizationStore>,
     attempt_reservation: Arc<PostgresUserCodeAttemptReservation>,
     limiter_state: Arc<Mutex<Option<ReservedAttempt>>>,
@@ -278,7 +289,9 @@ impl DeviceEnrollmentAuthorizationService {
         let (manager, policy) = manager;
 
         Ok(Self {
-            manager: Arc::new(Mutex::new(manager)),
+            manager: Arc::new(manager),
+            manager_gate: Arc::new(Mutex::new(())),
+            poll_admission: Arc::new(Semaphore::new(MAX_CONCURRENT_DEVICE_AUTHORIZATION_POLLS)),
             store,
             attempt_reservation,
             limiter_state,
@@ -1190,6 +1203,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         self.require_member(user, &scope).await?;
 
         let manager = Arc::clone(&self.manager);
+        let manager_gate = Arc::clone(&self.manager_gate);
         let limiter_state = Arc::clone(&self.limiter_state);
         let store = Arc::clone(&self.store);
         let user = user.clone();
@@ -1198,7 +1212,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         let abuse_key = Zeroizing::new(*abuse_key);
         let ports = self.port_handles();
         let result = tokio::task::spawn_blocking(move || {
-            let manager = manager
+            let _manager_gate = manager_gate
                 .lock()
                 .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
             let _installed = install_attempt(&limiter_state, reservation)?;
@@ -1240,6 +1254,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         self.require_member(user, &record.scope).await?;
 
         let manager = Arc::clone(&self.manager);
+        let manager_gate = Arc::clone(&self.manager_gate);
         let store = Arc::clone(&self.store);
         let registry = Arc::clone(&self.registry);
         let webauthn = Arc::clone(&self.webauthn);
@@ -1250,7 +1265,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         let assertion = assertion_json;
         let membership_scope = record.scope.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
-            let manager = manager
+            let _manager_gate = manager_gate
                 .lock()
                 .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
             let now = store
@@ -1300,6 +1315,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
             .map_err(|_| DeviceEnrollmentHttpError::InvalidGrant)?;
 
         let manager = Arc::clone(&self.manager);
+        let manager_gate = Arc::clone(&self.manager_gate);
         let limiter_state = Arc::clone(&self.limiter_state);
         let store = Arc::clone(&self.store);
         let user = user.clone();
@@ -1308,7 +1324,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         let scope_for_membership = scope.clone();
         let response_user = user.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let manager = manager
+            let _manager_gate = manager_gate
                 .lock()
                 .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
             let _installed = install_attempt(&limiter_state, reservation)?;
@@ -1335,6 +1351,9 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
     }
 
     async fn poll(&self, device_code: &str) -> Result<PollHttpResponse, DeviceEnrollmentHttpError> {
+        let admission = Arc::clone(&self.poll_admission)
+            .try_acquire_owned()
+            .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
         let device_code = Zeroizing::new(device_code.to_owned());
         let manager = Arc::clone(&self.manager);
         let store = Arc::clone(&self.store);
@@ -1342,9 +1361,7 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         let retirement = Arc::clone(&self.retirement);
         let certificate_metadata = Arc::clone(&self.certificate_metadata);
         let result = tokio::task::spawn_blocking(move || {
-            let manager = manager
-                .lock()
-                .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
+            let _admission = admission;
             let now = store
                 .database_time_unix_ms()
                 .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
@@ -1403,8 +1420,9 @@ impl DeviceEnrollmentAuthorizationPort for DeviceEnrollmentAuthorizationService 
         let expected_certificate_sha256 = request.certificate_sha256;
         let expected_csr_sha256 = request.csr_sha256;
         let expected_spki_sha256 = request.csr_spki_sha256;
+        let manager_gate = Arc::clone(&self.manager_gate);
         let result = tokio::task::spawn_blocking(move || {
-            let manager = manager
+            let _manager_gate = manager_gate
                 .lock()
                 .map_err(|_| DeviceEnrollmentHttpError::Unavailable)?;
             let clock = DatabaseClock(Arc::clone(&store));
