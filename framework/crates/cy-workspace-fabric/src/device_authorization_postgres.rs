@@ -1588,6 +1588,7 @@ fn due_retirement_entered_at(
             reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
             entered_at_unix_ms,
             last_failure: None,
+            delivered_receipt: None,
         } => (
             approval_id,
             approver,
@@ -1618,6 +1619,8 @@ fn valid_delivery_ack_transition(
         (
             DeviceAuthorizationState::DeliveryPending {
                 approval_id: current_approval_id,
+                approver: current_approver,
+                certificate: current_certificate,
                 delivery_id: current_delivery_id,
                 certificate_sha256: current_certificate_sha256,
                 delivery_deadline_unix_ms,
@@ -1626,9 +1629,13 @@ fn valid_delivery_ack_transition(
             DeviceAuthorizationState::Delivered {
                 approval_id: next_approval_id,
                 receipt,
+                approver: Some(next_approver),
+                certificate: Some(next_certificate),
             },
         ) => {
             current_approval_id == next_approval_id
+                && current_approver == next_approver
+                && current_certificate == next_certificate
                 && receipt.authorization_id == replacement.id
                 && current_delivery_id == &receipt.delivery_id
                 && current_certificate_sha256 == &receipt.certificate_sha256
@@ -1738,6 +1745,7 @@ impl EncodedRecord {
             &record.spki_sha256,
             &record.id,
             &record.csr_sha256,
+            stored_state.format_version(),
         ) || !stored_state.matches_registration(&record.registration_binding)
         {
             return Err(DeviceAuthorizationStoreError::Unavailable);
@@ -1878,9 +1886,13 @@ fn decode_record(row: PgRow) -> StoreResult<DeviceAuthorizationRecord> {
         || wrapper.state.deadline_unix_ms() != state_deadline_unix_ms
         || wrapper.state.delivery_certificate_not_after_unix_ms()
             != delivery_certificate_not_after_unix_ms
-        || !wrapper
-            .state
-            .is_valid(&scope, &spki_sha256, &id, &csr_sha256)
+        || !wrapper.state.is_valid(
+            &scope,
+            &spki_sha256,
+            &id,
+            &csr_sha256,
+            wrapper.format_version,
+        )
         || !wrapper.state.matches_registration(&registration_binding)
     {
         return Err(DeviceAuthorizationStoreError::Unavailable);
@@ -2018,6 +2030,12 @@ enum StoredAuthorizationState {
     Delivered {
         approval_id: DeviceAuthorizationId,
         receipt: StoredDeliveryReceipt,
+        /// Missing only from legacy V2/V3 rows; new ACKs always retain the identity and cert.
+        /// V2/V3 旧记录没有 identity 与 certificate 快照；新 ACK 必须完整保存。
+        #[serde(default)]
+        approver: Option<StoredIdentity>,
+        #[serde(default)]
+        certificate: Option<StoredCertificate>,
     },
     RetirementPending {
         approval_id: DeviceAuthorizationId,
@@ -2025,6 +2043,10 @@ enum StoredAuthorizationState {
         certificate: StoredCertificate,
         certificate_sha256: [u8; 32],
         delivery_id: Option<DeviceAuthorizationId>,
+        /// Present only when an acknowledged certificate is retired by registration rotation.
+        /// 已 ACK 证书因注册轮换而撤销时保留原 delivery receipt。
+        #[serde(default)]
+        delivered_receipt: Option<StoredDeliveryReceipt>,
         reason: StoredRetirementReason,
         entered_at_unix_ms: u64,
         last_failure: Option<StoredRetirementError>,
@@ -2050,6 +2072,18 @@ enum StoredAuthorizationState {
         approver: StoredIdentity,
         decided_at_unix_ms: u64,
         consumed_at_unix_ms: u64,
+    },
+    SupersededForRegistrationRotation {
+        approval_id: Option<DeviceAuthorizationId>,
+        superseded_at_unix_ms: u64,
+    },
+    RegistrationRetired {
+        approval_id: DeviceAuthorizationId,
+        approver: StoredIdentity,
+        receipt: Option<StoredDeliveryReceipt>,
+        delivery_id: Option<DeviceAuthorizationId>,
+        certificate_sha256: [u8; 32],
+        retired_at_unix_ms: u64,
     },
     Expired,
 }
@@ -2103,6 +2137,7 @@ enum StoredRetirementReason {
     MisboundCertificate,
     DeliveryDeadlineReached,
     CertificateExpiredBeforeDelivery,
+    RegistrationRotated,
 }
 
 impl From<DeviceCertificateRetirementReason> for StoredRetirementReason {
@@ -2115,6 +2150,7 @@ impl From<DeviceCertificateRetirementReason> for StoredRetirementReason {
             DeviceCertificateRetirementReason::CertificateExpiredBeforeDelivery => {
                 Self::CertificateExpiredBeforeDelivery
             }
+            DeviceCertificateRetirementReason::RegistrationRotated => Self::RegistrationRotated,
         }
     }
 }
@@ -2127,6 +2163,7 @@ impl From<StoredRetirementReason> for DeviceCertificateRetirementReason {
             StoredRetirementReason::CertificateExpiredBeforeDelivery => {
                 Self::CertificateExpiredBeforeDelivery
             }
+            StoredRetirementReason::RegistrationRotated => Self::RegistrationRotated,
         }
     }
 }
@@ -2418,9 +2455,13 @@ impl StoredAuthorizationState {
             DeviceAuthorizationState::Delivered {
                 approval_id,
                 receipt,
+                approver,
+                certificate,
             } => Self::Delivered {
                 approval_id: *approval_id,
                 receipt: receipt.into(),
+                approver: approver.as_ref().map(StoredIdentity::from_domain),
+                certificate: certificate.as_ref().map(StoredCertificate::from_domain),
             },
             DeviceAuthorizationState::RetirementPending {
                 approval_id,
@@ -2428,6 +2469,7 @@ impl StoredAuthorizationState {
                 certificate,
                 certificate_sha256,
                 delivery_id,
+                delivered_receipt,
                 reason,
                 entered_at_unix_ms,
                 last_failure,
@@ -2437,6 +2479,7 @@ impl StoredAuthorizationState {
                 certificate: StoredCertificate::from_domain(certificate),
                 certificate_sha256: *certificate_sha256,
                 delivery_id: *delivery_id,
+                delivered_receipt: delivered_receipt.as_ref().map(Into::into),
                 reason: (*reason).into(),
                 entered_at_unix_ms: *entered_at_unix_ms,
                 last_failure: last_failure.map(Into::into),
@@ -2481,6 +2524,28 @@ impl StoredAuthorizationState {
                 decided_at_unix_ms: *decided_at_unix_ms,
                 consumed_at_unix_ms: *consumed_at_unix_ms,
             },
+            DeviceAuthorizationState::SupersededForRegistrationRotation {
+                approval_id,
+                superseded_at_unix_ms,
+            } => Self::SupersededForRegistrationRotation {
+                approval_id: *approval_id,
+                superseded_at_unix_ms: *superseded_at_unix_ms,
+            },
+            DeviceAuthorizationState::RegistrationRetired {
+                approval_id,
+                approver,
+                receipt,
+                delivery_id,
+                certificate_sha256,
+                retired_at_unix_ms,
+            } => Self::RegistrationRetired {
+                approval_id: *approval_id,
+                approver: StoredIdentity::from_domain(approver),
+                receipt: receipt.as_ref().map(Into::into),
+                delivery_id: *delivery_id,
+                certificate_sha256: *certificate_sha256,
+                retired_at_unix_ms: *retired_at_unix_ms,
+            },
             DeviceAuthorizationState::Expired => Self::Expired,
         }
     }
@@ -2498,25 +2563,35 @@ impl StoredAuthorizationState {
             Self::IssuanceFailed { .. } => "issuance_failed",
             Self::Denied { .. } => "denied",
             Self::Consumed { .. } => "consumed",
+            Self::SupersededForRegistrationRotation { .. } => {
+                "superseded_for_registration_rotation"
+            }
+            Self::RegistrationRetired { .. } => "registration_retired",
             Self::Expired => "expired",
         }
     }
 
     fn format_version(&self) -> u8 {
-        match self {
-            Self::DeliveryPending { .. }
-            | Self::Delivered { .. }
-            | Self::RetirementPending { .. }
-            | Self::DeliveryExpired { .. }
-            | Self::IssuanceFailed { .. } => 2,
-            _ => 1,
-        }
+        4
     }
 
     fn supports_format_version(&self, format_version: u8) -> bool {
         match format_version {
-            1 => self.format_version() == 1,
-            2 => true,
+            1 => matches!(
+                self,
+                Self::Pending
+                    | Self::AwaitingWebauthn { .. }
+                    | Self::VerifyingWebauthn { .. }
+                    | Self::Issuing { .. }
+                    | Self::Denied { .. }
+                    | Self::Consumed { .. }
+                    | Self::Expired
+            ),
+            2 | 3 => !matches!(
+                self,
+                Self::SupersededForRegistrationRotation { .. } | Self::RegistrationRetired { .. }
+            ),
+            4 => true,
             _ => false,
         }
     }
@@ -2530,7 +2605,9 @@ impl StoredAuthorizationState {
             | Self::Delivered { approval_id, .. }
             | Self::RetirementPending { approval_id, .. }
             | Self::DeliveryExpired { approval_id, .. }
-            | Self::IssuanceFailed { approval_id, .. } => Some(*approval_id),
+            | Self::IssuanceFailed { approval_id, .. }
+            | Self::RegistrationRetired { approval_id, .. } => Some(*approval_id),
+            Self::SupersededForRegistrationRotation { approval_id, .. } => *approval_id,
             _ => None,
         }
     }
@@ -2558,10 +2635,21 @@ impl StoredAuthorizationState {
             | Self::RetirementPending { certificate, .. } => {
                 certificate.matches_registration(binding)
             }
-            Self::Delivered { receipt, .. } => {
+            Self::Delivered {
+                receipt,
+                certificate,
+                ..
+            } => {
                 receipt.device_id == binding.key().device_id
                     && receipt.authorization_generation == binding.authorization_generation()
+                    && certificate
+                        .as_ref()
+                        .map_or(true, |value| value.matches_registration(binding))
             }
+            Self::RegistrationRetired { receipt, .. } => receipt.as_ref().map_or(true, |value| {
+                value.device_id == binding.key().device_id
+                    && value.authorization_generation == binding.authorization_generation()
+            }),
             Self::Pending
             | Self::AwaitingWebauthn { .. }
             | Self::VerifyingWebauthn { .. }
@@ -2570,6 +2658,7 @@ impl StoredAuthorizationState {
             | Self::IssuanceFailed { .. }
             | Self::Denied { .. }
             | Self::Consumed { .. }
+            | Self::SupersededForRegistrationRotation { .. }
             | Self::Expired => true,
         }
     }
@@ -2580,6 +2669,7 @@ impl StoredAuthorizationState {
         spki_sha256: &[u8; 32],
         authorization_id: &DeviceAuthorizationId,
         csr_sha256: &[u8; 32],
+        format_version: u8,
     ) -> bool {
         match self {
             Self::Pending | Self::Expired => true,
@@ -2631,19 +2721,37 @@ impl StoredAuthorizationState {
                     && to_i64(*decided_at_unix_ms).is_ok()
                     && to_i64(*delivery_deadline_unix_ms).is_ok()
             }
-            Self::Delivered { receipt, .. } => {
-                receipt.authorization_id == *authorization_id
+            Self::Delivered {
+                receipt,
+                approver,
+                certificate,
+                ..
+            } => {
+                let receipt_valid = receipt.authorization_id == *authorization_id
+                    && receipt.delivery_id != [0; 16]
                     && !receipt.device_id.trim().is_empty()
                     && receipt.authorization_generation > 0
+                    && receipt.certificate_sha256 != [0; 32]
                     && receipt.csr_sha256 == *csr_sha256
                     && receipt.csr_spki_sha256 == *spki_sha256
-                    && to_i64(receipt.acknowledged_at_unix_ms).is_ok()
+                    && to_i64(receipt.acknowledged_at_unix_ms).is_ok();
+                let snapshot_valid = match (format_version, approver, certificate) {
+                    (1..=3, None, None) => true,
+                    (4, Some(approver), Some(certificate)) => {
+                        approver.is_valid()
+                            && certificate.is_valid(scope, spki_sha256)
+                            && sha256(&certificate.certificate_der) == receipt.certificate_sha256
+                    }
+                    _ => false,
+                };
+                receipt_valid && snapshot_valid
             }
             Self::RetirementPending {
                 approver,
                 certificate,
                 certificate_sha256,
                 delivery_id,
+                delivered_receipt,
                 reason,
                 entered_at_unix_ms,
                 ..
@@ -2652,10 +2760,26 @@ impl StoredAuthorizationState {
                     && certificate.is_valid(scope, spki_sha256)
                     && sha256(&certificate.certificate_der) == *certificate_sha256
                     && match reason {
-                        StoredRetirementReason::DeliveryDeadlineReached => delivery_id.is_some(),
+                        StoredRetirementReason::DeliveryDeadlineReached => {
+                            delivery_id.is_some() && delivered_receipt.is_none()
+                        }
                         StoredRetirementReason::MisboundCertificate
                         | StoredRetirementReason::CertificateExpiredBeforeDelivery => {
-                            delivery_id.is_none()
+                            delivery_id.is_none() && delivered_receipt.is_none()
+                        }
+                        StoredRetirementReason::RegistrationRotated => {
+                            format_version == 4
+                                && delivery_id.is_some()
+                                && delivered_receipt.as_ref().map_or(true, |receipt| {
+                                    stored_receipt_matches(
+                                        receipt,
+                                        authorization_id,
+                                        delivery_id,
+                                        certificate_sha256,
+                                        csr_sha256,
+                                        spki_sha256,
+                                    )
+                                })
                         }
                     }
                     && to_i64(*entered_at_unix_ms).is_ok()
@@ -2691,6 +2815,32 @@ impl StoredAuthorizationState {
                     && consumed_at_unix_ms >= decided_at_unix_ms
                     && to_i64(*decided_at_unix_ms).is_ok()
                     && to_i64(*consumed_at_unix_ms).is_ok()
+            }
+            Self::SupersededForRegistrationRotation {
+                superseded_at_unix_ms,
+                ..
+            } => to_i64(*superseded_at_unix_ms).is_ok(),
+            Self::RegistrationRetired {
+                approver,
+                receipt,
+                delivery_id,
+                certificate_sha256,
+                retired_at_unix_ms,
+                ..
+            } => {
+                approver.is_valid()
+                    && *certificate_sha256 != [0; 32]
+                    && to_i64(*retired_at_unix_ms).is_ok()
+                    && receipt.as_ref().map_or(true, |receipt| {
+                        stored_receipt_matches(
+                            receipt,
+                            authorization_id,
+                            delivery_id,
+                            certificate_sha256,
+                            csr_sha256,
+                            spki_sha256,
+                        )
+                    })
             }
         }
     }
@@ -2749,9 +2899,13 @@ impl StoredAuthorizationState {
             Self::Delivered {
                 approval_id,
                 receipt,
+                approver,
+                certificate,
             } => DeviceAuthorizationState::Delivered {
                 approval_id,
                 receipt: receipt.into(),
+                approver: approver.map(StoredIdentity::into_domain).transpose()?,
+                certificate: certificate.map(StoredCertificate::into_domain),
             },
             Self::RetirementPending {
                 approval_id,
@@ -2759,6 +2913,7 @@ impl StoredAuthorizationState {
                 certificate,
                 certificate_sha256,
                 delivery_id,
+                delivered_receipt,
                 reason,
                 entered_at_unix_ms,
                 last_failure,
@@ -2768,6 +2923,7 @@ impl StoredAuthorizationState {
                 certificate: certificate.into_domain(),
                 certificate_sha256,
                 delivery_id,
+                delivered_receipt: delivered_receipt.map(Into::into),
                 reason: reason.into(),
                 entered_at_unix_ms,
                 last_failure: last_failure.map(Into::into),
@@ -2812,9 +2968,49 @@ impl StoredAuthorizationState {
                 decided_at_unix_ms,
                 consumed_at_unix_ms,
             },
+            Self::SupersededForRegistrationRotation {
+                approval_id,
+                superseded_at_unix_ms,
+            } => DeviceAuthorizationState::SupersededForRegistrationRotation {
+                approval_id,
+                superseded_at_unix_ms,
+            },
+            Self::RegistrationRetired {
+                approval_id,
+                approver,
+                receipt,
+                delivery_id,
+                certificate_sha256,
+                retired_at_unix_ms,
+            } => DeviceAuthorizationState::RegistrationRetired {
+                approval_id,
+                approver: approver.into_domain()?,
+                receipt: receipt.map(Into::into),
+                delivery_id,
+                certificate_sha256,
+                retired_at_unix_ms,
+            },
             Self::Expired => DeviceAuthorizationState::Expired,
         })
     }
+}
+
+fn stored_receipt_matches(
+    receipt: &StoredDeliveryReceipt,
+    authorization_id: &DeviceAuthorizationId,
+    delivery_id: &Option<DeviceAuthorizationId>,
+    certificate_sha256: &[u8; 32],
+    csr_sha256: &[u8; 32],
+    spki_sha256: &[u8; 32],
+) -> bool {
+    delivery_id.is_some_and(|delivery_id| receipt.delivery_id == delivery_id)
+        && receipt.authorization_id == *authorization_id
+        && !receipt.device_id.trim().is_empty()
+        && receipt.authorization_generation > 0
+        && receipt.certificate_sha256 == *certificate_sha256
+        && receipt.csr_sha256 == *csr_sha256
+        && receipt.csr_spki_sha256 == *spki_sha256
+        && to_i64(receipt.acknowledged_at_unix_ms).is_ok()
 }
 
 #[cfg(test)]
@@ -3082,6 +3278,8 @@ mod tests {
     ) -> DeviceAuthorizationState {
         let DeviceAuthorizationState::DeliveryPending {
             approval_id,
+            approver,
+            certificate,
             delivery_id,
             certificate_sha256,
             ..
@@ -3101,6 +3299,8 @@ mod tests {
                 csr_spki_sha256: record.spki_sha256,
                 acknowledged_at_unix_ms,
             },
+            approver: Some(approver.clone()),
+            certificate: Some(certificate.clone()),
         }
     }
 
@@ -3150,6 +3350,8 @@ mod tests {
                     csr_spki_sha256: [4; 32],
                     acknowledged_at_unix_ms: 5_000,
                 },
+                approver: Some(identity()),
+                certificate: Some(certificate()),
             },
             DeviceAuthorizationState::RetirementPending {
                 approval_id,
@@ -3157,6 +3359,7 @@ mod tests {
                 certificate: certificate(),
                 certificate_sha256,
                 delivery_id: Some([8; 16]),
+                delivered_receipt: None,
                 reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
                 entered_at_unix_ms: 6_000,
                 last_failure: Some(DeviceCertificateRetirementError::OutcomeUnknown),
@@ -3211,7 +3414,7 @@ mod tests {
             );
             assert!(decoded
                 .state
-                .is_valid(&scope(), &[4; 32], &authorization_id, &csr_sha256));
+                .is_valid(&scope(), &[4; 32], &authorization_id, &csr_sha256, 4));
             assert_eq!(
                 decoded.state.deadline_unix_ms(),
                 StoredAuthorizationState::from_domain(&state).deadline_unix_ms()
@@ -3296,6 +3499,7 @@ mod tests {
             certificate: certificate.clone(),
             certificate_sha256: *certificate_sha256,
             delivery_id: Some(*delivery_id),
+            delivered_receipt: None,
             reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
             entered_at_unix_ms: 6_000,
             last_failure: None,
@@ -3323,7 +3527,7 @@ mod tests {
                 credential_request_options_json: b"{}".to_vec(),
                 opaque_state: vec![1; MAX_WEBAUTHN_STATE_BYTES + 1],
             });
-        assert!(!state.is_valid(&scope(), &[4; 32], &[1; 16], &[6; 32]));
+        assert!(!state.is_valid(&scope(), &[4; 32], &[1; 16], &[6; 32], 4));
     }
 
     #[test]
@@ -3337,11 +3541,12 @@ mod tests {
                 certificate: value,
                 certificate_sha256: sha256(&certificate().certificate_der),
                 delivery_id: None,
+                delivered_receipt: None,
                 reason: DeviceCertificateRetirementReason::MisboundCertificate,
                 entered_at_unix_ms: 4_000,
                 last_failure: None,
             });
-        assert!(!state.is_valid(&scope(), &[4; 32], &[1; 16], &[6; 32]));
+        assert!(!state.is_valid(&scope(), &[4; 32], &[1; 16], &[6; 32], 4));
     }
 
     #[test]
@@ -3393,6 +3598,8 @@ mod tests {
                 csr_spki_sha256: current.spki_sha256,
                 acknowledged_at_unix_ms: 5_999,
             },
+            approver: Some(identity()),
+            certificate: Some(certificate()),
         };
         assert!(valid_delivery_ack_transition(&current, &replacement));
 
@@ -3563,6 +3770,18 @@ mod tests {
                 csr_spki_sha256: open_record.spki_sha256,
                 acknowledged_at_unix_ms: now,
             },
+            approver: match &open_record.state {
+                DeviceAuthorizationState::DeliveryPending { approver, .. } => {
+                    Some(approver.clone())
+                }
+                _ => unreachable!(),
+            },
+            certificate: match &open_record.state {
+                DeviceAuthorizationState::DeliveryPending { certificate, .. } => {
+                    Some(certificate.clone())
+                }
+                _ => unreachable!(),
+            },
         };
         store
             .compare_and_swap_delivery_ack(0, acknowledged.clone())
@@ -3612,6 +3831,18 @@ mod tests {
                 csr_spki_sha256: expired_record.spki_sha256,
                 acknowledged_at_unix_ms: expired_deadline.saturating_sub(1),
             },
+            approver: match &expired_record.state {
+                DeviceAuthorizationState::DeliveryPending { approver, .. } => {
+                    Some(approver.clone())
+                }
+                _ => unreachable!(),
+            },
+            certificate: match &expired_record.state {
+                DeviceAuthorizationState::DeliveryPending { certificate, .. } => {
+                    Some(certificate.clone())
+                }
+                _ => unreachable!(),
+            },
         };
         assert_eq!(
             store.compare_and_swap(0, late_ack.clone()),
@@ -3649,6 +3880,7 @@ mod tests {
             certificate: certificate.clone(),
             certificate_sha256: *certificate_sha256,
             delivery_id: Some(*delivery_id),
+            delivered_receipt: None,
             reason: DeviceCertificateRetirementReason::DeliveryDeadlineReached,
             entered_at_unix_ms: now,
             last_failure: None,
@@ -3692,6 +3924,7 @@ mod tests {
             certificate,
             certificate_sha256,
             delivery_id: None,
+            delivered_receipt: None,
             reason: DeviceCertificateRetirementReason::MisboundCertificate,
             entered_at_unix_ms: now,
             last_failure: None,

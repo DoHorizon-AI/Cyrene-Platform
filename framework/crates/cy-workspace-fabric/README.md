@@ -161,10 +161,13 @@ authorization changes were atomic.
 
 Rows created before the registration recovery digest was introduced keep a
 `NULL` digest. They remain readable and can finish an already pending
-certificate acknowledgement, but cannot be used for code recovery or rotation.
-The store never reconstructs a missing digest or persists raw device or user
-codes. New-key mTLS rotation stays unavailable until its predecessor
-supersede/retirement transition is committed in the same transaction.
+certificate acknowledgement, but cannot be used for code recovery. New V4 ACK
+rows retain the approver and complete issued-certificate snapshot needed for
+later retirement; legacy V3 `Delivered` rows have no such snapshot and must
+conflict on rotation. The store never reconstructs a missing digest or persists
+raw device or user codes. New-key mTLS rotation stays unavailable until the
+predecessor supersede/retirement transition and Directory generation advance
+are committed together by the PostgreSQL adapter.
 
 ## Relay host security state
 
