@@ -6326,17 +6326,24 @@ mod tests {
             receipt.authorization_generation,
             start.authorization_generation
         );
-        let rotated_start =
-            start_with_generation(&manager, start.authorization_generation.saturating_add(100));
-        assert_eq!(rotated_start.device_id, start.device_id);
-        assert!(rotated_start.authorization_generation > start.authorization_generation);
+        assert_eq!(
+            manager.begin(
+                test_authorization_request(
+                    &scope(),
+                    start.authorization_generation.saturating_add(100),
+                ),
+                100,
+                &TestCsrValidator,
+            ),
+            Err(DeviceAuthorizationError::ConcurrentTransition)
+        );
         assert_eq!(
             manager.acknowledge_delivery(&acknowledgement, &TestApprovalPorts),
             Ok(receipt.clone())
         );
         assert_eq!(
             manager.poll(&start.device_code, 3_300, &TestApprovalPorts),
-            Err(DeviceAuthorizationError::ConcurrentTransition)
+            Ok(DeviceAuthorizationPoll::Delivered(receipt.clone()))
         );
     }
 
@@ -7167,7 +7174,7 @@ mod tests {
             scope(),
             csr_der.clone(),
             sha256(&csr_der),
-            [1; 32],
+            [7; 32],
             digest,
         );
         assert_eq!(
