@@ -6,9 +6,19 @@ an authenticated private mTLS direct endpoint, and the outbound mTLS
 application relay used by the v1 reference vertical. Candidate selection tries
 `LAN_DIRECT` before `RELAY` according to descriptor priority.
 
+The reusable low-level HTTPS mTLS dialer lives in
+[`../cy-mtls-channel-client/`](../cy-mtls-channel-client/README.md). Fabric
+retains descriptor validation, identity and authorization gates, direct-versus-
+Relay selection, fallback policy, and Workspace request dispatch.
+
 本 crate 提供产品无关的 Account/Directory 边界、transport-neutral Workspace
 连接描述符、稳定 Workspace API port、私网 mTLS 直连端点与 v1 参考纵向使用的出站
 mTLS 应用层 Relay。候选选择按描述符优先级先尝试 `LAN_DIRECT`，再选择 `RELAY`。
+
+可复用的底层 HTTPS mTLS dialer 位于
+[`../cy-mtls-channel-client/`](../cy-mtls-channel-client/README.md)。Fabric 继续持有
+descriptor 校验、身份与授权 gate、直连/Relay 选择、fallback policy 和 Workspace request
+dispatch。
 
 It consumes the existing Execution Fabric connectivity provider and semantic
 Operation identity. It does not own Product state, Lease/Fence, Runtime state,
@@ -31,7 +41,8 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/direct.rs` | Workspace API endpoint with session and membership checks. | 校验会话与成员关系的 Workspace API 直连端点。 |
 | `src/frontend_relay_client.rs` | Verified-principal Web Frontend client for an outbound mTLS Relay session. | 基于已验证主体的出站 mTLS Relay 客户端。 |
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
-| `src/transport.rs` | Direct candidate selection and outbound mTLS Relay transport. | 直连候选选择与出站 mTLS Relay 传输。 |
+| `src/transport.rs` | Fabric-owned descriptor validation, direct candidate selection, and Relay transport policy. | Fabric 持有的描述符校验、直连候选选择与 Relay transport policy。 |
+| `../cy-mtls-channel-client/` | Reusable HTTPS mTLS Tonic channel construction; no identity, authorization, routing, or dispatch authority. | 可复用的 HTTPS mTLS Tonic channel 构造；不持有身份、授权、路由或 dispatch 权限。 |
 | `src/bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
 | `src/sidecar.rs` | Loopback-authenticated bridge for non-Rust Workspace clients. | 为非 Rust Workspace client 提供 loopback 认证代理。 |
 | `../cy-workspace-relay-host/` | Independently versioned fail-closed Relay Host package and image. | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
@@ -424,7 +435,8 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 | `src/api.rs` | 稳定的 frontend-to-Workspace API port 与 LOCAL adapter。 |
 | `src/direct.rs` | 校验会话与成员关系的 Workspace API 私网直连端点。 |
 | `src/relay.rs` | 不拥有 Workspace authority 的实时应用请求路由。 |
-| `src/transport.rs` | 直连候选选择、出站 mTLS Relay client 和 connector session。 |
+| `src/transport.rs` | Fabric 持有的描述符校验、直连候选选择、出站 Relay policy 和 connector session。 |
+| `../cy-mtls-channel-client/` | 可复用的 HTTPS mTLS Tonic channel 构造，不拥有身份、授权、路由或 dispatch authority。 |
 | `src/bin/` | 验收 fixture 与受限 Directory 配置 CLI。 |
 | `src/sidecar.rs` | 消费外部凭据并提供本地认证 gRPC 代理。 |
 | `../cy-workspace-relay-host/` | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |

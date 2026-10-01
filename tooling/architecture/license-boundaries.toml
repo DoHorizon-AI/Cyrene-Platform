@@ -7,6 +7,7 @@ public_permissive = [
     "cy-execution-fabric",
     "cy-kernel-contract",
     "cy-manifest",
+    "cy-mtls-channel-client",
     "cy-observability",
     "cy-proto",
     "cy-workspace-fabric",
@@ -28,6 +29,10 @@ core_copyleft = [
 ]
 
 separate_decision = [
+    "cy-workspace-connector-host",
+    "cy-workspace-product-adapters",
+    "cy-workspace-relay-host",
+    "cy-workspace-sidecar",
     "cy-workspace-web-bff",
     "cyrene-linux-sys-adapter",
     "cyrene-nvidia-adapter",

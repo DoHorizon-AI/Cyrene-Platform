@@ -6,6 +6,11 @@ library and the versioned `cyrene.workspace.local.v1` gRPC contract. The
 listener is fixed to IPv4 loopback; the Sidecar consumes externally issued
 credentials and never issues identity.
 
+Remote credential checks, the Workspace allowlist, and request-operation gates
+remain in `cy-workspace-fabric`. Fabric delegates only the low-level HTTPS mTLS
+channel construction to `cy-mtls-channel-client`; the Sidecar does not acquire
+identity, routing, or dispatch authority from that helper.
+
 Build or run the binary independently from the Platform workspace root:
 
 ```bash
@@ -23,6 +28,10 @@ network-namespace requirement are documented in
 本 Cargo package 独立拥有供非 Rust client 使用的 loopback Workspace bridge 进程，并消费共享
 `cy-workspace-fabric` library 与版本化的 `cyrene.workspace.local.v1` gRPC 合同。listener 固定为
 IPv4 loopback；Sidecar 只消费外部签发的凭据，不签发 identity。
+
+远端凭据校验、Workspace allowlist 与 request operation gate 仍属于
+`cy-workspace-fabric`。Fabric 只将底层 HTTPS mTLS channel 构造委托给
+`cy-mtls-channel-client`；Sidecar 不因此获得 identity、routing 或 dispatch authority。
 
 Sidecar 有 build-only GitHub Actions workflow，会生成带 commit SHA 名称、版本和 SHA-256
 manifest 的二进制 artifact，保留 30 天；目前没有 system package、安装器或 updater 消费该

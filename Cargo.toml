@@ -20,6 +20,7 @@ members = [
     "framework/crates/cy-observability",
     "framework/crates/cy-execution-fabric",
     "framework/crates/cy-execution-control",
+    "framework/crates/cy-mtls-channel-client",
     "framework/crates/cy-workspace-fabric",
     "framework/crates/cy-workspace-product-adapters",
     "framework/crates/cy-workspace-relay-host",

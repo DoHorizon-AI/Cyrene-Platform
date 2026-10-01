@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cy_mtls_channel_client::{connect_mtls_channel, MtlsChannelConnectError};
 use cy_proto::core_v1::ConnectivityMode;
 use cy_proto::workspace_v1::relay_frame;
 use cy_proto::workspace_v1::workspace_direct_service_client::WorkspaceDirectServiceClient;
@@ -21,7 +22,7 @@ use cy_proto::workspace_v1::{
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use tonic::transport::Channel;
 use tonic::{Request, Streaming};
 
 use crate::{
@@ -420,24 +421,17 @@ async fn connect_tls_channel(
     credentials: &RelayClientConfig,
     connect_timeout: Option<Duration>,
 ) -> Result<Channel, RelayTransportError> {
-    let mut endpoint = Endpoint::from_shared(address.to_string())
-        .map_err(|error| RelayTransportError::Endpoint(error.to_string()))?;
-    if let Some(timeout) = connect_timeout {
-        endpoint = endpoint.connect_timeout(timeout);
-    }
-    let tls = ClientTlsConfig::new()
-        .domain_name(server_name.to_string())
-        .ca_certificate(Certificate::from_pem(
-            credentials.ca_certificate_pem.clone(),
-        ))
-        .identity(Identity::from_pem(
-            credentials.client_certificate_pem.clone(),
-            credentials.client_key_pem.clone(),
-        ));
-    endpoint
-        .tls_config(tls)
-        .map_err(|error| RelayTransportError::Transport(error.to_string()))?
-        .connect()
-        .await
-        .map_err(|error| RelayTransportError::Transport(error.to_string()))
+    connect_mtls_channel(
+        address,
+        server_name,
+        &credentials.ca_certificate_pem,
+        &credentials.client_certificate_pem,
+        &credentials.client_key_pem,
+        connect_timeout,
+    )
+    .await
+    .map_err(|error| match error {
+        MtlsChannelConnectError::Endpoint(message) => RelayTransportError::Endpoint(message),
+        MtlsChannelConnectError::Transport(message) => RelayTransportError::Transport(message),
+    })
 }

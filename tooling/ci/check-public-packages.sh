@@ -12,6 +12,7 @@ public_packages=(
   cy-observability
   cy-artifact-transfer
   cy-execution-fabric
+  cy-mtls-channel-client
   cy-workspace-fabric
 )
 
@@ -26,6 +27,7 @@ public_dependency_patches=(
   --config 'patch.crates-io.cy-proto.path="contracts/rust/cy-proto"'
   --config 'patch.crates-io.cy-observability.path="framework/crates/cy-observability"'
   --config 'patch.crates-io.cy-artifact-transfer.path="sdk/rust/cy-artifact-transfer"'
+  --config 'patch.crates-io.cy-mtls-channel-client.path="framework/crates/cy-mtls-channel-client"'
 )
 
 for package in "${public_packages[@]}"; do

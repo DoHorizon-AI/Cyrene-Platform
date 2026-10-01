@@ -656,6 +656,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-mtls-channel-client"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "tonic",
+]
+
+[[package]]
 name = "cy-node-agent"
 version = "0.1.0"
 dependencies = [
@@ -804,6 +812,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "cy-mtls-channel-client",
  "cy-observability",
  "cy-proto",
  "ed25519-dalek",
@@ -861,6 +870,7 @@ dependencies = [
  "cy-proto",
  "cy-workspace-fabric",
  "serde_json",
+ "tempfile",
  "tokio",
  "tonic",
  "tracing",
