@@ -8,4 +8,4 @@ repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
 [dependencies]
 thiserror = "1.0"
-tonic = { version = "0.12", features = ["transport", "tls"] }
+tonic = { version = "0.12", default-features = false, features = ["channel", "tls", "codegen", "prost"] }

@@ -12,6 +12,7 @@ members = [
     "kernel/crates/cy-resource-manager",
     "kernel/crates/cy-sandbox-client",
     "kernel/crates/cy-kernel-daemon",
+    "kernel/crates/cy-runtime-maintenance",
 
     # 3. 框架层与 SDK (Framework & SDK Crates)
     "framework/crates/cy-installation-resolver",
@@ -22,6 +23,11 @@ members = [
     "framework/crates/cy-execution-control",
     "framework/crates/cy-mtls-channel-client",
     "framework/crates/cy-workspace-fabric",
+    "framework/crates/cy-workspace-client-sdk",
+    "framework/crates/cy-workspace-control-plane",
+    "framework/crates/cy-workspace-relay-runtime",
+    "framework/crates/cy-workspace-postgres-storage",
+    "framework/crates/cy-workspace-product-contracts",
     "framework/crates/cy-workspace-product-adapters",
     "framework/crates/cy-workspace-relay-host",
     "framework/crates/cy-workspace-connector-host",

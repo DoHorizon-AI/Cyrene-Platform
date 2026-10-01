@@ -93,10 +93,12 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
         if ttl.is_zero() {
             return Err(Status::invalid_argument("lease ttl must be positive"));
         }
-        let lease = self
-            .authority()
-            .acquire_lease(&context, &principal, holder, query, expires_after(ttl))
-            .map_err(authority_status)?;
+        let authority = self.authority();
+        let lease = self.with_runtime_admission("core-v1-acquire-lease", || {
+            authority
+                .acquire_lease(&context, &principal, holder, query, expires_after(ttl))
+                .map_err(authority_status)
+        })?;
         Ok(Response::new(to_semantic_proto_contract_lease(&lease)))
     }
 
@@ -159,10 +161,12 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                 .ok_or_else(|| Status::invalid_argument("worker is required"))?,
             principal.identity.clone(),
         )?;
-        let operation = self
-            .authority()
-            .start_worker(&context, &principal, worker)
-            .map_err(authority_status)?;
+        let authority = self.authority();
+        let operation = self.with_runtime_admission("core-v1-start-worker", || {
+            authority
+                .start_worker(&context, &principal, worker)
+                .map_err(authority_status)
+        })?;
         Ok(Response::new(to_semantic_proto_operation(&operation)))
     }
 

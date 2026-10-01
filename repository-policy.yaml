@@ -32,6 +32,7 @@ artifacts:
   package_units:
   - cyrene-preflight
   - cyrene-artifacts
+  - cyrene-runtime-maintenance
   native_binaries:
   - cy-kernel-daemon
   - cy-node-agent

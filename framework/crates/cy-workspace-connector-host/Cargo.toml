@@ -9,7 +9,9 @@ repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 [dependencies]
 cy-observability = { version = "0.1.0", path = "../cy-observability" }
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane" }
 cy-workspace-product-adapters = { version = "0.1.0", path = "../cy-workspace-product-adapters" }
+cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts" }
 cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
 openssl = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

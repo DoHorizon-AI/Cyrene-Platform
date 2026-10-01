@@ -1,0 +1,56 @@
+[package]
+name = "cy-workspace-postgres-storage"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL-backed Workspace Directory, enrollment, authorization, and WebAuthn adapters."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.7", features = ["json"] }
+base64 = "0.22"
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane" }
+cy-workspace-relay-runtime = { version = "0.1.0", path = "../cy-workspace-relay-runtime" }
+hmac = "0.12"
+openssl = { version = "0.10", features = ["vendored"] }
+prost = "0.13"
+getrandom = "0.2"
+rusqlite = { version = "0.32.1", default-features = false, features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "migrate", "macros"] }
+subtle = "2.6"
+thiserror = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tracing = "0.1"
+url = "2.5"
+uuid = { version = "1.0", features = ["v4"] }
+webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation", "danger-credential-internals"] }
+x509-parser = "0.18.1"
+webpki = { package = "rustls-webpki", version = "0.103", features = ["ring"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+base64 = "0.22"
+cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane", features = ["test-support"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+tempfile = "3.8"
+tower = { version = "0.5", features = ["util"] }
+webauthn-authenticator-rs = { version = "0.5.5", features = ["softpasskey"] }
+
+[[bin]]
+name = "cy-workspace-device-ca-admin"
+path = "src/bin/cy-workspace-device-ca-admin.rs"
+
+[[bin]]
+name = "cy-workspace-directory-admin"
+path = "src/bin/cy-workspace-directory-admin.rs"
+
+[[bin]]
+name = "cy-workspace-storage-migrator"
+path = "src/bin/cy-workspace-storage-migrator.rs"

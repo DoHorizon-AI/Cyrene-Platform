@@ -14,6 +14,7 @@ COPY runtime runtime
 COPY agents agents
 COPY adapters adapters
 COPY sdk/rust sdk/rust
+COPY tooling/workspace-product-contract-bundle tooling/workspace-product-contract-bundle
 
 RUN cargo build --locked --release -p cy-workspace-connector-host
 

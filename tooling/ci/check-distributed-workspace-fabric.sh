@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Contract/unit gate for Distributed Workspace Fabric v1.
-# Distributed Workspace Fabric v1 的 Contract 与单元测试门禁。
+# Contract/unit gate for the Workspace Fabric v1 transport and v2 Product API.
+# Workspace Fabric v1 transport 与 v2 Product API 的 Contract 和单元测试门禁。
 
 set -euo pipefail
 
@@ -9,15 +9,28 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${repo_root}"
 
 workspace_proto=contracts/proto/cyrene/workspace/v1/workspace_fabric.proto
+product_v2_proto=contracts/proto/cyrene/workspace/product/v2/product_api.proto
 workspace_crate=framework/crates/cy-workspace-fabric
+client_sdk_crate=framework/crates/cy-workspace-client-sdk
+control_plane_crate=framework/crates/cy-workspace-control-plane
+relay_runtime_crate=framework/crates/cy-workspace-relay-runtime
+storage_crate=framework/crates/cy-workspace-postgres-storage
+sidecar_crate=framework/crates/cy-workspace-sidecar
 tck_root=contracts/tck/distributed-workspace-fabric/v1
 acceptance_root=tooling/acceptance/distributed-workspace-fabric
 projection_manifest=${tck_root}/product-projections.tsv
 
 for path in \
   "${workspace_proto}" \
+  "${product_v2_proto}" \
   "${workspace_crate}/README.md" \
   "${workspace_crate}/src/README.md" \
+  "${client_sdk_crate}/Cargo.toml" \
+  "${client_sdk_crate}/src/lib.rs" \
+  "${control_plane_crate}/src/README.md" \
+  "${relay_runtime_crate}/src/README.md" \
+  "${storage_crate}/src/README.md" \
+  "${sidecar_crate}/src/README.md" \
   "${workspace_crate}/src/bin/README.md" \
   "${tck_root}/README.md" \
   "${tck_root}/scenarios.tsv" \
@@ -28,6 +41,40 @@ for path in \
     exit 1
   }
 done
+
+for message in ProductApiInvocationV2 ProductApiResponseV2; do
+  rg -q "message ${message}" "${product_v2_proto}" || {
+    printf 'missing generic Workspace Product API v2 wire message: %s\n' "${message}" >&2
+    exit 1
+  }
+done
+rg -q 'string owner_id = 1;' "${product_v2_proto}"
+rg -q 'string operation_id = 2;' "${product_v2_proto}"
+rg -q 'bytes json_body = 3;' "${product_v2_proto}"
+rg -q 'ProductApiInvocationV2 product_api_v2 = 13;' "${workspace_proto}"
+rg -q 'ProductApiResponseV2 product_api_v2 = 13;' "${workspace_proto}"
+
+# The v1 enum assertions below preserve its closed compatibility contract. New Product operations
+# use the generic owner/operation IDs in v2 and are checked against pinned catalogs and policy.
+rg -q 'WORKSPACE_PRODUCT_API_V1_UNSUPPORTED' \
+  "${control_plane_crate}/src/control_plane.rs"
+if rg -n 'sqlx|webauthn-rs|axum' "${workspace_crate}/Cargo.toml"; then
+  printf 'Fabric facade must not contain database, WebAuthn, or HTTP server implementations\n' >&2
+  exit 1
+fi
+if rg -n 'sqlx|webauthn-rs|axum|cy-workspace-fabric|cy-workspace-control-plane|cy-workspace-relay-runtime|cy-workspace-postgres-storage' \
+  "${sidecar_crate}/Cargo.toml"; then
+  printf 'Sidecar client dependency closure contains a Platform host implementation crate\n' >&2
+  exit 1
+fi
+rg -q 'cy-workspace-client-sdk' "${sidecar_crate}/Cargo.toml"
+rg -q 'default-features = false' "${client_sdk_crate}/Cargo.toml"
+rg -q 'features = \["channel", "tls", "codegen", "prost"\]' \
+  "${client_sdk_crate}/Cargo.toml"
+if rg -n 'tonic = .*server|cy-proto = .*server' "${client_sdk_crate}/Cargo.toml"; then
+  printf 'Workspace client SDK must not enable tonic server support\n' >&2
+  exit 1
+fi
 
 for message in \
   UserIdentityRef \
@@ -202,10 +249,10 @@ rg -q '^service WorkspaceRelayService' "${workspace_proto}"
 rg -q 'rpc Connect\(stream RelayFrame\) returns \(stream RelayFrame\)' "${workspace_proto}"
 rg -q '^service WorkspaceDirectService' "${workspace_proto}"
 rg -q 'rpc Execute\(WorkspaceDirectRequest\) returns \(WorkspaceApiResponse\)' "${workspace_proto}"
-rg -q 'trait WorkspaceDirectory' "${workspace_crate}/src/directory.rs"
-rg -q 'trait RelayAuthenticator' "${workspace_crate}/src/auth.rs"
-rg -q 'trait WorkspaceApi' "${workspace_crate}/src/api.rs"
-rg -q 'LocalWorkspaceClient' "${workspace_crate}/src/api.rs"
+rg -q 'trait WorkspaceDirectory' "${control_plane_crate}/src/directory.rs"
+rg -q 'trait RelayAuthenticator' "${control_plane_crate}/src/auth.rs"
+rg -q 'trait WorkspaceApi' "${control_plane_crate}/src/api.rs"
+rg -q 'LocalWorkspaceClient' "${control_plane_crate}/src/api.rs"
 if rg -n 'RelayConnectivityProvider|cy-execution-fabric' \
   "${workspace_crate}/src/bin/cy-workspace-fabric-fixture.rs" \
   "${workspace_crate}/Cargo.toml"; then
@@ -232,11 +279,11 @@ if rg -n 'Dataset|TrainingRun|ModelVersion|EvaluationRun|Deployment' "${workspac
   exit 1
 fi
 if rg -n 'WorkspaceOperationView|WorkspaceApiRequest|WorkspaceApiResponse' \
-  "${workspace_crate}/src/directory.rs" "${workspace_crate}/src/auth.rs"; then
+  "${control_plane_crate}/src/directory.rs" "${control_plane_crate}/src/auth.rs"; then
   printf 'Directory or authentication boundary contains Workspace/Product state\n' >&2
   exit 1
 fi
-if rg -n 'Mutex<.*WorkspaceOperation|BTreeMap<.*WorkspaceOperation' "${workspace_crate}/src/relay.rs"; then
+if rg -n 'Mutex<.*WorkspaceOperation|BTreeMap<.*WorkspaceOperation' "${relay_runtime_crate}/src/relay.rs"; then
   printf 'Relay must not become a Workspace operation state authority\n' >&2
   exit 1
 fi
@@ -252,6 +299,21 @@ command -v "${buf_bin}" >/dev/null 2>&1 || {
 }
 (cd contracts/proto && "${buf_bin}" lint . --path cyrene/workspace/v1)
 
-cargo test --locked -p cy-workspace-fabric -p cy-runtime-agent --no-fail-fast
-cargo clippy --locked -p cy-workspace-fabric -p cy-runtime-agent --all-targets -- -D warnings
+workspace_packages=(
+  cy-workspace-client-sdk
+  cy-workspace-sidecar
+  cy-workspace-control-plane
+  cy-workspace-relay-runtime
+  cy-workspace-postgres-storage
+  cy-workspace-product-contracts
+  cy-workspace-product-adapters
+  cy-workspace-fabric
+  cy-runtime-agent
+)
+package_args=()
+for package in "${workspace_packages[@]}"; do
+  package_args+=(-p "${package}")
+done
+cargo test --locked "${package_args[@]}" --no-fail-fast
+cargo clippy --locked "${package_args[@]}" --all-targets -- -D warnings
 printf 'Distributed Workspace Fabric v1 contract checks passed\n'

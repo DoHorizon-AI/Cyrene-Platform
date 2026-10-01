@@ -1,0 +1,26 @@
+scenario	input	expected
+bundle_manifest_pin	mounted product-contract-bundle.json SHA differs from the reviewed Workspace v2 lock	FAIL_CLOSED
+owner_source_pin	any owner sourceSha differs from the reviewed dynamic owner map	FAIL_CLOSED
+catalog_digest	owner catalog bytes differ from catalogSha256	FAIL_CLOSED
+catalog_schema	owner catalog has unknown fields, duplicate owner operationId, or routeId differs from operationId	FAIL_CLOSED
+openapi_operation	routeId resolves to zero or multiple OpenAPI operationIds	FAIL_CLOSED
+openapi_closure	local $ref is absent, remote, absolute, escaping, or not digest-listed	FAIL_CLOSED
+request_schema	request JSON bytes fail the pinned request JSON Schema	REJECT_400_NO_OWNER_CALL
+no_body	optional request body is absent	OWNER_CALL_WITHOUT_BODY
+literal_null	one byte-preserving body parses as JSON null and satisfies the operation schema	OWNER_CALL_WITH_ORIGINAL_BYTES
+resource_id	resource ID is absent, out of bounds, or fails the pinned regex	REJECT_400_NO_OWNER_CALL
+idempotency_key	Idempotency-Key is missing when required or violates its pinned bounds	REJECT_400_NO_OWNER_CALL
+request_scope	body selector differs from verified organization, workspace, or resource context	REJECT_400_NO_OWNER_CALL
+mandatory_catalog_scope	owner catalog omits any Platform-required request or response selector	FAIL_CLOSED
+unknown_operation	ownerId/operationId does not resolve in the pinned bundle	DENY_NO_OWNER_CALL
+unapproved_operation	operation resolves in a catalog but has no Platform policy grant	DENY_NO_OWNER_CALL
+principal_kind	principal class is absent from the exact owner/operation policy grant	DENY_NO_OWNER_CALL
+required_roles	verified Directory roles do not include every exact policy role	DENY_NO_OWNER_CALL
+workspace_scope	verified organization/Workspace context is missing or invalid	DENY_NO_OWNER_CALL
+route_injection	caller attempts to supply method, URL, path, credentials, role, or catalog version	REJECT_UNKNOWN_WIRE_FIELD
+route_binding	authorized token does not inject all path params from pinned route and verified context	FAIL_CLOSED
+response_schema	Product response status, media type, or body violates pinned OpenAPI response schema	REJECT_UPSTREAM_502
+response_scope	Product response selector differs from authorized organization, workspace, or resource	REJECT_UPSTREAM_502
+operation_addition	a source-pinned catalog adds an operation without a separately reviewed policy grant	DENY_NEW_OPERATION
+dynamic_owner_addition	a reviewed lock, bundle, catalog, policy, and API-compatible owner is added without editing core operation enums	LOAD_AND_AUTHORIZE_FROM_DATA
+endpoint_binding	Product endpoint base URL or credential is provided by caller input	REJECT_UNKNOWN_WIRE_FIELD

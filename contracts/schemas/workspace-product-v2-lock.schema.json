@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/platform/workspace-product-v2-lock.schema.json",
+  "title": "Cyrene Workspace Product v2 compatibility lock",
+  "description": "Platform-reviewed pins for the complete Product bundle and separately owned authorization policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "releaseId", "wireApiVersion", "contractApiVersion", "bundle", "policy", "owners"],
+  "properties": {
+    "formatVersion": { "const": 2 },
+    "releaseId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "wireApiVersion": { "const": "cyrene.workspace.product.v2" },
+    "contractApiVersion": { "const": "0.1.0" },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifestPath", "manifestSha256"],
+      "properties": {
+        "manifestPath": { "const": "product-contract-bundle.json" },
+        "manifestSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePath", "bundlePath", "schemaVersion", "sha256"],
+      "properties": {
+        "sourcePath": { "const": "contracts/policies/workspace-product-policy-v2.json" },
+        "bundlePath": { "const": "workspace-product-policy-v2.json" },
+        "schemaVersion": { "const": "cyrene.workspace.product.authorization-policy.v2" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "owners": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/owner" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerId", "repository", "sourceSha", "catalogPath", "catalogSha256"],
+      "properties": {
+        "ownerId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+        "repository": { "type": "string", "pattern": "^Cyrene-[A-Za-z0-9-]+$" },
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "catalogPath": { "type": "string", "pattern": "^Cyrene-[A-Za-z0-9-]+/contracts/product/v2/catalog\\.json$" },
+        "catalogSha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

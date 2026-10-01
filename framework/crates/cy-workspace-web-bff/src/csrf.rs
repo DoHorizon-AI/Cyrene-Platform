@@ -12,14 +12,15 @@ use std::fmt;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use cy_workspace_fabric::{VerifiedWebPrincipal, VerifiedWebSessionContext};
+use cy_workspace_control_plane::VerifiedWebPrincipal;
+use cy_workspace_postgres_storage::VerifiedWebSessionContext;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
 use zeroize::Zeroize;
 
 const CSRF_COOKIE_NAME: &str = "__Secure-cyrene-csrf";
-const CSRF_COOKIE_PATH: &str = "/api/workspace/v1";
+const CSRF_COOKIE_PATH: &str = "/api/workspace";
 type HmacSha256 = Hmac<Sha256>;
 
 /// Identity/session fields covered by the CSRF MAC.
@@ -251,7 +252,7 @@ mod tests {
     #[test]
     fn cookie_name_uses_path_scoped_secure_prefix() {
         assert_eq!(csrf_cookie_name(), "__Secure-cyrene-csrf");
-        assert_eq!(csrf_cookie_path(), "/api/workspace/v1");
+        assert_eq!(csrf_cookie_path(), "/api/workspace");
     }
 
     #[test]
@@ -326,7 +327,7 @@ mod tests {
         let cookie = csrf_set_cookie(&token, 1_000_000);
 
         assert!(cookie.starts_with(&format!("{}={};", csrf_cookie_name(), token.value)));
-        assert!(cookie.contains("Path=/api/workspace/v1"));
+        assert!(cookie.contains("Path=/api/workspace"));
         assert!(cookie.contains("Secure; HttpOnly; SameSite=Strict"));
         assert!(!cookie.contains("Domain="));
     }

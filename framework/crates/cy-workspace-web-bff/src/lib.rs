@@ -15,13 +15,12 @@ mod device_approval;
 mod fabric_device_approval;
 mod fabric_gateway;
 mod http;
-mod manifest;
 mod problem;
 mod product;
 
 pub use catalog_loader::{
     load_product_operation_catalog, load_product_operation_catalog_from_environment,
-    CONTRACT_BUNDLE_MANIFEST_FILENAME, PRODUCT_CONTRACT_ROOT_ENV,
+    CONTRACT_BUNDLE_MANIFEST_FILENAME, PRODUCT_CONTRACT_ROOT_ENV, PRODUCT_POLICY_BUNDLE_FILENAME,
 };
 pub use csrf::{csrf_cookie_name, csrf_cookie_path};
 pub use device_approval::{
@@ -34,14 +33,10 @@ pub use fabric_gateway::{
     WorkspaceApiResolver,
 };
 pub use http::{
-    router, router_with_device_approval, WebBffConfig, WebBffState, MAX_JSON_BODY_BYTES,
-};
-pub use manifest::{
-    product_projection_manifest, ProductProjectionEntry, ProductProjectionManifestError,
+    router, router_with_device_approval, with_verified_web_session_routes, WebBffConfig,
+    WebBffState, MAX_JSON_BODY_BYTES,
 };
 pub use problem::ProblemCode;
 pub use product::{
-    ProductCatalogError, ProductJsonSchema, ProductOperationCatalog, ProductOperationContract,
-    ProductPathParameter, ProductRequestBodyContract, ProductResourceReferenceField,
-    ProductResponseContract, WorkspaceGatewayError, WorkspaceProductGateway,
+    ProductCatalogError, ProductOperationCatalog, WorkspaceGatewayError, WorkspaceProductGateway,
 };

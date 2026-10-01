@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "preview-1111111111111111111111111111111111111111",
+  "componentId": "cyrene-sample",
+  "version": "1111111111111111111111111111111111111111",
+  "channel": "preview",
+  "target": {
+    "os": "linux",
+    "osVersion": "24.04-東京",
+    "distribution": "ubuntu",
+    "distributionVersion": "24.04",
+    "architecture": "x86_64",
+    "abi": "gnu"
+  },
+  "artifact": {
+    "kind": "native-binary",
+    "format": "tar.gz",
+    "entrypoint": "cyrene-sample",
+    "sha256": "sha256:aae6759109c5fc28390f7849b51752efcd805a9a8a5a086af766c4cb22b6a04d",
+    "sizeBytes": 130,
+    "files": {
+      "cyrene-sample": "sha256:c5cc8ba5d2662a3c33ecc300437585da57eebcdd296aeb865b962d624c8ca696"
+    },
+    "uri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1111111111111111111111111111111111111111/cyrene-sample-linux-ubuntu-24-04-x86-64.tar.gz"
+  },
+  "dependencies": [],
+  "restart": {
+    "group": "single-service",
+    "unit": "cyrene-sample.service"
+  },
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Platform",
+    "ref": "refs/heads/develop",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "uri": "https://github.com/DoHorizon-AI/Cyrene-Platform/attestations/123456789",
+      "subjectName": "cyrene-sample-linux-ubuntu-24-04-x86-64.tar.gz",
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "123456789",
+        "attempt": 1,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/123456789/attempts/1"
+      }
+    }
+  },
+  "compatibility": {
+    "groupId": "workspace-product-v2",
+    "contractApiVersion": "0.1.0",
+    "wireApiVersion": "cyrene.workspace.product.v2",
+    "contractLock": {
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "commit": "1111111111111111111111111111111111111111",
+      "path": "tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json",
+      "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  },
+  "manifestDigest": "sha256:76db4fe4f0d26a2eabc330ec6bf1b55cd908d140527a264b12c4b326524cd8f8"
+}

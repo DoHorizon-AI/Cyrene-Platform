@@ -7,24 +7,24 @@
 // ║ 职责：将已验证的 BFF 审批请求适配到 Fabric 授权端口。                 ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 
-//! Explicit adapter from authenticated BFF approval requests to Fabric's
-//! device-enrollment authorization port.
+//! Explicit adapter from authenticated BFF approval requests to the
+//! Workspace device-enrollment authorization port.
 //!
 //! This module never derives identity or role from request JSON. The only
 //! identity input is the verified web principal; browser scope is passed only
 //! after the BFF route has checked its organization and Directory capability.
 //!
-//! 将已认证的 BFF 审批请求显式适配到 Fabric device-enrollment 授权端口。本模块不从请求 JSON 派生身份或角色；
+//! 将已认证的 BFF 审批请求显式适配到 Workspace device-enrollment 授权端口。本模块不从请求 JSON 派生身份或角色；
 //! identity 仅来自已验证 web principal。浏览器 scope 仅在 BFF 路由检查 organization 与 Directory capability 后传入。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use cy_proto::workspace_v1::UserIdentityRef;
-use cy_workspace_fabric::{
-    device_authorization::DeviceAuthorizationScope,
-    device_enrollment_http::{DeviceEnrollmentHttpError, SecretBytes},
-    DeviceEnrollmentAuthorizationPort, VerifiedWebPrincipal,
+use cy_workspace_control_plane::VerifiedWebPrincipal;
+use cy_workspace_postgres_storage::{
+    device_authorization::DeviceAuthorizationScope, DeviceEnrollmentAuthorizationPort,
+    DeviceEnrollmentHttpError, SecretBytes,
 };
 use serde_json::Value;
 
@@ -33,22 +33,22 @@ use crate::{
     DeviceApprovalServiceError,
 };
 
-/// BFF adapter backed by one explicitly supplied Fabric authorization port.
+/// BFF adapter backed by one explicitly supplied Workspace authorization port.
 ///
 /// Hosts may inject this adapter only after constructing the real authorization
 /// port and its required providers. It does not create or substitute those
 /// providers itself.
 ///
-/// 由调用方显式注入一个 Fabric authorization port 的 BFF adapter。Host 只有在真实 authorization port 与所需 provider
+/// 由调用方显式注入一个 Workspace authorization port 的 BFF adapter。Host 只有在真实 authorization port 与所需 provider
 /// 均已构造后才能注入；本 adapter 不会自行创建或替代 provider。
 pub struct FabricDeviceApprovalAdapter {
     port: Arc<dyn DeviceEnrollmentAuthorizationPort>,
 }
 
 impl FabricDeviceApprovalAdapter {
-    /// Binds the adapter to the supplied Fabric authorization port.
+    /// Binds the adapter to the supplied Workspace authorization port.
     ///
-    /// 将 adapter 绑定到调用方提供的 Fabric authorization port。
+    /// 将 adapter 绑定到调用方提供的 Workspace authorization port。
     pub fn new(port: Arc<dyn DeviceEnrollmentAuthorizationPort>) -> Self {
         Self { port }
     }

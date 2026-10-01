@@ -14,11 +14,15 @@ distribution targets relate to one another.
 | `tagging.md` | Tagging rules. | 标签规则 |
 | `release-topology.md` | Release topology. | 发布拓扑 |
 | `PUBLIC_PACKAGE_RELEASE_ORDER.md` | Public Rust package publication DAG and dry-run procedure. | 公共 Rust 包发布依赖顺序与 dry-run 流程 |
+| `component-release-stream.md` | Immutable component manifests, indexes, attestations, and producer workflows. | 不可变组件 Manifest、Index、Attestation 与 Producer workflow。 |
 
 ## Suggested reading | 推荐顺序
 
 Read `component-vs-distribution.md`, `versioning-model.md`, and
 `release-topology.md` before preparing a release.
+
+Read `component-release-stream.md` for target-specific component artifacts,
+GitHub release assets, OCI digests, and provenance verification.
 
 准备发布前先读 `component-vs-distribution.md`、`versioning-model.md` 和
 `release-topology.md`。
@@ -39,7 +43,11 @@ Read `component-vs-distribution.md`, `versioning-model.md`, and
 | `tagging.md` | Tag 规则。 |
 | `release-topology.md` | 发布拓扑。 |
 | `PUBLIC_PACKAGE_RELEASE_ORDER.md` | 公共 Rust package 发布依赖顺序和 dry-run 流程。 |
+| `component-release-stream.md` | 不可变组件 Manifest、Index、Attestation 与 Producer workflow。 |
 
 ## 推荐顺序
 
 准备发布前先读 `component-vs-distribution.md`、`versioning-model.md` 和 `release-topology.md`。
+
+组件级目标产物、GitHub release assets、OCI digest 与来源校验见
+`component-release-stream.md`。

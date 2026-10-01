@@ -11,7 +11,7 @@ Product 合同 bundle 全部加载成功后 executable 才会启动。由于不�
 
 ## Composition boundary
 
-WebBffState::new requires all providers and a canonical operation catalog:
+WebBffState::new requires all providers and the source-pinned v2 catalog and policy bundle:
 
 - WebPrincipalVerifier validates one access token using the fixed issuer,
   audience, JWKS keys, lifetime, and scope rules. Only its immutable
@@ -37,34 +37,41 @@ WebBffState::new requires all providers and a canonical operation catalog:
   Product adapter. Product endpoint manifests are consumed by the Connector,
   not by the BFF. The BFF loads owner OpenAPI schemas to validate browser
   envelopes and responses; it never proxies browser-selected Product URLs.
-- ProductOperationCatalog must contain exactly one matching owner OpenAPI
-  operation for each canonical projection row. Its operation key, owner,
-  Product operationId, and semantic kind must match the TCK. The BFF does not
-  maintain a second owner or permission table. Navigator append is retained as
-  a canonical provenance row but is deny-only: its request/response schemas are
-  not compiled into the callable catalog and no upstream dispatch is allowed.
-  For operations 01–12, the loader also requires the owner-specific private
-  path namespace and one exact HTTP bearer security scheme:
-  `WorkspaceServiceBearer` for Catalyst, Yield, Reactor, and Echo;
-  `WorkspaceControlBearer` for Exchange; `NavigatorProductBearer` for operation
-  11; and `NavigatorWorkspaceBearer` for operation 12. Missing, alternate, or
-  inherited-only security fails startup.
+- The BFF loads the source-pinned v2 owner catalogs and OpenAPI closure from a
+  release bundle. The separately pinned Platform policy is used only as a
+  startup/UI preflight; Workspace control-plane authorization remains decisive.
+  The owner set is taken from the immutable compatibility lock, not a compiled
+  list of Products or operations. Navigator append remains in the owner catalog
+  but has no default policy grant, so it fails closed.
+- The browser calls the single generic v2 endpoint with `ownerId`,
+  `operationId`, optional Base64 `jsonBody` bytes, optional `resourceId`, and
+  optional `idempotencyKey`. The BFF resolves schemas and route metadata only
+  from the pinned bundle, checks JSON scope bindings, and never accepts a URL,
+  method, role, policy version, or Product credential from the browser.
+- `build.rs` reads
+  `tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json`.
+  Production Docker builds require the named BuildKit context `product-contracts`
+  and compare its bundle manifest, owner catalog digests, and policy digest to
+  that independent lock. Runtime then re-verifies the full manifest, owner
+  source SHA map, all files, and the transitive local `$ref` closure before the
+  router can start. Missing, mixed-version, stale, or incomplete artifacts fail
+  closed.
 
-build.rs reads
-contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv.
-The generated rows are checked against the compiled
-WorkspaceProductApiOperation enum at router composition and in crate tests.
-The runtime composition root loads the read-only release bundle named by
-`CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`. It verifies the canonical
-TCK digest, six repository pins, every raw file hash, and the complete local
-`$ref` closure before compiling request, path, and response schemas. The bundle
-must contain all 13 TCK operation mappings. Operations 01–12 compile closed
-owner request/path/response schemas. Operation 13 must resolve to its recorded
-Navigator POST operation but stays deny-only; its open append body is never
-compiled as callable input. A missing, stale, partial, remote, or out-of-root
-contract prevents readiness.
+WebBffState::new 必须接收全部 provider 与经过源 SHA 和 digest pin 校验的 v2 catalog/policy bundle：
 
-WebBffState::new 必须接收全部 provider 与 canonical operation catalog：
+- BFF 只从版本锁定 bundle 加载 Product owner catalog 与 OpenAPI 闭包。独立固定的 Platform policy 只用于启动和前置拒绝，最终授权仍由
+  Workspace control plane 执行。owner 集合来自不可变 compatibility lock，不再在编译代码中维护 Product/operation 列表。Navigator append
+  保留在 owner catalog，但没有默认 policy grant，因此 fail closed。
+- 浏览器只调用通用 v2 endpoint，提交 `ownerId`、`operationId`、可选 Base64 `jsonBody` bytes、可选 `resourceId` 和可选
+  `idempotencyKey`。BFF 只从固定 bundle 解析 schema 与路由 metadata，并验证 JSON scope binding；浏览器不能提交 URL、method、role、policy
+  version 或 Product credential。
+- `build.rs` 读取
+  `tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json`。生产 Docker build 必须提供名为
+  `product-contracts` 的 BuildKit named context，并将其中 bundle manifest、owner catalog digest 与 policy digest 和独立 lock 比对。
+  Runtime 再校验完整 manifest、owner source SHA map、所有文件和本地 transitive `$ref` 闭包，之后 router 才能启动。缺失、mixed-version、过期或
+  不完整 artifact 均 fail closed。
+
+WebBffState::new 必须接收全部 provider 与固定来源的 v2 catalog/policy bundle：
 
 - WebPrincipalVerifier 使用固定 issuer、audience、JWKS key、token lifetime 与 scope rule 校验 access token；
   router 只消费其不可变 VerifiedWebPrincipal getter，绝不从 X-MS-CLIENT-PRINCIPAL 或其他未签名身份 header
@@ -81,20 +88,12 @@ WebBffState::new 必须接收全部 provider 与 canonical operation catalog：
   candidate。transport 不会跨用户缓存。
 - 调用链为 Web BFF → Frontend Relay session → Workspace Connector → Product adapter。Product endpoint manifest 由 Connector
   使用，不由 BFF 消费。BFF 加载 owner OpenAPI schema 以校验浏览器 envelope 与 response；不会代理浏览器选择的 Product URL。
-- ProductOperationCatalog 对 canonical projection row 的每个 operation 必须恰有一个匹配的 owner OpenAPI operation。
-  operation key、owner、Product operationId 和语义类型必须与 TCK 一致。BFF 不维护第二份 owner 或 permission table。
-
-build.rs 从 contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv 读取 projection rows，并在 router
-composition 与 crate tests 中和生成的 WorkspaceProductApiOperation enum 对齐。Runtime composition root 从环境变量
-`CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT` 指定的只读 release bundle 加载合同，校验 canonical TCK digest、六个仓库 pin、
-每个文件的原始字节 hash 和完整本地 `$ref` 闭包，再编译 request、path、response schema。bundle 必须包含全部 13 个 TCK operation mapping。
-Operation 01–12 编译封闭 owner request/path/response schema。Operation 13 必须能解析到所记录的 Navigator POST operation，但保持 deny-only；开放 append body 不会编译成可调用输入。合同缺失、过期、部分、远端或越界均阻止 readiness。
-
 ## HTTP and security behavior
 
-- The only routes are GET /api/workspace/v1/session,
-  GET /api/workspace/v1/workspaces, and
-  POST /api/workspace/v1/workspaces/{workspaceId}/products/{operation}.
+- Product invocation uses only
+  `POST /api/workspace/v2/workspaces/{workspaceId}/products/invocations`.
+  The v1 Product route is not mounted. The existing v1 session and workspace
+  discovery routes remain available to the same-origin client.
 - Each request accepts exactly one server-injected
   `Authorization: Bearer <access-token>` header. Duplicate or malformed
   Authorization values and any `X-MS-TOKEN-*` header are rejected. Ingress
@@ -102,9 +101,9 @@ Operation 01–12 编译封闭 owner request/path/response schema。Operation 13
   token-store value, strip Easy Auth and Cyrene identity headers, and block all
   public access that bypasses that ingress. The access token is passed only to
   the verifier and session-bound CSRF signer; it is never serialized or logged.
-- The router requires one exact configured HTTPS Client origin for every
-  Product POST, including semantic READ operations. A COMMAND additionally
-  requires exact header/cookie equality and a valid HMAC bound to issuer,
+- The router requires one exact configured HTTPS Client origin and matching,
+  valid session-bound CSRF header/cookie for every Product invocation,
+  including semantic READ operations. The HMAC is bound to issuer,
   subject, organization, the current access-token session, and its verified
   expiry. Repeated and concurrent session refreshes for the same principal and
   access token return the same token/cookie value without server-side state.
@@ -112,26 +111,18 @@ Operation 01–12 编译封闭 owner request/path/response schema。Operation 13
   key configuration prevents router construction.
 - Session JSON returns an opaque signed csrfToken. The matching cookie is
   __Secure-cyrene-csrf with Secure, HttpOnly, SameSite=Strict, and
-  Path=/api/workspace/v1, without Domain. The access token and any
+  Path=/api/workspace, without Domain, so the same verified session protects
+  both the v1 session/discovery and v2 Product routes. The access token and any
   access-token fingerprint are absent from both response and logs.
-- Every JSON request and response is limited to 4 MiB. Successful Product
-  responses must match closed owner schemas; undeclared fields and URL-shaped
-  resource links fail closed. Declared resource references must be closed
-  relative objects with an allowlisted READ key and a bounded opaque resourceId
-  containing no URL or path separators. The BFF preserves a Product status and
-  body only after those checks pass.
-- Exchange operation 08 may accept the closed command-only `sourceEndpoint`
-  selector (`product: "reactor"`, UUID `endpointId`, positive integer
-  `resourceVersion`). It is not a navigable Product resource reference. The
-  Exchange owner must check the scoped grant and resolve the endpoint through
-  its fixed Reactor service connection; browser input never supplies a URL,
-  path, or upstream operation.
-- Navigator operation 13 remains unavailable to ordinary Web callers. Its
-  legacy `AppendRequest.events` items are open objects, and its writer token,
-  epoch fencing, and batch replay semantics require a trusted server-side
-  Harness writer handoff. The current BFF has no such handoff; it retains the
-  TCK row for provenance, keeps it outside the callable catalog, and returns
-  BFF-owned 403 without reading or forwarding its body.
+- The HTTP envelope is limited to 6 MiB and decoded Product JSON request and
+  response bodies to 4 MiB. Product responses must match the pinned owner
+  schemas and JSON scope bindings; undeclared fields or values outside the
+  selected organization, Workspace, or resource scope fail closed. The BFF
+  preserves a Product status and body only after those checks pass.
+- Navigator append remains unavailable to ordinary Web callers because the
+  pinned Platform policy has no grant for it. The control plane also requires a
+  trusted Harness writer handoff for append authorization; the BFF does not
+  synthesize one or expose writer credentials to the browser.
 - Product `application/problem+json` responses must use the closed shared
   RFC 9457 schema. Runtime accepts only `type` and `instance` equal to
   `about:blank`, a body status matching the HTTP status, and no `resourceRef`
@@ -146,20 +137,24 @@ Operation 01–12 编译封闭 owner request/path/response schema。Operation 13
 
 ## Deployment gates
 
-The production executable binds `0.0.0.0:8080` only after startup configuration,
-the PostgreSQL Workspace Directory connection, Azure AD verifier configuration,
-the complete pinned Product schema bundle, and Relay mTLS/handoff configuration
-have been constructed. Missing or malformed configuration, unreachable PostgreSQL,
-or an incomplete/stale contract bundle aborts startup before the listener opens.
-`GET /healthz` reports process liveness. `GET /readyz` deliberately stays 503:
-without a real verified user token, the host cannot safely prove AAD JWKS,
-Directory query permissions, or the principal-scoped Relay service trust path.
-This executable is not eligible for live traffic yet. A Relay outage or a token/JWKS
-failure also fails the corresponding request closed.
-The three browser device-approval routes also stay unavailable (503) until a real
-`DeviceEnrollmentAuthorizationPort` production composition is supplied. The optional
-session-binding store below only provides durable ceremony/session binding; it is
-not an approval service.
+The production executable opens its listener only after required configuration,
+PostgreSQL adapters, the pinned Product bundle and policy, the device CA, and the
+WebAuthn/session-binding adapters have initialized. A bare executable defaults to
+`127.0.0.1:8080`; the Docker image explicitly binds `0.0.0.0:8080` for its
+container ingress. Missing configuration, unreachable or unmigrated storage, or
+an incomplete/stale contract bundle aborts startup before the listener opens.
+`GET /healthz` reports process liveness. `GET /readyz` checks PostgreSQL schemas,
+AAD discovery/JWKS, the configured Relay mTLS handshake, the signed device CA CRL,
+and the loaded Product bundle without inventing a user identity. An external trust
+path outage keeps readiness at 503 and requests fail closed.
+
+The browser device-approval and WebAuthn routes are composed with durable
+authorization, credential, ceremony-binding, Directory role, and restricted-CA
+providers. Device start/poll/delivery-ack routes are composed from the same durable
+authorization flow. The host does not run database migrations: operators must run
+the storage migrator with each component's separate migration URL and provision
+least-privilege application logins before starting the BFF. Real AAD user/passkey
+ceremonies still require environment credentials to exercise end to end.
 
 Required runtime configuration:
 
@@ -171,17 +166,40 @@ Required runtime configuration:
 - `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`: Directory reader connection URL;
   configure its login as the restricted `cyrene_workspace_directory_reader`
   role. The adapter enforces PostgreSQL TLS `verify-full`.
-- Optional `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL`: dedicated
+- `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL`:
+  `cyrene_workspace_device_authorization_app` runtime login for device-start,
+  approval, polling, and delivery acknowledgements. This URL is also used by the
+  persisted user-code attempt limiter.
+- `CYRENE_WORKSPACE_DEVICE_REGISTRY_DATABASE_URL`:
+  `cyrene_workspace_device_registry_app` runtime login for certificate registration
+  and revocation records.
+- `CYRENE_WORKSPACE_DEVICE_CA_DATABASE_URL`:
+  `cyrene_workspace_device_ca_app` runtime login for signer receipts and the current
+  signed CRL. Set `CYRENE_WORKSPACE_DEVICE_CA_ISSUER_ID` to its fixed issuer ID.
+- `CYRENE_WORKSPACE_WEBAUTHN_DATABASE_URL`:
+  `cyrene_workspace_webauthn_app` runtime login for credentials and ceremonies.
+- `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL`: dedicated
   runtime connection URL for the durable WebAuthn HTTP session-binding store. Its
   login must use the restricted `cyrene_workspace_webauthn_http_binding_app` role;
-  PostgreSQL TLS `verify-full` is enforced. If absent, approval routes remain 503.
-  Schema migration uses the separate operator-only
-  `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_MIGRATION_DATABASE_URL`; the BFF
-  never applies migrations at startup.
-- `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`: read-only release bundle
-  directory. Production packaging supplies the locked 36-file bundle at
-  `/opt/cyrene/product-contracts`; the runtime verifies its TCK digest and all
-  repository/file pins before serving.
+  PostgreSQL TLS `verify-full` is enforced.
+- `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_VERIFICATION_URI` and
+  `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_KEY_VERSION`: fixed public
+  verification URI and positive HMAC key version. `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_HMAC_KEY_FILE`
+  points to a persistent 32-byte secret file. The Docker entrypoint stages the
+  fixed `user-code-hmac-key` secret at mode 0400; it is not read from an environment
+  value. Keep the key and version stable while any authorization created with it
+  can still be active.
+- `CYRENE_WORKSPACE_DEVICE_CA_SIGNING_KEY_FILE` and
+  `CYRENE_WORKSPACE_DEVICE_CA_CERTIFICATE_FILE` point to the CA key and certificate.
+  The Docker entrypoint stages fixed `device-ca-signing-key.pem` and
+  `device-ca-cert.pem` secret files with owner-only permissions.
+- Configure each adapter's `*_MIGRATION_DATABASE_URL` only for the separate
+  `cy-workspace-storage-migrator` operator action. The BFF does not apply schema
+  migrations at startup and does not use an operator URL as a runtime login.
+- `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT_V2`: read-only release bundle
+  directory. Production packaging supplies the bundle and separately pinned
+  policy at `/opt/cyrene/product-contracts`; the runtime verifies the
+  compatibility lock and every bundle file before serving.
 - `CYRENE_WORKSPACE_WEB_BFF_RELAY_ENDPOINT` and
   `CYRENE_WORKSPACE_WEB_BFF_RELAY_SERVER_NAME`: one trusted HTTPS Relay origin
   and exact TLS SNI name. `CYRENE_WORKSPACE_WEB_BFF_RELAY_CA_FILE`,
@@ -213,14 +231,15 @@ implied by internal ingress or by co-locating only the BFF. No public Product
 surface, public BFF ingress, placeholder secrets, or deployment is authorized by
 this source change.
 
-生产 executable 只有在启动配置、PostgreSQL Workspace Directory 连接、Azure AD verifier 配置、完整锁定的 Product schema
-bundle、Relay mTLS/handoff 配置均构造成功后才会绑定 `0.0.0.0:8080`。配置缺失或格式错误、PostgreSQL 不可达、合同 bundle
-不完整或过期都会在 listener 打开前终止启动。`GET /healthz` 报告进程存活。`GET /readyz` 刻意保持 503：没有真实已验证用户
-token 时，host 无法安全证明 AAD JWKS、Directory 查询权限或 principal-scoped Relay 服务信任路径，因此当前 executable 不能接 live
-traffic。Relay outage 或 token/JWKS failure 也会使对应请求 fail closed。
-三个浏览器设备审批路由也会保持不可用（503），直到提供真实的
-`DeviceEnrollmentAuthorizationPort` production composition。下面的可选 session-binding store
-只负责持久化 ceremony/session 绑定，不是审批 service。
+生产 executable 只有在必需配置、PostgreSQL adapters、固定 Product bundle 与 policy、device CA、WebAuthn 和 session-binding
+adapters 初始化成功后才会打开 listener。裸 executable 默认绑定 `127.0.0.1:8080`；Docker image 显式绑定 `0.0.0.0:8080` 以供容器 ingress
+访问。缺少配置、storage 不可达或 schema 未迁移、合同 bundle 不完整或过期，都会在 listener 打开前终止启动。
+`GET /healthz` 报告进程存活。`GET /readyz` 检查 PostgreSQL schemas、AAD discovery/JWKS、配置的 Relay mTLS handshake、签名 device CA CRL
+和已加载 Product bundle，不伪造用户身份。外部信任路径不可用时 readiness 返回 503，业务请求 fail closed。
+
+浏览器 device-approval 和 WebAuthn routes 已装配持久授权、credential、ceremony binding、Directory role 和受限 CA providers；device start/poll/delivery-ack
+routes 也连接到同一持久授权流程。Host 不执行数据库 migrations：运维必须用各组件独立的 migration URL 运行 storage migrator，并在启动 BFF
+前 provision 最小权限的 application logins。真实 AAD user/passkey ceremony 仍需要环境凭证才能端到端验证。
 
 Required runtime configuration:
 
@@ -229,12 +248,23 @@ Required runtime configuration:
 - `CYRENE_WORKSPACE_WEB_BFF_AAD_TENANT_ID` 与 `CYRENE_WORKSPACE_WEB_BFF_AAD_AUDIENCE`：固定 tenant UUID 与 API audience。
 - `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`：Directory reader 连接 URL；运维必须配置受限的
   `cyrene_workspace_directory_reader` 登录角色，adapter 强制 PostgreSQL TLS `verify-full`。
-- 可选 `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL`：WebAuthn HTTP session-binding store 的专用 runtime
-  连接 URL。登录角色必须为受限的 `cyrene_workspace_webauthn_http_binding_app`；adapter 强制 PostgreSQL TLS `verify-full`。
-  缺少此项时审批路由保持 503。schema migration 使用独立 operator-only
-  `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_MIGRATION_DATABASE_URL`；BFF 启动时不会执行 migration。
-- `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT`：只读 release bundle 目录。生产 packaging 将锁定的 36-file bundle 放到
-  `/opt/cyrene/product-contracts`；runtime 在服务前校验 TCK digest 与所有 repository/file pins。
+- `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL`：device start、approval、poll、delivery-ack 与用户码尝试限制器的
+  `cyrene_workspace_device_authorization_app` runtime login。
+- `CYRENE_WORKSPACE_DEVICE_REGISTRY_DATABASE_URL`：证书注册与撤销记录的 `cyrene_workspace_device_registry_app` runtime login。
+- `CYRENE_WORKSPACE_DEVICE_CA_DATABASE_URL`：签发收据与当前签名 CRL 的 `cyrene_workspace_device_ca_app` runtime login；另需固定
+  `CYRENE_WORKSPACE_DEVICE_CA_ISSUER_ID`。
+- `CYRENE_WORKSPACE_WEBAUTHN_DATABASE_URL`：credential 与 ceremony 数据的 `cyrene_workspace_webauthn_app` runtime login。
+- `CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL`：WebAuthn HTTP session-binding 专用 runtime URL；角色为受限的
+  `cyrene_workspace_webauthn_http_binding_app`。所有 adapters 均强制 PostgreSQL TLS `verify-full`。
+- `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_VERIFICATION_URI` 与 `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_KEY_VERSION`：固定公开验证 URI
+  与正整数 HMAC key version。`CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_HMAC_KEY_FILE` 指向持久 32-byte secret；Docker entrypoint
+  从固定的 `user-code-hmac-key` secret 挂载 stage 为 owner-only 文件，不从环境变量读取 key bytes。仍有旧授权可能有效时须保持 key/version 稳定。
+- `CYRENE_WORKSPACE_DEVICE_CA_SIGNING_KEY_FILE` 与 `CYRENE_WORKSPACE_DEVICE_CA_CERTIFICATE_FILE` 指向 CA key/certificate；Docker entrypoint
+  从固定 `device-ca-signing-key.pem` 和 `device-ca-cert.pem` secret 挂载 stage 为 owner-only 文件。
+- 各组件 `*_MIGRATION_DATABASE_URL` 只用于单独执行 `cy-workspace-storage-migrator` operator action。BFF 不在启动时运行 schema
+  migrations，也不会把 operator URL 用作 runtime login。
+- `CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT_V2`：只读 release bundle 目录。生产 packaging 将 bundle 和独立 pin 的 policy 放到
+  `/opt/cyrene/product-contracts`；runtime 在服务前校验 compatibility lock 与所有 bundle 文件。
 - `CYRENE_WORKSPACE_WEB_BFF_RELAY_ENDPOINT` 与 `CYRENE_WORKSPACE_WEB_BFF_RELAY_SERVER_NAME`：可信 HTTPS Relay origin 和精确 TLS SNI。
   `CYRENE_WORKSPACE_WEB_BFF_RELAY_CA_FILE`、`CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_CERT_FILE`、
   `CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_KEY_FILE` 指定 Relay trust root 与 BFF workload mTLS identity。文件大小有界；private key

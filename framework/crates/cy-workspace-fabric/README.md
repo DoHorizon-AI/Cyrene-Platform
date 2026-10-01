@@ -6,18 +6,21 @@ an authenticated private mTLS direct endpoint, and the outbound mTLS
 application relay used by the v1 reference vertical. Candidate selection tries
 `LAN_DIRECT` before `RELAY` according to descriptor priority.
 
-The reusable low-level HTTPS mTLS dialer lives in
+The reusable outbound Workspace client transport lives in
+[`../cy-workspace-client-sdk/`](../cy-workspace-client-sdk/README.md), and its
+low-level HTTPS mTLS dialer lives in
 [`../cy-mtls-channel-client/`](../cy-mtls-channel-client/README.md). Fabric
-retains descriptor validation, identity and authorization gates, direct-versus-
+retains identity and authorization gates, direct-versus-
 Relay selection, fallback policy, and Workspace request dispatch.
 
 本 crate 提供产品无关的 Account/Directory 边界、transport-neutral Workspace
 连接描述符、稳定 Workspace API port、私网 mTLS 直连端点与 v1 参考纵向使用的出站
 mTLS 应用层 Relay。候选选择按描述符优先级先尝试 `LAN_DIRECT`，再选择 `RELAY`。
 
-可复用的底层 HTTPS mTLS dialer 位于
+可复用的 Workspace 出站 client transport 位于
+[`../cy-workspace-client-sdk/`](../cy-workspace-client-sdk/README.md)，底层 HTTPS mTLS dialer 位于
 [`../cy-mtls-channel-client/`](../cy-mtls-channel-client/README.md)。Fabric 继续持有
-descriptor 校验、身份与授权 gate、直连/Relay 选择、fallback policy 和 Workspace request
+身份与授权 gate、直连/Relay 选择、fallback policy 和 Workspace request
 dispatch。
 
 It consumes the existing Execution Fabric connectivity provider and semantic
@@ -41,10 +44,9 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/direct.rs` | Workspace API endpoint with session and membership checks. | 校验会话与成员关系的 Workspace API 直连端点。 |
 | `src/frontend_relay_client.rs` | Verified-principal Web Frontend client for an outbound mTLS Relay session. | 基于已验证主体的出站 mTLS Relay 客户端。 |
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
-| `src/transport.rs` | Fabric-owned descriptor validation, direct candidate selection, and Relay transport policy. | Fabric 持有的描述符校验、直连候选选择与 Relay transport policy。 |
+| `src/transport.rs` | Connector-facing Relay session service path; client dialing is in the SDK. | Connector 侧 Relay session service path；client dialing 位于 SDK。 |
 | `../cy-mtls-channel-client/` | Reusable HTTPS mTLS Tonic channel construction; no identity, authorization, routing, or dispatch authority. | 可复用的 HTTPS mTLS Tonic channel 构造；不持有身份、授权、路由或 dispatch 权限。 |
 | `src/bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
-| `src/sidecar.rs` | Loopback-authenticated bridge for non-Rust Workspace clients. | 为非 Rust Workspace client 提供 loopback 认证代理。 |
 | `../cy-workspace-relay-host/` | Independently versioned fail-closed Relay Host package and image. | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
 | `../cy-workspace-connector-host/` | Independently versioned outbound Connector Host package and image. | 独立版本化的出站 Connector Host package 与镜像。 |
 | `../cy-workspace-sidecar/` | Independently versioned loopback Sidecar package. | 独立版本化的 loopback Sidecar package。 |
@@ -62,13 +64,19 @@ gate are documented in [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.
 生产出站 Connector host 的固定私有文件布局、设备身份构造、Product scope 校验与
 Relay 外部注册表 gate 见 [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.md)。
 
-Product operation routing remains implemented in this shared Platform crate.
-The current Connector composition and the safe follow-up catalog boundary are
+Product API v2 dispatch and authorization live in `cy-workspace-control-plane`.
+The generic HTTPS adapter lives in `cy-workspace-product-adapters`, while
+operation routes and schemas come from release-pinned owner catalogs. Platform
+policy, caller scope, response schema, and response-scope checks remain
+control-plane gates. The Connector composition and its fixed release inputs are
 documented in
 [`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md).
 
-Product operation 路由仍由共享 Platform crate 实现。当前 Connector composition 与后续安全
-catalog 边界见 [`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md)。
+Product API v2 dispatch 与授权位于 `cy-workspace-control-plane`。通用 HTTPS adapter 位于
+`cy-workspace-product-adapters`；operation route 和 schema 来自 release 固定的 owner catalog。
+Platform policy、caller scope、响应 schema 与 response-scope 校验仍由 control plane 执行。
+Connector composition 与固定 release 输入见
+[`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md)。
 
 ## Local Python bridge
 
@@ -290,13 +298,13 @@ before verifying the short-lived signed handoff. The browser's AAD access token
 is not the Relay credential. WorkspaceConnector authentication remains
 disabled: this host does not load a device CA or accept Connector sessions
 until the durable device registry adapter is composed. Directory
-administration, DeviceAuthorization, certificate issuance, WebAuthn, and
-Product private access are not composed.
+administration, DeviceAuthorization, certificate issuance, and WebAuthn are not
+composed in this Relay host.
 
-Product HTTP is performed by `ProductHttpApiAdapter` on the WorkspaceConnector
-path. Frontend Relay authentication alone does not create a Product request
-path; this host rejects Connector sessions, so no Product request can currently
-reach its owner through this host.
+The Connector host composes the Product v2 control plane and
+`ProductHttpApiAdapter`. Frontend Relay authentication alone does not create a
+Product request path; this Relay host rejects Connector sessions, so those
+calls cannot currently reach their owners through this host.
 
 `GET /healthz` reports process liveness. `GET /readyz` performs a bounded,
 read-only PostgreSQL Directory probe and returns fixed dependency booleans; it
@@ -435,10 +443,9 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 | `src/api.rs` | 稳定的 frontend-to-Workspace API port 与 LOCAL adapter。 |
 | `src/direct.rs` | 校验会话与成员关系的 Workspace API 私网直连端点。 |
 | `src/relay.rs` | 不拥有 Workspace authority 的实时应用请求路由。 |
-| `src/transport.rs` | Fabric 持有的描述符校验、直连候选选择、出站 Relay policy 和 connector session。 |
+| `src/transport.rs` | Connector 侧 Relay session service path；client dialing 位于 SDK。 |
 | `../cy-mtls-channel-client/` | 可复用的 HTTPS mTLS Tonic channel 构造，不拥有身份、授权、路由或 dispatch authority。 |
 | `src/bin/` | 验收 fixture 与受限 Directory 配置 CLI。 |
-| `src/sidecar.rs` | 消费外部凭据并提供本地认证 gRPC 代理。 |
 | `../cy-workspace-relay-host/` | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
 | `../cy-workspace-connector-host/` | 独立版本化的出站 Connector Host package 与镜像。 |
 | `../cy-workspace-sidecar/` | 独立版本化的 loopback Sidecar package。 |
@@ -530,7 +537,7 @@ session、user code 或其他身份值。部署 composite 前，使用
 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL` 并连接只读 PostgreSQL Directory；host 不再回退到文件存储。
 PostgreSQL TLS 会校验证书和主机名；私有数据库 CA 需要通过 `sslrootcert` 配置。数据库配置缺失或不可用时启动失败，并将数据库错误转换为固定安全错误。
 
-未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发、WebAuthn 和 Product 私有访问仍未组合。Product HTTP 由 WorkspaceConnector 路径上的 `ProductHttpApiAdapter` 发起；Frontend Relay authentication 不会自动创建 Product 请求通路。此 host 拒绝 Connector session，因此当前没有请求能经它到达 Product owner。
+未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发和 WebAuthn 尚未在此 Relay host 组合。Connector host 已组合 Product v2 control plane 与 `ProductHttpApiAdapter`；但 Frontend Relay authentication 不会自动创建 Product 请求通路，此 Relay host 拒绝 Connector session，因此当前不能经由此 Relay host 到达 Product owner。
 
 `GET /healthz` 表示进程存活。`GET /readyz` 会在有界时间内执行只读 PostgreSQL Directory 探测，并返回固定依赖布尔值；全部必需服务和部署拓扑验证完成前，保持 HTTP 503。host 无法从配置值推断 ACA 实际 ingress 设置或私网连通性。这是 fail-closed 的分阶段组合，不是生产 Relay 部署。准确运行配置和探针行为见 [`../cy-workspace-relay-host/RUNTIME.md`](../cy-workspace-relay-host/RUNTIME.md)。
 

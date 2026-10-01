@@ -1,0 +1,35 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  Product API v2 invocation contract                                  │
+// │                                                                      │
+// │  Role: Selects an owner-published operation without exposing routes, │
+// │        credentials, principals, roles, or catalog versions.           │
+// │                                                                      │
+// │  协议职责：以 owner 与 operation 标识调用 Product；不暴露路由、凭据、    │
+// │            主体、角色或目录版本。                                      │
+// └─────────────────────────────────────────────────────────────────────┘
+syntax = "proto3";
+
+package cyrene.workspace.product.v2;
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.workspace.product.v2";
+
+// A caller-selected Product operation. Route resolution and authorization
+// are performed by the trusted Platform against pinned owner catalogs and
+// a separately pinned Platform policy.
+// 调用方只能选择目录中的 owner/operation；受信 Platform 才解析路由并授权。
+message ProductApiInvocationV2 {
+  string owner_id = 1;
+  string operation_id = 2;
+  bytes json_body = 3;
+  string resource_id = 4;
+  string idempotency_key = 5;
+}
+
+// Product-owned HTTP response data projected without creating Platform state.
+// 返回 Product 自有的 HTTP 响应数据，不在 Platform 创建 Product 状态。
+message ProductApiResponseV2 {
+  uint32 status_code = 1;
+  bytes json_body = 2;
+  string content_type = 3;
+}

@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use cy_workspace_fabric::workspace_v1::{
+use cy_workspace_control_plane::workspace_v1::{
     workspace_api_request, WorkspaceApiRequest, WorkspaceApiResponse, WorkspaceConnectionCandidate,
     WorkspaceConnectionDescriptor,
 };
-use cy_workspace_fabric::{
+use cy_workspace_control_plane::{
     validate_descriptor, VerifiedWebPrincipal, WorkspaceApi, WorkspaceCallerContext,
     WorkspaceDirectory, WorkspaceDirectoryError,
 };
@@ -278,7 +278,7 @@ impl crate::WorkspaceProductGateway for FabricWorkspaceProductGateway {
 
 async fn select_member_workspace(
     directory: &dyn WorkspaceDirectory,
-    identity: &cy_workspace_fabric::workspace_v1::UserIdentityRef,
+    identity: &cy_workspace_control_plane::workspace_v1::UserIdentityRef,
     organization_id: &str,
     workspace_id: &str,
     now_unix_ms: u64,
@@ -311,12 +311,34 @@ fn validate_gateway_request(request: &WorkspaceApiRequest) -> Result<(), Workspa
         || request.workspace_id.len() > 200
         || !matches!(
             request.request.as_ref(),
-            Some(workspace_api_request::Request::ProductApi(_))
+            Some(workspace_api_request::Request::ProductApiV2(invocation))
+                if is_valid_wire_owner_id(&invocation.owner_id)
+                    && is_valid_wire_operation_id(&invocation.operation_id)
+                    && invocation.json_body.len() <= crate::MAX_JSON_BODY_BYTES
+                    && invocation.resource_id.len() <= 512
+                    && invocation.idempotency_key.len() <= 200
         )
     {
         return Err(WorkspaceGatewayError::InvalidResponse);
     }
     Ok(())
+}
+
+fn is_valid_wire_owner_id(value: &str) -> bool {
+    let mut characters = value.bytes();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && value.len() <= 63
+        && characters.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_valid_wire_operation_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn map_caller_context_status(status: u16) -> WorkspaceGatewayError {
@@ -356,11 +378,11 @@ fn now_unix_ms() -> Option<i64> {
 mod tests {
     use std::sync::Mutex;
 
-    use cy_workspace_fabric::workspace_v1::{
+    use cy_workspace_control_plane::workspace_v1::{
         workspace_api_request, GetWorkspaceOperationRequest, WorkspaceApiRequest,
         WorkspaceConnectionCandidate, WorkspaceConnectionDescriptor,
     };
-    use cy_workspace_fabric::{WorkspaceDirectory, WorkspaceDirectoryError};
+    use cy_workspace_control_plane::{WorkspaceDirectory, WorkspaceDirectoryError};
     use prost_types::Timestamp;
 
     use super::*;
@@ -374,7 +396,7 @@ mod tests {
     impl WorkspaceDirectory for FixtureDirectory {
         async fn discover(
             &self,
-            user: &cy_workspace_fabric::workspace_v1::UserIdentityRef,
+            user: &cy_workspace_control_plane::workspace_v1::UserIdentityRef,
             organization_id: &str,
             now_unix_ms: u64,
         ) -> Result<Vec<WorkspaceConnectionDescriptor>, WorkspaceDirectoryError> {
@@ -388,7 +410,7 @@ mod tests {
 
         async fn is_member(
             &self,
-            _user: &cy_workspace_fabric::workspace_v1::UserIdentityRef,
+            _user: &cy_workspace_control_plane::workspace_v1::UserIdentityRef,
             _organization_id: &str,
             _workspace_id: &str,
         ) -> Result<bool, WorkspaceDirectoryError> {
@@ -417,8 +439,8 @@ mod tests {
         }
     }
 
-    fn identity() -> cy_workspace_fabric::workspace_v1::UserIdentityRef {
-        cy_workspace_fabric::workspace_v1::UserIdentityRef {
+    fn identity() -> cy_workspace_control_plane::workspace_v1::UserIdentityRef {
+        cy_workspace_control_plane::workspace_v1::UserIdentityRef {
             issuer: "https://issuer.example".to_string(),
             subject: "subject-1".to_string(),
         }
@@ -580,13 +602,17 @@ mod tests {
     }
 
     #[test]
-    fn gateway_accepts_only_typed_product_requests_without_caller_or_url_fields() {
+    fn gateway_accepts_only_v2_product_requests_without_caller_or_url_fields() {
         let valid = WorkspaceApiRequest {
             request_id: "request-1".to_string(),
             workspace_id: "workspace-a".to_string(),
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
-            request: Some(workspace_api_request::Request::ProductApi(
-                cy_workspace_fabric::workspace_v1::WorkspaceProductApiRequest::default(),
+            request: Some(workspace_api_request::Request::ProductApiV2(
+                cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2 {
+                    owner_id: "catalyst".into(),
+                    operation_id: "workspaceListDatasets".into(),
+                    ..Default::default()
+                },
             )),
         };
         assert!(validate_gateway_request(&valid).is_ok());
@@ -595,10 +621,25 @@ mod tests {
             request: Some(workspace_api_request::Request::GetOperation(
                 GetWorkspaceOperationRequest::default(),
             )),
-            ..valid
+            ..valid.clone()
         };
         assert_eq!(
             validate_gateway_request(&non_product),
+            Err(WorkspaceGatewayError::InvalidResponse)
+        );
+
+        let invalid_owner = WorkspaceApiRequest {
+            request: Some(workspace_api_request::Request::ProductApiV2(
+                cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2 {
+                    owner_id: "../catalyst".into(),
+                    operation_id: "workspaceListDatasets".into(),
+                    ..Default::default()
+                },
+            )),
+            ..valid
+        };
+        assert_eq!(
+            validate_gateway_request(&invalid_owner),
             Err(WorkspaceGatewayError::InvalidResponse)
         );
     }

@@ -34,11 +34,12 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::DateTime;
-use cy_workspace_fabric::{
-    authorize_verified_web_session_role, VerifiedWebPrincipal, VerifiedWebSessionContext,
-    WebAuthnHttpAuthorizationError, WebAuthnHttpCeremonyPurpose, WebAuthnHttpSessionBindingError,
-    WebAuthnHttpSessionBindingStore, WebAuthnSessionCeremonyBinding,
-    WebAuthnSessionFinishReservation, WorkspaceDirectory, WORKSPACE_DEVICE_ENROLLMENT_APPROVE_ROLE,
+use cy_workspace_control_plane::{VerifiedWebPrincipal, WorkspaceDirectory};
+use cy_workspace_postgres_storage::{
+    authorize_verified_web_session_role, VerifiedWebSessionContext, WebAuthnHttpAuthorizationError,
+    WebAuthnHttpCeremonyPurpose, WebAuthnHttpSessionBindingError, WebAuthnHttpSessionBindingStore,
+    WebAuthnSessionCeremonyBinding, WebAuthnSessionFinishReservation,
+    WORKSPACE_DEVICE_ENROLLMENT_APPROVE_ROLE,
 };
 use http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
 use http::HeaderValue as HttpHeaderValue;

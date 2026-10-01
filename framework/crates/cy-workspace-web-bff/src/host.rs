@@ -6,40 +6,63 @@
 //! ║ 模块职责：装配真实身份、Directory、合同 catalog 与 Relay provider。    ║
 //! ╚══════════════════════════════════════════════════════════════════════╝
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::routing::get;
 use axum::Router;
 use cy_proto::google::rpc::Status as RpcStatus;
-use cy_workspace_fabric::workspace_v1::{
+use cy_proto::workspace_v1::UserIdentityRef;
+use cy_proto::workspace_v1::{
     workspace_api_request, workspace_api_response, WorkspaceApiRequest, WorkspaceApiResponse,
     WorkspaceConnectionDescriptor,
 };
-use cy_workspace_fabric::{
-    AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, FrontendRelayClient,
-    FrontendRelayClientConfig, FrontendRelayClientError, PostgresWebAuthnHttpSessionBindingStore,
-    PostgresWorkspaceDirectory, VerifiedWebPrincipal, WebAuthnHttpSessionBindingStore,
+use cy_workspace_control_plane::{
+    AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, UserCodeKeyRing, VerifiedWebPrincipal,
     WebIdentityDirectory, WebIdentityDirectoryError, WebPrincipalVerifier, WebRelaySessionIssuer,
     WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceDirectory,
     WORKSPACE_MEMBER_ROLE,
 };
+use cy_workspace_fabric::{
+    FrontendRelayClient, FrontendRelayClientConfig, FrontendRelayClientError,
+};
+use cy_workspace_postgres_storage::{
+    device_enrollment_device_v1_router, webauthn_http_router, DeviceAuthorizationPolicy,
+    DeviceAuthorizationPortError, DeviceCertificateIssuer, DeviceCertificatePublicMetadataPort,
+    DeviceCertificateRetirementPort, DeviceCertificateRevocationChecker,
+    DeviceEnrollmentAuthorizationPort, DeviceEnrollmentAuthorizationService,
+    DeviceEnrollmentAuthorizationServiceConfig, DeviceEnrollmentHttpDependencies,
+    DurableDirectoryError, PostgresDeviceAuthorizationStore,
+    PostgresDeviceEnrollmentRegistrationTransaction, PostgresRestrictedDeviceCa,
+    PostgresUserCodeAttemptReservation, PostgresWebAuthnCredentialStore,
+    PostgresWebAuthnHttpSessionBindingStore, PostgresWorkspaceDeviceRegistry,
+    PostgresWorkspaceDirectory, ProductionDeviceCsrValidator, WebAuthnAuthenticationPort,
+    WebAuthnAuthenticationVerifier, WebAuthnCredentialEnrollmentAuthorizer,
+    WebAuthnCredentialManagementAction, WebAuthnHttpSessionBindingStore, WebAuthnHttpState,
+    WebAuthnVerifierConfig, WebAuthnVerifierSystemClock,
+};
 use http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use http::{Response, StatusCode};
+use serde_json::json;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
+use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
 use cy_workspace_web_bff::{
     load_product_operation_catalog_from_environment, router_with_device_approval,
-    DeviceApprovalDependencies, FabricWorkspaceProductGateway, WebBffConfig, WebBffState,
-    WorkspaceApiBinding, WorkspaceApiResolutionError, WorkspaceApiResolver,
+    with_verified_web_session_routes, DeviceApprovalDependencies, FabricWorkspaceProductGateway,
+    WebBffConfig, WebBffState, WorkspaceApiBinding, WorkspaceApiResolutionError,
+    WorkspaceApiResolver,
 };
 
 const MAX_CERTIFICATE_FILE_BYTES: u64 = 256 * 1024;
@@ -55,8 +78,15 @@ const RELAY_CLIENT_KEY_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_K
 const HANDOFF_ISSUER_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_ISSUER";
 const HANDOFF_AUDIENCE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_AUDIENCE";
 const HANDOFF_SIGNING_SEED_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_SIGNING_SEED_FILE";
-const WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL_ENV: &str =
-    "CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL";
+const DEVICE_AUTHORIZATION_USER_CODE_KEY_FILE_ENV: &str =
+    "CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_HMAC_KEY_FILE";
+const DEVICE_AUTHORIZATION_VERIFICATION_URI_ENV: &str =
+    "CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_VERIFICATION_URI";
+const DEVICE_AUTHORIZATION_USER_CODE_KEY_VERSION_ENV: &str =
+    "CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_KEY_VERSION";
+const WEBAUTHN_SESSION_BINDING_TIMEOUT: Duration = Duration::from_secs(3);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Fixed startup failures which never include credential values or backend diagnostics.
 ///
@@ -75,6 +105,10 @@ pub(crate) enum HostStartupError {
     ProductCatalog,
     #[error("WebAuthn HTTP session-binding store could not be initialized")]
     WebAuthnSessionBinding,
+    #[error("device enrollment authorization dependencies could not be initialized")]
+    DeviceEnrollment,
+    #[error("restricted device CA could not be initialized")]
+    DeviceCa,
     #[error("Workspace Web BFF application state could not be initialized")]
     Application,
     #[error("Workspace Web BFF HTTP listener failed")]
@@ -205,6 +239,7 @@ impl HostSettings {
 /// 在打开 HTTP listener 前装配所有必要生产依赖。Relay session 只会在真实 token 验证后创建，不使用合成用户探测。
 pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     let settings = HostSettings::from_environment()?;
+    let relay = Arc::new(settings.relay);
     let mut csrf_mac_key = settings.csrf_mac_key.duplicate();
     let web_config = WebBffConfig::new(settings.client_origin.clone(), csrf_mac_key)
         .map_err(|_| HostStartupError::Application);
@@ -222,10 +257,11 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     let identity_config =
         AzureAdWebIdentityConfig::new(settings.tenant_id, settings.audience.clone())
             .map_err(|_| HostStartupError::Identity)?;
-    let principal_verifier: Arc<dyn WebPrincipalVerifier> = Arc::new(
+    let identity_verifier = Arc::new(
         AzureAdWebPrincipalVerifier::new(identity_config, identity_directory)
             .map_err(|_| HostStartupError::Identity)?,
     );
+    let principal_verifier: Arc<dyn WebPrincipalVerifier> = identity_verifier.clone();
     let mut signing_seed = settings.handoff_signing_seed.duplicate();
     let handoff_issuer = Arc::new(
         WebRelaySessionIssuer::new(
@@ -238,79 +274,384 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     signing_seed.zeroize();
 
     let resolver: Arc<dyn WorkspaceApiResolver> = Arc::new(PrincipalScopedRelayResolver {
-        relay: settings.relay.clone(),
+        relay: Arc::clone(&relay),
         handoff_issuer,
     });
-    let workspace_directory: Arc<dyn WorkspaceDirectory> = directory;
-    let approval_directory = Arc::clone(&workspace_directory);
+    let workspace_directory: Arc<dyn WorkspaceDirectory> = directory.clone();
     let workspace_gateway = Arc::new(FabricWorkspaceProductGateway::new(
         Arc::clone(&workspace_directory),
         resolver,
     ));
     let product_catalog = load_product_operation_catalog_from_environment()
         .map_err(|_| HostStartupError::ProductCatalog)?;
-    let state = WebBffState::new(
-        web_config,
-        principal_verifier,
-        workspace_directory,
-        workspace_gateway,
-        product_catalog,
-    )
-    .map_err(|_| HostStartupError::Application)?;
+    let state = Arc::new(
+        WebBffState::new(
+            web_config,
+            principal_verifier,
+            workspace_directory,
+            workspace_gateway,
+            product_catalog,
+        )
+        .map_err(|_| HostStartupError::Application)?,
+    );
 
-    let session_bindings: Option<Arc<dyn WebAuthnHttpSessionBindingStore>> =
-        if env::var_os(WEBAUTHN_HTTP_SESSION_BINDING_DATABASE_URL_ENV).is_some() {
-            Some(Arc::new(
-                PostgresWebAuthnHttpSessionBindingStore::connect_from_environment()
-                    .await
-                    .map_err(|_| HostStartupError::WebAuthnSessionBinding)?,
-            ))
-        } else {
-            None
-        };
+    let authorization_store = Arc::new(
+        tokio::task::spawn_blocking(PostgresDeviceAuthorizationStore::connect_from_environment)
+            .await
+            .map_err(|_| HostStartupError::DeviceEnrollment)?
+            .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let attempt_reservation = Arc::new(
+        PostgresUserCodeAttemptReservation::connect_from_environment()
+            .await
+            .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let registry = Arc::new(
+        tokio::task::spawn_blocking(PostgresWorkspaceDeviceRegistry::connect_from_environment)
+            .await
+            .map_err(|_| HostStartupError::DeviceEnrollment)?
+            .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let ca = Arc::new(
+        tokio::task::spawn_blocking(PostgresRestrictedDeviceCa::connect_from_environment)
+            .await
+            .map_err(|_| HostStartupError::DeviceCa)?
+            .map_err(|_| HostStartupError::DeviceCa)?,
+    );
+    tokio::task::spawn_blocking({
+        let ca = Arc::clone(&ca);
+        move || ca.check_current_crl()
+    })
+    .await
+    .map_err(|_| HostStartupError::DeviceCa)?
+    .map_err(|_| HostStartupError::DeviceCa)?;
+
+    let credential_store = Arc::new(
+        tokio::task::spawn_blocking(PostgresWebAuthnCredentialStore::connect_from_environment)
+            .await
+            .map_err(|_| HostStartupError::DeviceEnrollment)?
+            .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let session_bindings = Arc::new(
+        tokio::time::timeout(
+            WEBAUTHN_SESSION_BINDING_TIMEOUT,
+            PostgresWebAuthnHttpSessionBindingStore::connect_from_environment(),
+        )
+        .await
+        .map_err(|_| HostStartupError::WebAuthnSessionBinding)?
+        .map_err(|_| HostStartupError::WebAuthnSessionBinding)?,
+    );
+
+    let policy = DeviceAuthorizationPolicy::default();
+    let user_code_keys = user_code_key_ring_from_environment()?;
+    let csr_validator = Arc::new(ProductionDeviceCsrValidator::default());
+    let trust_roots = vec![ca.trusted_root_der().to_vec()];
+    let revocation_checker = ca.revocation_checker();
+    let revocation_checker_for_issuance: Arc<dyn DeviceCertificateRevocationChecker> =
+        revocation_checker.clone();
+    let issuer: Arc<dyn DeviceCertificateIssuer> = ca.clone();
+    let retirement: Arc<dyn DeviceCertificateRetirementPort> = ca.clone();
+    let certificate_metadata: Arc<dyn DeviceCertificatePublicMetadataPort> = ca.clone();
+    let authorization_directory: Arc<dyn WorkspaceDirectory> = directory.clone();
+    let webauthn_origin =
+        Url::parse(&settings.client_origin).map_err(|_| HostStartupError::Configuration)?;
+    let rp_id = webauthn_origin
+        .host_str()
+        .ok_or(HostStartupError::Configuration)?
+        .to_string();
+    let webauthn_config = WebAuthnVerifierConfig::new(rp_id, webauthn_origin)
+        .map_err(|_| HostStartupError::DeviceEnrollment)?;
+    let credential_store_for_authentication: Arc<
+        dyn cy_workspace_postgres_storage::WebAuthnCredentialStore,
+    > = credential_store.clone();
+    let clock = Arc::new(WebAuthnVerifierSystemClock);
+    let webauthn = Arc::new(
+        WebAuthnAuthenticationVerifier::new(
+            webauthn_config.clone(),
+            credential_store_for_authentication,
+            clock.clone(),
+        )
+        .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let webauthn_authentication: Arc<dyn WebAuthnAuthenticationPort> = webauthn;
+    let csr_validator_port: Arc<dyn cy_workspace_postgres_storage::DeviceCsrValidator> =
+        csr_validator.clone();
+
+    let verification_uri = required_text(DEVICE_AUTHORIZATION_VERIFICATION_URI_ENV)?;
+    let registration = Arc::new(
+        PostgresDeviceEnrollmentRegistrationTransaction::new(
+            Arc::clone(&authorization_store),
+            user_code_keys.clone(),
+            policy.clone(),
+            csr_validator_port.clone(),
+            &verification_uri,
+        )
+        .await
+        .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let authorization_service = Arc::new(
+        DeviceEnrollmentAuthorizationService::new(DeviceEnrollmentAuthorizationServiceConfig {
+            store: Arc::clone(&authorization_store),
+            attempt_reservation: Arc::clone(&attempt_reservation),
+            directory: authorization_directory,
+            webauthn: webauthn_authentication,
+            csr_validator: csr_validator_port,
+            issuer,
+            retirement,
+            registry: Arc::clone(&registry),
+            certificate_metadata,
+            device_certificate_trust_roots_der: trust_roots,
+            device_certificate_revocation_checker: revocation_checker_for_issuance,
+            user_code_keys: user_code_keys.clone(),
+            policy,
+        })
+        .await
+        .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+
+    // Recover committed issue/delivery/retirement transitions before routes accept new work.
+    authorization_service
+        .reconcile_pending_work_once()
+        .await
+        .map_err(|_| HostStartupError::DeviceEnrollment)?;
+    start_reconciliation_worker(Arc::clone(&authorization_service));
+
+    let webauthn_http_state = Arc::new(
+        WebAuthnHttpState::production(
+            webauthn_config,
+            Arc::clone(&credential_store),
+            directory.clone(),
+            clock,
+            Arc::new(TrustedBffCredentialManagementAuthorizer),
+            session_bindings.clone(),
+            cy_workspace_postgres_storage::WORKSPACE_DEVICE_ENROLLMENT_APPROVE_ROLE,
+        )
+        .map_err(|_| HostStartupError::DeviceEnrollment)?,
+    );
+    let webauthn_routes = with_verified_web_session_routes(
+        Arc::clone(&state),
+        webauthn_http_router(webauthn_http_state),
+    );
+
+    let user_enrollment_port: Arc<dyn DeviceEnrollmentAuthorizationPort> =
+        authorization_service.clone();
+    let approval_service = Arc::new(cy_workspace_web_bff::FabricDeviceApprovalAdapter::new(
+        user_enrollment_port,
+    ));
+    let approval_directory: Arc<dyn WorkspaceDirectory> = directory.clone();
+    let session_bindings_for_routes: Arc<dyn WebAuthnHttpSessionBindingStore> =
+        session_bindings.clone();
     let approval_dependencies = DeviceApprovalDependencies {
-        // No production DeviceEnrollmentAuthorizationPort composition exists yet.
-        // Keep approval unavailable until that real provider is supplied.
-        // 尚无生产级 DeviceEnrollmentAuthorizationPort 组合；真实 provider 接入前保持审批不可用。
-        service: None,
+        service: Some(approval_service),
         directory: Some(approval_directory),
-        session_bindings,
+        session_bindings: Some(session_bindings_for_routes),
     };
 
-    Ok(with_probes(router_with_device_approval(
-        Arc::new(state),
-        approval_dependencies,
-    )))
+    let device_routes = device_enrollment_device_v1_router(DeviceEnrollmentHttpDependencies {
+        registration: Some(registration),
+        csr_validator: Some(csr_validator),
+        authorization: Some(authorization_service.clone()),
+    });
+    let application = router_with_device_approval(Arc::clone(&state), approval_dependencies)
+        .merge(webauthn_routes)
+        .merge(device_routes);
+    let readiness = Arc::new(HostReadiness {
+        directory,
+        identity_verifier,
+        relay,
+        authorization_store,
+        attempt_reservation,
+        registry,
+        ca,
+        credential_store,
+        session_bindings,
+        product_catalog_loaded: true,
+    });
+
+    Ok(with_probes(application, readiness))
 }
 
-/// Start liveness after composition while keeping readiness closed until external trust paths
-/// can be health-checked without fabricating a user identity.
+/// Start liveness and check each live trust dependency without inventing a user identity.
 ///
-/// Composition verifies local configuration, PostgreSQL reachability, and the pinned contract
-/// bundle. It cannot prove AAD JWKS availability or Relay service trust without a real user
-/// token, so `readyz` remains 503 and this build is not eligible for live ingress.
+/// Readiness probes the current PostgreSQL schemas, signed CRL, pinned OIDC discovery/JWKS, and
+/// the native mTLS connection to Relay. Product authorization remains request-scoped and is
+/// checked only after a real verified browser principal arrives.
 ///
-/// 装配后可报告进程存活；在不伪造用户身份的前提下验证 AAD JWKS 与 Relay 服务信任前，readiness 始终关闭。
-fn with_probes(application: Router) -> Router {
+/// 启动 liveness 并逐项探测真实 PostgreSQL schema、签名 CRL、OIDC metadata 与 Relay native mTLS；不伪造用户身份。
+fn with_probes(application: Router, readiness: Arc<HostReadiness>) -> Router {
     Router::new()
         .merge(application)
         .route("/healthz", get(health))
-        .route("/readyz", get(ready))
+        .route("/readyz", get(move || ready(Arc::clone(&readiness))))
 }
 
 async fn health() -> Response<Body> {
-    probe_response(StatusCode::OK, br#"{"status":"live"}"#)
+    probe_response(StatusCode::OK, "{\"status\":\"live\"}")
 }
 
-async fn ready() -> Response<Body> {
-    probe_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        br#"{"status":"not_ready"}"#,
-    )
+struct HostReadiness {
+    directory: Arc<PostgresWorkspaceDirectory>,
+    identity_verifier: Arc<AzureAdWebPrincipalVerifier>,
+    relay: Arc<RelaySettings>,
+    authorization_store: Arc<PostgresDeviceAuthorizationStore>,
+    attempt_reservation: Arc<PostgresUserCodeAttemptReservation>,
+    registry: Arc<PostgresWorkspaceDeviceRegistry>,
+    ca: Arc<PostgresRestrictedDeviceCa>,
+    credential_store: Arc<PostgresWebAuthnCredentialStore>,
+    session_bindings: Arc<PostgresWebAuthnHttpSessionBindingStore>,
+    product_catalog_loaded: bool,
 }
 
-fn probe_response(status: StatusCode, body: &'static [u8]) -> Response<Body> {
-    let mut response = Response::new(Body::from(body));
+impl HostReadiness {
+    async fn checks(&self) -> serde_json::Value {
+        let directory = timeout(READINESS_TIMEOUT, self.directory.health_check())
+            .await
+            .is_ok_and(|result| result.is_ok());
+        let identity_provider = timeout(
+            READINESS_TIMEOUT,
+            self.identity_verifier.check_provider_readiness(),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        let relay_mtls = timeout(
+            READINESS_TIMEOUT,
+            cy_mtls_channel_client::connect_mtls_channel(
+                &self.relay.endpoint,
+                &self.relay.server_name,
+                &self.relay.ca_certificate,
+                &self.relay.client_certificate,
+                &self.relay.client_key,
+                Some(READINESS_TIMEOUT),
+            ),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        let authorization_database = blocking_readiness({
+            let store = Arc::clone(&self.authorization_store);
+            move || store.database_time_unix_ms().is_ok()
+        })
+        .await;
+        let user_code_attempt_store =
+            timeout(READINESS_TIMEOUT, self.attempt_reservation.health_check())
+                .await
+                .is_ok_and(|result| result.is_ok());
+        let registry = blocking_readiness({
+            let registry = Arc::clone(&self.registry);
+            move || registry.health_check().is_ok()
+        })
+        .await;
+        let current_signed_crl = blocking_readiness({
+            let ca = Arc::clone(&self.ca);
+            move || ca.check_current_crl().is_ok()
+        })
+        .await;
+        let webauthn_credentials = blocking_readiness({
+            let store = Arc::clone(&self.credential_store);
+            move || store.health_check().is_ok()
+        })
+        .await;
+        let webauthn_session_bindings =
+            timeout(READINESS_TIMEOUT, self.session_bindings.health_check())
+                .await
+                .is_ok_and(|result| result.is_ok());
+        json!({
+            "directoryDatabase": directory,
+            "oidcDiscoveryAndJwks": identity_provider,
+            "relayNativeMtls": relay_mtls,
+            "deviceAuthorizationDatabase": authorization_database,
+            "userCodeAttemptStore": user_code_attempt_store,
+            "deviceCertificateRegistry": registry,
+            "deviceCaSignedCrl": current_signed_crl,
+            "webauthnCredentialStore": webauthn_credentials,
+            "webauthnSessionBindingStore": webauthn_session_bindings,
+            "productContractBundle": self.product_catalog_loaded,
+        })
+    }
+}
+
+struct TrustedBffCredentialManagementAuthorizer;
+
+impl WebAuthnCredentialEnrollmentAuthorizer for TrustedBffCredentialManagementAuthorizer {
+    fn authorize_credential_management(
+        &self,
+        owner: &UserIdentityRef,
+        _action: WebAuthnCredentialManagementAction,
+    ) -> Result<(), DeviceAuthorizationPortError> {
+        if owner.issuer.trim().is_empty()
+            || owner.subject.trim().is_empty()
+            || owner.issuer.len() > 2048
+            || owner.subject.len() > 1024
+        {
+            return Err(DeviceAuthorizationPortError::Rejected);
+        }
+
+        // This private authorizer is reachable only through the browser routes composed below.
+        // Those routes require the exact OIDC-verified principal, CSRF pair, and a fresh Directory
+        // role check before calling the enrollment service.
+        Ok(())
+    }
+}
+
+fn user_code_key_ring_from_environment() -> Result<UserCodeKeyRing, HostStartupError> {
+    let active_version = required_text(DEVICE_AUTHORIZATION_USER_CODE_KEY_VERSION_ENV)?
+        .parse::<u32>()
+        .map_err(|_| HostStartupError::DeviceEnrollment)?;
+    if active_version == 0 {
+        return Err(HostStartupError::DeviceEnrollment);
+    }
+    let key_file = read_secret_32(DEVICE_AUTHORIZATION_USER_CODE_KEY_FILE_ENV)?;
+    let mut key = key_file.duplicate();
+    if key.iter().all(|byte| *byte == 0) {
+        key.zeroize();
+        return Err(HostStartupError::DeviceEnrollment);
+    }
+    let mut keys = BTreeMap::new();
+    keys.insert(active_version, key);
+    key.zeroize();
+    UserCodeKeyRing::new(active_version, keys).map_err(|_| HostStartupError::DeviceEnrollment)
+}
+
+fn start_reconciliation_worker(service: Arc<DeviceEnrollmentAuthorizationService>) {
+    tokio::spawn(async move {
+        loop {
+            if service.reconcile_pending_work_once().await.is_err() {
+                eprintln!("Workspace device enrollment reconciliation is unavailable");
+            }
+            tokio::time::sleep(RECONCILIATION_INTERVAL).await;
+        }
+    });
+}
+
+async fn blocking_readiness<F>(check: F) -> bool
+where
+    F: FnOnce() -> bool + Send + 'static,
+{
+    timeout(READINESS_TIMEOUT, tokio::task::spawn_blocking(check))
+        .await
+        .is_ok_and(|result| result.is_ok_and(|ready| ready))
+}
+
+async fn ready(readiness: Arc<HostReadiness>) -> Response<Body> {
+    let checks = timeout(READINESS_TIMEOUT, readiness.checks())
+        .await
+        .unwrap_or_else(|_| json!({"probe": false}));
+    let ready = checks
+        .as_object()
+        .is_some_and(|values| values.values().all(|value| value.as_bool() == Some(true)));
+    let response = json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "checks": checks,
+    });
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    probe_response(status, response.to_string())
+}
+
+fn probe_response(status: StatusCode, body: impl Into<Body>) -> Response<Body> {
+    let mut response = Response::new(body.into());
     *response.status_mut() = status;
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -336,11 +677,11 @@ impl WebIdentityDirectory for PostgresIdentityDirectory {
             .organizations_for_verified_identity(identity)
             .await
             .map_err(|error| match error {
-                cy_workspace_fabric::DurableDirectoryError::InvalidIdentity
-                | cy_workspace_fabric::DurableDirectoryError::NoMembershipMapping => {
+                DurableDirectoryError::InvalidIdentity
+                | DurableDirectoryError::NoMembershipMapping => {
                     WebIdentityDirectoryError::MissingMapping
                 }
-                cy_workspace_fabric::DurableDirectoryError::AmbiguousOrganizations => {
+                DurableDirectoryError::AmbiguousOrganizations => {
                     WebIdentityDirectoryError::AmbiguousMapping
                 }
                 _ => WebIdentityDirectoryError::Unavailable,
@@ -349,7 +690,7 @@ impl WebIdentityDirectory for PostgresIdentityDirectory {
 }
 
 struct PrincipalScopedRelayResolver {
-    relay: RelaySettings,
+    relay: Arc<RelaySettings>,
     handoff_issuer: Arc<WebRelaySessionIssuer>,
 }
 
@@ -430,7 +771,7 @@ impl WorkspaceApi for PrincipalScopedWorkspaceApi {
             && request.workspace_id == self.workspace_id
             && matches!(
                 request.request.as_ref(),
-                Some(workspace_api_request::Request::ProductApi(_))
+                Some(workspace_api_request::Request::ProductApiV2(_))
             );
         if !caller_matches {
             return workspace_error(request_id, 7, "WORKSPACE_CALLER_CONTEXT_REQUIRED");

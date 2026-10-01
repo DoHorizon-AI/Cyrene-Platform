@@ -13,6 +13,8 @@ public_packages=(
   cy-artifact-transfer
   cy-execution-fabric
   cy-mtls-channel-client
+  cy-workspace-client-sdk
+  cy-workspace-product-contracts
   cy-workspace-fabric
 )
 
@@ -28,6 +30,11 @@ public_dependency_patches=(
   --config 'patch.crates-io.cy-observability.path="framework/crates/cy-observability"'
   --config 'patch.crates-io.cy-artifact-transfer.path="sdk/rust/cy-artifact-transfer"'
   --config 'patch.crates-io.cy-mtls-channel-client.path="framework/crates/cy-mtls-channel-client"'
+  --config 'patch.crates-io.cy-workspace-client-sdk.path="framework/crates/cy-workspace-client-sdk"'
+  --config 'patch.crates-io.cy-workspace-control-plane.path="framework/crates/cy-workspace-control-plane"'
+  --config 'patch.crates-io.cy-workspace-postgres-storage.path="framework/crates/cy-workspace-postgres-storage"'
+  --config 'patch.crates-io.cy-workspace-product-contracts.path="framework/crates/cy-workspace-product-contracts"'
+  --config 'patch.crates-io.cy-workspace-relay-runtime.path="framework/crates/cy-workspace-relay-runtime"'
 )
 
 for package in "${public_packages[@]}"; do

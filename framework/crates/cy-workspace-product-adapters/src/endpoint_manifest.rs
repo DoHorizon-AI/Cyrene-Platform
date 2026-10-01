@@ -11,12 +11,11 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path};
 
-use cy_proto::workspace_v1::WorkspaceProductApiOwner as Owner;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use cy_workspace_fabric::{ProductEndpointConfig, ProductHttpClient};
+use crate::{validate_product_endpoint_configs, ProductEndpointConfig};
 
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ENDPOINTS: usize = 256;
@@ -48,7 +47,7 @@ struct EndpointManifest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EndpointEntry {
-    owner: String,
+    owner_id: String,
     organization_id: String,
     workspace_id: String,
     base_url: String,
@@ -108,7 +107,7 @@ fn load_product_endpoint_configs_in_scope(
     .map_err(|_| ProductEndpointManifestError::ManifestInvalid)?;
     let manifest: EndpointManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ProductEndpointManifestError::ManifestInvalid)?;
-    if manifest.version != 1
+    if manifest.version != 2
         || manifest.endpoints.is_empty()
         || manifest.endpoints.len() > MAX_ENDPOINTS
     {
@@ -130,9 +129,8 @@ fn load_product_endpoint_configs_in_scope(
     let mut configs = Vec::with_capacity(manifest.endpoints.len());
     let mut secret_digests = HashSet::with_capacity(manifest.endpoints.len());
     for entry in manifest.endpoints {
-        let owner =
-            parse_owner(&entry.owner).ok_or(ProductEndpointManifestError::ManifestInvalid)?;
-        if !valid_scope_id(&entry.organization_id)
+        if !valid_owner_id(&entry.owner_id)
+            || !valid_scope_id(&entry.organization_id)
             || !valid_scope_id(&entry.workspace_id)
             || !valid_secret_file_name(&entry.credential_file)
             || expected_scope.is_some_and(|(organization_id, workspace_id)| {
@@ -162,7 +160,7 @@ fn load_product_endpoint_configs_in_scope(
             .map_err(|_| ProductEndpointManifestError::SecretUnavailable)?;
 
         configs.push(ProductEndpointConfig::new(
-            owner,
+            entry.owner_id,
             entry.organization_id,
             entry.workspace_id,
             entry.base_url,
@@ -170,7 +168,7 @@ fn load_product_endpoint_configs_in_scope(
         ));
     }
 
-    ProductHttpClient::validate_private_config(&configs)
+    validate_product_endpoint_configs(&configs)
         .map_err(|_| ProductEndpointManifestError::ManifestInvalid)?;
     Ok(configs)
 }
@@ -340,16 +338,13 @@ fn valid_credential(value: &[u8]) -> bool {
 }
 
 #[cfg(unix)]
-fn parse_owner(value: &str) -> Option<Owner> {
-    match value {
-        "CATALYST" => Some(Owner::Catalyst),
-        "YIELD" => Some(Owner::Yield),
-        "REACTOR" => Some(Owner::Reactor),
-        "EXCHANGE" => Some(Owner::Exchange),
-        "ECHO" => Some(Owner::Echo),
-        "NAVIGATOR" => Some(Owner::Navigator),
-        _ => None,
-    }
+fn valid_owner_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 #[cfg(test)]
@@ -362,7 +357,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use cy_workspace_fabric::ProductHttpClient;
 
     const LONG_CREDENTIAL: &str = "test-workspace-private-bearer-credential-0123456789";
 
@@ -398,7 +392,7 @@ mod tests {
 
     fn document(secret_file: &str) -> String {
         format!(
-            r#"{{"version":1,"endpoints":[{{"owner":"CATALYST","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://catalyst.example.test/","credentialFile":"{secret_file}"}}]}}"#
+            r#"{{"version":2,"endpoints":[{{"ownerId":"catalyst","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://catalyst.example.test/","credentialFile":"{secret_file}"}}]}}"#
         )
     }
 
@@ -430,7 +424,28 @@ mod tests {
 
         assert_eq!(configs.len(), 1);
         assert!(!format!("{:?}", configs[0]).contains(LONG_CREDENTIAL));
-        assert!(ProductHttpClient::from_private_config(configs).is_ok());
+        assert!(validate_product_endpoint_configs(&configs).is_ok());
+        assert_eq!(configs[0].owner_id(), "catalyst");
+        let _keep_root_alive = fixture.root;
+    }
+
+    #[test]
+    fn workspace_loader_rejects_endpoints_from_other_tenant_scopes() {
+        let fixture = Fixture::new();
+        assert!(load_product_endpoint_configs_for_workspace(
+            &fixture.manifest,
+            &fixture.secrets,
+            "org-1",
+            "workspace-1",
+        )
+        .is_ok());
+        assert!(load_product_endpoint_configs_for_workspace(
+            &fixture.manifest,
+            &fixture.secrets,
+            "org-2",
+            "workspace-1",
+        )
+        .is_err());
         let _keep_root_alive = fixture.root;
     }
 
@@ -446,14 +461,21 @@ mod tests {
         let malformed = fixture.root.path().join("malformed.json");
         write_manifest(
             &malformed,
-            r#"{"version":1,"endpoints":[{"owner":"OTHER","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://catalyst.example.test/","credentialFile":"catalyst-token"}]}"#,
+            r#"{"version":2,"endpoints":[{"ownerId":"OTHER","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://catalyst.example.test/","credentialFile":"catalyst-token"}]}"#,
         );
         assert!(load_product_endpoint_configs(&malformed, &fixture.secrets).is_err());
+
+        let legacy = fixture.root.path().join("legacy.json");
+        write_manifest(
+            &legacy,
+            &document("catalyst-token").replace("\"version\":2", "\"version\":1"),
+        );
+        assert!(load_product_endpoint_configs(&legacy, &fixture.secrets).is_err());
 
         let unknown_field = fixture.root.path().join("unknown-field.json");
         write_manifest(
             &unknown_field,
-            &document("catalyst-token").replace("\"version\":1", "\"version\":1,\"unknown\":true"),
+            &document("catalyst-token").replace("\"version\":2", "\"version\":2,\"unknown\":true"),
         );
         assert!(load_product_endpoint_configs(&unknown_field, &fixture.secrets).is_err());
 
@@ -465,7 +487,7 @@ mod tests {
         assert!(load_product_endpoint_configs(&invalid_url, &fixture.secrets).is_err());
 
         let empty = fixture.root.path().join("empty.json");
-        write_manifest(&empty, r#"{"version":1,"endpoints":[]}"#);
+        write_manifest(&empty, r#"{"version":2,"endpoints":[]}"#);
         assert!(load_product_endpoint_configs(&empty, &fixture.secrets).is_err());
     }
 
@@ -509,7 +531,7 @@ mod tests {
         assert!(load_product_endpoint_configs(&short_manifest, &fixture.secrets).is_err());
 
         let duplicate_manifest = fixture.root.path().join("duplicate.json");
-        let duplicate = r#"{"version":1,"endpoints":[{"owner":"CATALYST","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://catalyst.example.test/","credentialFile":"catalyst-token"},{"owner":"ECHO","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://echo.example.test/","credentialFile":"catalyst-token"}]}"#;
+        let duplicate = r#"{"version":2,"endpoints":[{"ownerId":"catalyst","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://catalyst.example.test/","credentialFile":"catalyst-token"},{"ownerId":"echo","organizationId":"org-1","workspaceId":"workspace-1","baseUrl":"https://echo.example.test/","credentialFile":"catalyst-token"}]}"#;
         write_manifest(&duplicate_manifest, duplicate);
         assert!(load_product_endpoint_configs(&duplicate_manifest, &fixture.secrets).is_err());
 

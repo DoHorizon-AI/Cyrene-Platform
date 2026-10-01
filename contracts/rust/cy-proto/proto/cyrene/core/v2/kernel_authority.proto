@@ -47,6 +47,23 @@ service KernelAuthorityService {
   rpc ReadEvents(ReadEventsRequest) returns (ReadEventsResponse);
   rpc WatchEvents(WatchEventsRequest)
       returns (stream WatchEventsResponse);
+
+  rpc GetUpdateReadiness(UpdateReadinessRequest)
+      returns (UpdateReadinessResponse);
+  rpc BeginMaintenance(BeginMaintenanceRequest)
+      returns (BeginMaintenanceResponse);
+  rpc EndMaintenance(EndMaintenanceRequest)
+      returns (EndMaintenanceResponse);
+  rpc AdmitTask(AdmitTaskRequest) returns (AdmitTaskResponse);
+  rpc UpdateTaskActivity(UpdateTaskActivityRequest)
+      returns (UpdateTaskActivityResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+  rpc HeartbeatActivitySource(HeartbeatActivitySourceRequest)
+      returns (HeartbeatActivitySourceResponse);
+  rpc ReconcileActivitySource(ReconcileActivitySourceRequest)
+      returns (ReconcileActivitySourceResponse);
+  rpc ListActiveTasks(ListActiveTasksRequest)
+      returns (ListActiveTasksResponse);
 }
 
 // Namespace is mandatory for every stateful Core v2 authority request. It is
@@ -160,4 +177,189 @@ message WatchEventsResponse {
     cyrene.semantic.v1.Event event = 1;
     cyrene.semantic.v1.EventContinuity continuity = 3;
   }
+}
+
+// Update readiness and maintenance gate messages.
+// 更新就绪状态与维护门控消息。
+enum MaintenanceTargetKind {
+  MAINTENANCE_TARGET_KIND_UNSPECIFIED = 0;
+  MAINTENANCE_TARGET_KIND_PACKAGE_ONLY = 1;
+  MAINTENANCE_TARGET_KIND_CORE_RUNTIME = 2;
+}
+
+enum UpdateReadinessStatus {
+  UPDATE_READINESS_STATUS_UNKNOWN = 0;
+  UPDATE_READINESS_STATUS_READY = 1;
+  UPDATE_READINESS_STATUS_ACTIVE_TASKS = 2;
+  UPDATE_READINESS_STATUS_IDLE_RUNTIME_REQUIRES_UNLOAD = 3;
+  UPDATE_READINESS_STATUS_MAINTENANCE_ACTIVE = 4;
+  UPDATE_READINESS_STATUS_STALE_READINESS = 5;
+  UPDATE_READINESS_STATUS_USER_CONFIRMATION_REQUIRED = 6;
+}
+
+enum MaintenanceOutcome {
+  MAINTENANCE_OUTCOME_UNSPECIFIED = 0;
+  MAINTENANCE_OUTCOME_SUCCESS = 1;
+  MAINTENANCE_OUTCOME_ROLLED_BACK = 2;
+  MAINTENANCE_OUTCOME_FAILED = 3;
+}
+
+enum WorkspaceTaskActivityState {
+  WORKSPACE_TASK_ACTIVITY_STATE_UNSPECIFIED = 0;
+  WORKSPACE_TASK_ACTIVITY_STATE_ACCEPTED = 1;
+  WORKSPACE_TASK_ACTIVITY_STATE_QUEUED = 2;
+  WORKSPACE_TASK_ACTIVITY_STATE_DISPATCHING = 3;
+  WORKSPACE_TASK_ACTIVITY_STATE_RUNNING = 4;
+  WORKSPACE_TASK_ACTIVITY_STATE_CANCELING = 5;
+  WORKSPACE_TASK_ACTIVITY_STATE_INFLIGHT = 6;
+}
+
+message ActiveWorkspaceTask {
+  string source_id = 1;
+  string task_id = 2;
+  WorkspaceTaskActivityState state = 3;
+}
+
+message UpdateReadinessRequest {
+  MaintenanceTargetKind target_kind = 1;
+  repeated string expected_activity_sources = 2;
+  uint64 expected_catalog_generation = 3;
+  bool requires_restart = 4;
+}
+
+message UpdateReadinessResponse {
+  UpdateReadinessStatus status = 1;
+  uint64 gate_generation = 2;
+  uint64 active_task_count = 3;
+  uint64 active_worker_count = 4;
+  uint64 active_lease_or_allocation_count = 5;
+  repeated string unknown_activity_sources = 6;
+  repeated string blocker_codes = 7;
+  repeated ActiveWorkspaceTask active_tasks = 8;
+  uint64 install_catalog_generation = 9;
+  uint64 inflight_runtime_admission_count = 10;
+  bool requires_restart_confirmation = 11;
+}
+
+message BeginMaintenanceRequest {
+  string request_id = 1;
+  MaintenanceTargetKind target_kind = 2;
+  uint64 expected_gate_generation = 3;
+  bool user_confirmed_restart = 4;
+  repeated string expected_activity_sources = 5;
+  uint64 expected_catalog_generation = 6;
+  string operator_token = 7;
+  string plan_id = 8;
+  string plan_digest = 9;
+  map<string, string> component_artifact_digests = 10;
+}
+
+message BeginMaintenanceResponse {
+  UpdateReadinessStatus status = 1;
+  string maintenance_token = 2;
+  uint64 gate_generation = 3;
+  repeated string blocker_codes = 4;
+}
+
+message EndMaintenanceRequest {
+  string request_id = 1;
+  string maintenance_token = 2;
+  MaintenanceOutcome outcome = 3;
+  bool healthy = 4;
+  string operator_token = 5;
+}
+
+message EndMaintenanceResponse {
+  bool unlocked = 1;
+  UpdateReadinessStatus status = 2;
+  uint64 gate_generation = 3;
+  repeated string blocker_codes = 4;
+}
+
+message AdmitTaskRequest {
+  string source_id = 1;
+  string task_id = 2;
+  WorkspaceTaskActivityState state = 3;
+  string idempotency_key = 4;
+  string source_token = 5;
+}
+
+message AdmitTaskResponse {
+  reserved 3;
+  reserved "activity_token";
+
+  bool admitted = 1;
+  UpdateReadinessStatus status = 2;
+  uint64 gate_generation = 4;
+  repeated string blocker_codes = 5;
+}
+
+message UpdateTaskActivityRequest {
+  reserved 5;
+  reserved "activity_token";
+
+  string source_id = 1;
+  string task_id = 2;
+  WorkspaceTaskActivityState state = 3;
+  string idempotency_key = 4;
+  string source_token = 6;
+}
+
+message UpdateTaskActivityResponse {
+  bool accepted = 1;
+  UpdateReadinessStatus status = 2;
+  uint64 gate_generation = 3;
+  repeated string blocker_codes = 4;
+}
+
+message CompleteTaskRequest {
+  reserved 1;
+  reserved "activity_token";
+
+  string source_id = 2;
+  string task_id = 3;
+  string source_token = 4;
+}
+
+message CompleteTaskResponse {
+  bool completed = 1;
+  uint64 gate_generation = 2;
+  repeated string blocker_codes = 3;
+}
+
+message HeartbeatActivitySourceRequest {
+  string source_id = 1;
+  string source_token = 2;
+  uint64 expected_catalog_generation = 3;
+}
+
+message HeartbeatActivitySourceResponse {
+  uint64 last_heartbeat_unix_ms = 1;
+  uint64 gate_generation = 2;
+}
+
+message TaskActivity {
+  string task_id = 1;
+  WorkspaceTaskActivityState state = 2;
+}
+
+message ReconcileActivitySourceRequest {
+  string source_id = 1;
+  string source_token = 2;
+  uint64 expected_catalog_generation = 3;
+  repeated TaskActivity active_tasks = 4;
+}
+
+message ReconcileActivitySourceResponse {
+  uint64 gate_generation = 1;
+  bool reconciled = 2;
+}
+
+message ListActiveTasksRequest {
+  string source_id = 1;
+  string source_token = 2;
+}
+
+message ListActiveTasksResponse {
+  repeated TaskActivity active_tasks = 1;
 }

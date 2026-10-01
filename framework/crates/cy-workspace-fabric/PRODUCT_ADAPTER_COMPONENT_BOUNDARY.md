@@ -1,92 +1,98 @@
 # Product adapter component boundary
 
-Relay Host, Connector Host, and Sidecar now have separate Cargo package
-versions and build targets. The shared `cy-workspace-fabric` package still owns
-Platform authorization and the current Product adapter implementation. This
-change does not make Product routing independently versioned.
+Product API v2 uses owner release catalogs for route and schema selection. The
+Platform control plane authorizes calls against a separately pinned policy and
+passes an opaque `AuthorizedProductInvocation` to the generic HTTP adapter. The
+adapter is the independent `cy-workspace-product-adapters` crate; it does not
+depend on `cy-workspace-fabric` and cannot receive caller roles or choose a URL.
 
-## Current coupling
+## Request path and ownership
 
-- `cy-workspace-connector-host/src/main.rs` loads
-  `product-endpoints.json` with
-  `load_product_endpoint_configs_for_workspace` from
-  `cy-workspace-product-adapters`, then composes `ProductHttpApiAdapter` from
-  `cy-workspace-fabric`. Only the private endpoint loader has moved out of Fabric.
-- `src/product_adapters/{catalyst,echo,exchange,navigator,reactor,yield_api}.rs`
-  map closed owner/operation enums to fixed Product paths. These modules also
-  reject operation-specific body, resource-ID, kind, and idempotency-key
-  mismatches; they are not just a table of strings.
-- `src/product_projection.rs` owns `authorize_product_invocation`, the role
-  allowlist, and Product request/response validation. `src/control_plane.rs`
-  applies the Platform authorization and validation before dispatch through
-  `ProductInvocationPort`.
-- Navigator additionally checks that returned projection data is scoped to the
-  authenticated caller's Workspace. That response check must remain a Platform
-  gate if the route mapping moves.
+- `cy-workspace-control-plane` checks the authenticated caller's organization
+  and Workspace scope, membership/current authorization fence, request bounds,
+  and the pinned Platform policy before it creates the opaque invocation.
+- `cy-workspace-product-contracts` loads the fixed Product v2 bundle and policy
+  pins, resolves each operation's route from the corresponding owner OpenAPI
+  document, and validates request and response schemas and declared scope
+  bindings. Unknown or unapproved operations fail closed.
+- `cy-workspace-product-adapters` only sends an approved invocation over HTTPS.
+  Method, route template, and path parameters come from the authorized token;
+  endpoint origins and bearer credentials come from the server-owned,
+  exact-owner/organization/Workspace endpoint manifest.
+- Connector startup embeds the Platform release lock and loads the matching
+  bundle and policy from the root-owned read-only
+  `/run/cyrene-workspace-product-contracts` mount. Missing, malformed, or
+  digest-mismatched inputs prevent startup.
+- The Workspace API v1 Product request is explicitly unsupported. There is no
+  silent v1 fallback.
 
-Moving the adapter today would either duplicate/skip these checks or require a
-public adapter API that accepts raw `WorkspaceCallerContext` and Product
-requests. Neither is a safe component boundary. The current extraction keeps
-the request path and its authorization behavior unchanged.
+## Security invariants
 
-## Required follow-up seam
+1. Product `operationId`, route, request/response schema, resource constraints,
+   and scope bindings come from the owner release bundle pinned by the Platform
+   lock. Platform policy grants remain a separately pinned Platform artifact.
+2. The adapter accepts only the opaque Platform-authorized invocation and
+   server-owned endpoint configuration. It never accepts raw callers, roles,
+   caller-selected hosts, tokens, or catalog versions.
+3. Organization, Workspace, and resource path values are injected by the
+   control plane from trusted scope and catalog declarations. Redirects,
+   non-HTTPS endpoints, unbounded bodies, unsupported media, and unknown route
+   parameters fail closed.
+4. The control plane validates Product response status, schema, response scope
+   selectors, and RPC/body bounds before returning the response.
 
-1. Add a Platform-created `AuthorizedProductInvocation` with private fields
-   and a constructor available only after Platform identity, Workspace
-   membership, owner/operation/kind allowlisting, body validation, and scope
-   checks succeed. Narrow the adapter port so it cannot receive caller role
-   authority or fabricate that authorization result.
-2. Define a versioned Product operation catalog contract consumed by Connector
-   host composition. Catalog entries must identify closed owner/operation and
-   validated route identifiers. They must not let callers select URL, host,
-   HTTP method, path segments, credentials, or authorization roles.
-3. Make missing, unknown, incomplete, or unpinned catalog versions fail closed.
-   Platform continues to validate requests and responses and keeps the
-   private endpoint/credential manifest allowlist.
-4. Migrate one simple owner mapping first. Keep Navigator's caller-scoped
-   response validation in Platform; do not use browser or Product-provided
-   data as identity or authorization authority.
+## Build and runtime inputs
 
-The endpoint manifest remains a server-owned configuration of private HTTPS
-endpoints and credentials. This follow-up is separate from connection process
-packaging and does not enable Relay Connector authentication or change
-readiness.
+The Connector image is built with the Platform repository root as Docker build
+context. It compile-embeds
+`tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json`.
+At runtime, the release bundle and policy are supplied at
+`/mnt/cyrene-input/product-contracts` and staged read-only by the root
+entrypoint. Product endpoint metadata and credential files remain a separate
+private server configuration.
 
 ## Product 适配器组件边界
 
-Relay Host、Connector Host 与 Sidecar 现已使用独立 Cargo package 版本和构建目标。共享的
-`cy-workspace-fabric` 仍拥有 Platform 授权和当前 Product adapter 实现；本次变更没有让
-Product 路由获得独立版本。
+Product API v2 根据 owner release catalog 解析路由和 schema。Platform
+control plane 按独立 pin 的 Platform policy 授权，并向通用 HTTP adapter
+传递不透明的 `AuthorizedProductInvocation`。Adapter 位于独立的
+`cy-workspace-product-adapters` crate，不依赖 `cy-workspace-fabric`，也无法
+读取 caller roles 或选择 URL。
 
-### 当前耦合
+### 请求路径与所有权
 
-- `cy-workspace-connector-host/src/main.rs` 使用
-  `cy-workspace-product-adapters` 的 `load_product_endpoint_configs_for_workspace` 加载
-  `product-endpoints.json`，并从 `cy-workspace-fabric` 组合 `ProductHttpApiAdapter`。目前只有
-  私有 endpoint loader 移出了 Fabric。
-- `src/product_adapters/{catalyst,echo,exchange,navigator,reactor,yield_api}.rs` 将封闭的
-  owner/operation enum 映射到固定 Product path，同时逐操作校验 body、resource ID、kind 与
-  idempotency key；这些文件并非单纯的字符串表。
-- `src/product_projection.rs` 拥有 `authorize_product_invocation`、role allowlist 和
-  Product request/response 校验。`src/control_plane.rs` 会在经由
-  `ProductInvocationPort` 分发前执行 Platform 授权与校验。
-- Navigator 还会校验响应数据属于已认证 caller 的 Workspace。即使迁移路由，这项响应校验也必须保留为 Platform gate。
+- `cy-workspace-control-plane` 校验已认证 caller 的 organization、Workspace
+  scope、membership/current authorization fence、请求大小和固定 Platform
+  policy，之后才能签发不透明 invocation。
+- `cy-workspace-product-contracts` 加载固定 Product v2 bundle 与 policy pins；
+  按 owner OpenAPI 文档解析 operation 路由，并校验请求/响应 schema 与声明
+  的 scope bindings。未知或未批准的操作 fail closed。
+- `cy-workspace-product-adapters` 只通过 HTTPS 发送已授权 invocation。HTTP
+  method、route template 与 path 参数来自授权 token；endpoint origin 和
+  bearer credential 来自服务端拥有、精确绑定 owner/organization/Workspace
+  的 endpoint manifest。
+- Connector 启动时嵌入 Platform release lock，并从 root-owned、只读的
+  `/run/cyrene-workspace-product-contracts` 加载匹配的 bundle 与 policy。缺失、
+  格式错误或 digest 不匹配会阻止启动。
+- Workspace API v1 Product request 会明确拒绝，不会静默回退到 v1。
 
-现在搬移 adapter 会重复或跳过这些检查，或要求公开一个能接收原始
-`WorkspaceCallerContext` 和 Product request 的接口；两者都不是安全的组件边界。本次提取保持
-请求路径和授权行为不变。
+### 安全不变量
 
-### 后续所需接口
+1. Product `operationId`、route、请求/响应 schema、resource constraints 与
+   scope bindings 来自 Platform lock 固定的 owner release bundle；Platform
+   policy grants 是独立固定的 Platform artifact。
+2. Adapter 只接受 Platform 授权的不透明 invocation 和服务端 endpoint 配置；
+   不接受原始 caller、roles、caller-selected host、token 或 catalog version。
+3. Organization、Workspace、resource path 值由 control plane 根据可信 scope
+   和 catalog 声明注入。Redirect、非 HTTPS endpoint、超限 body、不支持的媒体
+   类型及未知路由参数均 fail closed。
+4. Control plane 在返回响应前校验 Product status、schema、response scope
+   selectors 以及 RPC/body bounds。
 
-1. 增加由 Platform 创建的 `AuthorizedProductInvocation`，字段私有，且只能在 Platform 身份、
-   Workspace membership、owner/operation/kind allowlist、body 与 scope 检查成功后创建。收窄
-   adapter port，使其不能读取 caller role authority，也不能伪造授权结果。
-2. 定义由 Connector host 组合时消费的版本化 Product operation catalog 合同。条目只标识封闭
-   owner/operation 与经过校验的 route ID；调用者不能选择 URL、host、HTTP method、path segment、
-   credential 或授权角色。
-3. 缺少、未知、不完整或 pin 不匹配的 catalog 版本必须 fail closed。Platform 继续校验请求和响应，并保留私有 endpoint/credential manifest allowlist。
-4. 先迁移一个简单 owner mapping。Navigator 的 caller-scoped response validation 必须留在
-   Platform；浏览器或 Product 返回数据不能成为 identity 或授权事实来源。
+### 构建与运行输入
 
-Endpoint manifest 仍是服务端私有 HTTPS endpoint 和 credential 配置。本后续工作独立于连接进程打包，
-不启用 Relay Connector authentication，也不更改 readiness。
+Connector 镜像使用 Platform 仓库根目录作为 Docker build context，并编译嵌入
+`tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json`。
+运行时 release bundle 与 policy 从 `/mnt/cyrene-input/product-contracts` 提供，
+由 root entrypoint 暂存为只读文件。Product endpoint 元数据和 credential 文件仍
+是独立的服务端私有配置。

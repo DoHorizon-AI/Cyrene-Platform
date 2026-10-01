@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/platform/product-contract-bundle.v2.schema.json",
+  "title": "Cyrene Product contract bundle v2",
+  "description": "Source-pinned owner catalogs and their local OpenAPI/schema closure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "wireApiVersion", "owners", "files"],
+  "properties": {
+    "formatVersion": { "const": 2 },
+    "wireApiVersion": { "const": "cyrene.workspace.product.v2" },
+    "owners": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/owner" }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file" }
+    }
+  },
+  "$defs": {
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerId", "repository", "sourceSha", "catalogPath", "catalogSha256"],
+      "properties": {
+        "ownerId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+        "repository": { "type": "string", "pattern": "^Cyrene-[A-Za-z0-9-]+$" },
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "catalogPath": { "type": "string", "pattern": "^Cyrene-[A-Za-z0-9-]+/contracts/product/v2/catalog\\.json$" },
+        "catalogSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

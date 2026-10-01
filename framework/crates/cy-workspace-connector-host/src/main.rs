@@ -4,21 +4,27 @@
 //! constructs the Connector identity internally and serves the Workspace API
 //! over the existing outbound Relay transport. / 本入口只读取固定位置的服务端私有文件，并内部构造 Connector 身份。
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_observability::{init_observability, ObservabilityConfig};
 use cy_proto::workspace_v1::{DeviceEnrollmentRef, RelayHello, RelayParticipantRole};
-use cy_workspace_fabric::{
-    run_workspace_connector_session, ProductHttpApiAdapter, ProductHttpClient, RelayClientConfig,
+use cy_workspace_control_plane::{
     WorkspaceApi, WorkspaceControlPlane, WorkspaceDispatchError, WorkspaceOperationProjection,
     WorkspaceProductRequest, WorkspaceRequestDispatcher,
 };
-use cy_workspace_product_adapters::load_product_endpoint_configs_for_workspace;
+use cy_workspace_fabric::{run_workspace_connector_session, RelayClientConfig};
+use cy_workspace_product_adapters::{
+    load_product_endpoint_configs_for_workspace, ProductHttpApiAdapter,
+};
+use cy_workspace_product_contracts::{
+    ProductBundlePins, ProductContractBundle, TrustedProductPolicy,
+};
 use openssl::{pkey::PKey, x509::X509};
 use serde::Deserialize;
 use thiserror::Error as ThisError;
@@ -29,6 +35,12 @@ use x509_parser::parse_x509_certificate;
 const PRIVATE_ROOT: &str = "/run/cyrene/workspace-connector";
 const PRIVATE_SECRET_ROOT: &str = "/run/cyrene/workspace-connector/secrets";
 const PRODUCT_ENDPOINT_MANIFEST: &str = "/run/cyrene/workspace-connector/product-endpoints.json";
+const PRODUCT_CONTRACT_ROOT_ENV: &str = "CYRENE_WORKSPACE_CONNECTOR_PRODUCT_CONTRACT_ROOT_V2";
+const DEFAULT_PRODUCT_CONTRACT_ROOT: &str = "/run/cyrene-workspace-product-contracts";
+const PRODUCT_POLICY_BUNDLE_FILENAME: &str = "workspace-product-policy-v2.json";
+const PRODUCT_RELEASE_LOCK: &[u8] = include_bytes!(
+    "../../../../tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
+);
 const RELAY_CA_FILE: &str = "relay-server-ca.pem";
 const DEVICE_CERTIFICATE_FILE: &str = "device-enrollment-cert.pem";
 const DEVICE_PRIVATE_KEY_FILE: &str = "device-enrollment-key.pem";
@@ -64,6 +76,44 @@ struct ConnectorManifest {
     organization_id: String,
     workspace_id: String,
     device_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WorkspaceProductLock {
+    format_version: u32,
+    release_id: String,
+    wire_api_version: String,
+    contract_api_version: String,
+    bundle: ProductBundlePin,
+    policy: ProductPolicyPin,
+    owners: Vec<ProductOwnerPin>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProductBundlePin {
+    manifest_path: String,
+    manifest_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProductPolicyPin {
+    source_path: String,
+    bundle_path: String,
+    schema_version: String,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProductOwnerPin {
+    owner_id: String,
+    repository: String,
+    source_sha: String,
+    catalog_path: String,
+    catalog_sha256: String,
 }
 
 struct LoadedHostConfiguration {
@@ -111,6 +161,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn run_host() -> Result<(), Box<dyn Error>> {
     let configuration = load_host_configuration()?;
+    let pins = load_product_bundle_pins()?;
+    let product_contract_root = load_product_contract_root()?;
+    let product_contracts = Arc::new(
+        ProductContractBundle::load(&product_contract_root, &pins)
+            .map_err(|_| HostConfigurationError::ProductManifestInvalid)?,
+    );
+    let product_policy = Arc::new(
+        TrustedProductPolicy::load(
+            product_contract_root.join(PRODUCT_POLICY_BUNDLE_FILENAME),
+            &pins,
+        )
+        .map_err(|_| HostConfigurationError::ProductManifestInvalid)?,
+    );
     let endpoint_configs = load_product_endpoint_configs_for_workspace(
         Path::new(PRODUCT_ENDPOINT_MANIFEST),
         Path::new(PRIVATE_SECRET_ROOT),
@@ -118,17 +181,19 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
         &configuration.workspace_id,
     )
     .map_err(|_| HostConfigurationError::ProductManifestInvalid)?;
-    let product_client = ProductHttpClient::from_private_config(endpoint_configs)
-        .map_err(|_| HostConfigurationError::ProductManifestInvalid)?;
-    let product_api = Arc::new(ProductHttpApiAdapter::new(product_client));
+    let product_api = Arc::new(
+        ProductHttpApiAdapter::from_private_config(endpoint_configs, &product_contracts)
+            .map_err(|_| HostConfigurationError::ProductManifestInvalid)?,
+    );
     let dispatcher = Arc::new(UnavailableOperationDispatcher);
     let control_plane = WorkspaceControlPlane::new(
+        configuration.organization_id.clone(),
         configuration.workspace_id.clone(),
         uuid::Uuid::new_v4().to_string(),
         dispatcher,
     )
     .map_err(|_| HostConfigurationError::ManifestInvalid)?
-    .with_product_invocation_port(product_api);
+    .with_product_v2(product_contracts, product_policy, product_api);
     let api: Arc<dyn WorkspaceApi> = Arc::new(control_plane);
 
     tracing::info!(
@@ -137,6 +202,101 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
     );
     serve_until_shutdown(configuration, api).await?;
     Ok(())
+}
+
+/// Loads the server-owned Product contract directory override, if installed.
+/// The embedded release lock remains the trust root; this path selects only
+/// where its pinned files are read from. / 仅从 Connector 进程环境读取安装器提供的文件目录。
+fn load_product_contract_root() -> Result<PathBuf, HostConfigurationError> {
+    let root = std::env::var_os(PRODUCT_CONTRACT_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_PRODUCT_CONTRACT_ROOT));
+    validate_product_contract_root(&root)?;
+    Ok(root)
+}
+
+fn validate_product_contract_root(root: &Path) -> Result<(), HostConfigurationError> {
+    if root.as_os_str().is_empty()
+        || !root.is_absolute()
+        || root == Path::new("/")
+        || root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(HostConfigurationError::ProductManifestInvalid);
+    }
+    Ok(())
+}
+
+/// Validate the compile-time Platform release lock and derive runtime loader pins.
+///
+/// The lock is the trust root; runtime mounts and environment variables cannot replace it.
+/// 校验编译时固定的 Platform release lock，并生成 bundle/policy loader pins。
+fn load_product_bundle_pins() -> Result<ProductBundlePins, HostConfigurationError> {
+    let lock: WorkspaceProductLock = serde_json::from_slice(PRODUCT_RELEASE_LOCK)
+        .map_err(|_| HostConfigurationError::ProductManifestInvalid)?;
+    if lock.format_version != 2
+        || lock.release_id.trim().is_empty()
+        || lock.wire_api_version != "cyrene.workspace.product.v2"
+        || lock.contract_api_version != "0.1.0"
+        || lock.bundle.manifest_path != "product-contract-bundle.json"
+        || !is_lower_hex(&lock.bundle.manifest_sha256, 64)
+        || lock.policy.source_path != "contracts/policies/workspace-product-policy-v2.json"
+        || lock.policy.bundle_path != PRODUCT_POLICY_BUNDLE_FILENAME
+        || lock.policy.schema_version != "cyrene.workspace.product.authorization-policy.v2"
+        || !is_lower_hex(&lock.policy.sha256, 64)
+        || lock.owners.is_empty()
+    {
+        return Err(HostConfigurationError::ProductManifestInvalid);
+    }
+
+    let mut owner_source_shas = BTreeMap::new();
+    let mut previous_owner = None;
+    for owner in lock.owners {
+        if !valid_product_owner_id(&owner.owner_id)
+            || owner.repository.trim().is_empty()
+            || owner.repository.chars().any(char::is_control)
+            || !owner
+                .catalog_path
+                .starts_with(&format!("{}/", owner.repository))
+            || owner.catalog_path.contains("..")
+            || !is_lower_hex(&owner.source_sha, 40)
+            || !is_lower_hex(&owner.catalog_sha256, 64)
+            || previous_owner
+                .as_deref()
+                .is_some_and(|previous: &str| previous >= owner.owner_id.as_str())
+            || owner_source_shas
+                .insert(owner.owner_id.clone(), owner.source_sha)
+                .is_some()
+        {
+            return Err(HostConfigurationError::ProductManifestInvalid);
+        }
+        previous_owner = Some(owner.owner_id);
+    }
+
+    Ok(ProductBundlePins::new(
+        lock.wire_api_version,
+        lock.bundle.manifest_sha256,
+        owner_source_shas,
+        lock.policy.schema_version,
+        lock.policy.sha256,
+    ))
+}
+
+fn valid_product_owner_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 async fn serve_until_shutdown(
@@ -462,4 +622,35 @@ fn validate_tls_materials(
         return Err(HostConfigurationError::TlsMaterialInvalid);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod product_contract_root_tests {
+    use super::{
+        validate_product_contract_root, HostConfigurationError, DEFAULT_PRODUCT_CONTRACT_ROOT,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn accepts_the_docker_default_and_an_absolute_native_release_root() {
+        assert!(validate_product_contract_root(Path::new(DEFAULT_PRODUCT_CONTRACT_ROOT)).is_ok());
+        assert!(validate_product_contract_root(Path::new(
+            "/opt/cyrene/releases/connector-2/share/cyrene/product-contracts"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_relative_broad_and_parent_traversing_roots() {
+        for root in [
+            Path::new("share/cyrene/product-contracts"),
+            Path::new("/"),
+            Path::new("/opt/cyrene/releases/../share/cyrene/product-contracts"),
+        ] {
+            assert!(matches!(
+                validate_product_contract_root(root),
+                Err(HostConfigurationError::ProductManifestInvalid)
+            ));
+        }
+    }
 }

@@ -1,4 +1,4 @@
-name: Workspace Relay image
+name: Workspace Relay image build only
 
 on:
   push:
@@ -11,63 +11,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: workspace-relay-image-${{ github.ref }}
+  group: workspace-relay-image-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  image:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+  image-build:
+    name: Build the Relay image without publishing
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Prepare image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/dohorizon-ai/cyrene-workspace-relay
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix=sha-,format=long
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and publish fail-closed Relay image
-        id: build
+      - name: Build-only Relay image with provenance and SBOM
         uses: docker/build-push-action@v6
         with:
           context: .
           file: framework/crates/cy-workspace-relay-host/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          push: false
+          tags: ghcr.io/dohorizon-ai/cyrene-workspace-relay:build-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           provenance: mode=max
           sbom: true
-
-      - name: Record immutable image reference
-        if: github.event_name != 'pull_request'
-        env:
-          IMAGE_NAME: ghcr.io/dohorizon-ai/cyrene-workspace-relay
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-          SOURCE_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          test -n "$IMAGE_DIGEST"
-          {
-            printf 'Source commit: `%s`\n\n' "$SOURCE_SHA"
-            printf 'Published image: `%s@%s`\n' "$IMAGE_NAME" "$IMAGE_DIGEST"
-            printf '\nThis workflow publishes an image only. It does not deploy to Azure Container Apps or move traffic.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
