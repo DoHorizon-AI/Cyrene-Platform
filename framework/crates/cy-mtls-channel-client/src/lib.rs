@@ -52,11 +52,8 @@ pub async fn connect_mtls_channel(
     }
     let tls = ClientTlsConfig::new()
         .domain_name(server_name.to_string())
-        .ca_certificate(Certificate::from_pem(ca_certificate_pem.to_vec()))
-        .identity(Identity::from_pem(
-            client_certificate_pem.to_vec(),
-            client_key_pem.to_vec(),
-        ));
+        .ca_certificate(Certificate::from_pem(ca_certificate_pem))
+        .identity(Identity::from_pem(client_certificate_pem, client_key_pem));
 
     endpoint
         .tls_config(tls)

@@ -666,6 +666,7 @@ mod tests {
     use rcgen::{
         date_time_ymd, BasicConstraints, CertificateParams, CertifiedIssuer, CustomExtension,
         DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+        SerialNumber,
     };
 
     use crate::device_authorization::{DeviceAuthorizationPortError, DeviceCsrValidator};
@@ -739,6 +740,7 @@ mod tests {
         let uri = device_identity_uri(&key, generation, &csr_sha256).expect("profile URI");
         let leaf_key = KeyPair::generate().expect("leaf key");
         let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
+        leaf_params.serial_number = Some(SerialNumber::from(vec![1]));
         leaf_params.distinguished_name = DistinguishedName::new();
         leaf_params.not_before = date_time_ymd(2020, 1, 1);
         leaf_params.not_after = if expired {
