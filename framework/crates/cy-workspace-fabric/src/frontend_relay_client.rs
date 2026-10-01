@@ -18,8 +18,8 @@ use thiserror::Error;
 use tonic::codegen::http::Uri;
 
 use cy_workspace_client_sdk::{
-    connect_relay_session, validate_workspace_descriptor as validate_descriptor,
-    RelayClientConfig, RelaySession, RelayTransportError,
+    connect_relay_session, validate_workspace_descriptor as validate_descriptor, RelayClientConfig,
+    RelaySession, RelayTransportError,
 };
 use cy_workspace_control_plane::{VerifiedWebPrincipal, WebRelaySessionCredentialIssuer};
 

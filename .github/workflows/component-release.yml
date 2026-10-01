@@ -33,7 +33,6 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RELEASE_ID: ${{ (github.ref == 'refs/heads/develop' && 'preview-' || 'stable-') }}${{ github.sha }}
       IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      OUTPUT_ROOT: ${{ runner.temp }}/component-release
       CATALOG_COMMIT: 522524b86a8f79c70e948fed8cb27c4cc70f29c4
       CATALOG_SHA256: 248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35
     steps:
@@ -55,6 +54,8 @@ jobs:
       - name: Verify source, channel, and catalog pins
         run: |
           set -euo pipefail
+          OUTPUT_ROOT="$RUNNER_TEMP/component-release"
+          echo "OUTPUT_ROOT=$OUTPUT_ROOT" >> "$GITHUB_ENV"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           case "$CHANNEL:$SOURCE_REF" in
             stable:refs/heads/main|stable:refs/heads/release|preview:refs/heads/develop) ;;

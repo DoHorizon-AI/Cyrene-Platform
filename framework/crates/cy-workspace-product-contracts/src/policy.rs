@@ -60,7 +60,7 @@ pub enum AuthorizationError {
 pub enum ProductPrincipalKind {
     /// Interactive user with current Directory membership and role lookup.
     DirectoryUser,
-    /// A specifically authenticated Navigator service workload.
+    /// A specifically authenticated trusted service workload.
     TrustedNavigatorWorkload,
 }
 
@@ -81,8 +81,8 @@ impl VerifiedProductPrincipal {
         }
     }
 
-    /// Creates the principal only after validating the Navigator workload
-    /// identity, audience, and exact Workspace handoff server-side.
+    /// Creates the principal only after validating the workload identity,
+    /// audience, and exact Workspace scope server-side.
     pub fn trusted_navigator_workload() -> Self {
         Self {
             kind: ProductPrincipalKind::TrustedNavigatorWorkload,

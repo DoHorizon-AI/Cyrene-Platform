@@ -302,12 +302,7 @@ impl RelayServingSession {
             };
             let response = match caller {
                 Ok(caller) => {
-                    dispatch_authenticated_workspace_request(
-                        api.as_ref(),
-                        request,
-                        caller,
-                    )
-                    .await
+                    dispatch_authenticated_workspace_request(api.as_ref(), request, caller).await
                 }
                 Err(_) => unauthenticated_workspace_response(request.request_id),
             };

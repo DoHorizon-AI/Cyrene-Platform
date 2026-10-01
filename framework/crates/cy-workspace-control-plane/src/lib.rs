@@ -11,8 +11,8 @@ pub mod caller;
 pub mod connector_session;
 pub mod control_plane;
 pub mod device_registry;
-pub mod directory;
 pub mod direct_server;
+pub mod directory;
 pub mod persistent_directory;
 pub mod product_authorization;
 pub mod product_projection;
@@ -30,8 +30,8 @@ pub use auth::{
     SessionPrincipal,
 };
 pub use caller::{
-    WorkspaceAuthorizationError, WorkspaceCallerContext, WorkspaceCallerPrincipal,
-    WorkspaceCallerContextError, WorkspaceDeviceIdentity, NAVIGATOR_SERVICE_WRITER_ROLE,
+    WorkspaceAuthorizationError, WorkspaceCallerContext, WorkspaceCallerContextError,
+    WorkspaceCallerPrincipal, WorkspaceDeviceIdentity, NAVIGATOR_SERVICE_WRITER_ROLE,
     WORKSPACE_MEMBER_ROLE,
 };
 pub use connector_session::{
@@ -53,11 +53,11 @@ pub use device_registry::{
     WorkspaceDeviceCertificateIdentity, WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
     WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
 };
+pub use direct_server::DirectWorkspaceServer;
 pub use directory::{
     validate_descriptor, InMemoryWorkspaceDirectory, WorkspaceDirectory, WorkspaceDirectoryError,
     WorkspaceMembership,
 };
-pub use direct_server::DirectWorkspaceServer;
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_projection::PRODUCT_JSON_BODY_MAX_BYTES;
 pub use user_code_secret::{

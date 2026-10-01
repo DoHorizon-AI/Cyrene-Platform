@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn rejects_non_https_urls_bad_owner_ids_and_unsafe_scope_ids() {
         for config in [
-            endpoint("Catalyst", "https://catalyst.example.test/", TOKEN),
+            endpoint("sample-owner", "https://api.example.test/", TOKEN),
             endpoint("catalyst", "http://catalyst.example.test/", TOKEN),
             endpoint(
                 "catalyst",
