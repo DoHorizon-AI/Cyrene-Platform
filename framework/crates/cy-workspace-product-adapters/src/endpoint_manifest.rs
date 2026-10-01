@@ -1,6 +1,6 @@
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │  📄 endpoint_manifest.rs                                            │
-//! │  Module: cy_workspace_fabric::product_adapters::endpoint_manifest  │
+//! │  Module: cy_workspace_product_adapters::endpoint_manifest         │
 //! │  Role: Load private scoped Product endpoints from server files.     │
 //! │                                                                     │
 //! │  模块职责：从服务端文件加载私有且精确 scope 的 Product endpoint。       │
@@ -16,7 +16,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::http::{validate_product_endpoint_configs, ProductEndpointConfig};
+use cy_workspace_fabric::{ProductEndpointConfig, ProductHttpClient};
 
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ENDPOINTS: usize = 256;
@@ -75,6 +75,15 @@ pub fn load_product_endpoint_configs(
     manifest_path: &Path,
     private_secret_root: &Path,
 ) -> Result<Vec<ProductEndpointConfig>, ProductEndpointManifestError> {
+    load_product_endpoint_configs_in_scope(manifest_path, private_secret_root, None)
+}
+
+#[cfg(unix)]
+fn load_product_endpoint_configs_in_scope(
+    manifest_path: &Path,
+    private_secret_root: &Path,
+    expected_scope: Option<(&str, &str)>,
+) -> Result<Vec<ProductEndpointConfig>, ProductEndpointManifestError> {
     use std::os::unix::fs::MetadataExt;
 
     let manifest_parent = manifest_path
@@ -126,6 +135,9 @@ pub fn load_product_endpoint_configs(
         if !valid_scope_id(&entry.organization_id)
             || !valid_scope_id(&entry.workspace_id)
             || !valid_secret_file_name(&entry.credential_file)
+            || expected_scope.is_some_and(|(organization_id, workspace_id)| {
+                entry.organization_id != organization_id || entry.workspace_id != workspace_id
+            })
         {
             return Err(ProductEndpointManifestError::ManifestInvalid);
         }
@@ -158,7 +170,7 @@ pub fn load_product_endpoint_configs(
         ));
     }
 
-    validate_product_endpoint_configs(&configs)
+    ProductHttpClient::validate_private_config(&configs)
         .map_err(|_| ProductEndpointManifestError::ManifestInvalid)?;
     Ok(configs)
 }
@@ -169,22 +181,21 @@ pub fn load_product_endpoint_configs(
 /// A Connector process is pinned to a single Workspace identity. This wrapper
 /// rejects a valid manifest whose entries belong to another organization or
 /// Workspace before any Relay session is opened.
+#[cfg(unix)]
 pub fn load_product_endpoint_configs_for_workspace(
     manifest_path: &Path,
     private_secret_root: &Path,
     organization_id: &str,
     workspace_id: &str,
 ) -> Result<Vec<ProductEndpointConfig>, ProductEndpointManifestError> {
-    let configs = load_product_endpoint_configs(manifest_path, private_secret_root)?;
-    if organization_id.trim().is_empty()
-        || workspace_id.trim().is_empty()
-        || configs
-            .iter()
-            .any(|config| !config.is_scoped_to(organization_id, workspace_id))
-    {
+    if organization_id.trim().is_empty() || workspace_id.trim().is_empty() {
         return Err(ProductEndpointManifestError::ManifestInvalid);
     }
-    Ok(configs)
+    load_product_endpoint_configs_in_scope(
+        manifest_path,
+        private_secret_root,
+        Some((organization_id, workspace_id)),
+    )
 }
 
 /// Non-Unix targets fail closed because the loader cannot verify Unix owner and mode policy.
@@ -192,6 +203,17 @@ pub fn load_product_endpoint_configs_for_workspace(
 pub fn load_product_endpoint_configs(
     _manifest_path: &Path,
     _private_secret_root: &Path,
+) -> Result<Vec<ProductEndpointConfig>, ProductEndpointManifestError> {
+    Err(ProductEndpointManifestError::UnsupportedPlatform)
+}
+
+/// Non-Unix targets fail closed because the loader cannot verify Unix owner and mode policy.
+#[cfg(not(unix))]
+pub fn load_product_endpoint_configs_for_workspace(
+    _manifest_path: &Path,
+    _private_secret_root: &Path,
+    _organization_id: &str,
+    _workspace_id: &str,
 ) -> Result<Vec<ProductEndpointConfig>, ProductEndpointManifestError> {
     Err(ProductEndpointManifestError::UnsupportedPlatform)
 }
@@ -340,7 +362,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::ProductHttpClient;
+    use cy_workspace_fabric::ProductHttpClient;
 
     const LONG_CREDENTIAL: &str = "test-workspace-private-bearer-credential-0123456789";
 

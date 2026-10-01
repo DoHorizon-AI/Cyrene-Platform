@@ -14,11 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cy_observability::{init_observability, ObservabilityConfig};
 use cy_proto::workspace_v1::{DeviceEnrollmentRef, RelayHello, RelayParticipantRole};
 use cy_workspace_fabric::{
-    load_product_endpoint_configs_for_workspace, run_workspace_connector_session,
-    ProductHttpApiAdapter, ProductHttpClient, RelayClientConfig, WorkspaceApi,
-    WorkspaceControlPlane, WorkspaceDispatchError, WorkspaceOperationProjection,
+    run_workspace_connector_session, ProductHttpApiAdapter, ProductHttpClient, RelayClientConfig,
+    WorkspaceApi, WorkspaceControlPlane, WorkspaceDispatchError, WorkspaceOperationProjection,
     WorkspaceProductRequest, WorkspaceRequestDispatcher,
 };
+use cy_workspace_product_adapters::load_product_endpoint_configs_for_workspace;
 use openssl::{pkey::PKey, x509::X509};
 use serde::Deserialize;
 use thiserror::Error as ThisError;

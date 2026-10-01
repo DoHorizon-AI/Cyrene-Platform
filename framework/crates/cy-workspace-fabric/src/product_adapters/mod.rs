@@ -5,7 +5,6 @@
 
 mod catalyst;
 mod echo;
-mod endpoint_manifest;
 mod exchange;
 mod http;
 mod navigator;
@@ -20,10 +19,6 @@ use crate::{
     WorkspaceCallerContext,
 };
 
-pub use endpoint_manifest::{
-    load_product_endpoint_configs, load_product_endpoint_configs_for_workspace,
-    ProductEndpointManifestError,
-};
 pub use http::{ProductEndpointConfig, ProductHttpClient};
 
 #[cfg(test)]

@@ -21,7 +21,7 @@
 | `transport.rs` | Direct candidate selection and outbound mTLS transport. | 直连候选选择与出站 mTLS 传输。 |
 | `sidecar.rs` | External-credential consumer and authenticated local gRPC bridge. | 外部凭据 consumer 与本地认证 gRPC 代理。 |
 | `user_code_secret.rs` | Versioned HMAC key ring for user-code storage and verification. | user code 存储与校验使用的带版本 HMAC key ring。 |
-| `bin/` | Acceptance fixtures, Workspace sidecar, and restricted Directory provisioning CLI. | Acceptance fixture、Workspace sidecar 与受限 Directory 配置 CLI。 |
+| `bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
 
 `cy-workspace-directory-admin` uses separate operator and migration database URLs. Membership/role/descriptor writes and audit records commit atomically; the runtime reader role is SELECT-only. Device registration uses a separate registrar role and stores only a domain-separated digest of its 256-bit recovery credential. The binding adapter alone does not enable enrollment start or approval; production must compose binding and authorization-state CAS under one PostgreSQL transaction and device-row lock. OIDC verification, database users/secrets/deployment, and production host configuration remain external work.
 
@@ -74,7 +74,7 @@ identity 权威。
 | `relay.rs` | 临时认证路由。 |
 | `transport.rs` | 直连候选选择与出站 mTLS 传输。 |
 | `user_code_secret.rs` | user code 存储与校验使用的带版本 HMAC key ring。 |
-| `bin/` | Acceptance fixture、Workspace sidecar 与受限 Directory 配置 CLI。 |
+| `bin/` | Acceptance fixture 与受限 Directory 配置 CLI。 |
 
 Web Frontend Relay 客户端只接受 `VerifiedWebPrincipal` 和可信的 `WebRelaySessionCredentialIssuer`，并在内部构造用户作用域的 Frontend `RelayHello`。其 mTLS 证书标识 BFF workload，必须与已注册的 Workspace device 身份分离。转发前会校验 Directory descriptor 的组织、有效期以及精确配置的 Relay endpoint/SNI。response contract 不含 Workspace ID，因此 response 的 Workspace 归属依赖已认证 Relay 对 Workspace route 的绑定和 pending-request correlation。host 接线边界见 [`WEB_FRONTEND_RELAY_CLIENT.md`](../WEB_FRONTEND_RELAY_CLIENT.md)。
 

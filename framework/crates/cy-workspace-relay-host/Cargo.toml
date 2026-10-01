@@ -1,0 +1,17 @@
+[package]
+name = "cy-workspace-relay-host"
+version = "0.1.0"
+edition = "2021"
+description = "Fail-closed process host for the Cyrene Workspace Relay."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+base64 = "0.22"
+cy-observability = { version = "0.1.0", path = "../cy-observability" }
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tracing = "0.1"

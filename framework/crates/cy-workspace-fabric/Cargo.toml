@@ -56,17 +56,5 @@ name = "cy-workspace-fabric-fixture"
 path = "src/bin/cy-workspace-fabric-fixture.rs"
 
 [[bin]]
-name = "cy-workspace-relay-host"
-path = "src/bin/cy-workspace-relay-host.rs"
-
-[[bin]]
-name = "cy-workspace-connector-host"
-path = "src/bin/cy-workspace-connector-host.rs"
-
-[[bin]]
-name = "cy-workspace-sidecar"
-path = "src/bin/cy-workspace-sidecar.rs"
-
-[[bin]]
 name = "cy-workspace-directory-admin"
 path = "src/bin/cy-workspace-directory-admin.rs"

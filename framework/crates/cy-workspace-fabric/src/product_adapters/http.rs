@@ -287,10 +287,6 @@ impl ProductEndpointConfig {
             service_credential: service_credential.into(),
         }
     }
-
-    pub(super) fn is_scoped_to(&self, organization_id: &str, workspace_id: &str) -> bool {
-        self.organization_id == organization_id && self.workspace_id == workspace_id
-    }
 }
 
 impl fmt::Debug for ProductEndpointConfig {
@@ -615,6 +611,17 @@ pub struct ProductHttpClient {
 }
 
 impl ProductHttpClient {
+    /// Validates private Product endpoint configuration without creating a transport client.
+    ///
+    /// This keeps manifest validation in the separately versioned configuration crate while
+    /// preserving the same owner, scope, URL, credential, and uniqueness checks used at client
+    /// construction.
+    pub fn validate_private_config(
+        configs: &[ProductEndpointConfig],
+    ) -> Result<(), ProductInvocationError> {
+        validate_product_endpoint_configs(configs)
+    }
+
     /// Builds a production client from private, server-side endpoint secrets.
     pub fn from_private_config(
         configs: Vec<ProductEndpointConfig>,

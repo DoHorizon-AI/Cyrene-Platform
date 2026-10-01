@@ -15,7 +15,7 @@ COPY agents agents
 COPY adapters adapters
 COPY sdk/rust sdk/rust
 
-RUN cargo build --locked --release -p cy-workspace-fabric --bin cy-workspace-relay-host
+RUN cargo build --locked --release -p cy-workspace-relay-host
 
 FROM debian:bookworm-slim AS runtime
 

@@ -136,9 +136,7 @@ pub use frontend_relay_client::{
 };
 pub use persistent_directory::FileWorkspaceDirectory;
 pub use product_adapters::{
-    load_product_endpoint_configs, load_product_endpoint_configs_for_workspace,
-    CatalystEchoProductApiAdapter, ProductEndpointConfig, ProductEndpointManifestError,
-    ProductHttpApiAdapter, ProductHttpClient,
+    CatalystEchoProductApiAdapter, ProductEndpointConfig, ProductHttpApiAdapter, ProductHttpClient,
 };
 pub use product_projection::{
     ProductInvocationError, ProductInvocationPort, ProductInvocationRequest,

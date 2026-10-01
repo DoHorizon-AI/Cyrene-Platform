@@ -1,0 +1,18 @@
+[package]
+name = "cy-workspace-product-adapters"
+version = "0.1.0"
+edition = "2021"
+description = "Private Product endpoint manifest loading for Workspace Connector composition."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"

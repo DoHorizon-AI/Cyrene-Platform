@@ -1,6 +1,6 @@
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │  📄 cy-workspace-sidecar.rs                                         │
-//! │  Module: cy_workspace_fabric::sidecar::binary                       │
+//! │  Module: cy_workspace_sidecar                                       │
 //! │  Role: Loopback-only Workspace API proxy for Python clients.         │
 //! │                                                                     │
 //! │  模块职责：为 Python client 提供仅 loopback 可访问的 Workspace API proxy。 │

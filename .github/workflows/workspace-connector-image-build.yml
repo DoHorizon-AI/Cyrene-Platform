@@ -39,7 +39,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: framework/crates/cy-workspace-fabric/Dockerfile.connector
+          file: framework/crates/cy-workspace-connector-host/Dockerfile
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

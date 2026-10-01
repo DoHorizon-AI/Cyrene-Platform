@@ -32,9 +32,11 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/frontend_relay_client.rs` | Verified-principal Web Frontend client for an outbound mTLS Relay session. | 基于已验证主体的出站 mTLS Relay 客户端。 |
 | `src/relay.rs` | Live application request routing without Workspace authority. | 不拥有 Workspace 权威的实时应用请求路由。 |
 | `src/transport.rs` | Direct candidate selection and outbound mTLS Relay transport. | 直连候选选择与出站 mTLS Relay 传输。 |
-| `src/bin/` | Fail-closed Relay host and acceptance-only connector/reference frontend fixtures. | fail-closed Relay host 与仅用于验收的 Connector/参考 frontend fixture。 |
+| `src/bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
 | `src/sidecar.rs` | Loopback-authenticated bridge for non-Rust Workspace clients. | 为非 Rust Workspace client 提供 loopback 认证代理。 |
-| `src/bin/` | Acceptance relay/connector/frontend fixtures and the loopback sidecar executable. | 验收 Relay/Connector/frontend fixture 与 loopback sidecar 可执行程序。 |
+| `../cy-workspace-relay-host/` | Independently versioned fail-closed Relay Host package and image. | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
+| `../cy-workspace-connector-host/` | Independently versioned outbound Connector Host package and image. | 独立版本化的出站 Connector Host package 与镜像。 |
+| `../cy-workspace-sidecar/` | Independently versioned loopback Sidecar package. | 独立版本化的 loopback Sidecar package。 |
 
 The Web Frontend Relay adapter's trust boundaries and required host wiring are
 documented in [`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md).
@@ -48,6 +50,14 @@ gate are documented in [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.
 
 生产出站 Connector host 的固定私有文件布局、设备身份构造、Product scope 校验与
 Relay 外部注册表 gate 见 [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.md)。
+
+Product operation routing remains implemented in this shared Platform crate.
+The current Connector composition and the safe follow-up catalog boundary are
+documented in
+[`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md).
+
+Product operation 路由仍由共享 Platform crate 实现。当前 Connector composition 与后续安全
+catalog 边界见 [`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md)。
 
 ## Local Python bridge
 
@@ -283,13 +293,14 @@ remains HTTP 503 until every required service and the deployment topology are
 verified. The host cannot infer live ACA ingress configuration or private
 network reachability from configuration values. This is a fail-closed
 composition stage, not a production Relay deployment. See
-`src/bin/README.md` for exact runtime settings and health behavior.
+[`../cy-workspace-relay-host/RUNTIME.md`](../cy-workspace-relay-host/RUNTIME.md)
+for exact runtime settings and health behavior.
 
 Run locally with the trusted database URL in the environment:
 
 ```bash
 export CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL='postgresql://<reader>@<host>/<database>?sslmode=verify-full&sslrootcert=/path/to/postgres-roots.pem'
-cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
+cargo run --locked -p cy-workspace-relay-host
 ```
 
 The default listeners are `127.0.0.1:8080` for gRPC and `127.0.0.1:8081` for
@@ -414,9 +425,11 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 | `src/direct.rs` | 校验会话与成员关系的 Workspace API 私网直连端点。 |
 | `src/relay.rs` | 不拥有 Workspace authority 的实时应用请求路由。 |
 | `src/transport.rs` | 直连候选选择、出站 mTLS Relay client 和 connector session。 |
-| `src/bin/` | fail-closed Relay host 与仅用于 acceptance 的 Connector/参考 frontend fixture。 |
+| `src/bin/` | 验收 fixture 与受限 Directory 配置 CLI。 |
 | `src/sidecar.rs` | 消费外部凭据并提供本地认证 gRPC 代理。 |
-| `src/bin/` | 验收 fixture 与独立 Workspace sidecar。 |
+| `../cy-workspace-relay-host/` | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
+| `../cy-workspace-connector-host/` | 独立版本化的出站 Connector Host package 与镜像。 |
+| `../cy-workspace-sidecar/` | 独立版本化的 loopback Sidecar package。 |
 
 ## 本地 Python 代理
 
@@ -507,13 +520,13 @@ PostgreSQL TLS 会校验证书和主机名；私有数据库 CA 需要通过 `ss
 
 未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发、WebAuthn 和 Product 私有访问仍未组合。Product HTTP 由 WorkspaceConnector 路径上的 `ProductHttpApiAdapter` 发起；Frontend Relay authentication 不会自动创建 Product 请求通路。此 host 拒绝 Connector session，因此当前没有请求能经它到达 Product owner。
 
-`GET /healthz` 表示进程存活。`GET /readyz` 会在有界时间内执行只读 PostgreSQL Directory 探测，并返回固定依赖布尔值；全部必需服务和部署拓扑验证完成前，保持 HTTP 503。host 无法从配置值推断 ACA 实际 ingress 设置或私网连通性。这是 fail-closed 的分阶段组合，不是生产 Relay 部署。准确运行配置和探针行为见 `src/bin/README.md`。
+`GET /healthz` 表示进程存活。`GET /readyz` 会在有界时间内执行只读 PostgreSQL Directory 探测，并返回固定依赖布尔值；全部必需服务和部署拓扑验证完成前，保持 HTTP 503。host 无法从配置值推断 ACA 实际 ingress 设置或私网连通性。这是 fail-closed 的分阶段组合，不是生产 Relay 部署。准确运行配置和探针行为见 [`../cy-workspace-relay-host/RUNTIME.md`](../cy-workspace-relay-host/RUNTIME.md)。
 
 本地运行时，在环境变量中提供可信数据库 URL：
 
 ```bash
 export CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL='postgresql://<reader>@<host>/<database>?sslmode=verify-full&sslrootcert=/path/to/postgres-roots.pem'
-cargo run --locked -p cy-workspace-fabric --bin cy-workspace-relay-host
+cargo run --locked -p cy-workspace-relay-host
 ```
 
 默认 gRPC listener 为 `127.0.0.1:8080`，健康探针 listener 为

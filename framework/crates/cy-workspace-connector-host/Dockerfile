@@ -15,7 +15,7 @@ COPY agents agents
 COPY adapters adapters
 COPY sdk/rust sdk/rust
 
-RUN cargo build --locked --release -p cy-workspace-fabric --bin cy-workspace-connector-host
+RUN cargo build --locked --release -p cy-workspace-connector-host
 
 FROM debian:bookworm-slim AS runtime
 
@@ -24,7 +24,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /source/target/release/cy-workspace-connector-host /usr/local/bin/cy-workspace-connector-host
-COPY --chmod=0755 framework/crates/cy-workspace-fabric/connector-entrypoint.sh /usr/local/bin/connector-entrypoint.sh
+COPY --chmod=0755 framework/crates/cy-workspace-connector-host/connector-entrypoint.sh /usr/local/bin/connector-entrypoint.sh
 
 # The entrypoint copies fixed Key Vault mount names into an owner-private tree,
 # then drops to UID/GID 10001 before starting the Connector.

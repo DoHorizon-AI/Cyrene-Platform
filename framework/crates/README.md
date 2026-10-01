@@ -23,6 +23,10 @@ Read this guide first, then the direct files above in dependency order, and fina
 | `cy-package-runtime/` | Generic package install, activation, supervision, and opaque connection facts; no capability payload routing. | 通用包安装、激活、监督与不透明连接事实；不路由能力业务载荷。 |
 | `cy-platform-api/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-workspace-fabric/` | Workspace discovery, stable frontend API, and outbound relay connectivity. | Workspace 发现、稳定 frontend API 与出站 Relay 连接。 |
+| `cy-workspace-relay-host/` | Independently versioned Relay process and image. | 独立版本化的 Relay 进程与镜像。 |
+| `cy-workspace-connector-host/` | Independently versioned outbound Connector process and image. | 独立版本化的出站 Connector 进程与镜像。 |
+| `cy-workspace-sidecar/` | Independently versioned loopback client bridge process. | 独立版本化的 loopback client bridge 进程。 |
+| `cy-workspace-web-bff/` | Independently packaged authenticated Workspace Web BFF. | 独立打包的 Workspace Web BFF 认证服务。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
@@ -53,5 +57,9 @@ This snapshot is intentionally limited to direct entries; nested directories own
 | `cy-package-runtime/` | 通用包安装、激活、监督与不透明连接事实；不路由能力业务载荷。 |
 | `cy-platform-api/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-workspace-fabric/` | Workspace 发现、稳定 frontend API 与出站 Relay 连接。 |
+| `cy-workspace-relay-host/` | 独立版本化的 Relay 进程与镜像。 |
+| `cy-workspace-connector-host/` | 独立版本化的出站 Connector 进程与镜像。 |
+| `cy-workspace-sidecar/` | 独立版本化的 loopback client bridge 进程。 |
+| `cy-workspace-web-bff/` | 独立打包的 Workspace Web BFF 认证服务。 |
 
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

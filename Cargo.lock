@@ -777,6 +777,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cy-workspace-connector-host"
+version = "0.1.0"
+dependencies = [
+ "cy-observability",
+ "cy-proto",
+ "cy-workspace-fabric",
+ "cy-workspace-product-adapters",
+ "openssl",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
+ "tracing",
+ "url",
+ "uuid",
+ "x509-parser 0.18.1",
+]
+
+[[package]]
 name = "cy-workspace-fabric"
 version = "0.1.0"
 dependencies = [
@@ -816,6 +837,43 @@ dependencies = [
  "webauthn-rs",
  "x509-parser 0.18.1",
  "zeroize",
+]
+
+[[package]]
+name = "cy-workspace-product-adapters"
+version = "0.1.0"
+dependencies = [
+ "cy-proto",
+ "cy-workspace-fabric",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "cy-workspace-relay-host"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cy-observability",
+ "cy-proto",
+ "cy-workspace-fabric",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "cy-workspace-sidecar"
+version = "0.1.0"
+dependencies = [
+ "cy-proto",
+ "cy-workspace-fabric",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]

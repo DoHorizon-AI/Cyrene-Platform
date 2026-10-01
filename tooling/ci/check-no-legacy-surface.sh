@@ -356,7 +356,7 @@ workspace_host_semantic_sources=(
   "framework/crates/cy-workspace-fabric/src/product_authorization.rs"
   "framework/crates/cy-workspace-fabric/src/product_projection.rs"
   "${workspace_product_adapter_sources[@]}"
-  "framework/crates/cy-workspace-fabric/src/bin/cy-workspace-connector-host.rs"
+  "framework/crates/cy-workspace-connector-host/src/main.rs"
   "${workspace_bff_sources[@]}"
 )
 product_private_state_matches=$(

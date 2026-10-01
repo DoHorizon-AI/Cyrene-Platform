@@ -21,6 +21,10 @@ members = [
     "framework/crates/cy-execution-fabric",
     "framework/crates/cy-execution-control",
     "framework/crates/cy-workspace-fabric",
+    "framework/crates/cy-workspace-product-adapters",
+    "framework/crates/cy-workspace-relay-host",
+    "framework/crates/cy-workspace-connector-host",
+    "framework/crates/cy-workspace-sidecar",
     "framework/crates/cy-workspace-web-bff",
     "sdk/rust/cy-artifact-transfer",
 

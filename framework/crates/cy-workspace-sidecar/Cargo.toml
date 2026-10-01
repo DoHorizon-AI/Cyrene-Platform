@@ -1,0 +1,13 @@
+[package]
+name = "cy-workspace-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "Loopback-only Workspace API bridge for non-Rust clients."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
+tokio = { version = "1.35", features = ["macros", "rt-multi-thread"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }

@@ -1,6 +1,6 @@
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │  📄 cy-workspace-relay-host.rs                                      │
-//! │  Module: cy_workspace_fabric::relay_host                            │
+//! │  Module: cy_workspace_relay_host                                    │
 //! │  Role: Fail-closed non-fixture Workspace Relay process host.        │
 //! │                                                                     │
 //! │  模块职责：默认拒绝 Relay 会话的非 fixture 服务进程入口。                │

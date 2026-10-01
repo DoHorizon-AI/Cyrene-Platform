@@ -1,0 +1,24 @@
+[package]
+name = "cy-workspace-connector-host"
+version = "0.1.0"
+edition = "2021"
+description = "Fail-closed outbound process host for a Cyrene Workspace Connector."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+cy-observability = { version = "0.1.0", path = "../cy-observability" }
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-product-adapters = { version = "0.1.0", path = "../cy-workspace-product-adapters" }
+cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
+openssl = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tracing = "0.1"
+url = "2.5"
+uuid = { version = "1.0", features = ["v4"] }
+x509-parser = "0.18.1"
