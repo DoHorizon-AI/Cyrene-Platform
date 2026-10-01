@@ -889,8 +889,8 @@ fn proto_target_kind(value: UpdateTargetKind) -> MaintenanceTargetKind {
 }
 
 fn parse_proto_status(value: i32) -> &'static str {
-    match UpdateReadinessStatus::try_from(value).unwrap_or(UpdateReadinessStatus::Unknown) {
-        UpdateReadinessStatus::Unknown => "UNKNOWN",
+    match UpdateReadinessStatus::try_from(value).unwrap_or(UpdateReadinessStatus::Unspecified) {
+        UpdateReadinessStatus::Unspecified => "UNKNOWN",
         UpdateReadinessStatus::Ready => "READY",
         UpdateReadinessStatus::ActiveTasks => "ACTIVE_TASKS",
         UpdateReadinessStatus::IdleRuntimeRequiresUnload => "IDLE_RUNTIME_REQUIRES_UNLOAD",

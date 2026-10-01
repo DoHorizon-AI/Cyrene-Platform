@@ -114,7 +114,7 @@ fn readiness_request_from_proto(
 
 fn readiness_status_to_proto(status: ReadinessStatus) -> i32 {
     let status = match status {
-        ReadinessStatus::Unknown => core_v2::UpdateReadinessStatus::Unknown,
+        ReadinessStatus::Unknown => core_v2::UpdateReadinessStatus::Unspecified,
         ReadinessStatus::Ready => core_v2::UpdateReadinessStatus::Ready,
         ReadinessStatus::ActiveTasks => core_v2::UpdateReadinessStatus::ActiveTasks,
         ReadinessStatus::IdleRuntimeRequiresUnload => {
