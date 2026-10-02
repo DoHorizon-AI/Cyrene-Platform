@@ -13,6 +13,7 @@ cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-contro
 cy-workspace-product-adapters = { version = "0.1.0", path = "../cy-workspace-product-adapters" }
 cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts" }
 cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
+libc = "0.2"
 openssl = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -24,3 +25,6 @@ tracing = "0.1"
 url = "2.5"
 uuid = { version = "1.0", features = ["v4"] }
 x509-parser = "0.18.1"
+
+[dev-dependencies]
+tempfile = "3.8"

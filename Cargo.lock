@@ -827,10 +827,12 @@ dependencies = [
  "cy-workspace-fabric",
  "cy-workspace-product-adapters",
  "cy-workspace-product-contracts",
+ "libc",
  "openssl",
  "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tonic",
@@ -933,13 +935,16 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cy-workspace-product-contracts",
+ "rcgen",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

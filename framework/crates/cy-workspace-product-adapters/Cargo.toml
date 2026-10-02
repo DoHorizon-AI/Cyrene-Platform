@@ -16,5 +16,8 @@ sha2 = "0.10"
 thiserror = "1.0"
 
 [dev-dependencies]
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tempfile = "3.8"
-tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "net", "time"] }
+tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
