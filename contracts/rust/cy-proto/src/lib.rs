@@ -72,9 +72,27 @@ pub mod cyrene {
             }
         }
 
+        pub mod authority {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.workspace.authority.v1");
+            }
+        }
+
+        pub mod bridge {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.workspace.bridge.v1");
+            }
+        }
+
         pub mod local {
             pub mod v1 {
                 tonic::include_proto!("cyrene.workspace.local.v1");
+            }
+        }
+
+        pub mod relay {
+            pub mod v1 {
+                tonic::include_proto!("cyrene.workspace.relay.v1");
             }
         }
 
@@ -117,6 +135,14 @@ pub use cyrene::workspace::local::v1 as workspace_local_v1;
 /// Transport-neutral Workspace discovery and relay API projection.
 /// 中文：与传输方式无关的 Workspace 发现与中继 API 投影。
 pub use cyrene::workspace::v1 as workspace_v1;
+/// Decoupled Authority and invocation lifecycle RPC contract.
+pub use cyrene::workspace::authority::v1 as workspace_authority_v1;
+/// Local frontend bridge RPC contract for BFF decoupling.
+pub use cyrene::workspace::bridge::v1 as workspace_bridge_v1;
+/// Product API v2 invocation messages.
+pub use cyrene::workspace::product::v2 as workspace_product_v2;
+/// Decoupled Workspace Relay protocol.
+pub use cyrene::workspace::relay::v1 as workspace_relay_v1;
 
 #[cfg(test)]
 #[allow(deprecated)]

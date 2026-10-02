@@ -29,8 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_fabric_proto = proto_dir.join("cyrene/workspace/v1/workspace_fabric.proto");
     let workspace_product_v2_proto =
         proto_dir.join("cyrene/workspace/product/v2/product_api.proto");
+    let workspace_authority_proto =
+        proto_dir.join("cyrene/workspace/authority/v1/workspace_authority.proto");
+    let workspace_bridge_proto =
+        proto_dir.join("cyrene/workspace/bridge/v1/workspace_frontend_bridge.proto");
     let workspace_sidecar_proto =
         proto_dir.join("cyrene/workspace/local/v1/workspace_sidecar.proto");
+    let workspace_relay_proto =
+        proto_dir.join("cyrene/workspace/relay/v1/workspace_relay.proto");
     let device_enrollment_proto = proto_dir.join("cyrene/device/v1/device_enrollment.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
@@ -50,7 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        workspace_authority_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_bridge_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         workspace_sidecar_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_relay_proto.display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -86,7 +104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 service_supervision_proto,
                 workspace_fabric_proto,
                 workspace_product_v2_proto,
+                workspace_authority_proto,
+                workspace_bridge_proto,
                 workspace_sidecar_proto,
+                workspace_relay_proto,
                 hardware_adapter_proto,
                 sandbox_adapter_proto,
                 semantic_contract_proto,
