@@ -1,7 +1,7 @@
 {
   "bundle": {
     "manifestPath": "product-contract-bundle.json",
-    "manifestSha256": "f241fae23c8dec0fdc88a146452b83e84009c2e57db8c3f8516c746ced1deefd"
+    "manifestSha256": "ca2a39cdd020f73a86d84d7d8e08d8150a2cd08dd1452bb2bf2a2adabeef9cdd"
   },
   "contractApiVersion": "0.1.0",
   "formatVersion": 2,
@@ -11,48 +11,48 @@
       "catalogSha256": "15977640d292e3dc0882f0dbdf1f97194a2599971999137f2f98316a5a309f9e",
       "ownerId": "catalyst",
       "repository": "Cyrene-Catalyst",
-      "sourceSha": "75ad5ded966f66609f2b016fb96c62be1511ef02"
+      "sourceSha": "9b9e5da1dd387adcbc1a5198de2b9b9460bd201e"
     },
     {
       "catalogPath": "Cyrene-Echo/contracts/product/v2/catalog.json",
       "catalogSha256": "d6aeb91b4dea1ef7aaefe3ee43d57e53d1a0c03836b0101bea515e34fd728247",
       "ownerId": "echo",
       "repository": "Cyrene-Echo",
-      "sourceSha": "4de40bd9e50f3048491b00e868f7767911237b63"
+      "sourceSha": "3387990be3b0674998dc6f9697f4e5a35fcfeeaf"
     },
     {
       "catalogPath": "Cyrene-Exchange/contracts/product/v2/catalog.json",
       "catalogSha256": "73ec67b5e85e31d9262b3b896fc7c88e401ccd77f1d21e4a060d01622e2020d4",
       "ownerId": "exchange",
       "repository": "Cyrene-Exchange",
-      "sourceSha": "8a6258e656d90bc8fcc22ce570b61917fad7763a"
+      "sourceSha": "d4ad1d6895e630eb9e07d0cd4f0c9dbff4ec5d06"
     },
     {
       "catalogPath": "Cyrene-Navigator/contracts/product/v2/catalog.json",
       "catalogSha256": "1471bd90fd0c36015103d5b3dcbd10f02e39103bde775b0a4b2f964ac0e8d6d0",
       "ownerId": "navigator",
       "repository": "Cyrene-Navigator",
-      "sourceSha": "8224a47551533c1d17857d418ff63dc1857b8b2d"
+      "sourceSha": "06fe528d9829dffce370d5b57654b77c39e2cc99"
     },
     {
       "catalogPath": "Cyrene-Reactor/contracts/product/v2/catalog.json",
       "catalogSha256": "f00bb28e32b8ac000087a6525aaf2ca5db8cb2cc23c0833e39a24b9f0d597343",
       "ownerId": "reactor",
       "repository": "Cyrene-Reactor",
-      "sourceSha": "c8f11c09b4f873bf1a550e83a528c5ea05c0b446"
+      "sourceSha": "b0c67e7517ea1b447ae691cd0da0208ab58b75b5"
     },
     {
       "catalogPath": "Cyrene-Yield/contracts/product/v2/catalog.json",
-      "catalogSha256": "b2a88b69c09ac5dd4b229408c9fa45745ff3dd6b6cdcd89bd8b4c42ec09009d0",
+      "catalogSha256": "1287317b96c24d9c7367c9430273365c1c091f7706246b587610d78da4fffce7",
       "ownerId": "yield",
       "repository": "Cyrene-Yield",
-      "sourceSha": "4fc49155786e594ec5f67e5c8f42ec5b35cdd9ab"
+      "sourceSha": "af11fca6f4ac07468ce6cc341f4f65b427648aa7"
     }
   ],
   "policy": {
     "bundlePath": "workspace-product-policy-v2.json",
     "schemaVersion": "cyrene.workspace.product.authorization-policy.v2",
-    "sha256": "6397ce7edd0d08f23d37bac60ec12284af227e577ab06b4629e52b52d5d8663e",
+    "sha256": "1b339fcec6aee88b959c4b76cc7fe7edbd7eb2247b3ac673270c3219b5613219",
     "sourcePath": "contracts/policies/workspace-product-policy-v2.json"
   },
   "releaseId": "workspace-product-v2-initial",
