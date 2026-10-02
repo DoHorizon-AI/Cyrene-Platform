@@ -30,9 +30,15 @@ use cy_workspace_control_plane::{
     WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceDirectory,
     WORKSPACE_MEMBER_ROLE,
 };
-use cy_workspace_fabric::{
-    FrontendRelayClient, FrontendRelayClientConfig, FrontendRelayClientError,
+use cy_proto::cyrene::workspace::authority::v1::workspace_authority_service_server::WorkspaceAuthorityService;
+use cy_proto::cyrene::workspace::authority::v1::*;
+use cy_proto::cyrene::workspace::bridge::v1::workspace_frontend_bridge_service_client::WorkspaceFrontendBridgeServiceClient;
+use cy_proto::cyrene::workspace::bridge::v1::*;
+use cy_workspace_control_plane::authority_service::{
+    ContractSnapshotManager, WorkspaceAuthorityServiceImpl,
 };
+use cy_workspace_postgres_storage::PostgresWorkspaceOutbox;
+use tonic::transport::{Channel, Endpoint};
 use cy_workspace_postgres_storage::{
     device_enrollment_device_v1_router, webauthn_http_router, DeviceAuthorizationPolicy,
     DeviceAuthorizationPortError, DeviceCertificateIssuer, DeviceCertificatePublicMetadataPort,
@@ -59,7 +65,7 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 use cy_workspace_web_bff::{
-    load_product_operation_catalog_from_environment, router_with_device_approval,
+    router_with_device_approval,
     with_verified_web_session_routes, DeviceApprovalDependencies, FabricWorkspaceProductGateway,
     WebBffConfig, WebBffState, WorkspaceApiBinding, WorkspaceApiResolutionError,
     WorkspaceApiResolver,
@@ -122,19 +128,6 @@ struct RelaySettings {
     ca_certificate: Vec<u8>,
     client_certificate: Vec<u8>,
     client_key: Vec<u8>,
-}
-
-impl RelaySettings {
-    fn client_config(&self) -> Result<FrontendRelayClientConfig, HostStartupError> {
-        FrontendRelayClientConfig::new(
-            self.endpoint.clone(),
-            self.server_name.clone(),
-            self.ca_certificate.clone(),
-            self.client_certificate.clone(),
-            self.client_key.clone(),
-        )
-        .map_err(|_| HostStartupError::Relay)
-    }
 }
 
 impl Drop for RelaySettings {
@@ -200,8 +193,6 @@ impl HostSettings {
             )?,
         };
 
-        // Validate fixed HTTPS/SNI/mTLS settings before any listener can accept traffic.
-        drop(relay.client_config()?);
         let mut seed_for_validation = handoff_signing_seed.duplicate();
         let issuer_validation = WebRelaySessionIssuer::new(
             handoff_issuer.clone(),
@@ -273,17 +264,48 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     );
     signing_seed.zeroize();
 
-    let resolver: Arc<dyn WorkspaceApiResolver> = Arc::new(PrincipalScopedRelayResolver {
-        relay: Arc::clone(&relay),
+    let (product_catalog, contract_snapshot) =
+        cy_workspace_web_bff::load_product_catalog_and_snapshot_from_environment()
+            .map_err(|_| HostStartupError::ProductCatalog)?;
+    let snapshot_manager = Arc::new(ContractSnapshotManager::new(contract_snapshot));
+
+    let outbox: Arc<dyn cy_workspace_control_plane::authority_service::AuthorityOutboxStore> =
+        match PostgresWorkspaceOutbox::connect_from_environment().await {
+            Ok(ob) => Arc::new(ob),
+            Err(_) => Arc::new(cy_workspace_control_plane::InMemoryAuthorityOutbox::default()),
+        };
+    let authority_service = Arc::new(WorkspaceAuthorityServiceImpl::new(
+        snapshot_manager,
+        outbox,
+        b"cyrene-platform-authority-secret-32".to_vec(),
+    ));
+
+    let bridge_uds = env::var("CYRENE_WORKSPACE_WEB_BFF_BRIDGE_UDS")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            let default_path = PathBuf::from("/tmp/cyrene-frontend-bridge.sock");
+            if default_path.exists() {
+                Some(default_path)
+            } else {
+                None
+            }
+        });
+    let bridge_tcp = env::var("CYRENE_WORKSPACE_WEB_BFF_BRIDGE_TCP").ok();
+
+    let resolver: Arc<dyn WorkspaceApiResolver> = Arc::new(PrincipalScopedBridgeResolver {
+        bridge_uds_path: bridge_uds,
+        bridge_tcp_endpoint: bridge_tcp,
+        relay_endpoint: relay.endpoint.clone(),
+        relay_server_name: relay.server_name.clone(),
         handoff_issuer,
+        authority_service,
     });
     let workspace_directory: Arc<dyn WorkspaceDirectory> = directory.clone();
     let workspace_gateway = Arc::new(FabricWorkspaceProductGateway::new(
         Arc::clone(&workspace_directory),
         resolver,
     ));
-    let product_catalog = load_product_operation_catalog_from_environment()
-        .map_err(|_| HostStartupError::ProductCatalog)?;
     let state = Arc::new(
         WebBffState::new(
             web_config,
@@ -671,7 +693,7 @@ struct PostgresIdentityDirectory {
 impl WebIdentityDirectory for PostgresIdentityDirectory {
     async fn organizations_for_verified_identity(
         &self,
-        identity: &cy_workspace_fabric::workspace_v1::UserIdentityRef,
+        identity: &UserIdentityRef,
     ) -> Result<Vec<String>, WebIdentityDirectoryError> {
         self.directory
             .organizations_for_verified_identity(identity)
@@ -689,43 +711,81 @@ impl WebIdentityDirectory for PostgresIdentityDirectory {
     }
 }
 
-struct PrincipalScopedRelayResolver {
-    relay: Arc<RelaySettings>,
+struct PrincipalScopedBridgeResolver {
+    bridge_uds_path: Option<PathBuf>,
+    bridge_tcp_endpoint: Option<String>,
+    relay_endpoint: String,
+    relay_server_name: String,
     handoff_issuer: Arc<WebRelaySessionIssuer>,
+    authority_service: Arc<WorkspaceAuthorityServiceImpl>,
+}
+
+impl PrincipalScopedBridgeResolver {
+    async fn connect_bridge(
+        &self,
+    ) -> Result<WorkspaceFrontendBridgeServiceClient<Channel>, WorkspaceApiResolutionError> {
+        #[cfg(unix)]
+        if let Some(ref socket_path) = self.bridge_uds_path {
+            let path = socket_path.clone();
+            let channel = Endpoint::try_from("http://[::]:50051")
+                .map_err(|_| WorkspaceApiResolutionError::NotConfigured)?
+                .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                    let p = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(p).await?;
+                        Ok::<_, std::io::Error>(hyper_util::rt::tokio::TokioIo::new(stream))
+                    }
+                }))
+                .await
+                .map_err(|_| WorkspaceApiResolutionError::Unavailable)?;
+            return Ok(WorkspaceFrontendBridgeServiceClient::new(channel));
+        }
+
+        if let Some(ref endpoint) = self.bridge_tcp_endpoint {
+            let channel = Endpoint::from_shared(endpoint.clone())
+                .map_err(|_| WorkspaceApiResolutionError::NotConfigured)?
+                .connect()
+                .await
+                .map_err(|_| WorkspaceApiResolutionError::Unavailable)?;
+            return Ok(WorkspaceFrontendBridgeServiceClient::new(channel));
+        }
+
+        // Fallback default UDS location
+        #[cfg(unix)]
+        {
+            let path = PathBuf::from("/tmp/cyrene-frontend-bridge.sock");
+            let channel = Endpoint::try_from("http://[::]:50051")
+                .map_err(|_| WorkspaceApiResolutionError::NotConfigured)?
+                .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                    let p = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(p).await?;
+                        Ok::<_, std::io::Error>(hyper_util::rt::tokio::TokioIo::new(stream))
+                    }
+                }))
+                .await
+                .map_err(|_| WorkspaceApiResolutionError::Unavailable)?;
+            return Ok(WorkspaceFrontendBridgeServiceClient::new(channel));
+        }
+
+        #[allow(unreachable_code)]
+        Err(WorkspaceApiResolutionError::NotConfigured)
+    }
 }
 
 #[async_trait]
-impl WorkspaceApiResolver for PrincipalScopedRelayResolver {
+impl WorkspaceApiResolver for PrincipalScopedBridgeResolver {
     async fn resolve(
         &self,
         principal: &VerifiedWebPrincipal,
         descriptor: &WorkspaceConnectionDescriptor,
     ) -> Result<WorkspaceApiBinding, WorkspaceApiResolutionError> {
-        let config = self
-            .relay
-            .client_config()
-            .map_err(|_| WorkspaceApiResolutionError::NotConfigured)?;
-        let mut transport =
-            FrontendRelayClient::connect(config, principal, self.handoff_issuer.as_ref())
-                .await
-                .map_err(map_relay_resolution_error)?;
-        let discovered = transport
-            .discover_workspaces()
-            .await
-            .map_err(map_relay_resolution_error)?;
-        let mut exact = discovered
-            .iter()
-            .filter(|candidate| candidate.workspace_id == descriptor.workspace_id);
-        let discovered_descriptor = exact
-            .next()
-            .ok_or(WorkspaceApiResolutionError::NotConfigured)?;
-        if exact.next().is_some() || discovered_descriptor != descriptor {
-            return Err(WorkspaceApiResolutionError::InvalidBinding);
-        }
+        let bridge_client = self.connect_bridge().await?;
+
         let mut candidates = descriptor.candidates.iter().filter(|candidate| {
             candidate.mode == cy_proto::core_v1::ConnectivityMode::Relay as i32
-                && candidate.connection_uri == self.relay.endpoint
-                && candidate.server_name == self.relay.server_name
+                && candidate.connection_uri == self.relay_endpoint
+                && candidate.server_name == self.relay_server_name
         });
         let candidate = candidates
             .next()
@@ -734,27 +794,39 @@ impl WorkspaceApiResolver for PrincipalScopedRelayResolver {
             return Err(WorkspaceApiResolutionError::InvalidBinding);
         }
 
-        let api: Arc<dyn WorkspaceApi> = Arc::new(PrincipalScopedWorkspaceApi {
-            transport: Mutex::new(transport),
+        let now_unix_ms = unix_now_ms().unwrap_or(0).max(0) as u64;
+        let session_token = match self.handoff_issuer.issue(principal, now_unix_ms) {
+            Ok(token) => token,
+            Err(_) => return Err(WorkspaceApiResolutionError::Unavailable),
+        };
+
+        let api: Arc<dyn WorkspaceApi> = Arc::new(PrincipalScopedBridgeApi {
+            bridge_client: Mutex::new(bridge_client),
+            authority_service: Arc::clone(&self.authority_service),
             identity: principal.identity().clone(),
             organization_id: principal.organization_id().to_owned(),
             workspace_id: descriptor.workspace_id.clone(),
+            relay_endpoint: self.relay_endpoint.clone(),
+            session_token,
             expires_at_unix_ms: principal.expires_at_unix_ms(),
         });
         WorkspaceApiBinding::for_candidate(principal, descriptor, candidate, api)
     }
 }
 
-struct PrincipalScopedWorkspaceApi {
-    transport: Mutex<FrontendRelayClient>,
-    identity: cy_workspace_fabric::workspace_v1::UserIdentityRef,
+struct PrincipalScopedBridgeApi {
+    bridge_client: Mutex<WorkspaceFrontendBridgeServiceClient<Channel>>,
+    authority_service: Arc<WorkspaceAuthorityServiceImpl>,
+    identity: UserIdentityRef,
     organization_id: String,
     workspace_id: String,
+    relay_endpoint: String,
+    session_token: String,
     expires_at_unix_ms: i64,
 }
 
 #[async_trait]
-impl WorkspaceApi for PrincipalScopedWorkspaceApi {
+impl WorkspaceApi for PrincipalScopedBridgeApi {
     async fn handle_authenticated(
         &self,
         request: WorkspaceApiRequest,
@@ -780,19 +852,112 @@ impl WorkspaceApi for PrincipalScopedWorkspaceApi {
             return workspace_error(request_id, 16, "WORKSPACE_CALLER_EXPIRED");
         }
 
-        match self.transport.lock().await.execute(request).await {
-            Ok(response) => response,
-            Err(error) => {
-                let (code, message) = match error {
-                    FrontendRelayClientError::Timeout => (4, "WORKSPACE_RELAY_REQUEST_TIMEOUT"),
-                    FrontendRelayClientError::RelayUnavailable
-                    | FrontendRelayClientError::SessionExpired
-                    | FrontendRelayClientError::CredentialUnavailable => {
-                        (14, "WORKSPACE_RELAY_UNAVAILABLE")
+        let Some(workspace_api_request::Request::ProductApiV2(invocation)) = request.request else {
+            return workspace_error(request_id, 3, "INVALID_REQUEST_BODY");
+        };
+
+        // 1. Platform Authority approves and enqueues the invocation
+        let caller_token = format!("{}:{}", self.identity.issuer, self.identity.subject);
+        let approve_req = ApproveAndEnqueueInvocationRequest {
+            workspace_id: self.workspace_id.clone(),
+            caller_token,
+            invocation: Some(invocation),
+        };
+        let approved = match self
+            .authority_service
+            .approve_and_enqueue_invocation(tonic::Request::new(approve_req))
+            .await
+        {
+            Ok(resp) => {
+                let inner = resp.into_inner();
+                if let Some(err) = inner.error {
+                    return workspace_error(
+                        request_id,
+                        err.code,
+                        Box::leak(err.message.into_boxed_str()),
+                    );
+                }
+                match inner.approved_invocation {
+                    Some(app) => app,
+                    None => return workspace_error(request_id, 13, "WORKSPACE_APPROVAL_FAILED"),
+                }
+            }
+            Err(status) => {
+                return workspace_error(
+                    request_id,
+                    status.code() as i32,
+                    Box::leak(status.message().to_string().into_boxed_str()),
+                );
+            }
+        };
+
+        // 2. Dispatches to decoupled Plugins Frontend Bridge over local RPC
+        let invocation_id = approved.invocation_id.clone();
+        let credential = approved.credential.clone();
+        let bridge_req = BridgeExecuteInvocationRequest {
+            approved_invocation: Some(approved),
+            relay_endpoint: self.relay_endpoint.clone(),
+            session_token: self.session_token.clone(),
+        };
+
+        let bridge_call = self
+            .bridge_client
+            .lock()
+            .await
+            .execute_invocation(tonic::Request::new(bridge_req))
+            .await;
+
+        match bridge_call {
+            Ok(resp) => {
+                let inner = resp.into_inner();
+                if inner.success && inner.product_response.is_some() {
+                    let product_resp = inner.product_response.unwrap();
+                    let _ = self
+                        .authority_service
+                        .submit_invocation_result(tonic::Request::new(
+                            SubmitInvocationResultRequest {
+                                invocation_id: invocation_id.clone(),
+                                credential: credential.clone(),
+                                outcome_status: ExecutionOutcomeStatus::Success as i32,
+                                product_response: Some(product_resp.clone()),
+                                error_message: String::new(),
+                            },
+                        ))
+                        .await;
+                    WorkspaceApiResponse {
+                        request_id,
+                        outcome: Some(workspace_api_response::Outcome::ProductApiV2(product_resp)),
                     }
-                    _ => (13, "WORKSPACE_RELAY_RESPONSE_INVALID"),
-                };
-                workspace_error(request_id, code, message)
+                } else {
+                    let _ = self
+                        .authority_service
+                        .submit_invocation_result(tonic::Request::new(
+                            SubmitInvocationResultRequest {
+                                invocation_id: invocation_id.clone(),
+                                credential: credential.clone(),
+                                outcome_status: ExecutionOutcomeStatus::Failed as i32,
+                                product_response: None,
+                                error_message: inner.error_message.clone(),
+                            },
+                        ))
+                        .await;
+                    workspace_error(request_id, 13, "WORKSPACE_BRIDGE_EXECUTION_FAILED")
+                }
+            }
+            Err(status) => {
+                let _ = self
+                    .authority_service
+                    .submit_invocation_result(tonic::Request::new(
+                        SubmitInvocationResultRequest {
+                            invocation_id: invocation_id.clone(),
+                            credential: credential.clone(),
+                            outcome_status: ExecutionOutcomeStatus::UnknownResult as i32,
+                            product_response: None,
+                            error_message: format!("Transport error: {}", status.message()),
+                        },
+                    ))
+                    .await;
+                workspace_error(request_id, 14, "WORKSPACE_BRIDGE_UNAVAILABLE")
             }
         }
     }
@@ -806,22 +971,6 @@ fn workspace_error(request_id: String, code: i32, message: &'static str) -> Work
             message: message.to_owned(),
             details: Vec::new(),
         })),
-    }
-}
-
-fn map_relay_resolution_error(error: FrontendRelayClientError) -> WorkspaceApiResolutionError {
-    match error {
-        FrontendRelayClientError::Configuration => WorkspaceApiResolutionError::NotConfigured,
-        FrontendRelayClientError::Timeout
-        | FrontendRelayClientError::RelayUnavailable
-        | FrontendRelayClientError::CredentialUnavailable
-        | FrontendRelayClientError::SessionExpired => WorkspaceApiResolutionError::Unavailable,
-        FrontendRelayClientError::DescriptorInvalid
-        | FrontendRelayClientError::WorkspaceNotDiscovered
-        | FrontendRelayClientError::RequestInvalid
-        | FrontendRelayClientError::ResponseInvalid
-        | FrontendRelayClientError::CorrelationUnavailable
-        | FrontendRelayClientError::ClockUnavailable => WorkspaceApiResolutionError::InvalidBinding,
     }
 }
 

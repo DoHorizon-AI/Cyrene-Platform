@@ -67,6 +67,16 @@ impl ProductOperationCatalog {
         }
     }
 
+    pub fn from_arcs(
+        bundle: Arc<ProductContractBundle>,
+        policy: Arc<TrustedProductPolicy>,
+    ) -> Self {
+        Self {
+            bundle: Some(bundle),
+            policy: Some(policy),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn deny_all_for_tests() -> Self {
         Self {

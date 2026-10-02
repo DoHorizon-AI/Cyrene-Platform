@@ -19,6 +19,7 @@ mod problem;
 mod product;
 
 pub use catalog_loader::{
+    load_product_catalog_and_snapshot, load_product_catalog_and_snapshot_from_environment,
     load_product_operation_catalog, load_product_operation_catalog_from_environment,
     CONTRACT_BUNDLE_MANIFEST_FILENAME, PRODUCT_CONTRACT_ROOT_ENV, PRODUCT_POLICY_BUNDLE_FILENAME,
 };

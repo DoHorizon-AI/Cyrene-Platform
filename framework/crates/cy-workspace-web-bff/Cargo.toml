@@ -14,13 +14,15 @@ base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
-cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
 cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane" }
 cy-workspace-postgres-storage = { version = "0.1.0", path = "../cy-workspace-postgres-storage" }
 cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts" }
 cy-mtls-channel-client = { version = "0.1.0", path = "../cy-mtls-channel-client" }
 hmac = "0.12"
 http = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tonic = { version = "0.12", default-features = false, features = ["channel", "codegen", "prost"] }
+tower = { version = "0.4", features = ["util"] }
 jsonschema = { version = "0.18", default-features = false, features = ["draft201909", "draft202012"] }
 mime = "0.3"
 prost-types = "0.13"
@@ -37,7 +39,7 @@ zeroize = "1"
 [dev-dependencies]
 cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane", features = ["test-support"] }
 http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.4", features = ["util"] }
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

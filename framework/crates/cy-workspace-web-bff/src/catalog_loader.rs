@@ -71,6 +71,51 @@ pub fn load_product_operation_catalog_from_environment(
     load_product_operation_catalog(root)
 }
 
+/// Load both the operation catalog and the pinned contract snapshot.
+pub fn load_product_catalog_and_snapshot(
+    contract_root: impl AsRef<Path>,
+) -> Result<(ProductOperationCatalog, cy_workspace_control_plane::ContractSnapshot), ProductCatalogError> {
+    let pins = expected_product_bundle_pins()?;
+    let root = contract_root
+        .as_ref()
+        .canonicalize()
+        .map_err(|_| ProductCatalogError::ContractBundle)?;
+    if !root.is_dir() {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+
+    let bundle = ProductContractBundle::load(&root, &pins)
+        .map_err(|_| ProductCatalogError::ContractBundle)?;
+    let policy = TrustedProductPolicy::load(root.join(PRODUCT_POLICY_BUNDLE_FILENAME), &pins)
+        .map_err(|_| ProductCatalogError::TrustedPolicy)?;
+    policy
+        .validate_bundle(&bundle)
+        .map_err(|_| ProductCatalogError::TrustedPolicy)?;
+    let bundle_arc = std::sync::Arc::new(bundle);
+    let policy_arc = std::sync::Arc::new(policy);
+    let catalog = ProductOperationCatalog::from_arcs(
+        std::sync::Arc::clone(&bundle_arc),
+        std::sync::Arc::clone(&policy_arc),
+    );
+    let snapshot = cy_workspace_control_plane::ContractSnapshot {
+        generation: 1,
+        bundle: bundle_arc,
+        policy: policy_arc,
+        pins,
+        activated_at_unix_ms: cy_workspace_control_plane::now_unix_ms(),
+    };
+    Ok((catalog, snapshot))
+}
+
+pub fn load_product_catalog_and_snapshot_from_environment(
+) -> Result<(ProductOperationCatalog, cy_workspace_control_plane::ContractSnapshot), ProductCatalogError> {
+    let root = std::env::var_os(PRODUCT_CONTRACT_ROOT_ENV)
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or(ProductCatalogError::ContractBundle)?;
+    load_product_catalog_and_snapshot(root)
+}
+
 fn expected_product_bundle_pins() -> Result<ProductBundlePins, ProductCatalogError> {
     if !PRODUCT_BUNDLE_PINS_AVAILABLE {
         return Err(ProductCatalogError::ReleasePinUnavailable);
