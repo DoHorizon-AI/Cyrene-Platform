@@ -1,7 +1,7 @@
 [Unit]
 Description=CYRENE Rust Node Kernel
-After=local-fs.target cyrene-sandboxd.service cyrene-linux-sys-adapter.service
-Requires=cyrene-sandboxd.service cyrene-linux-sys-adapter.service
+After=local-fs.target cyrene-sandboxd.service cyrene-linux-sys-adapter.service cyrene-nvidia-adapter.service
+Requires=cyrene-sandboxd.service cyrene-linux-sys-adapter.service cyrene-nvidia-adapter.service
 
 [Service]
 Type=simple
@@ -23,14 +23,19 @@ Group=cyrene
 #     example 991/992 -> `id -u cyrene-kernel`, `getent group cyrene`).
 #   See docs/operations/kernel-runtime.md for the full service-account UID/GID
 #   deployment example.
-ExecStart=/usr/bin/cyrene-kernel --socket /run/cyrene/kernel.sock --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock --sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992 --system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock --system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system=992 --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock --hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992 --runtime-journal /var/lib/cyrene/runtime/journal.jsonl
+ExecStart=/usr/bin/cyrene component-run cyrene-kernel -- --socket /run/cyrene/kernel.sock --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock --sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992 --system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock --system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system=992 --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock --hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992 --runtime-journal /var/lib/cyrene/runtime/journal.jsonl
 Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene
 RuntimeDirectoryMode=0750
-StateDirectory=cyrene
-StateDirectoryMode=0750
 UMask=0007
+SupplementaryGroups=cyrene-runtime-maintenance
+
+# Do not declare StateDirectory=cyrene here. systemd recursively changes the
+# ownership of existing descendants when the declared directory's User/Group
+# differs, which would take over the broker-owned runtime journal and private
+# operator-token subtree. The shared runtime directory is pre-provisioned
+# root:cyrene-runtime-maintenance mode 2770 and accessed through the group above.
 
 # Kernel never owns workers or a cgroup delegation. `cyrene-sandboxd` owns the
 # delegated subtree and worker fate; this service contains only safe decisions

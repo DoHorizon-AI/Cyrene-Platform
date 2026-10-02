@@ -1,0 +1,30 @@
+[package]
+name = "cy-workspace-relay-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Inbound authenticated Workspace Relay streams and transport composition for Platform hosts."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+base64 = "0.22"
+cy-observability = { version = "0.1.0", path = "../cy-observability" }
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane" }
+futures-util = "0.3"
+prost-types = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tracing = "0.1"
+webpki = { package = "rustls-webpki", version = "0.103", features = ["ring"] }
+x509-parser = "0.18.1"
+
+[dev-dependencies]
+prost = "0.13"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+tempfile = "3.8"

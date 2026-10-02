@@ -1,324 +1,96 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
 // ║ File: framework/crates/cy-workspace-web-bff/src/product.rs          ║
 // ║ Module: cy_workspace_web_bff::product                              ║
-// ║ Role: Validate closed Product operation contracts and Workspace IO.║
+// ║ Role: Bind trusted Product contracts to Workspace v2 invocations.  ║
 // ║                                                                    ║
-// ║ 模块：cy_workspace_web_bff::product                                ║
-// ║ 职责：校验封闭 Product operation 合同并承载 Workspace I/O。          ║
+// ║ 模块职责：将受信 Product 合同绑定到 Workspace v2 invocation。        ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cy_workspace_fabric::workspace_v1::{
+use cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2;
+use cy_workspace_control_plane::workspace_v1::{
     workspace_api_request, workspace_api_response, WorkspaceApiRequest, WorkspaceApiResponse,
-    WorkspaceProductApiContentType, WorkspaceProductApiOperation, WorkspaceProductApiRequest,
 };
-use http::Method;
-use serde_json::Value;
+use cy_workspace_product_contracts::{
+    ProductContractBundle, ProductOperation, TrustedProductPolicy,
+};
 use thiserror::Error;
 
-use crate::manifest::{product_projection_manifest, ProductProjectionEntry};
-
-/// Owner-provided JSON Schema validator compiled from the matching Product OpenAPI contract.
+/// Startup validation failure for the pinned Product v2 contract bundle.
 ///
-/// 由对应 Product OpenAPI 合同编译出的 owner JSON Schema 校验器。
-pub trait ProductJsonSchema: Send + Sync + 'static {
-    /// Validate one request or response JSON value against an owner schema.
-    ///
-    /// 根据 owner schema 校验一个请求或响应 JSON value。
-    fn validate(&self, value: &Value) -> bool;
-
-    /// Validate an owner response selected by its upstream status code.
-    ///
-    /// 根据上游 status code 校验 owner response。
-    fn validate_response(&self, _status: u16, value: &Value) -> bool {
-        self.validate(value)
-    }
-
-    /// Validate one opaque value against a declared Product path-parameter schema.
-    ///
-    /// 根据 Product 声明的 path-parameter schema 校验不透明参数值。
-    fn validate_path_parameter(&self, _name: &str, _value: &str) -> bool {
-        true
-    }
-}
-
-/// One Product OpenAPI path parameter and whether the owner requires it.
-///
-/// 一个 Product OpenAPI path parameter 及 owner 是否要求该参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProductPathParameter {
-    /// Exact case-sensitive parameter name in the owner OpenAPI contract.
-    pub name: String,
-    /// Whether the Product operation requires a value for this path parameter.
-    pub required: bool,
-}
-
-/// A response JSON pointer declared as a ProductResourceReference field.
-///
-/// 一个在响应 schema 中声明为 ProductResourceReference 的 JSON pointer。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProductResourceReferenceField {
-    /// RFC 6901 JSON pointer to the owner-declared resource-reference field.
-    pub json_pointer: String,
-    /// Whether the owner response schema requires the field to be present.
-    pub required: bool,
-}
-
-/// Product-owned HTTP request-body rules derived from its OpenAPI operation.
-///
-/// 从 Product OpenAPI operation 派生的请求 body 规则。
-#[derive(Clone)]
-pub struct ProductRequestBodyContract {
-    /// Whether this owner operation accepts an application/json body.
-    pub allowed: bool,
-    /// Whether this owner operation requires that JSON body.
-    pub required: bool,
-    /// Compiled request schema; required when allowed is true.
-    pub schema: Option<Arc<dyn ProductJsonSchema>>,
-}
-
-impl std::fmt::Debug for ProductRequestBodyContract {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProductRequestBodyContract")
-            .field("allowed", &self.allowed)
-            .field("required", &self.required)
-            .field("schema_configured", &self.schema.is_some())
-            .finish()
-    }
-}
-
-/// Product OpenAPI response contract and resource-reference fields.
-///
-/// Product OpenAPI 响应合同及资源引用字段。
-#[derive(Clone)]
-pub struct ProductResponseContract {
-    /// Compiled response schema for the selected status and content type.
-    pub schema: Option<Arc<dyn ProductJsonSchema>>,
-    /// Some empty means the accepted schema declares no resource references.
-    /// None means no accepted owner response schema is available.
-    pub resource_reference_fields: Option<Vec<ProductResourceReferenceField>>,
-}
-
-impl std::fmt::Debug for ProductResponseContract {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProductResponseContract")
-            .field("schema_configured", &self.schema.is_some())
-            .field(
-                "resource_reference_fields_configured",
-                &self.resource_reference_fields.is_some(),
-            )
-            .finish()
-    }
-}
-
-/// Server-resolved Product operation policy; browser input cannot construct it.
-///
-/// 服务端解析出的 Product operation policy，浏览器输入不能构造该对象。
-#[derive(Clone)]
-pub struct ProductOperationContract {
-    /// Canonical owner, operation key, operationId, and semantic kind from the TCK.
-    pub projection: ProductProjectionEntry,
-    /// Upstream method declared by this operation in its owner OpenAPI document.
-    pub upstream_method: Method,
-    /// Exact owner OpenAPI path parameters.
-    pub path_parameters: Vec<ProductPathParameter>,
-    /// Compiled path-parameter schemas declared by the owner OpenAPI document.
-    pub path_schema: Option<Arc<dyn ProductJsonSchema>>,
-    /// Whether this operation requires unsupported query or header input.
-    pub has_unsupported_query_or_header_parameters: bool,
-    /// Owner request-body rules and compiled schema.
-    pub request_body: ProductRequestBodyContract,
-    /// Whether the operation accepts an idempotency key from the BFF envelope.
-    pub allows_idempotency_key: bool,
-    /// Whether the owner marks Idempotency-Key as required.
-    pub requires_idempotency_key: bool,
-    /// Compiled owner schema for an optional or required Idempotency-Key value.
-    pub idempotency_key_schema: Option<Arc<dyn ProductJsonSchema>>,
-    /// Owner response schema and any declared relative resource references.
-    pub response: ProductResponseContract,
-}
-
-impl std::fmt::Debug for ProductOperationContract {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProductOperationContract")
-            .field("projection", &self.projection)
-            .field("upstream_method", &self.upstream_method)
-            .field("path_parameters", &self.path_parameters)
-            .field("path_schema_configured", &self.path_schema.is_some())
-            .field(
-                "has_unsupported_query_or_header_parameters",
-                &self.has_unsupported_query_or_header_parameters,
-            )
-            .field("request_body", &self.request_body)
-            .field("allows_idempotency_key", &self.allows_idempotency_key)
-            .field("requires_idempotency_key", &self.requires_idempotency_key)
-            .field(
-                "idempotency_key_schema_configured",
-                &self.idempotency_key_schema.is_some(),
-            )
-            .field("response", &self.response)
-            .finish()
-    }
-}
-
-/// Startup validation failure for owner contracts or canonical TCK parity.
-///
-/// owner 合同或规范 TCK parity 的启动校验错误。
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+/// 受 pin 的 Product v2 合同 bundle 启动校验失败。
+#[derive(Debug, Error)]
 pub enum ProductCatalogError {
-    /// The generated Workspace enum did not match the canonical TCK.
-    #[error("canonical Product projection manifest is invalid")]
-    Manifest,
-    /// Owner OpenAPI data did not exactly match its TCK operation row.
-    #[error("owner Product contract did not match the canonical projection")]
-    ProjectionMismatch,
-    /// The owner operation declares internally inconsistent JSON body rules.
-    #[error("owner Product request body schema configuration is invalid")]
-    RequestBodySchema,
-    /// There is not exactly one owner contract for each canonical operation.
-    #[error("owner Product contract operation set is incomplete or contains duplicates")]
-    OperationSet,
-    /// The owner method cannot be represented as a Product API operation.
-    #[error("owner Product operation uses an unsupported HTTP method")]
-    UpstreamMethod,
-    /// The mounted, provenance-pinned Product OpenAPI bundle is invalid or incomplete.
-    #[error("trusted Product contract bundle is invalid or incomplete")]
+    /// The pinned Product v2 bundle or its local reference closure is invalid.
+    #[error("trusted Product v2 contract bundle is invalid")]
     ContractBundle,
-    /// A selected response exposes an unsafe absolute link instead of a closed Product reference.
-    #[error("owner Product response schema declares an unsafe external resource link")]
-    UnsafeResourceReference,
-    /// A selected response contains an open object whose undeclared fields cannot be inspected.
-    #[error("owner Product response schema contains an open object")]
-    UnsafeResponseSchema,
-    /// A projected request contains a caller-controlled URL or navigable reference.
-    #[error("owner Product request schema accepts a caller-controlled resource link")]
-    UnsafeRequestSchema,
-    /// A deny-only TCK operation was accidentally given callable schemas or routing data.
-    #[error("deny-only Product operation must not carry callable schemas or routing data")]
-    DenyOnlyOperationSchema,
+    /// This build did not include a coordinated Product v2 release pin.
+    #[error("Product v2 release pin is unavailable in this build")]
+    ReleasePinUnavailable,
+    /// The pinned Platform authorization policy could not be loaded.
+    #[error("trusted Product v2 policy is invalid")]
+    TrustedPolicy,
 }
 
-/// Validated closed Product projection catalog with no browser-controlled routing fields.
+/// Read-only Product operation catalog compiled from a trusted versioned bundle.
 ///
-/// 已校验的封闭 Product projection catalog，不包含浏览器可控的路由字段。
+/// 从受信版本化 bundle 编译出的只读 Product operation catalog。
 #[derive(Clone)]
 pub struct ProductOperationCatalog {
-    entries: BTreeMap<i32, ProductOperationContract>,
-    deny_only: BTreeSet<i32>,
+    bundle: Option<Arc<ProductContractBundle>>,
+    policy: Option<Arc<TrustedProductPolicy>>,
+}
+
+impl std::fmt::Debug for ProductOperationCatalog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProductOperationCatalog")
+            .field("trusted_bundle_configured", &self.bundle.is_some())
+            .field("trusted_policy_configured", &self.policy.is_some())
+            .finish()
+    }
 }
 
 impl ProductOperationCatalog {
-    /// Build the catalog from server-loaded owner OpenAPI operation contracts.
+    /// Wrap a bundle only after its source and digest pins have been verified.
     ///
-    /// 使用服务端加载的 owner OpenAPI operation 合同构建 catalog。
-    pub fn new(
-        contracts: impl IntoIterator<Item = ProductOperationContract>,
-    ) -> Result<Self, ProductCatalogError> {
-        let manifest = product_projection_manifest().map_err(|_| ProductCatalogError::Manifest)?;
-        let mut entries = BTreeMap::new();
-        let mut deny_only = BTreeSet::new();
-        let mut seen = BTreeSet::new();
-        for contract in contracts {
-            let canonical = manifest
-                .iter()
-                .find(|entry| entry.operation == contract.projection.operation)
-                .ok_or(ProductCatalogError::ProjectionMismatch)?;
-            if canonical != &contract.projection {
-                return Err(ProductCatalogError::ProjectionMismatch);
-            }
-            if !is_supported_method(&contract.upstream_method) {
-                return Err(ProductCatalogError::UpstreamMethod);
-            }
-            let operation_key = contract.projection.operation as i32;
-            if !seen.insert(operation_key) {
-                return Err(ProductCatalogError::OperationSet);
-            }
-            if is_navigator_append(contract.projection.operation) {
-                if contract.request_body.allowed
-                    || contract.request_body.required
-                    || contract.request_body.schema.is_some()
-                    || contract.path_schema.is_some()
-                    || !contract.path_parameters.is_empty()
-                    || contract.allows_idempotency_key
-                    || contract.requires_idempotency_key
-                    || contract.idempotency_key_schema.is_some()
-                    || contract.response.schema.is_some()
-                    || contract.response.resource_reference_fields.is_some()
-                {
-                    return Err(ProductCatalogError::DenyOnlyOperationSchema);
-                }
-                deny_only.insert(operation_key);
-                continue;
-            }
-            if (contract.request_body.required && !contract.request_body.allowed)
-                || (contract.request_body.allowed && contract.request_body.schema.is_none())
-                || (contract.requires_idempotency_key && !contract.allows_idempotency_key)
-                || (contract.allows_idempotency_key && contract.idempotency_key_schema.is_none())
-                || (!contract.allows_idempotency_key && contract.idempotency_key_schema.is_some())
-            {
-                return Err(ProductCatalogError::RequestBodySchema);
-            }
-            if entries.insert(operation_key, contract).is_some() {
-                return Err(ProductCatalogError::OperationSet);
-            }
+    /// 只有来源与 digest pins 已验证后才能包装 bundle。
+    pub(crate) fn from_verified_bundle(
+        bundle: ProductContractBundle,
+        policy: TrustedProductPolicy,
+    ) -> Self {
+        Self {
+            bundle: Some(Arc::new(bundle)),
+            policy: Some(Arc::new(policy)),
         }
-        if seen.len() != manifest.len()
-            || manifest.iter().any(|entry| {
-                let key = entry.operation as i32;
-                !entries.contains_key(&key) && !deny_only.contains(&key)
-            })
-        {
-            return Err(ProductCatalogError::OperationSet);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deny_all_for_tests() -> Self {
+        Self {
+            bundle: None,
+            policy: None,
         }
-        Ok(Self { entries, deny_only })
     }
 
-    /// Return a server-resolved contract for one closed Workspace operation key.
+    /// Find one operation by the owner-published stable identifiers.
     ///
-    /// 返回一个封闭 Workspace operation key 对应的服务端合同。
-    pub fn get(
-        &self,
-        operation: WorkspaceProductApiOperation,
-    ) -> Option<&ProductOperationContract> {
-        self.entries.get(&(operation as i32))
+    /// 按 owner 发布的稳定标识查找 operation。
+    pub fn get(&self, owner_id: &str, operation_id: &str) -> Option<&ProductOperation> {
+        self.bundle.as_deref()?.operation(owner_id, operation_id)
     }
 
-    /// Return whether the canonical operation is recorded only for provenance and denied.
+    /// Preflight whether the pinned Platform policy contains a grant for an operation.
+    /// This is a fail-closed filter only; the Workspace control plane remains the authority.
     ///
-    /// 返回规范 operation 是否仅用于来源记录并保持拒绝。
-    pub fn is_deny_only(&self, operation: WorkspaceProductApiOperation) -> bool {
-        self.deny_only.contains(&(operation as i32))
+    /// 预检查固定 Platform policy 是否包含该 operation 的 grant；实际授权仍只由 Workspace control plane 执行。
+    pub fn has_grant(&self, owner_id: &str, operation_id: &str) -> bool {
+        self.policy
+            .as_deref()
+            .is_some_and(|policy| policy.has_grant(owner_id, operation_id))
     }
-
-    /// Return the count of validated canonical Product operations.
-    pub fn len(&self) -> usize {
-        self.entries.len() + self.deny_only.len()
-    }
-
-    /// Returns whether the catalog contains no Product operations.
-    ///
-    /// 返回目录是否不包含任何 Product 操作。
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.deny_only.is_empty()
-    }
-}
-
-fn is_navigator_append(operation: WorkspaceProductApiOperation) -> bool {
-    operation == WorkspaceProductApiOperation::WorkspaceProductApiOperation13
-}
-
-fn is_supported_method(method: &Method) -> bool {
-    method == Method::GET
-        || method == Method::POST
-        || method == Method::PUT
-        || method == Method::PATCH
-        || method == Method::DELETE
 }
 
 /// Authenticated Workspace API adapter used by the BFF router.
@@ -326,12 +98,12 @@ fn is_supported_method(method: &Method) -> bool {
 /// BFF router 使用的已认证 Workspace API adapter。
 #[async_trait]
 pub trait WorkspaceProductGateway: Send + Sync + 'static {
-    /// Dispatch one typed Product request with the verified web identity context.
+    /// Dispatch one v2 Product request with the verified web identity context.
     ///
-    /// 使用已验证的 Web identity context 派发一个 typed Product request。
+    /// 使用已验证的 Web identity context 派发一个 v2 Product request。
     async fn invoke(
         &self,
-        principal: &cy_workspace_fabric::VerifiedWebPrincipal,
+        principal: &cy_workspace_control_plane::VerifiedWebPrincipal,
         request: WorkspaceApiRequest,
     ) -> Result<WorkspaceApiResponse, WorkspaceGatewayError>;
 }
@@ -353,38 +125,42 @@ pub enum WorkspaceGatewayError {
     InvalidResponse,
 }
 
-/// Construct the typed Workspace API envelope from already validated BFF values.
+/// Construct the Workspace v2 envelope from values checked by the BFF.
 ///
-/// 从已校验的 BFF 值构造 typed Workspace API envelope。
+/// 使用 BFF 已校验的值构造 Workspace v2 envelope。
+pub(crate) struct WorkspaceProductRequestInput<'a> {
+    pub(crate) owner_id: &'a str,
+    pub(crate) operation_id: &'a str,
+    pub(crate) workspace_id: &'a str,
+    pub(crate) resource_id: Option<&'a str>,
+    pub(crate) json_body: Option<&'a [u8]>,
+    pub(crate) idempotency_key: Option<&'a str>,
+    pub(crate) traceparent: &'a str,
+    pub(crate) request_id: &'a str,
+}
+
 pub(crate) fn workspace_product_request(
-    projection: &ProductProjectionEntry,
-    workspace_id: &str,
-    resource_id: Option<&str>,
-    json_body: Option<&[u8]>,
-    idempotency_key: Option<&str>,
-    traceparent: &str,
-    request_id: String,
+    input: WorkspaceProductRequestInput<'_>,
 ) -> WorkspaceApiRequest {
     WorkspaceApiRequest {
-        request_id,
-        workspace_id: workspace_id.to_owned(),
-        traceparent: traceparent.to_owned(),
-        request: Some(workspace_api_request::Request::ProductApi(
-            WorkspaceProductApiRequest {
-                owner: projection.owner as i32,
-                operation: projection.operation as i32,
-                kind: projection.kind as i32,
-                resource_id: resource_id.unwrap_or_default().to_owned(),
-                json_body: json_body.unwrap_or_default().to_vec(),
-                idempotency_key: idempotency_key.unwrap_or_default().to_owned(),
+        request_id: input.request_id.to_owned(),
+        workspace_id: input.workspace_id.to_owned(),
+        traceparent: input.traceparent.to_owned(),
+        request: Some(workspace_api_request::Request::ProductApiV2(
+            ProductApiInvocationV2 {
+                owner_id: input.owner_id.to_owned(),
+                operation_id: input.operation_id.to_owned(),
+                json_body: input.json_body.unwrap_or_default().to_vec(),
+                resource_id: input.resource_id.unwrap_or_default().to_owned(),
+                idempotency_key: input.idempotency_key.unwrap_or_default().to_owned(),
             },
         )),
     }
 }
 
-/// Extract a valid Product response from the Workspace oneof.
+/// Extract a valid Product v2 response from the Workspace oneof.
 ///
-/// 从 Workspace oneof 提取有效 Product response。
+/// 从 Workspace oneof 提取有效 Product v2 response。
 pub(crate) fn product_response(
     response: WorkspaceApiResponse,
     expected_request_id: &str,
@@ -393,21 +169,15 @@ pub(crate) fn product_response(
         return Err(WorkspaceGatewayError::InvalidResponse);
     }
     match response.outcome {
-        Some(workspace_api_response::Outcome::ProductApi(product)) => {
+        Some(workspace_api_response::Outcome::ProductApiV2(product)) => {
             let status = u16::try_from(product.status_code)
                 .ok()
                 .filter(|value| (200..=599).contains(value))
                 .ok_or(WorkspaceGatewayError::InvalidResponse)?;
-            let content_type = match WorkspaceProductApiContentType::try_from(product.content_type)
-                .map_err(|_| WorkspaceGatewayError::InvalidResponse)?
-            {
-                WorkspaceProductApiContentType::ApplicationJson => "application/json",
-                WorkspaceProductApiContentType::ApplicationProblemJson => {
-                    "application/problem+json"
-                }
-                WorkspaceProductApiContentType::Unspecified => {
-                    return Err(WorkspaceGatewayError::InvalidResponse);
-                }
+            let content_type = match product.content_type.as_str() {
+                "application/json" => "application/json",
+                "application/problem+json" => "application/problem+json",
+                _ => return Err(WorkspaceGatewayError::InvalidResponse),
             };
             Ok((status, content_type, product.json_body))
         }
@@ -427,13 +197,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_manifest_has_the_canonical_operation_set() {
-        let manifest = product_projection_manifest().expect("manifest should parse");
-        assert_eq!(manifest.len(), 13);
-        let operations = manifest
-            .iter()
-            .map(|entry| entry.operation.as_str_name())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(operations.len(), 13);
+    fn workspace_request_uses_the_generic_v2_envelope_and_preserves_body_bytes() {
+        let original_body = b"{ \"workspaceId\" : \"workspace-a\" }\n";
+        let request = workspace_product_request(WorkspaceProductRequestInput {
+            owner_id: "navigator",
+            operation_id: "observeWorkspaceSnapshot",
+            workspace_id: "workspace-a",
+            resource_id: Some("snapshot-1"),
+            json_body: Some(original_body),
+            idempotency_key: Some("request-1"),
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            request_id: "request-1",
+        });
+        assert_eq!(request.workspace_id, "workspace-a");
+        let Some(workspace_api_request::Request::ProductApiV2(invocation)) = request.request else {
+            panic!("request must use the v2 Product invocation oneof");
+        };
+        assert_eq!(invocation.owner_id, "navigator");
+        assert_eq!(invocation.operation_id, "observeWorkspaceSnapshot");
+        assert_eq!(invocation.json_body, original_body);
+        assert_eq!(invocation.resource_id, "snapshot-1");
+        assert_eq!(invocation.idempotency_key, "request-1");
+    }
+
+    #[test]
+    fn product_response_accepts_only_matching_v2_json_envelopes() {
+        let response = WorkspaceApiResponse {
+            request_id: "request-1".into(),
+            outcome: Some(workspace_api_response::Outcome::ProductApiV2(
+                cy_proto::cyrene::workspace::product::v2::ProductApiResponseV2 {
+                    status_code: 200,
+                    json_body: b"{}".to_vec(),
+                    content_type: "application/json".into(),
+                },
+            )),
+        };
+        assert_eq!(
+            product_response(response, "request-1"),
+            Ok((200, "application/json", b"{}".to_vec()))
+        );
+    }
+
+    #[test]
+    fn product_response_rejects_the_v1_outcome() {
+        let response = WorkspaceApiResponse {
+            request_id: "request-1".into(),
+            outcome: Some(workspace_api_response::Outcome::ProductApi(
+                cy_workspace_control_plane::workspace_v1::WorkspaceProductApiResponse::default(),
+            )),
+        };
+        assert_eq!(
+            product_response(response, "request-1"),
+            Err(WorkspaceGatewayError::InvalidResponse)
+        );
     }
 }

@@ -1,0 +1,24 @@
+[Unit]
+Description=CYRENE Workspace Web BFF Host
+After=network-online.target cyrene-runtime-maintenance.service
+Wants=network-online.target
+Requires=cyrene-runtime-maintenance.service
+
+[Service]
+Type=simple
+User=cyrene
+Group=cyrene
+EnvironmentFile=-/etc/cyrene/workspace-web-bff.env
+ExecStart=/usr/bin/cyrene component-run cy-workspace-web-bff --
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

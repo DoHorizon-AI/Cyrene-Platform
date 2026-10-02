@@ -1,0 +1,142 @@
+{
+  "schemaVersion": "cyrene.workspace.product.authorization-policy.v2",
+  "policyVersion": "2.0.0",
+  "grants": [
+    {
+      "ownerId": "catalyst",
+      "operationId": "workspaceListDatasets",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "catalyst",
+      "operationId": "workspaceCreateDataset",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.catalyst.create_dataset.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "yield",
+      "operationId": "workspaceGetDraft",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "yield",
+      "operationId": "workspaceStartRun",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.yield.start_training_run.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "reactor",
+      "operationId": "workspaceListModelImports",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "reactor",
+      "operationId": "workspaceCreateModelImport",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.reactor.create_model_import.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "listWorkspaceGatewayRoutes",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "createWorkspaceGatewayRouteDraft",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.create_route_draft.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "echo",
+      "operationId": "workspaceGetEvaluationSuite",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "echo",
+      "operationId": "workspaceCreateEvaluationSuite",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.echo.create_evaluation_suite.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "navigator",
+      "operationId": "observeWorkspaceSnapshot",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [
+        { "jsonPointer": "/workspaceId", "matches": "WORKSPACE_ID" }
+      ],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
+    },
+    {
+      "ownerId": "navigator",
+      "operationId": "getWorkspaceSession",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        {
+          "jsonPointer": "/productMetadata/workspaceId",
+          "matches": "WORKSPACE_ID"
+        },
+        {
+          "jsonPointer": "/productMetadata/sessionId",
+          "matches": "RESOURCE_ID"
+        }
+      ]
+    }
+  ]
+}

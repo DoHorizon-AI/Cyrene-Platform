@@ -1,0 +1,4 @@
+# RFC 8785 canonical JSON is shared with Rust and TypeScript consumers.
+rfc8785==0.1.4
+jsonschema==4.26.0
+PyYAML==6.0.1

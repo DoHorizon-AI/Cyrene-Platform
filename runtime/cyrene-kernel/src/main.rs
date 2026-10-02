@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     use cy_proto::{core_v1, core_v2, provider_v1};
     use cy_resource_manager::InMemoryResourceManager;
+    use cy_runtime_maintenance::RuntimeMaintenance;
     use cy_sandbox_client::UdsSandboxAdapterClient;
     use runtime_journal::FileRuntimeJournal;
     use tokio_stream::wrappers::UnixListenerStream;
@@ -107,6 +108,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    // Reopen the root-owned state shared with the long-lived broker only after
+    // the sandbox journal has classified/reaped prior runtime processes. An
+    // active maintenance transaction survives this Kernel restart; abandoned
+    // short admission markers can now be cleared safely before listeners bind.
+    let maintenance = RuntimeMaintenance::open_with_catalog_file(
+        &args.runtime_maintenance_state,
+        &args.runtime_activity_catalog,
+    )?;
+    maintenance.clear_recovered_runtime_admissions()?;
     let heartbeat = WorkerHeartbeatConfig {
         socket_path: args.worker_control_socket.clone(),
         interval: args.heartbeat_interval,
@@ -121,6 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_worker_transport_root(args.worker_transport_root.clone()),
         ),
     )
+    .with_runtime_maintenance(maintenance)
     .with_worker_heartbeat(heartbeat)
     .with_adapter_poll_interval(args.adapter_poll_interval)
     .with_runtime_journal(journal.clone())
@@ -212,6 +223,8 @@ struct Args {
     installations_root: std::path::PathBuf,
     worker_transport_root: std::path::PathBuf,
     runtime_journal: std::path::PathBuf,
+    runtime_maintenance_state: std::path::PathBuf,
+    runtime_activity_catalog: std::path::PathBuf,
     heartbeat_interval: std::time::Duration,
     heartbeat_timeout: std::time::Duration,
     heartbeat_grace: std::time::Duration,
@@ -234,6 +247,9 @@ impl Args {
         let mut installations_root = PathBuf::from("/var/lib/cyrene/installations");
         let mut worker_transport_root = PathBuf::from("/run/cyrene/workers");
         let mut runtime_journal = PathBuf::from("/var/lib/cyrene/runtime/journal.jsonl");
+        let mut runtime_maintenance_state = PathBuf::from("/var/lib/cyrene/runtime");
+        let mut runtime_activity_catalog =
+            PathBuf::from("/etc/cyrene/runtime-activity-sources.json");
         let mut heartbeat_interval = Duration::from_secs(5);
         let mut heartbeat_timeout = Duration::from_secs(20);
         let mut heartbeat_grace = Duration::from_secs(10);
@@ -287,12 +303,16 @@ impl Args {
                 "--installations-root" => installations_root = PathBuf::from(value()?),
                 "--worker-transport-root" => worker_transport_root = PathBuf::from(value()?),
                 "--runtime-journal" => runtime_journal = PathBuf::from(value()?),
+                "--runtime-maintenance-state" => {
+                    runtime_maintenance_state = PathBuf::from(value()?)
+                }
+                "--activity-catalog" => runtime_activity_catalog = PathBuf::from(value()?),
                 "--heartbeat-interval-ms" => heartbeat_interval = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-timeout-ms" => heartbeat_timeout = Duration::from_millis(value()?.parse()?),
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --system-adapter ID=/absolute/socket.sock [--system-adapter-peer-uid ID=UID] [--system-adapter-peer-gid ID=GID] [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --system-adapter ID=/absolute/socket.sock [--system-adapter-peer-uid ID=UID] [--system-adapter-peer-gid ID=GID] [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--runtime-maintenance-state PATH] [--activity-catalog PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -373,6 +393,8 @@ impl Args {
             installations_root,
             worker_transport_root,
             runtime_journal,
+            runtime_maintenance_state,
+            runtime_activity_catalog,
             heartbeat_interval,
             heartbeat_timeout,
             heartbeat_grace,

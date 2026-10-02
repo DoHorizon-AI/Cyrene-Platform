@@ -288,28 +288,17 @@ product_name_candidates=$(
 )
 
 workspace_app_host_product_name_paths=(
-  "framework/crates/cy-workspace-fabric/src/caller.rs"
-  "framework/crates/cy-workspace-fabric/src/control_plane.rs"
-  "framework/crates/cy-workspace-fabric/src/product_authorization.rs"
-  "framework/crates/cy-workspace-fabric/src/product_projection.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/README.md"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/catalyst.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/echo.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/exchange.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/http.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/mod.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/navigator.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/reactor.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/yield_api.rs"
-  "framework/crates/cy-workspace-fabric/PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md"
+  "framework/crates/cy-workspace-control-plane/src/caller.rs"
+  "framework/crates/cy-workspace-control-plane/src/product_authorization.rs"
+  "framework/crates/cy-workspace-control-plane/src/product_projection.rs"
   "framework/crates/cy-workspace-product-adapters/src/endpoint_manifest.rs"
-  "framework/crates/cy-workspace-web-bff/PRODUCT_CONTRACT_STATIC_AUDIT.md"
+  "framework/crates/cy-workspace-product-adapters/src/lib.rs"
   "framework/crates/cy-workspace-web-bff/README.md"
   "framework/crates/cy-workspace-web-bff/src/catalog_loader.rs"
 )
 
-# Product names are allowed only in the existing Workspace host authority,
-# closed-operation projection, typed adapters, and their direct catalog docs.
+# Product names are allowed only in Workspace caller validation, the v2 wire
+# projection, Product endpoint catalog metadata, and direct catalog docs.
 # This exact-file list does not exempt any source from the semantic checks below.
 is_workspace_app_host_product_name_path() {
   local candidate="$1"
@@ -342,20 +331,22 @@ if [ -n "$product_name_matches" ]; then
 fi
 
 # The retained Workspace hosts may not add Product-owned state or persistence.
-# Existing finite operation names (for example `YieldStartRun`) remain valid.
+# Product v2 operation identifiers remain data from pinned owner catalogs.
 # 保留的 Workspace host 不得新增 Product 自有状态或持久化。
 product_private_state_pattern='(CREATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE|sqlx::|rusqlite::|diesel::|sea_orm::|Product[A-Z][[:alnum:]]*(State|Store|Repository|Persistence|Database|Migration|Lifecycle|Workflow|Entity)|((Catalyst|Echo|Exchange|Navigator|Reactor|Yield)[A-Z][[:alnum:]]*(State|Store|Repository|Persistence|Database|Migration|Lifecycle|Workflow|Entity)|(^|[^[:alnum:]_])(product|catalyst|echo|exchange|navigator|reactor|yield)_[[:alnum:]_]*(runs?|attempts?|workflows?|lifecycles?|states?|stores?|repositories?|persistence|databases?|migrations?|events?)($|[^[:alnum:]_]))'
 mapfile -t workspace_product_adapter_sources < <(
-  git ls-files 'framework/crates/cy-workspace-fabric/src/product_adapters/*.rs'
+  git ls-files 'framework/crates/cy-workspace-product-adapters/src/*.rs'
 )
 mapfile -t workspace_bff_sources < <(
   git ls-files 'framework/crates/cy-workspace-web-bff/src' | grep '\.rs$' || true
 )
 workspace_host_semantic_sources=(
-  "framework/crates/cy-workspace-fabric/src/caller.rs"
-  "framework/crates/cy-workspace-fabric/src/control_plane.rs"
-  "framework/crates/cy-workspace-fabric/src/product_authorization.rs"
-  "framework/crates/cy-workspace-fabric/src/product_projection.rs"
+  "framework/crates/cy-workspace-control-plane/src/caller.rs"
+  "framework/crates/cy-workspace-control-plane/src/product_authorization.rs"
+  "framework/crates/cy-workspace-control-plane/src/product_projection.rs"
+  "framework/crates/cy-workspace-product-contracts/src/bundle.rs"
+  "framework/crates/cy-workspace-product-contracts/src/invocation.rs"
+  "framework/crates/cy-workspace-product-contracts/src/policy.rs"
   "${workspace_product_adapter_sources[@]}"
   "framework/crates/cy-workspace-connector-host/src/main.rs"
   "${workspace_bff_sources[@]}"
@@ -409,267 +400,29 @@ if [ -n "$workspace_product_private_type_matches" ]; then
   status=1
 fi
 
-# Owner maps must use fixed operation routes and the central typed transport.
-# Caller values may enter a path only through the validated resource constructor.
-# owner map 只能使用固定 operation 路由和集中类型化 transport；调用方参数必须先校验。
-workspace_product_owner_mapping_sources=(
-  "framework/crates/cy-workspace-fabric/src/product_adapters/catalyst.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/echo.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/exchange.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/navigator.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/reactor.rs"
-  "framework/crates/cy-workspace-fabric/src/product_adapters/yield_api.rs"
-)
-direct_product_transport_matches=$(
-  git grep -n -E '(reqwest::|hyper::Client|TcpStream::connect)' -- \
-    "${workspace_product_owner_mapping_sources[@]}" 2>/dev/null || true
-)
-if [ -n "$direct_product_transport_matches" ]; then
-  echo "FORBIDDEN: a Product owner map bypasses the typed Workspace HTTP transport:"
-  echo "$direct_product_transport_matches" | sed 's/^/  - /'
+# Product v2 must remain catalog- and policy-driven. Platform may bind the
+# verified caller and Workspace scope, but it may not duplicate owner grants,
+# business routes, or operation dispatch in this host crate.
+workspace_product_auth_source="framework/crates/cy-workspace-control-plane/src/product_authorization.rs"
+workspace_product_projection_source="framework/crates/cy-workspace-control-plane/src/product_projection.rs"
+workspace_product_http_source="framework/crates/cy-workspace-product-adapters/src/http.rs"
+if ! rg -q '[.]authorize\(bundle, invocation, &principal, scope\)' "$workspace_product_auth_source" \
+  || ! rg -q 'TrustedProductPolicy' "$workspace_product_auth_source" \
+  || ! rg -q 'ProductApiInvocationV2' "$workspace_product_projection_source" \
+  || ! rg -q 'request[.]route\(\)' "$workspace_product_http_source" \
+  || ! rg -q 'route[.]path_template\(\)' "$workspace_product_http_source"; then
+  echo "FORBIDDEN: Workspace Product v2 must resolve authorization and routes from the pinned contract bundle."
   status=1
 fi
 
-# Central HTTP I/O must send only the URL produced from ProductHttpTarget and
-# the server-configured owner endpoint. Keep reqwest centralized and reject
-# convenience methods or additional request/execute call sites in this file.
-workspace_product_http_source="framework/crates/cy-workspace-fabric/src/product_adapters/http.rs"
-expected_product_http_request_shape='\.request\([[:space:]]*request\.method\.as_reqwest\(\),[[:space:]]*request\.url\.clone\(\)[[:space:]]*\)'
-product_http_request_call_count=$(
-  { rg --no-filename --no-line-number --only-matching \
-    '\.(request|execute)[[:space:]]*\(' "$workspace_product_http_source" \
-    || true; } | wc -l | tr -d '[:space:]'
+hardcoded_workspace_product_dispatch=$(
+  git grep -n -E 'WorkspaceProductApiOperation[0-9]+|Owner::(Catalyst|Yield|Reactor|Exchange|Echo|Navigator)|workspace[.]product[.]command[.]' -- \
+    "$workspace_product_auth_source" "$workspace_product_projection_source" \
+    "framework/crates/cy-workspace-product-adapters/src" 2>/dev/null || true
 )
-product_http_direct_method_pattern='(Client::new[[:space:]]*\(|(reqwest::|::)(get|post|put|delete|patch)[[:space:]]*\(|\.(get|post|put|delete|patch|execute)[[:space:]]*\()'
-product_http_direct_method_candidates=$(
-  git grep -n -E "$product_http_direct_method_pattern" -- \
-    "$workspace_product_http_source" 2>/dev/null || true
-)
-product_http_direct_method_matches=$(
-  printf '%s\n' "$product_http_direct_method_candidates" \
-    | sed 's/\.get(CONTENT_TYPE)//g' \
-    | grep -E "$product_http_direct_method_pattern" || true
-)
-product_http_url_overrides=$(
-  git grep -n -E 'request[.]url[[:space:]]*=' -- \
-    "$workspace_product_http_source" 2>/dev/null || true
-)
-product_http_target_mutations=$(
-  git grep -n -E \
-    'target[.]path_segments([[:space:]]*=|[[:space:]]*\[|[.][[:space:]]*(push|extend|insert|remove|clear|truncate|retain|as_mut|iter_mut)[[:space:]]*\()' -- \
-    "$workspace_product_http_source" 2>/dev/null || true
-)
-product_http_target_url_build_count=$(
-  { rg --no-filename --no-line-number --only-matching \
-    'target\.build_url\(&endpoint\.base_url\)' "$workspace_product_http_source" \
-    || true; } | wc -l | tr -d '[:space:]'
-)
-product_http_submission_count=$(
-  { git grep -h -E '\.send[[:space:]]*\(ProductHttpRequest[[:space:]]*\{' -- \
-      "$workspace_product_http_source" 2>/dev/null || true; } \
-    | wc -l | tr -d '[:space:]'
-)
-product_http_url_field_count=$(
-  { rg --no-filename --no-line-number --only-matching \
-    '^[[:space:]]*url,' "$workspace_product_http_source" || true; } \
-    | wc -l | tr -d '[:space:]'
-)
-if [ "$product_http_request_call_count" != "1" ] \
-  || ! rg --multiline -q "$expected_product_http_request_shape" "$workspace_product_http_source" \
-  || [ -n "$product_http_direct_method_matches" ] \
-  || [ -n "$product_http_url_overrides" ] \
-  || [ -n "$product_http_target_mutations" ] \
-  || [ "$product_http_target_url_build_count" != "1" ] \
-  || [ "$product_http_submission_count" != "1" ] \
-  || [ "$product_http_url_field_count" != "1" ]; then
-  echo "FORBIDDEN: central Product HTTP transport bypasses its single typed target URL."
-  printf '%s\n' "$product_http_direct_method_matches" "$product_http_url_overrides" \
-    "$product_http_target_mutations" \
-    | sed '/^$/d; s/^/  - /'
-  status=1
-fi
-
-caller_selected_product_route_matches=$(
-  git grep -n -E '(request|payload|body)\.(url|uri|route|path|endpoint)([.]|[[:space:],;]|$)' -- \
-    "framework/crates/cy-workspace-fabric/src/product_projection.rs" \
-    "${workspace_product_owner_mapping_sources[@]}" 2>/dev/null || true
-)
-untrusted_product_url_parse_matches=$(
-  git grep -n -E '(Url|Uri)::parse[[:space:]]*\([^)]*(request|payload|body|operation)' -- \
-    "${workspace_host_semantic_sources[@]}" 2>/dev/null || true
-)
-unreviewed_product_route_matches="${caller_selected_product_route_matches}${untrusted_product_url_parse_matches:+$'\n'${untrusted_product_url_parse_matches}}"
-if [ -n "$unreviewed_product_route_matches" ]; then
-  echo "FORBIDDEN: Workspace Product routing uses caller-selected URLs or paths:"
-  echo "$unreviewed_product_route_matches" | sed 's/^/  - /'
-  status=1
-fi
-
-product_route_segment_uses=$(
-  git grep -h -o -E 'ProductHttpPathSegment::[[:alpha:]_][[:alnum:]_]*' -- \
-    'framework/crates/cy-workspace-fabric/src/product_adapters/*.rs' 2>/dev/null \
-    | sed 's/.*:://' | sort -u || true
-)
-unreviewed_product_route_segments=""
-while IFS= read -r segment; do
-  [ -z "$segment" ] && continue
-  case "$segment" in
-    Static|resource|test_value) ;;
-    *) unreviewed_product_route_segments+="  - ProductHttpPathSegment::$segment"$'\n' ;;
-  esac
-done <<< "$product_route_segment_uses"
-if [ -n "$unreviewed_product_route_segments" ]; then
-  echo "FORBIDDEN: unreviewed Workspace Product HTTP path-segment forms:"
-  printf '%s' "$unreviewed_product_route_segments"
-  status=1
-fi
-
-direct_resource_segment_matches=$(
-  git grep -n 'ProductHttpPathSegment::Resource' -- \
-    "${workspace_product_owner_mapping_sources[@]}" 2>/dev/null || true
-)
-if [ -n "$direct_resource_segment_matches" ]; then
-  echo "FORBIDDEN: owner maps must validate resource path segments through the shared constructor:"
-  echo "$direct_resource_segment_matches" | sed 's/^/  - /'
-  status=1
-fi
-
-# Keep Workspace Product wire owners and operations closed to the reviewed TCK.
-# New owners, operation keys, or changed owner/kind/resource tuples require a
-# separate boundary review rather than expanding this exception by path alone.
-workspace_product_contract_proto="contracts/proto/cyrene/workspace/v1/workspace_fabric.proto"
-expected_workspace_product_owners=(
-  WORKSPACE_PRODUCT_API_OWNER_UNSPECIFIED
-  WORKSPACE_PRODUCT_API_OWNER_CATALYST
-  WORKSPACE_PRODUCT_API_OWNER_YIELD
-  WORKSPACE_PRODUCT_API_OWNER_REACTOR
-  WORKSPACE_PRODUCT_API_OWNER_EXCHANGE
-  WORKSPACE_PRODUCT_API_OWNER_ECHO
-  WORKSPACE_PRODUCT_API_OWNER_NAVIGATOR
-)
-expected_workspace_product_operations=(
-  WORKSPACE_PRODUCT_API_OPERATION_UNSPECIFIED
-  WORKSPACE_PRODUCT_API_OPERATION_01
-  WORKSPACE_PRODUCT_API_OPERATION_02
-  WORKSPACE_PRODUCT_API_OPERATION_03
-  WORKSPACE_PRODUCT_API_OPERATION_04
-  WORKSPACE_PRODUCT_API_OPERATION_05
-  WORKSPACE_PRODUCT_API_OPERATION_06
-  WORKSPACE_PRODUCT_API_OPERATION_07
-  WORKSPACE_PRODUCT_API_OPERATION_08
-  WORKSPACE_PRODUCT_API_OPERATION_09
-  WORKSPACE_PRODUCT_API_OPERATION_10
-  WORKSPACE_PRODUCT_API_OPERATION_11
-  WORKSPACE_PRODUCT_API_OPERATION_12
-  WORKSPACE_PRODUCT_API_OPERATION_13
-)
-expected_workspace_product_owners_text=$(
-  printf '%s\n' "${expected_workspace_product_owners[@]}" | LC_ALL=C sort
-)
-actual_workspace_product_owners=$(
-  rg --no-filename --no-line-number --only-matching \
-    'WORKSPACE_PRODUCT_API_OWNER_[A-Z_]+' "$workspace_product_contract_proto" \
-    | LC_ALL=C sort -u || true
-)
-if [ "$actual_workspace_product_owners" != "$expected_workspace_product_owners_text" ]; then
-  echo "FORBIDDEN: Workspace Product owner inventory changed without a boundary review."
-  printf '%s\n' "$actual_workspace_product_owners" | sed 's/^/  - /'
-  status=1
-fi
-
-expected_workspace_product_operations_text=$(
-  printf '%s\n' "${expected_workspace_product_operations[@]}" | LC_ALL=C sort
-)
-actual_workspace_product_operations=$(
-  rg --no-filename --no-line-number --only-matching \
-    'WORKSPACE_PRODUCT_API_OPERATION_[A-Z0-9_]+' "$workspace_product_contract_proto" \
-    | LC_ALL=C sort -u || true
-)
-if [ "$actual_workspace_product_operations" != "$expected_workspace_product_operations_text" ]; then
-  echo "FORBIDDEN: Workspace Product operation inventory changed without a boundary review."
-  printf '%s\n' "$actual_workspace_product_operations" | sed 's/^/  - /'
-  status=1
-fi
-
-expected_workspace_product_operation_map=(
-  "Operation::WorkspaceProductApiOperation01 => (Owner::Catalyst, Kind::Read, false)"
-  "Operation::WorkspaceProductApiOperation02 => (Owner::Catalyst, Kind::Command, false)"
-  "Operation::WorkspaceProductApiOperation03 => (Owner::Yield, Kind::Read, true)"
-  "Operation::WorkspaceProductApiOperation04 => (Owner::Yield, Kind::Command, true)"
-  "Operation::WorkspaceProductApiOperation05 => (Owner::Reactor, Kind::Read, false)"
-  "Operation::WorkspaceProductApiOperation06 => (Owner::Reactor, Kind::Command, false)"
-  "Operation::WorkspaceProductApiOperation07 => (Owner::Exchange, Kind::Read, false)"
-  "Operation::WorkspaceProductApiOperation08 => (Owner::Exchange, Kind::Command, false)"
-  "Operation::WorkspaceProductApiOperation09 => (Owner::Echo, Kind::Read, false)"
-  "Operation::WorkspaceProductApiOperation10 => (Owner::Echo, Kind::Command, false)"
-  "Operation::WorkspaceProductApiOperation11 => (Owner::Navigator, Kind::Read, false)"
-  "Operation::WorkspaceProductApiOperation12 => (Owner::Navigator, Kind::Read, true)"
-  "Operation::WorkspaceProductApiOperation13 => (Owner::Navigator, Kind::Command, true)"
-)
-expected_workspace_product_operation_map_text=$(
-  printf '%s\n' "${expected_workspace_product_operation_map[@]}" | LC_ALL=C sort
-)
-actual_workspace_product_operation_map=$(
-  git grep -h -E \
-    'Operation::WorkspaceProductApiOperation[0-9]{2} => \(Owner::(Catalyst|Yield|Reactor|Exchange|Echo|Navigator), Kind::(Read|Command), (true|false)\)' -- \
-    "framework/crates/cy-workspace-fabric/src/product_projection.rs" \
-    | sed -E 's/^[[:space:]]*//; s/[,[:space:]]+$//' | LC_ALL=C sort -u || true
-)
-if [ "$actual_workspace_product_operation_map" != "$expected_workspace_product_operation_map_text" ]; then
-  echo "FORBIDDEN: Workspace Product owner/operation/resource mapping changed without a boundary review."
-  printf '%s\n' "$actual_workspace_product_operation_map" | sed 's/^/  - /'
-  status=1
-fi
-
-expected_workspace_product_adapter_operations=(
-  "(Operation::WorkspaceProductApiOperation01, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation02, Kind::Command) => {"
-  "(Operation::WorkspaceProductApiOperation03, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation04, Kind::Command) => {"
-  "(Operation::WorkspaceProductApiOperation05, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation06, Kind::Command) => {"
-  "(Operation::WorkspaceProductApiOperation07, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation08, Kind::Command) => {"
-  "(Operation::WorkspaceProductApiOperation09, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation10, Kind::Command) => {"
-  "(Operation::WorkspaceProductApiOperation11, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation12, Kind::Read) => {"
-  "(Operation::WorkspaceProductApiOperation13, Kind::Command) => {"
-)
-expected_workspace_product_adapter_operations_text=$(
-  printf '%s\n' "${expected_workspace_product_adapter_operations[@]}" | LC_ALL=C sort
-)
-actual_workspace_product_adapter_operations=$(
-  git grep -h -E \
-    '\(Operation::WorkspaceProductApiOperation[0-9]{2}, Kind::(Read|Command)\) =>' -- \
-    "${workspace_product_owner_mapping_sources[@]}" \
-    | sed -E 's/^[[:space:]]*//; s/[[:space:]]+$//' | LC_ALL=C sort -u || true
-)
-if [ "$actual_workspace_product_adapter_operations" != "$expected_workspace_product_adapter_operations_text" ]; then
-  echo "FORBIDDEN: Workspace Product owner adapter operation mappings changed without a boundary review."
-  printf '%s\n' "$actual_workspace_product_adapter_operations" | sed 's/^/  - /'
-  status=1
-fi
-
-expected_workspace_product_roles=(
-  workspace.product.command.catalyst.create_dataset.v1
-  workspace.product.command.echo.create_evaluation_suite.v1
-  workspace.product.command.exchange.create_route_draft.v1
-  workspace.product.command.reactor.create_model_import.v1
-  workspace.product.command.yield.start_training_run.v1
-)
-expected_workspace_product_roles_text=$(
-  printf '%s\n' "${expected_workspace_product_roles[@]}" | LC_ALL=C sort
-)
-actual_workspace_product_roles=$(
-  rg --no-filename --no-line-number --only-matching \
-    '"workspace\.product\.command\.[a-z0-9_.-]+"' \
-    framework/crates/cy-workspace-fabric/src/product_authorization.rs \
-    | tr -d '"' | LC_ALL=C sort -u || true
-)
-if [ "$actual_workspace_product_roles" != "$expected_workspace_product_roles_text" ]; then
-  echo "FORBIDDEN: Workspace Product authorization role inventory changed without a boundary review."
-  printf '%s\n' "$actual_workspace_product_roles" | sed 's/^/  - /'
+if [ -n "$hardcoded_workspace_product_dispatch" ]; then
+  echo "FORBIDDEN: Workspace Product owner or operation policy is hard-coded in Platform dispatch:"
+  echo "$hardcoded_workspace_product_dispatch" | sed 's/^/  - /'
   status=1
 fi
 
@@ -678,10 +431,11 @@ fi
 expected_workspace_bff_routes=(
   "/api/workspace/v1/session"
   "/api/workspace/v1/workspaces"
-  "/api/workspace/v1/workspaces/:workspace_id/products/:operation"
+  "/api/workspace/v2/workspaces/:workspace_id/products/invocations"
   "/api/workspace/v1/device-authorizations/approval-challenges"
   "/api/workspace/v1/device-authorizations/approval-challenges/:approval_id/complete"
   "/api/workspace/v1/device-authorizations/denials"
+  "/credential-registration"
   "/healthz"
   "/readyz"
 )

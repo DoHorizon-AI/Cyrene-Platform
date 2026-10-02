@@ -1,0 +1,27 @@
+[Unit]
+Description=CYRENE Runtime Maintenance Broker
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=cyrene
+SupplementaryGroups=cyrene-runtime-maintenance
+ExecStart=/usr/bin/cyrene component-run cyrene-runtime-maintenance -- serve --state-dir /var/lib/cyrene/runtime --catalog /var/lib/cyrene/runtime/activity-sources.json --socket /run/cyrene/runtime-maintenance.sock --private-token-file /var/lib/cyrene/runtime-maintenance-private/operator.token --kernel-socket /run/cyrene/kernel.sock
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=cyrene
+RuntimeDirectoryMode=0750
+StateDirectory=cyrene/runtime-maintenance-private
+StateDirectoryMode=0700
+UMask=0007
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cyrene /var/lib/cyrene/runtime /var/lib/cyrene/runtime-maintenance-private
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

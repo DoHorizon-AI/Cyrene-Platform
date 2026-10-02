@@ -108,8 +108,13 @@ jobs:
         run: cargo check --locked --workspace --all-targets
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Enable user namespaces for authority acceptance
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Run Rust unit tests (--locked)
-        run: cargo test --locked --workspace
+        run: unshare --user --map-root-user cargo test --locked --workspace
 
   publish-artifact:
     name: ci / immutable-artifact

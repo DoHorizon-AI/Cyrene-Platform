@@ -12,7 +12,7 @@ Group=cyrene
 # `getent group cyrene`). The Kernel, in turn, asserts THIS process via
 # `--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`
 # in cyrene-kernel.service (see docs/operations/kernel-runtime.md).
-ExecStart=/usr/bin/cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock --allowed-client-uid 991 --allowed-client-gid 992
+ExecStart=/usr/bin/cyrene component-run cyrene-nvidia-adapter -- --socket /run/cyrene/nvidia-adapter.sock --allowed-client-uid 991 --allowed-client-gid 992
 Restart=on-failure
 RestartSec=2s
 

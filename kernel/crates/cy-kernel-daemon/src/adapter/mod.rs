@@ -30,6 +30,9 @@ use cy_kernel_api::{
     RuntimeJournalEvent, RuntimeJournalSink, StopRequest,
 };
 use cy_proto::{core_v1, core_v2};
+use cy_runtime_maintenance::{
+    MaintenanceError, RuntimeAdmissionError, RuntimeMaintenance, RuntimeUsage,
+};
 use tokio::sync::broadcast;
 use tonic::Status;
 
@@ -88,6 +91,7 @@ pub struct KernelServiceAdapter {
     pub(crate) adapter_available: Arc<AtomicBool>,
     pub(crate) adapter_poll_interval: Duration,
     hardware_providers: Arc<Mutex<BTreeMap<String, HardwareProviderTracker>>>,
+    runtime_maintenance: Option<RuntimeMaintenance>,
 }
 
 impl KernelServiceAdapter {
@@ -108,6 +112,99 @@ impl KernelServiceAdapter {
             adapter_available: Arc::new(AtomicBool::new(true)),
             adapter_poll_interval: Duration::from_secs(5),
             hardware_providers: Arc::new(Mutex::new(BTreeMap::new())),
+            runtime_maintenance: None,
+        }
+    }
+
+    /// Installs the process-external admission authority before listeners start.
+    /// Production must configure this using the root-managed catalog and the
+    /// shared `/var/lib/cyrene/runtime` state directory.
+    pub fn with_runtime_maintenance(mut self, maintenance: RuntimeMaintenance) -> Self {
+        self.runtime_maintenance = Some(maintenance);
+        self
+    }
+
+    pub(crate) fn runtime_maintenance(&self) -> Result<&RuntimeMaintenance, Status> {
+        self.runtime_maintenance.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "UPDATE_READINESS_UNKNOWN: runtime maintenance authority is not configured",
+            )
+        })
+    }
+
+    /// Reserves an admission marker under the same cross-process lock used by
+    /// BeginMaintenance, then executes the short synchronous Kernel action.
+    pub(crate) fn with_runtime_admission<T>(
+        &self,
+        action_name: &str,
+        action: impl FnOnce() -> Result<T, Status>,
+    ) -> Result<T, Status> {
+        let Some(maintenance) = &self.runtime_maintenance else {
+            // The sole production composition root fails startup if the gate
+            // cannot open and always installs it before registering listeners.
+            // Keeping the unconfigured constructor compatible supports older
+            // in-process adapter tests and migration-only embeddings.
+            return action();
+        };
+        maintenance
+            .with_runtime_admission_named(action_name, action)
+            .map_err(|error| match error {
+                RuntimeAdmissionError::Gate(error) => maintenance_status(error),
+                RuntimeAdmissionError::Action(error) => error,
+            })
+    }
+
+    /// Samples every live Worker and resource allocation while the caller owns
+    /// the maintenance file lock. Failure to inspect any authority is UNKNOWN.
+    pub(crate) fn runtime_usage(&self) -> RuntimeUsage {
+        let Ok(instances) = self.authority.runtime.instances.lock() else {
+            return RuntimeUsage::default();
+        };
+        let active_worker_count = instances
+            .values()
+            .filter(|process| {
+                let worker_active = process.semantic_worker.as_ref().is_some_and(|worker| {
+                    !matches!(
+                        worker.state,
+                        semantic::WorkerState::Stopped
+                            | semantic::WorkerState::Failed
+                            | semantic::WorkerState::Lost
+                    )
+                });
+                worker_active
+                    || process.actor.state() != crate::watchdog::InstanceActorState::Stopped
+            })
+            .count() as u64;
+        drop(instances);
+
+        let leases =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.daemon.leases()));
+        let Ok(leases) = leases else {
+            return RuntimeUsage::default();
+        };
+        let mut active_allocation_count = 0_u64;
+        for lease in leases {
+            let allocated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.daemon.is_allocated(&lease.name)
+            }));
+            let Ok(allocated) = allocated else {
+                return RuntimeUsage::default();
+            };
+            if allocated
+                || matches!(
+                    lease.state,
+                    cy_kernel_api::LeaseState::Active
+                        | cy_kernel_api::LeaseState::Releasing
+                        | cy_kernel_api::LeaseState::Quarantined
+                )
+            {
+                active_allocation_count = active_allocation_count.saturating_add(1);
+            }
+        }
+        RuntimeUsage {
+            known: true,
+            active_worker_count,
+            active_allocation_count,
         }
     }
 
@@ -615,6 +712,17 @@ impl KernelServiceAdapter {
         )?;
         Ok(Some(instance_name))
     }
+}
+
+pub(crate) fn maintenance_status(error: MaintenanceError) -> Status {
+    let code = error.code();
+    let status = match code {
+        "INVALID_ARGUMENT" => tonic::Code::InvalidArgument,
+        "MAINTENANCE_ADMISSION_DENIED" => tonic::Code::FailedPrecondition,
+        "UPDATE_READINESS_UNKNOWN" => tonic::Code::Unavailable,
+        _ => tonic::Code::Internal,
+    };
+    Status::new(status, format!("{code}: {error}"))
 }
 
 impl Deref for KernelServiceAdapter {

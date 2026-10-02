@@ -1,0 +1,18 @@
+[package]
+name = "cy-workspace-product-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "Pinned owner Product catalogs, Platform authorization policy, and generic invocation contracts."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+async-trait = "0.1"
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+jsonschema = { version = "0.18", default-features = false, features = ["draft201909", "draft202012"] }
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "1.0"

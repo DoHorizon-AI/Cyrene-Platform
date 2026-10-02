@@ -11,7 +11,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use cy_proto::workspace_local_v1::workspace_sidecar_service_server::WorkspaceSidecarServiceServer;
-use cy_workspace_fabric::{LocalBearerInterceptor, WorkspaceSidecar};
+use cy_workspace_sidecar::{LocalBearerInterceptor, WorkspaceSidecar};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Server;
 

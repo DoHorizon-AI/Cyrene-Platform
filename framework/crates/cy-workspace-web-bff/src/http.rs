@@ -16,41 +16,41 @@ use axum::extract::{Path, State};
 use axum::middleware::{self, Next};
 use axum::routing::any;
 use axum::Router;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::{DateTime, SecondsFormat, Utc};
-use cy_workspace_fabric::workspace_v1::{
-    WorkspaceConnectionDescriptor, WorkspaceProductApiOperation,
-};
-use cy_workspace_fabric::{
+use cy_workspace_control_plane::workspace_v1::WorkspaceConnectionDescriptor;
+use cy_workspace_control_plane::{
     validate_descriptor, VerifiedWebPrincipal, WebIdentityError, WebPrincipalVerifier,
     WorkspaceDirectory, WorkspaceDirectoryError,
+};
+use cy_workspace_product_contracts::{
+    parse_json_bytes_with_limit, JsonScopeBinding, MatchContextField, ProductOperation,
 };
 use http::header::{
     ACCEPT, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE,
 };
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
-use serde::Serialize;
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use url::form_urlencoded;
 use uuid::Uuid;
 
 use crate::csrf::{csrf_set_cookie, CsrfPrincipalBinding, CsrfSigner};
 use crate::device_approval::{device_approval_router, DeviceApprovalDependencies};
-use crate::manifest::product_projection_manifest;
 use crate::problem::{problem_response, ProblemCode};
 use crate::product::{
-    product_response, workspace_product_request, ProductOperationCatalog, ProductOperationContract,
-    WorkspaceGatewayError, WorkspaceProductGateway,
+    product_response, workspace_product_request, ProductOperationCatalog, WorkspaceGatewayError,
+    WorkspaceProductGateway, WorkspaceProductRequestInput,
 };
 
 /// Maximum UTF-8 JSON request or response body size, in bytes.
 pub const MAX_JSON_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INVOCATION_ENVELOPE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_ACCEPT_HEADER_BYTES: usize = 512;
-const MAX_QUERY_BYTES: usize = 2048;
 const UNTRUSTED_EASY_AUTH_HEADER_PREFIX: &str = "x-ms-token-";
 const TRACEPARENT_HEADER: &str = "traceparent";
 const CSRF_HEADER: &str = "x-csrf-token";
-const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
 /// Required, immutable BFF deployment configuration.
 ///
@@ -111,9 +111,6 @@ pub enum WebBffStartupError {
     /// The injected CSRF signing key is absent or the all-zero placeholder.
     #[error("CSRF signing secret is not configured")]
     CsrfSecret,
-    /// The canonical TCK does not match the compiled Workspace operation enum.
-    #[error("Product operation manifest is inconsistent")]
-    Manifest,
 }
 
 /// Fully configured application state. All provider seams are required at construction.
@@ -137,7 +134,7 @@ impl std::fmt::Debug for WebBffState {
             .field("principal_verifier_configured", &true)
             .field("directory_configured", &true)
             .field("workspace_api_configured", &true)
-            .field("product_operation_count", &self.product_operations.len())
+            .field("product_catalog_configured", &true)
             .finish()
     }
 }
@@ -153,7 +150,6 @@ impl WebBffState {
         workspace_api: Arc<dyn WorkspaceProductGateway>,
         product_operations: ProductOperationCatalog,
     ) -> Result<Self, WebBffStartupError> {
-        product_projection_manifest().map_err(|_| WebBffStartupError::Manifest)?;
         Ok(Self {
             client_origin: config.client_origin,
             csrf_signer: config.csrf_signer,
@@ -193,18 +189,31 @@ pub fn router_with_device_approval(
         .route("/api/workspace/v1/session", any(session_route))
         .route("/api/workspace/v1/workspaces", any(workspaces_route))
         .route(
-            "/api/workspace/v1/workspaces/:workspace_id/products/:operation",
+            "/api/workspace/v2/workspaces/:workspace_id/products/invocations",
             any(product_route),
         )
         .with_state(state.clone());
     let approval_routes = device_approval_router(device_approval).route_layer(
-        middleware::from_fn_with_state(state.clone(), device_approval_session),
+        middleware::from_fn_with_state(state.clone(), verified_web_session),
     );
 
     Router::new()
         .merge(core_routes)
         .merge(approval_routes)
         .fallback(not_found_route)
+}
+
+/// Apply the BFF's verified browser-session boundary to an externally composed router.
+///
+/// This middleware validates one Bearer identity, exact configured Origin, and
+/// the signed CSRF header/cookie pair before inserting `VerifiedWebSessionContext`.
+/// Use it for browser-facing credential ceremonies; keep workload-authenticated
+/// Connector routes on their own transport boundary.
+///
+/// 为外部组合的 router 套用 BFF 已验证浏览器 session 边界。中间件会验证 Bearer identity、精确 Origin 与签名 CSRF
+/// header/cookie，之后才注入 `VerifiedWebSessionContext`。该方法用于浏览器凭据 ceremony；Connector workload 路由应使用独立传输边界。
+pub fn with_verified_web_session_routes(state: Arc<WebBffState>, routes: Router) -> Router {
+    routes.route_layer(middleware::from_fn_with_state(state, verified_web_session))
 }
 
 #[derive(Serialize)]
@@ -231,6 +240,16 @@ struct WorkspaceSummary {
     display_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProductInvocationEnvelope {
+    owner_id: String,
+    operation_id: String,
+    json_body: Option<String>,
+    resource_id: Option<String>,
+    idempotency_key: Option<String>,
+}
+
 struct TraceInfo {
     traceparent: String,
     trace_id: String,
@@ -241,23 +260,20 @@ struct AuthenticatedRequest {
     access_token: String,
 }
 
-/// Authenticate one browser approval command and insert its typed session context.
+/// Authenticate one browser route and insert its typed session context.
 ///
-/// This middleware runs only on the three approval routes. It verifies the exact
+/// This middleware runs only on routes explicitly wrapped by the BFF. It verifies the exact
 /// configured Origin, bearer identity, and matching signed CSRF header/cookie
 /// before inserting the context; raw credential headers are then removed before
 /// the route handler runs.
 ///
-/// 仅对三个审批命令验证精确 Origin、Bearer identity 与签名 CSRF header/cookie，成功后注入 typed context，
+/// 仅对 BFF 显式保护的路由验证精确 Origin、Bearer identity 与签名 CSRF header/cookie，成功后注入 typed context，
 /// 并在进入 handler 前移除原始 credential header。
-async fn device_approval_session(
+async fn verified_web_session(
     State(state): State<Arc<WebBffState>>,
     mut request: Request<Body>,
     next: Next,
 ) -> http::Response<Body> {
-    if request.method() != Method::POST {
-        return next.run(request).await;
-    }
     let trace = match trace_info(request.headers()) {
         Ok(value) => value,
         Err(()) => return invalid_request(None),
@@ -436,7 +452,7 @@ async fn workspaces_route(
 
 async fn product_route(
     State(state): State<Arc<WebBffState>>,
-    Path((workspace_id, operation_name)): Path<(String, String)>,
+    Path(workspace_id): Path<String>,
     request: Request<Body>,
 ) -> http::Response<Body> {
     if request.method() != Method::POST {
@@ -449,55 +465,14 @@ async fn product_route(
     if !accepts_json(request.headers()) {
         return not_acceptable(Some(&trace.trace_id));
     }
+    if request.uri().query().is_some() {
+        return invalid_request(Some(&trace.trace_id));
+    }
     if !exact_origin_matches(request.headers(), &state.client_origin) {
         return forbidden(Some(&trace.trace_id));
     }
     if workspace_id.is_empty() || workspace_id.len() > 200 {
         return invalid_request(Some(&trace.trace_id));
-    }
-    let operation = match WorkspaceProductApiOperation::from_str_name(&operation_name) {
-        Some(value) if value != WorkspaceProductApiOperation::Unspecified => value,
-        _ => {
-            return problem_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ProblemCode::UnsupportedOperation,
-                "Unprocessable Content",
-                Some(&trace.trace_id),
-            );
-        }
-    };
-    if state.product_operations.is_deny_only(operation) {
-        return forbidden(Some(&trace.trace_id));
-    }
-    let Some(contract) = state.product_operations.get(operation) else {
-        return problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            ProblemCode::UnsupportedOperation,
-            "Unprocessable Content",
-            Some(&trace.trace_id),
-        );
-    };
-    let resource_id = match parse_resource_id(request.uri()) {
-        Ok(value) => value,
-        Err(()) => return invalid_request(Some(&trace.trace_id)),
-    };
-    let idempotency_key = match parse_idempotency_key(request.headers()) {
-        Ok(value) => value,
-        Err(()) => return invalid_request(Some(&trace.trace_id)),
-    };
-    if contract.requires_idempotency_key && idempotency_key.is_none() {
-        return invalid_request(Some(&trace.trace_id));
-    }
-    if idempotency_key.is_some() && !contract.allows_idempotency_key {
-        return invalid_request(Some(&trace.trace_id));
-    }
-    if let Some(value) = idempotency_key.as_ref() {
-        let Some(schema) = contract.idempotency_key_schema.as_ref() else {
-            return internal_error(Some(&trace.trace_id));
-        };
-        if !schema.validate(&Value::String(value.clone())) {
-            return invalid_request(Some(&trace.trace_id));
-        }
     }
     let authenticated = match authenticate(&state, request.headers()).await {
         Ok(value) => value,
@@ -509,38 +484,68 @@ async fn product_route(
         Some(value) => value,
         None => return internal_error(Some(&trace.trace_id)),
     };
-    if contract.projection.kind
-        == cy_workspace_fabric::workspace_v1::WorkspaceProductApiRequestKind::Command
+    let csrf_header = match single_header(request.headers(), CSRF_HEADER) {
+        Ok(value) => value,
+        Err(()) => return csrf_failed(Some(&trace.trace_id)),
+    };
+    let csrf_cookie = match csrf_cookie_from_header(request.headers()) {
+        Ok(value) => value,
+        Err(()) => return csrf_failed(Some(&trace.trace_id)),
+    };
+    if csrf_header != csrf_cookie
+        || state
+            .csrf_signer
+            .verify(
+                csrf_header,
+                CsrfPrincipalBinding::from_verified(&authenticated.principal),
+                &authenticated.access_token,
+                now,
+            )
+            .is_err()
     {
-        let header = match single_header(request.headers(), CSRF_HEADER) {
-            Ok(value) => value,
-            Err(()) => return csrf_failed(Some(&trace.trace_id)),
-        };
-        let cookie = match csrf_cookie_from_header(request.headers()) {
-            Ok(value) => value,
-            Err(()) => return csrf_failed(Some(&trace.trace_id)),
-        };
-        if header != cookie
-            || state
-                .csrf_signer
-                .verify(
-                    header,
-                    CsrfPrincipalBinding::from_verified(&authenticated.principal),
-                    &authenticated.access_token,
-                    now,
-                )
-                .is_err()
-        {
-            return csrf_failed(Some(&trace.trace_id));
-        }
+        return csrf_failed(Some(&trace.trace_id));
     }
-    let body = match read_request_json(request, contract).await {
+
+    let envelope = match read_product_invocation_envelope(request).await {
         Ok(value) => value,
         Err(failure) => return failure.response(Some(&trace.trace_id)),
     };
-    let path = match map_path_parameters(contract, &workspace_id, resource_id.as_deref()) {
+    if !is_valid_owner_id(&envelope.owner_id) || !is_valid_operation_id(&envelope.operation_id) {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    let Some(contract) = state
+        .product_operations
+        .get(&envelope.owner_id, &envelope.operation_id)
+    else {
+        return problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemCode::UnsupportedOperation,
+            "Unprocessable Content",
+            Some(&trace.trace_id),
+        );
+    };
+    if !state
+        .product_operations
+        .has_grant(&envelope.owner_id, &envelope.operation_id)
+    {
+        return forbidden(Some(&trace.trace_id));
+    }
+    let json_body = match decode_product_body(envelope.json_body.as_deref()) {
         Ok(value) => value,
-        Err(()) => {
+        Err(failure) => return failure.response(Some(&trace.trace_id)),
+    };
+    let resource_id = match validate_resource_id(contract, envelope.resource_id.as_deref()) {
+        Ok(value) => value,
+        Err(()) => return invalid_request(Some(&trace.trace_id)),
+    };
+    let idempotency_key =
+        match validate_idempotency_key(contract, envelope.idempotency_key.as_deref()) {
+            Ok(value) => value,
+            Err(()) => return invalid_request(Some(&trace.trace_id)),
+        };
+    let request_value = match contract.validate_request(json_body.as_deref()) {
+        Ok(value) => value,
+        Err(_) => {
             return problem_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ProblemCode::UnsupportedOperation,
@@ -549,6 +554,17 @@ async fn product_route(
             );
         }
     };
+    if validate_scope_bindings(
+        &contract.scope_bindings().request_bindings,
+        request_value.as_ref(),
+        authenticated.principal.organization_id(),
+        &workspace_id,
+        resource_id.as_deref(),
+    )
+    .is_err()
+    {
+        return forbidden(Some(&trace.trace_id));
+    }
     let descriptors = match state
         .directory
         .discover(
@@ -574,21 +590,17 @@ async fn product_route(
         Ok(false) => return workspace_not_found(Some(&trace.trace_id)),
         Err(_) => return upstream_unavailable(Some(&trace.trace_id)),
     }
-    let forwarded_idempotency_key = if contract.allows_idempotency_key {
-        idempotency_key.as_deref()
-    } else {
-        None
-    };
     let request_id = Uuid::new_v4().to_string();
-    let workspace_request = workspace_product_request(
-        &contract.projection,
-        &workspace_id,
-        path.resource_id.as_deref(),
-        body.as_deref(),
-        forwarded_idempotency_key,
-        &trace.traceparent,
-        request_id.clone(),
-    );
+    let workspace_request = workspace_product_request(WorkspaceProductRequestInput {
+        owner_id: &envelope.owner_id,
+        operation_id: &envelope.operation_id,
+        workspace_id: &workspace_id,
+        resource_id: resource_id.as_deref(),
+        json_body: json_body.as_deref(),
+        idempotency_key: idempotency_key.as_deref(),
+        traceparent: &trace.traceparent,
+        request_id: &request_id,
+    });
     let upstream = match state
         .workspace_api
         .invoke(&authenticated.principal, workspace_request)
@@ -604,12 +616,31 @@ async fn product_route(
     if response_body.len() > MAX_JSON_BODY_BYTES {
         return invalid_upstream_response(Some(&trace.trace_id));
     }
-    let value: Value = match serde_json::from_slice(&response_body) {
+    let response_value = match contract.validate_response(status, content_type, &response_body) {
         Ok(value) => value,
         Err(_) => return invalid_upstream_response(Some(&trace.trace_id)),
     };
-    if validate_product_response(contract, status, content_type, &value).is_err() {
+    if validate_scope_bindings(
+        &contract.scope_bindings().response_bindings,
+        response_value.as_ref(),
+        authenticated.principal.organization_id(),
+        &workspace_id,
+        resource_id.as_deref(),
+    )
+    .is_err()
+    {
         return invalid_upstream_response(Some(&trace.trace_id));
+    }
+    if status >= 400 {
+        let Some(value) = response_value.as_ref() else {
+            return invalid_upstream_response(Some(&trace.trace_id));
+        };
+        if (content_type == "application/problem+json"
+            && validate_public_problem_details(status, value).is_err())
+            || contains_unsafe_error_address(value)
+        {
+            return invalid_upstream_response(Some(&trace.trace_id));
+        }
     }
     raw_product_response(status, content_type, response_body, Some(&trace.trace_id))
 }
@@ -623,144 +654,170 @@ async fn not_found_route() -> http::Response<Body> {
     )
 }
 
-struct ParsedPath {
-    resource_id: Option<String>,
+async fn read_product_invocation_envelope(
+    request: Request<Body>,
+) -> Result<ProductInvocationEnvelope, RequestFailure> {
+    let announced_length = content_length(request.headers())?;
+    if announced_length.is_some_and(|length| length > MAX_INVOCATION_ENVELOPE_BYTES) {
+        return Err(RequestFailure::PayloadTooLarge);
+    }
+    if !is_json_content_type(request.headers()) {
+        return Err(RequestFailure::UnsupportedMediaType);
+    }
+    let bytes = to_bytes(request.into_body(), MAX_INVOCATION_ENVELOPE_BYTES)
+        .await
+        .map_err(|_| RequestFailure::PayloadTooLarge)?;
+    if bytes.is_empty() {
+        return Err(RequestFailure::InvalidJson);
+    }
+    parse_json_bytes_with_limit(&bytes, MAX_INVOCATION_ENVELOPE_BYTES)
+        .map_err(|_| RequestFailure::InvalidJson)?;
+    serde_json::from_slice(&bytes).map_err(|_| RequestFailure::InvalidJson)
 }
 
-fn map_path_parameters(
-    contract: &ProductOperationContract,
+fn decode_product_body(encoded: Option<&str>) -> Result<Option<Vec<u8>>, RequestFailure> {
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| RequestFailure::InvalidJson)?;
+    if BASE64_STANDARD.encode(&bytes) != encoded {
+        return Err(RequestFailure::InvalidJson);
+    }
+    if bytes.len() > MAX_JSON_BODY_BYTES {
+        return Err(RequestFailure::PayloadTooLarge);
+    }
+    if bytes.is_empty() {
+        return Err(RequestFailure::InvalidJson);
+    }
+    Ok(Some(bytes))
+}
+
+fn is_valid_owner_id(value: &str) -> bool {
+    let mut characters = value.bytes();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && value.len() <= 63
+        && characters.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_valid_operation_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn validate_resource_id(
+    operation: &ProductOperation,
+    value: Option<&str>,
+) -> Result<Option<String>, ()> {
+    if value.is_some_and(|value| !is_safe_opaque_resource_id(value)) {
+        return Err(());
+    }
+    operation.validate_resource_id(value).map_err(|_| ())?;
+    Ok(value.map(str::to_owned))
+}
+
+fn validate_idempotency_key(
+    operation: &ProductOperation,
+    value: Option<&str>,
+) -> Result<Option<String>, ()> {
+    operation.validate_idempotency_key(value).map_err(|_| ())?;
+    Ok(value.map(str::to_owned))
+}
+
+fn validate_scope_bindings(
+    bindings: &[JsonScopeBinding],
+    value: Option<&Value>,
+    organization_id: &str,
     workspace_id: &str,
     resource_id: Option<&str>,
-) -> Result<ParsedPath, ()> {
-    if contract.has_unsupported_query_or_header_parameters {
-        return Err(());
+) -> Result<(), ()> {
+    if bindings.is_empty() {
+        return Ok(());
     }
-    let workspace_parameters = contract
-        .path_parameters
-        .iter()
-        .filter(|parameter| matches!(parameter.name.as_str(), "workspace_id" | "workspaceId"))
-        .collect::<Vec<_>>();
-    if workspace_parameters.len() > 1 {
-        return Err(());
-    }
-    let resource_parameters = contract
-        .path_parameters
-        .iter()
-        .filter(|parameter| !matches!(parameter.name.as_str(), "workspace_id" | "workspaceId"))
-        .collect::<Vec<_>>();
-    if resource_parameters.len() > 1 {
-        return Err(());
-    }
-    let path_schema = contract.path_schema.as_ref();
-    if let Some(parameter) = workspace_parameters.first() {
-        let schema = path_schema.ok_or(())?;
-        if !schema.validate_path_parameter(&parameter.name, workspace_id) {
+    let value = value.ok_or(())?;
+    for binding in bindings {
+        let expected = match binding.matches {
+            MatchContextField::OrganizationId => organization_id,
+            MatchContextField::WorkspaceId => workspace_id,
+            MatchContextField::ResourceId => resource_id.ok_or(())?,
+        };
+        let selected = json_pointer_values(value, &binding.json_pointer)?;
+        if selected.is_empty()
+            || selected
+                .iter()
+                .any(|candidate| candidate.as_str() != Some(expected))
+        {
             return Err(());
         }
     }
-    match resource_parameters.first() {
-        Some(parameter) => {
-            if parameter.required && resource_id.is_none() {
+    Ok(())
+}
+
+fn json_pointer_values<'a>(value: &'a Value, pointer: &str) -> Result<Vec<&'a Value>, ()> {
+    if pointer.len() > 1024 || !pointer.starts_with('/') {
+        return Err(());
+    }
+    let segments = pointer
+        .split('/')
+        .skip(1)
+        .map(unescape_json_pointer_segment)
+        .collect::<Result<Vec<_>, _>>()?;
+    if segments.len() > 64 {
+        return Err(());
+    }
+    let mut current = vec![value];
+    for segment in segments {
+        let mut next = Vec::new();
+        for selected in current {
+            match selected {
+                Value::Array(items) if segment == "*" => next.extend(items.iter()),
+                Value::Object(items) if segment == "*" => next.extend(items.values()),
+                Value::Array(items) => {
+                    let index = segment.parse::<usize>().map_err(|_| ())?;
+                    if let Some(item) = items.get(index) {
+                        next.push(item);
+                    }
+                }
+                Value::Object(items) => {
+                    if let Some(item) = items.get(&segment) {
+                        next.push(item);
+                    }
+                }
+                _ => {}
+            }
+            if next.len() > 16_384 {
                 return Err(());
             }
-            if let Some(value) = resource_id {
-                let schema = path_schema.ok_or(())?;
-                if !schema.validate_path_parameter(&parameter.name, value) {
-                    return Err(());
-                }
-            }
-            Ok(ParsedPath {
-                resource_id: resource_id.map(str::to_owned),
-            })
         }
-        None if resource_id.is_none() => Ok(ParsedPath { resource_id: None }),
-        None => Err(()),
-    }
-}
-
-fn validate_product_response(
-    contract: &ProductOperationContract,
-    status: u16,
-    content_type: &str,
-    value: &Value,
-) -> Result<(), ()> {
-    let schema = contract.response.schema.as_ref().ok_or(())?;
-    if !schema.validate_response(status, value) {
-        return Err(());
-    }
-    if status >= 400 {
-        if content_type == "application/problem+json" {
-            validate_public_problem_details(status, value)?;
-        }
-        if contains_unsafe_error_address(value) {
+        current = next;
+        if current.is_empty() {
             return Err(());
         }
     }
-    let fields = contract
-        .response
-        .resource_reference_fields
-        .as_ref()
-        .ok_or(())?;
-    let manifest = product_projection_manifest().map_err(|_| ())?;
-    validate_nested_resource_references(value, &manifest)?;
-    for field in fields {
-        if !field.json_pointer.starts_with('/') {
-            return Err(());
-        }
-        match value.pointer(&field.json_pointer) {
-            None if field.required => return Err(()),
-            None => {}
-            Some(reference) => validate_resource_reference(reference, &manifest)?,
-        }
-    }
-    Ok(())
+    Ok(current)
 }
 
-fn validate_resource_reference(
-    value: &Value,
-    manifest: &[crate::ProductProjectionEntry],
-) -> Result<(), ()> {
-    let object = value.as_object().ok_or(())?;
-    if object.len() != 2 || !object.contains_key("operation") || !object.contains_key("resourceId")
-    {
-        return Err(());
-    }
-    let operation_name = object.get("operation").and_then(Value::as_str).ok_or(())?;
-    let operation = WorkspaceProductApiOperation::from_str_name(operation_name).ok_or(())?;
-    if !manifest.iter().any(|entry| {
-        entry.operation == operation
-            && entry.kind == cy_workspace_fabric::workspace_v1::WorkspaceProductApiRequestKind::Read
-    }) {
-        return Err(());
-    }
-    let resource_id = object.get("resourceId").and_then(Value::as_str).ok_or(())?;
-    if !is_safe_opaque_resource_id(resource_id) {
-        return Err(());
-    }
-    Ok(())
-}
-
-fn validate_nested_resource_references(
-    value: &Value,
-    manifest: &[crate::ProductProjectionEntry],
-) -> Result<(), ()> {
-    match value {
-        Value::Object(object) => {
-            if object.contains_key("operation") && object.contains_key("resourceId") {
-                validate_resource_reference(value, manifest)?;
-            }
-            for child in object.values() {
-                validate_nested_resource_references(child, manifest)?;
-            }
+fn unescape_json_pointer_segment(segment: &str) -> Result<String, ()> {
+    let mut result = String::with_capacity(segment.len());
+    let mut characters = segment.chars();
+    while let Some(character) = characters.next() {
+        if character != '~' {
+            result.push(character);
+            continue;
         }
-        Value::Array(items) => {
-            for child in items {
-                validate_nested_resource_references(child, manifest)?;
-            }
+        match characters.next().ok_or(())? {
+            '0' => result.push('~'),
+            '1' => result.push('/'),
+            _ => return Err(()),
         }
-        _ => {}
     }
-    Ok(())
+    Ok(result)
 }
 
 fn is_safe_opaque_resource_id(value: &str) -> bool {
@@ -769,9 +826,9 @@ fn is_safe_opaque_resource_id(value: &str) -> bool {
         && value != "."
         && value != ".."
         && !value.contains("..")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+        && value.bytes().all(|byte| {
+            !byte.is_ascii_control() && !matches!(byte, b'/' | b'\\' | b'%' | b'?' | b'#')
+        })
 }
 
 fn validate_public_problem_details(status: u16, value: &Value) -> Result<(), ()> {
@@ -837,43 +894,6 @@ fn contains_private_ipv4_address(text: &str) -> bool {
         })
 }
 
-async fn read_request_json(
-    request: Request<Body>,
-    contract: &ProductOperationContract,
-) -> Result<Option<Vec<u8>>, RequestFailure> {
-    let content_length = content_length(request.headers())?;
-    if content_length.is_some_and(|length| length > MAX_JSON_BODY_BYTES) {
-        return Err(RequestFailure::PayloadTooLarge);
-    }
-    let json_content_type = is_json_content_type(request.headers());
-    let bytes = match to_bytes(request.into_body(), MAX_JSON_BODY_BYTES).await {
-        Ok(value) => value,
-        Err(_) => return Err(RequestFailure::PayloadTooLarge),
-    };
-    if bytes.is_empty() {
-        if contract.request_body.required {
-            return Err(RequestFailure::InvalidShape);
-        }
-        return Ok(None);
-    }
-    if !json_content_type {
-        return Err(RequestFailure::UnsupportedMediaType);
-    }
-    if !contract.request_body.allowed {
-        return Err(RequestFailure::InvalidShape);
-    }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| RequestFailure::InvalidJson)?;
-    let schema = contract
-        .request_body
-        .schema
-        .as_ref()
-        .ok_or(RequestFailure::InvalidShape)?;
-    if !schema.validate(&value) {
-        return Err(RequestFailure::InvalidShape);
-    }
-    Ok(Some(bytes.to_vec()))
-}
-
 async fn read_empty_get_body(request: Request<Body>) -> Result<(), RequestFailure> {
     let content_length = content_length(request.headers())?;
     if content_length.is_some_and(|length| length > MAX_JSON_BODY_BYTES) {
@@ -889,11 +909,11 @@ async fn read_empty_get_body(request: Request<Body>) -> Result<(), RequestFailur
     }
 }
 
+#[derive(Debug)]
 enum RequestFailure {
     InvalidJson,
     UnsupportedMediaType,
     PayloadTooLarge,
-    InvalidShape,
 }
 
 impl RequestFailure {
@@ -910,12 +930,6 @@ impl RequestFailure {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 ProblemCode::PayloadTooLarge,
                 "Content Too Large",
-                trace_id,
-            ),
-            Self::InvalidShape => problem_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ProblemCode::UnsupportedOperation,
-                "Unprocessable Content",
                 trace_id,
             ),
         }
@@ -1067,32 +1081,6 @@ fn identity_failure(error: WebIdentityError) -> (StatusCode, ProblemCode, &'stat
 
 fn exact_origin_matches(headers: &HeaderMap, configured_origin: &str) -> bool {
     single_header(headers, ORIGIN.as_str()).is_ok_and(|origin| origin == configured_origin)
-}
-
-fn parse_resource_id(uri: &Uri) -> Result<Option<String>, ()> {
-    let Some(query) = uri.query() else {
-        return Ok(None);
-    };
-    if query.len() > MAX_QUERY_BYTES {
-        return Err(());
-    }
-    let mut resource_id = None;
-    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
-        if key != "resourceId" || resource_id.is_some() || value.is_empty() || value.len() > 512 {
-            return Err(());
-        }
-        resource_id = Some(value.into_owned());
-    }
-    Ok(resource_id)
-}
-
-fn parse_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ()> {
-    match single_header(headers, IDEMPOTENCY_HEADER) {
-        Ok(value) if value.is_empty() || value.len() > 200 => Err(()),
-        Ok(value) => Ok(Some(value.to_owned())),
-        Err(()) if !headers.contains_key(IDEMPOTENCY_HEADER) => Ok(None),
-        Err(()) => Err(()),
-    }
 }
 
 fn csrf_cookie_from_header(headers: &HeaderMap) -> Result<&str, ()> {
@@ -1408,24 +1396,14 @@ mod tests {
 
     use async_trait::async_trait;
     use axum::body::to_bytes;
-    use cy_workspace_fabric::workspace_v1::{UserIdentityRef, WorkspaceApiRequest};
-    use cy_workspace_fabric::{WebIdentityError, WorkspaceDirectoryError};
+    use cy_workspace_control_plane::test_principal;
+    use cy_workspace_control_plane::workspace_v1::{UserIdentityRef, WorkspaceApiRequest};
+    use cy_workspace_control_plane::{
+        VerifiedWebPrincipal, WebIdentityError, WorkspaceDirectoryError,
+    };
     use http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use serde_json::Value;
     use tower::ServiceExt;
-
-    use crate::product::{
-        ProductJsonSchema, ProductRequestBodyContract, ProductResourceReferenceField,
-        ProductResponseContract,
-    };
-
-    struct AnyJsonSchema;
-
-    impl ProductJsonSchema for AnyJsonSchema {
-        fn validate(&self, _value: &Value) -> bool {
-            true
-        }
-    }
 
     struct RejectingVerifier {
         calls: Arc<AtomicUsize>,
@@ -1439,6 +1417,27 @@ mod tests {
         ) -> Result<VerifiedWebPrincipal, WebIdentityError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(WebIdentityError::InvalidToken)
+        }
+    }
+
+    struct AcceptingVerifier {
+        calls: Arc<AtomicUsize>,
+        access_token: String,
+        principal: VerifiedWebPrincipal,
+    }
+
+    #[async_trait]
+    impl WebPrincipalVerifier for AcceptingVerifier {
+        async fn verify_access_token(
+            &self,
+            access_token: &str,
+        ) -> Result<VerifiedWebPrincipal, WebIdentityError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if access_token == self.access_token {
+                Ok(self.principal.clone())
+            } else {
+                Err(WebIdentityError::InvalidToken)
+            }
         }
     }
 
@@ -1475,41 +1474,17 @@ mod tests {
             &self,
             _principal: &VerifiedWebPrincipal,
             _request: WorkspaceApiRequest,
-        ) -> Result<cy_workspace_fabric::workspace_v1::WorkspaceApiResponse, WorkspaceGatewayError>
-        {
+        ) -> Result<
+            cy_workspace_control_plane::workspace_v1::WorkspaceApiResponse,
+            WorkspaceGatewayError,
+        > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(WorkspaceGatewayError::Unavailable)
         }
     }
 
     fn test_catalog() -> ProductOperationCatalog {
-        let manifest = product_projection_manifest().expect("manifest should parse");
-        let contracts = manifest.into_iter().map(|projection| {
-            let deny_only = projection.operation
-                == WorkspaceProductApiOperation::WorkspaceProductApiOperation13;
-            ProductOperationContract {
-                projection,
-                upstream_method: Method::POST,
-                path_parameters: Vec::new(),
-                path_schema: None,
-                has_unsupported_query_or_header_parameters: false,
-                request_body: ProductRequestBodyContract {
-                    allowed: false,
-                    required: false,
-                    schema: None,
-                },
-                allows_idempotency_key: false,
-                requires_idempotency_key: false,
-                idempotency_key_schema: None,
-                response: ProductResponseContract {
-                    schema: (!deny_only)
-                        .then(|| Arc::new(AnyJsonSchema) as Arc<dyn ProductJsonSchema>),
-                    resource_reference_fields: (!deny_only)
-                        .then(Vec::<ProductResourceReferenceField>::new),
-                },
-            }
-        });
-        ProductOperationCatalog::new(contracts).expect("complete catalog should validate")
+        ProductOperationCatalog::deny_all_for_tests()
     }
 
     fn test_state() -> (Arc<WebBffState>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
@@ -1596,18 +1571,125 @@ mod tests {
     }
 
     #[test]
-    fn resource_query_is_single_and_bounded() {
-        let uri: Uri = "/route?resourceId=opaque-1".parse().expect("valid uri");
-        assert_eq!(
-            parse_resource_id(&uri).expect("single id"),
-            Some("opaque-1".to_owned())
+    fn v2_invocation_envelope_is_closed_and_uses_generic_ids() {
+        let envelope: ProductInvocationEnvelope = serde_json::from_value(serde_json::json!({
+            "ownerId": "echo",
+            "operationId": "workspaceCreateEvaluationSuite",
+            "jsonBody": "eyJuYW1lIjoiZXhhbXBsZSJ9",
+            "resourceId": "suite-1",
+            "idempotencyKey": "create-1"
+        }))
+        .expect("generic v2 invocation is valid");
+        assert_eq!(envelope.owner_id, "echo");
+        assert_eq!(envelope.operation_id, "workspaceCreateEvaluationSuite");
+        assert!(
+            serde_json::from_value::<ProductInvocationEnvelope>(serde_json::json!({
+                "ownerId": "echo",
+                "operationId": "workspaceCreateEvaluationSuite",
+                "catalogVersion": "2.0.0"
+            }))
+            .is_err()
         );
-        let duplicate: Uri = "/route?resourceId=one&resourceId=two"
-            .parse()
-            .expect("valid uri");
-        assert!(parse_resource_id(&duplicate).is_err());
-        let unknown: Uri = "/route?owner=exchange".parse().expect("valid uri");
-        assert!(parse_resource_id(&unknown).is_err());
+        assert!(
+            serde_json::from_value::<ProductInvocationEnvelope>(serde_json::json!({
+                "ownerId": "echo",
+                "operationId": "workspaceCreateEvaluationSuite",
+                "url": "https://product.example"
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn invocation_envelope_rejects_recursive_and_escaped_duplicate_keys() {
+        let duplicate_payloads = [
+            r#"{"ownerId":"echo","ownerId":"navigator","operationId":"observeWorkspaceSnapshot"}"#,
+            r#"{"ownerId":"echo","\u006fwnerId":"navigator","operationId":"observeWorkspaceSnapshot"}"#,
+            r#"{"ownerId":"echo","operationId":"observeWorkspaceSnapshot","extension":{"value":1,"value":2}}"#,
+        ];
+        for payload in duplicate_payloads {
+            let request = Request::builder()
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request is valid");
+            assert!(matches!(
+                read_product_invocation_envelope(request).await,
+                Err(RequestFailure::InvalidJson)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_invocation_envelope_maps_to_payload_too_large() {
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_LENGTH, MAX_INVOCATION_ENVELOPE_BYTES + 1)
+            .body(Body::empty())
+            .expect("request is valid");
+        assert!(matches!(
+            read_product_invocation_envelope(request).await,
+            Err(RequestFailure::PayloadTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn invocation_envelope_keeps_its_six_mib_limit() {
+        let padding = " ".repeat(5 * 1024 * 1024);
+        let body = format!(
+            "{padding}{{\"ownerId\":\"echo\",\"operationId\":\"workspaceGetEvaluationSuite\"}}"
+        );
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("request is valid");
+
+        let envelope = read_product_invocation_envelope(request)
+            .await
+            .expect("the envelope cap is independent from the four MiB Product body cap");
+        assert_eq!(envelope.owner_id, "echo");
+    }
+
+    #[test]
+    fn decoded_product_body_preserves_exact_bytes_and_enforces_four_mib() {
+        let original = b"{ \"workspaceId\" : \"ws-1\" }\n";
+        let encoded = BASE64_STANDARD.encode(original);
+        assert_eq!(
+            decode_product_body(Some(&encoded)).unwrap(),
+            Some(original.to_vec())
+        );
+
+        let oversized = BASE64_STANDARD.encode(vec![b'x'; MAX_JSON_BODY_BYTES + 1]);
+        assert!(matches!(
+            decode_product_body(Some(&oversized)),
+            Err(RequestFailure::PayloadTooLarge)
+        ));
+        assert!(decode_product_body(Some("not base64!")).is_err());
+    }
+
+    #[test]
+    fn scope_bindings_reject_cross_workspace_values_and_check_every_wildcard_match() {
+        let bindings = [JsonScopeBinding {
+            json_pointer: "/workspaces/*/workspaceId".to_owned(),
+            matches: MatchContextField::WorkspaceId,
+        }];
+        let valid = serde_json::json!({ "workspaces": [
+            { "workspaceId": "ws-1" }, { "workspaceId": "ws-1" }
+        ] });
+        let foreign = serde_json::json!({ "workspaces": [
+            { "workspaceId": "ws-1" }, { "workspaceId": "ws-2" }
+        ] });
+        let missing = serde_json::json!({ "workspaces": [] });
+        assert!(validate_scope_bindings(&bindings, Some(&valid), "org-1", "ws-1", None).is_ok());
+        assert!(validate_scope_bindings(&bindings, Some(&foreign), "org-1", "ws-1", None).is_err());
+        assert!(validate_scope_bindings(&bindings, Some(&missing), "org-1", "ws-1", None).is_err());
+        assert!(validate_scope_bindings(
+            &bindings,
+            Some(&serde_json::json!({})),
+            "org-1",
+            "ws-1",
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -1697,14 +1779,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_product_post_requires_exact_origin_before_authentication() {
+    async fn v2_product_post_requires_exact_origin_before_authentication() {
         let (state, verifier_calls, gateway_calls) = test_state();
         for origin in [None, Some("https://attacker.example")] {
             let mut request = Request::builder()
                 .method(Method::POST)
-                .uri(
-                    "/api/workspace/v1/workspaces/ws-1/products/WORKSPACE_PRODUCT_API_OPERATION_01",
-                )
+                .uri("/api/workspace/v2/workspaces/ws-1/products/invocations")
                 .body(Body::empty())
                 .expect("request is valid");
             if let Some(origin) = origin {
@@ -1724,7 +1804,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_product_operation_is_rejected_without_provider_calls() {
+    async fn v2_product_post_accepts_the_session_cookie_origin_and_signed_double_submit_token() {
+        let verifier_calls = Arc::new(AtomicUsize::new(0));
+        let gateway_calls = Arc::new(AtomicUsize::new(0));
+        let access_token = "test-access-token-bound-to-csrf-session".to_owned();
+        let now = now_unix_ms().expect("system clock is available");
+        let principal = test_principal(
+            UserIdentityRef {
+                issuer: "https://login.example/tenant/v2.0".to_owned(),
+                subject: "web-user-1".to_owned(),
+            },
+            "org-1",
+            now + 60_000,
+        );
+        let state = Arc::new(
+            WebBffState::new(
+                WebBffConfig::new("https://client.example", [0x5a; 32]).expect("valid config"),
+                Arc::new(AcceptingVerifier {
+                    calls: Arc::clone(&verifier_calls),
+                    access_token: access_token.clone(),
+                    principal: principal.clone(),
+                }),
+                Arc::new(EmptyWorkspaceDirectory),
+                Arc::new(CountingGateway {
+                    calls: Arc::clone(&gateway_calls),
+                }),
+                test_catalog(),
+            )
+            .expect("all runtime ports and contracts are supplied"),
+        );
+        let issued = state
+            .csrf_signer
+            .issue(
+                CsrfPrincipalBinding::from_verified(&principal),
+                &access_token,
+                now,
+            )
+            .expect("verified session receives a signed CSRF token");
+        let set_cookie = csrf_set_cookie(&issued, now);
+        assert!(set_cookie.contains("Path=/api/workspace;"));
+        assert!(set_cookie.contains("Secure; HttpOnly; SameSite=Strict"));
+        assert!(!set_cookie.contains("Domain="));
+        let cookie_pair = set_cookie.split(';').next().expect("cookie has a pair");
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/workspace/v2/workspaces/ws-1/products/invocations")
+            .header(ORIGIN, "https://client.example")
+            .header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {access_token}"),
+            )
+            .header(COOKIE, cookie_pair)
+            .header(CSRF_HEADER, issued.value)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .body(Body::from(
+                r#"{"ownerId":"unlisted","operationId":"unknown"}"#,
+            ))
+            .expect("request is valid");
+        let response = router(Arc::clone(&state))
+            .oneshot(request)
+            .await
+            .expect("router responds");
+
+        assert_problem(
+            response,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_operation",
+        )
+        .await;
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
+
+        let issued = state
+            .csrf_signer
+            .issue(
+                CsrfPrincipalBinding::from_verified(&principal),
+                &access_token,
+                now,
+            )
+            .expect("same session retains its CSRF token");
+        let tampered_token = format!("{}x", issued.value);
+        let tampered_cookie = format!("{}={tampered_token}", crate::csrf::csrf_cookie_name());
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/workspace/v2/workspaces/ws-1/products/invocations")
+            .header(ORIGIN, "https://client.example")
+            .header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {access_token}"),
+            )
+            .header(COOKIE, tampered_cookie)
+            .header(CSRF_HEADER, tampered_token)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .body(Body::from(
+                r#"{"ownerId":"unlisted","operationId":"unknown"}"#,
+            ))
+            .expect("request is valid");
+        let response = router(state)
+            .oneshot(request)
+            .await
+            .expect("router responds");
+
+        assert_problem(response, StatusCode::FORBIDDEN, "csrf_failed").await;
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_v1_product_route_is_not_mounted() {
         let (state, verifier_calls, gateway_calls) = test_state();
         let request = Request::builder()
             .method(Method::POST)
@@ -1737,32 +1927,55 @@ mod tests {
             .await
             .expect("router responds");
 
-        assert_problem(
-            response,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_operation",
-        )
-        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
         assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn product_request_body_is_capped_at_four_mib() {
-        let catalog = test_catalog();
-        let contract = catalog
-            .get(
-                WorkspaceProductApiOperation::from_str_name("WORKSPACE_PRODUCT_API_OPERATION_01")
-                    .expect("canonical operation"),
-            )
-            .expect("catalog entry");
+    async fn externally_composed_browser_routes_require_verified_session_context() {
+        async fn credential_handler(State(calls): State<Arc<AtomicUsize>>) -> StatusCode {
+            calls.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NO_CONTENT
+        }
+
+        let (state, verifier_calls, _) = test_state();
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let routes = Router::new()
+            .route("/credential-registration", any(credential_handler))
+            .with_state(Arc::clone(&handler_calls));
+        let app = with_verified_web_session_routes(state, routes);
         let request = Request::builder()
-            .method(Method::POST)
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(vec![b'a'; MAX_JSON_BODY_BYTES + 1]))
+            .method(Method::GET)
+            .uri("/credential-registration")
+            .header(ORIGIN, "https://client.example")
+            .body(Body::empty())
             .expect("request is valid");
 
-        let result = read_request_json(request, contract).await;
-        assert!(matches!(result, Err(RequestFailure::PayloadTooLarge)));
+        let response = app.oneshot(request).await.expect("router responds");
+        assert_problem(response, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn v2_query_parameters_are_rejected_before_authentication() {
+        let (state, verifier_calls, gateway_calls) = test_state();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/workspace/v2/workspaces/ws-1/products/invocations?ownerId=echo")
+            .header(ORIGIN, "https://client.example")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"ownerId":"echo","operationId":"workspaceGetEvaluationSuite"}"#,
+            ))
+            .expect("request is valid");
+        let response = router(state)
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        assert_problem(response, StatusCode::BAD_REQUEST, "invalid_request").await;
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
     }
 }

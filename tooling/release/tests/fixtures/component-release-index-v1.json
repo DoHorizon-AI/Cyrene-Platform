@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "repository": "DoHorizon-AI/Cyrene-Platform",
+  "channel": "preview",
+  "generatedAt": "2026-10-01T12:00:00Z",
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Platform",
+    "ref": "refs/heads/develop",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "subjectName": "component-release-index-v1.json",
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "123456789",
+        "attempt": 1,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/123456789/attempts/1"
+      }
+    }
+  },
+  "releases": [
+    {
+      "componentId": "cyrene-sample",
+      "version": "1111111111111111111111111111111111111111",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04-東京",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "gnu"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1111111111111111111111111111111111111111/cyrene-sample-linux-ubuntu-24-04-x86-64-gnu.manifest.json",
+      "manifestDigest": "sha256:76db4fe4f0d26a2eabc330ec6bf1b55cd908d140527a264b12c4b326524cd8f8"
+    }
+  ],
+  "compatibilityGroups": [
+    {
+      "groupId": "workspace-product-v2",
+      "contractApiVersion": "0.1.0",
+      "wireApiVersion": "cyrene.workspace.product.v2",
+      "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Platform",
+        "commit": "1111111111111111111111111111111111111111",
+        "path": "tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json",
+        "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "members": [
+        {
+          "componentId": "cyrene-sample",
+          "target": {
+            "os": "linux",
+            "osVersion": "24.04-東京",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "gnu"
+          },
+          "version": "1111111111111111111111111111111111111111",
+          "manifestDigest": "sha256:76db4fe4f0d26a2eabc330ec6bf1b55cd908d140527a264b12c4b326524cd8f8"
+        }
+      ]
+    }
+  ],
+  "indexDigest": "sha256:c740f4a9c3248835ba8bf10426e2ac6adc8757093cc88c4240db4159ee4cc259"
+}

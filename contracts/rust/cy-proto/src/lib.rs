@@ -66,6 +66,12 @@ pub mod cyrene {
     }
 
     pub mod workspace {
+        pub mod product {
+            pub mod v2 {
+                tonic::include_proto!("cyrene.workspace.product.v2");
+            }
+        }
+
         pub mod local {
             pub mod v1 {
                 tonic::include_proto!("cyrene.workspace.local.v1");

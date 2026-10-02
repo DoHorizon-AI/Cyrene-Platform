@@ -62,7 +62,7 @@ chmod 0710 "$RUNTIME_DIR" || fail_closed
 chown "0:$APP_GID" "$RUNTIME_DIR" || fail_closed
 
 # Remove only the fixed output names from the private runtime directory before staging.
-for staged_name in csrf-mac-key relay-ca.pem relay-client.crt relay-client.key handoff-signing-seed; do
+for staged_name in csrf-mac-key relay-ca.pem relay-client.crt relay-client.key handoff-signing-seed user-code-hmac-key device-ca-signing-key.pem device-ca-cert.pem; do
     rm -f -- "$RUNTIME_DIR/$staged_name" || fail_closed
 done
 
@@ -72,12 +72,19 @@ stage_secret relay-ca.pem relay-ca.pem 262144 0
 stage_secret relay-client.crt relay-client.crt 262144 0
 stage_secret relay-client.key relay-client.key 262144 0
 stage_secret handoff-signing-seed handoff-signing-seed 256 32
+stage_secret user-code-hmac-key user-code-hmac-key 256 32
+stage_secret device-ca-signing-key.pem device-ca-signing-key.pem 1048576 0
+stage_secret device-ca-cert.pem device-ca-cert.pem 1048576 0
 
 export CYRENE_WORKSPACE_WEB_BFF_CSRF_KEY_FILE="$RUNTIME_DIR/csrf-mac-key"
 export CYRENE_WORKSPACE_WEB_BFF_RELAY_CA_FILE="$RUNTIME_DIR/relay-ca.pem"
 export CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_CERT_FILE="$RUNTIME_DIR/relay-client.crt"
 export CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_KEY_FILE="$RUNTIME_DIR/relay-client.key"
 export CYRENE_WORKSPACE_WEB_BFF_HANDOFF_SIGNING_SEED_FILE="$RUNTIME_DIR/handoff-signing-seed"
+export CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_HMAC_KEY_FILE="$RUNTIME_DIR/user-code-hmac-key"
+export CYRENE_WORKSPACE_DEVICE_CA_SIGNING_KEY_FILE="$RUNTIME_DIR/device-ca-signing-key.pem"
+export CYRENE_WORKSPACE_DEVICE_CA_CERTIFICATE_FILE="$RUNTIME_DIR/device-ca-cert.pem"
+export CYRENE_WORKSPACE_WEB_BFF_BIND="${CYRENE_WORKSPACE_WEB_BFF_BIND:-0.0.0.0:8080}"
 
 exec /usr/bin/setpriv \
     --reuid="$APP_UID" \

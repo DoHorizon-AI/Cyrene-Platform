@@ -17,11 +17,11 @@ use cy_proto::workspace_v1::{
 use thiserror::Error;
 use tonic::codegen::http::Uri;
 
-use crate::transport::RelayTransportError;
-use crate::{
-    connect_relay_session, validate_descriptor, RelayClientConfig, RelaySession,
-    VerifiedWebPrincipal, WebRelaySessionCredentialIssuer,
+use cy_workspace_client_sdk::{
+    connect_relay_session, validate_workspace_descriptor as validate_descriptor, RelayClientConfig,
+    RelaySession, RelayTransportError,
 };
+use cy_workspace_control_plane::{VerifiedWebPrincipal, WebRelaySessionCredentialIssuer};
 
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_WORKSPACE_DESCRIPTORS: usize = 1024;

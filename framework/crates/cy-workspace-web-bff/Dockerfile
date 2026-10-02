@@ -10,6 +10,7 @@ RUN apt-get update \
 
 WORKDIR /source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json
 COPY contracts contracts
 COPY kernel kernel
 COPY framework framework
@@ -17,6 +18,9 @@ COPY runtime runtime
 COPY agents agents
 COPY adapters adapters
 COPY sdk/rust sdk/rust
+COPY --from=product-contracts / /source/product-contracts/
+
+ENV CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_BUILD_ROOT=/source/product-contracts
 
 RUN cargo build --locked --release -p cy-workspace-web-bff --bin cy-workspace-web-bff
 
@@ -35,7 +39,8 @@ COPY --from=product-contracts --chown=0:0 / /opt/cyrene/product-contracts/
 RUN chmod 0555 /usr/local/libexec/cyrene/workspace-web-bff-entrypoint \
     && chmod -R a-w /opt/cyrene/product-contracts
 
-ENV CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT=/opt/cyrene/product-contracts
+ENV CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT_V2=/opt/cyrene/product-contracts
+ENV CYRENE_WORKSPACE_WEB_BFF_BIND=0.0.0.0:8080
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/libexec/cyrene/workspace-web-bff-entrypoint"]

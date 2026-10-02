@@ -1,5 +1,63 @@
 # Workspace Product contract bundle builder
 
+## Product API v2 release lock
+
+`build_v2_bundle.py` builds the generic Product API v2 context from exact
+owner Git commit objects. It reads `contracts/product/v2/catalog.json` from
+each named owner commit and packages every referenced OpenAPI document and
+local `$ref` closure. The Platform policy is packaged as a separately pinned
+sidecar. Dirty checkouts are safe because file bytes come from `git cat-file`
+at the supplied full commit SHA; branches and mutable worktree contents are
+never used as release inputs.
+
+The Platform compatibility authority is
+[`releases/workspace-product-v2.lock.json`](releases/workspace-product-v2.lock.json).
+It pins the raw bundle manifest digest, the complete sorted dynamic owner map,
+each owner catalog digest, the Product wire and contract API versions, and the
+separate Platform policy schema and digest. BFF `build.rs` embeds these pins
+and checks a supplied BuildKit context against them. Runtime requests and
+environment variables cannot override the pins.
+
+The initial v2 release uses six owner commits and has manifest SHA-256
+`f241fae23c8dec0fdc88a146452b83e84009c2e57db8c3f8516c746ced1deefd`.
+Reproduce and verify its build context from the Cyrene umbrella checkout with:
+
+```sh
+PLATFORM=/path/to/Cyrene-Platform
+SERVICES=/path/to/Cyrene-Services
+python3 "$PLATFORM/tooling/workspace-product-contract-bundle/build_v2_bundle.py" \
+  --source catalyst="$SERVICES/Cyrene-Catalyst" --commit catalyst=75ad5ded966f66609f2b016fb96c62be1511ef02 \
+  --source echo="$SERVICES/Cyrene-Echo" --commit echo=4de40bd9e50f3048491b00e868f7767911237b63 \
+  --source exchange="$SERVICES/Cyrene-Exchange" --commit exchange=8a6258e656d90bc8fcc22ce570b61917fad7763a \
+  --source navigator="$SERVICES/Cyrene-Navigator" --commit navigator=8224a47551533c1d17857d418ff63dc1857b8b2d \
+  --source reactor="$SERVICES/Cyrene-Reactor" --commit reactor=c8f11c09b4f873bf1a550e83a528c5ea05c0b446 \
+  --source yield="$SERVICES/Cyrene-Yield" --commit yield=4fc49155786e594ec5f67e5c8f42ec5b35cdd9ab \
+  --output /tmp/workspace-product-v2-bundle \
+  --verify-lock "$PLATFORM/tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
+```
+
+To propose a reviewed lock update, use the same command with a new external
+output path and `--write-lock /tmp/workspace-product-v2.lock.json`, review the
+resulting lock, then update the tracked lock in a Platform change. The builder
+never self-pins its bundle context. Generic catalog, policy, lock, and
+cross-language invocation scenarios are specified under
+`contracts/schemas/` and `contracts/tck/workspace-product/v2/`.
+
+Run the Rust dynamic-operation TCK and the optional exact-release loader smoke
+from the Platform workspace. The second command uses a generated external
+bundle context and the tracked Platform lock:
+
+```sh
+CARGO_TARGET_DIR=/tmp/cyrene-components-target cargo test --locked -p cy-workspace-product-contracts --test dynamic_product_v2
+CYRENE_PRODUCT_V2_BUNDLE_ROOT=/tmp/workspace-product-v2-bundle \
+  CARGO_TARGET_DIR=/tmp/cyrene-components-target \
+  cargo test --locked -p cy-workspace-product-contracts --test release_bundle_smoke -- --ignored
+```
+
+The v1 stage2 tool below remains for compatibility evidence. Its fixed
+operation rows are only the initial migration seed; the Product v2 wire and
+runtime resolver have no per-operation enum or operation-specific core branch.
+
 This offline tool creates the release bundle consumed by the Platform Product
 catalog loader. It packages only the six documents selected by the canonical
 Product projection TCK and their local `$ref` closure. File bytes are copied

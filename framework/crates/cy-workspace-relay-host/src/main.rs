@@ -8,9 +8,10 @@
 //!
 //! The host owns only Workspace relay transport and reads membership and
 //! discovery from the PostgreSQL Directory. It does not create Product,
-//! Kernel, Runtime, or Artifact authority. Frontend BFF authentication is an
-//! explicit ACA XFCC plus signed-handoff configuration; WorkspaceConnector
-//! authentication remains disabled until the durable device registry is wired.
+//! Kernel, Runtime, or Artifact authority. Frontend BFF authentication uses a
+//! pinned workload certificate plus signed handoff. Native ingress also
+//! validates Connector certificates against the durable registry and current
+//! signed CRL; ACA remains a separate explicit mode.
 
 use std::env;
 use std::error::Error;
@@ -23,21 +24,29 @@ use std::time::Duration;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use cy_observability::{init_observability, ObservabilityConfig};
 use cy_proto::workspace_v1::UserIdentityRef;
-use cy_workspace_fabric::{
-    bounded_workspace_relay_server, AcaForwardedBffWorkloadCertificateAdapter,
-    BffWorkloadCertificatePin, DurableDirectoryError, PostgresWorkspaceDirectory,
-    RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims, WebRelaySessionVerifier,
-    WorkspaceRelay,
+use cy_workspace_control_plane::bounded_workspace_relay_server;
+use cy_workspace_postgres_storage::{
+    DurableDirectoryError, PostgresRelayPeerSignedCrlChecker, PostgresWorkspaceDeviceRegistry,
+    PostgresWorkspaceDirectory,
+};
+use cy_workspace_relay_runtime::{
+    AcaForwardedBffWorkloadCertificateAdapter, BffWorkloadCertificatePin, RelayAuthenticationError,
+    RelayAuthenticator, RelayPeerCertificateValidator, RelaySessionClaims,
+    TonicBffWorkloadCertificateAdapter, WebRelaySessionVerifier, WorkspaceRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::time::timeout;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 const DEFAULT_RELAY_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_HEALTH_BIND: &str = "127.0.0.1:8081";
 const ACA_INGRESS_ASSERTION: &str = "client-certificate-required";
+const INGRESS_MODE_ENV: &str = "CYRENE_WORKSPACE_RELAY_INGRESS_MODE";
+const NATIVE_SERVER_CERTIFICATE_ENV: &str = "CYRENE_WORKSPACE_RELAY_NATIVE_SERVER_CERT_FILE";
+const NATIVE_SERVER_KEY_ENV: &str = "CYRENE_WORKSPACE_RELAY_NATIVE_SERVER_KEY_FILE";
+const NATIVE_DEVICE_CA_BUNDLE_ENV: &str = "CYRENE_WORKSPACE_RELAY_NATIVE_DEVICE_CA_BUNDLE_FILE";
 const BFF_CLIENT_CA_BUNDLE_ENV: &str = "CYRENE_WORKSPACE_RELAY_BFF_CLIENT_CA_BUNDLE";
 const BFF_CERTIFICATE_ALLOWLIST_ENV: &str = "CYRENE_WORKSPACE_RELAY_BFF_CERT_ALLOWLIST";
 const WEB_HANDOFF_ISSUER_ENV: &str = "CYRENE_WORKSPACE_RELAY_WEB_HANDOFF_ISSUER";
@@ -51,8 +60,16 @@ const MAX_HEALTH_REQUEST_BYTES: usize = 2048;
 const MAX_HEALTH_CONNECTIONS: usize = 32;
 const MAX_BFF_CLIENT_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 const MAX_BFF_CERTIFICATE_ALLOWLIST_BYTES: u64 = 64 * 1024;
+const MAX_NATIVE_SERVER_CERTIFICATE_BYTES: u64 = 1024 * 1024;
+const MAX_NATIVE_SERVER_KEY_BYTES: u64 = 1024 * 1024;
 const READINESS_PROBE_ISSUER: &str = "https://relay-readiness.invalid";
 const READINESS_PROBE_SUBJECT: &str = "workspace-directory-probe";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayIngressMode {
+    Aca,
+    Native,
+}
 
 struct FrontendWorkloadConfig {
     client_ca_bundle: PathBuf,
@@ -65,7 +82,16 @@ struct FrontendWorkloadConfig {
 struct HostConfig {
     relay_bind: SocketAddr,
     health_bind: SocketAddr,
+    ingress_mode: RelayIngressMode,
     frontend_workload: Option<FrontendWorkloadConfig>,
+    native_tls: Option<NativeTlsConfig>,
+}
+
+struct NativeTlsConfig {
+    server_certificate: Vec<u8>,
+    server_private_key: Vec<u8>,
+    client_ca_bundle: Vec<u8>,
+    device_ca_bundle: Vec<u8>,
 }
 
 impl HostConfig {
@@ -75,6 +101,7 @@ impl HostConfig {
         let relay_bind = socket_addr_from_env("CYRENE_WORKSPACE_RELAY_BIND", DEFAULT_RELAY_BIND)?;
         let health_bind =
             socket_addr_from_env("CYRENE_WORKSPACE_RELAY_HEALTH_BIND", DEFAULT_HEALTH_BIND)?;
+        let ingress_mode = parse_ingress_mode(optional_nonempty_env(INGRESS_MODE_ENV)?)?;
         let ingress_assertion =
             match env::var_os("CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION") {
                 Some(value) => Some(value.into_string().map_err(|_| {
@@ -82,10 +109,31 @@ impl HostConfig {
                 })?),
                 None => None,
             };
+        validate_ingress_mode_configuration(
+            ingress_mode,
+            ingress_assertion.is_some(),
+            [
+                NATIVE_SERVER_CERTIFICATE_ENV,
+                NATIVE_SERVER_KEY_ENV,
+                NATIVE_DEVICE_CA_BUNDLE_ENV,
+            ]
+            .into_iter()
+            .any(|name| env::var_os(name).is_some()),
+        )?;
         let health_assertion = env::var("CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION").ok();
-        let aca_ingress_enabled =
-            validate_aca_ingress_config(relay_bind, ingress_assertion.as_deref())?;
-        let frontend_workload = frontend_workload_config(aca_ingress_enabled)?;
+        let frontend_workload = match ingress_mode {
+            RelayIngressMode::Aca => {
+                let aca_ingress_enabled =
+                    validate_aca_ingress_config(relay_bind, ingress_assertion.as_deref())?;
+                frontend_workload_config(aca_ingress_enabled, RelayIngressMode::Aca)?
+            }
+            RelayIngressMode::Native => frontend_workload_config(true, RelayIngressMode::Native)?,
+        };
+        let native_tls = if ingress_mode == RelayIngressMode::Native {
+            Some(native_tls_config(frontend_workload.as_ref())?)
+        } else {
+            None
+        };
         if health_assertion
             .as_deref()
             .is_some_and(|assertion| assertion != HEALTH_BIND_ASSERTION)
@@ -107,16 +155,45 @@ impl HostConfig {
         Ok(Self {
             relay_bind,
             health_bind,
+            ingress_mode,
             frontend_workload,
+            native_tls,
         })
     }
 }
 
+fn parse_ingress_mode(value: Option<String>) -> Result<RelayIngressMode, Box<dyn Error>> {
+    match value.as_deref() {
+        Some("aca") => Ok(RelayIngressMode::Aca),
+        Some("native") => Ok(RelayIngressMode::Native),
+        Some(_) => Err(format!("{INGRESS_MODE_ENV} must be 'aca' or 'native'").into()),
+        None => Err(format!("{INGRESS_MODE_ENV} must explicitly select 'aca' or 'native'").into()),
+    }
+}
+
+fn validate_ingress_mode_configuration(
+    ingress_mode: RelayIngressMode,
+    aca_assertion_present: bool,
+    native_tls_configuration_present: bool,
+) -> Result<(), Box<dyn Error>> {
+    match ingress_mode {
+        RelayIngressMode::Aca if native_tls_configuration_present => {
+            Err("ACA Relay mode rejects native TLS configuration".into())
+        }
+        RelayIngressMode::Native if aca_assertion_present => {
+            Err("native Relay mode rejects CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION".into())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn frontend_workload_config(
-    aca_ingress_enabled: bool,
+    ingress_enabled: bool,
+    ingress_mode: RelayIngressMode,
 ) -> Result<Option<FrontendWorkloadConfig>, Box<dyn Error>> {
     parse_frontend_workload_config(
-        aca_ingress_enabled,
+        ingress_enabled,
+        ingress_mode,
         env::var_os(BFF_CLIENT_CA_BUNDLE_ENV).map(PathBuf::from),
         env::var_os(BFF_CERTIFICATE_ALLOWLIST_ENV).map(PathBuf::from),
         optional_nonempty_env(WEB_HANDOFF_ISSUER_ENV)?,
@@ -126,7 +203,8 @@ fn frontend_workload_config(
 }
 
 fn parse_frontend_workload_config(
-    aca_ingress_enabled: bool,
+    ingress_enabled: bool,
+    ingress_mode: RelayIngressMode,
     client_ca_bundle: Option<PathBuf>,
     certificate_allowlist: Option<PathBuf>,
     handoff_issuer: Option<String>,
@@ -153,11 +231,14 @@ fn parse_frontend_workload_config(
         )
         .into());
     }
-    if !aca_ingress_enabled {
-        return Err(format!(
-        "BFF Frontend authentication requires CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION={ACA_INGRESS_ASSERTION}"
-        )
-        .into());
+    if !ingress_enabled {
+        let message = match ingress_mode {
+            RelayIngressMode::Aca => format!(
+                "BFF Frontend authentication requires CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION={ACA_INGRESS_ASSERTION}"
+            ),
+            RelayIngressMode::Native => "BFF Frontend authentication requires native Relay mode".to_string(),
+        };
+        return Err(message.into());
     }
     if client_ca_bundle
         .as_ref()
@@ -189,6 +270,142 @@ fn parse_frontend_workload_config(
         handoff_audience: handoff_audience.ok_or("BFF handoff audience is required")?,
         handoff_public_key,
     }))
+}
+
+fn native_tls_config(
+    frontend: Option<&FrontendWorkloadConfig>,
+) -> Result<NativeTlsConfig, Box<dyn Error>> {
+    let server_certificate = read_bounded_regular_file(
+        required_path(NATIVE_SERVER_CERTIFICATE_ENV)?,
+        MAX_NATIVE_SERVER_CERTIFICATE_BYTES,
+        "Relay native server certificate",
+    )?;
+    let server_private_key = read_restricted_private_key(
+        required_path(NATIVE_SERVER_KEY_ENV)?,
+        MAX_NATIVE_SERVER_KEY_BYTES,
+    )?;
+    let device_ca_bundle = read_bff_client_ca_bundle(&required_path(NATIVE_DEVICE_CA_BUNDLE_ENV)?)?;
+    let frontend =
+        frontend.ok_or("native Relay mode requires pinned BFF workload configuration")?;
+    let client_ca_bundle = read_bff_client_ca_bundle(&frontend.client_ca_bundle)?;
+    Ok(NativeTlsConfig {
+        server_certificate,
+        server_private_key,
+        client_ca_bundle,
+        device_ca_bundle,
+    })
+}
+
+fn required_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let path = env::var_os(name)
+        .ok_or_else(|| format!("required path environment variable {name} is missing"))?;
+    if path.is_empty() {
+        return Err(format!("{name} must not be empty").into());
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn read_bounded_regular_file(
+    path: PathBuf,
+    max_bytes: u64,
+    description: &str,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let path_metadata = std::fs::symlink_metadata(&path)?;
+    if !path_metadata.is_file() {
+        return Err(format!("{description} must not be a symbolic link").into());
+    }
+    let file = std::fs::File::open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+        return Err(format!(
+            "{description} must be a non-empty regular file no larger than {max_bytes} bytes"
+        )
+        .into());
+    }
+    let mut contents = Vec::with_capacity(usize::try_from(metadata.len())?);
+    file.take(max_bytes + 1).read_to_end(&mut contents)?;
+    if contents.is_empty() || contents.len() as u64 > max_bytes {
+        return Err(format!("{description} exceeds {max_bytes} bytes").into());
+    }
+    Ok(contents)
+}
+
+fn read_restricted_private_key(path: PathBuf, max_bytes: u64) -> Result<Vec<u8>, Box<dyn Error>> {
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component.as_os_str().to_str(),
+                Some("versions" | "releases" | "current")
+            )
+        })
+    {
+        return Err("Relay native server key must be outside versioned release directories".into());
+    }
+    let path_metadata = std::fs::symlink_metadata(&path)?;
+    if !path_metadata.is_file() {
+        return Err("Relay native server key must not be a symbolic link".into());
+    }
+    let file = open_relay_private_key(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+        return Err(format!("Relay native server key must be a non-empty regular file no larger than {max_bytes} bytes").into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let process = std::fs::metadata("/proc/self")?;
+        let parent = path
+            .parent()
+            .ok_or("Relay native server key has no parent directory")?;
+        let parent_metadata = std::fs::symlink_metadata(parent)?;
+        if metadata.permissions().mode() & 0o077 != 0
+            || parent_metadata.permissions().mode() & 0o077 != 0
+            || metadata.uid() != process.uid()
+            || parent_metadata.uid() != process.uid()
+            || !parent_metadata.is_dir()
+        {
+            return Err(
+                "Relay native server key and parent directory must be owner-only and owned by the process user".into(),
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    return Err("Relay native server key file checks are unsupported on this platform".into());
+    let mut contents = Vec::with_capacity(usize::try_from(metadata.len())?);
+    file.take(max_bytes + 1).read_to_end(&mut contents)?;
+    if contents.is_empty() || contents.len() as u64 > max_bytes {
+        return Err("Relay native server key exceeds the configured size limit".into());
+    }
+    Ok(contents)
+}
+
+#[cfg(target_os = "linux")]
+fn open_relay_private_key(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x20000 | 0x80000)
+        .open(path)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_relay_private_key(path: &Path) -> io::Result<std::fs::File> {
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Relay native server key must not be a symbolic link",
+        ));
+    }
+    std::fs::File::open(path)
+}
+
+#[cfg(not(unix))]
+fn open_relay_private_key(_path: &Path) -> io::Result<std::fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Relay native server key file checks are unsupported on this platform",
+    ))
 }
 
 fn optional_nonempty_env(name: &str) -> Result<Option<String>, Box<dyn Error>> {
@@ -334,41 +551,103 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn run_host() -> Result<(), Box<dyn Error>> {
     let config = HostConfig::from_env()?;
     let directory = Arc::new(PostgresWorkspaceDirectory::connect_from_environment().await?);
-    let authenticator: Arc<dyn RelayAuthenticator> = match &config.frontend_workload {
-        Some(frontend_config) => Arc::new(WebRelaySessionVerifier::new(
-            frontend_config.handoff_issuer.clone(),
-            frontend_config.handoff_audience.clone(),
-            frontend_config.handoff_public_key,
-        )?),
-        None => Arc::new(UnavailableFrontendIdentity),
-    };
-    let relay = if let Some(frontend_config) = &config.frontend_workload {
-        let bff_ca_bundle = read_bff_client_ca_bundle(&frontend_config.client_ca_bundle)?;
-        let certificate_pins =
-            read_bff_certificate_allowlist(&frontend_config.certificate_allowlist)?;
-        let frontend_adapter =
-            AcaForwardedBffWorkloadCertificateAdapter::new(&bff_ca_bundle, certificate_pins)?;
-        WorkspaceRelay::with_aca_forwarded_frontend_certificate_adapter(
-            directory.clone(),
-            authenticator,
-            frontend_adapter,
-        )
-    } else {
-        WorkspaceRelay::new(directory.clone(), authenticator)
+    let authenticator: Arc<dyn RelayAuthenticator> = config
+        .frontend_workload
+        .as_ref()
+        .map(|frontend_config| {
+            WebRelaySessionVerifier::new(
+                frontend_config.handoff_issuer.clone(),
+                frontend_config.handoff_audience.clone(),
+                frontend_config.handoff_public_key,
+            )
+            .map(|verifier| Arc::new(verifier) as Arc<dyn RelayAuthenticator>)
+        })
+        .transpose()?
+        .unwrap_or_else(|| Arc::new(UnavailableFrontendIdentity));
+
+    let mut registry_for_readiness = None;
+    let mut revocation_for_readiness = None;
+    let (relay, tls_config) = match config.ingress_mode {
+        RelayIngressMode::Aca => {
+            let relay = if let Some(frontend_config) = &config.frontend_workload {
+                let bff_ca_bundle = read_bff_client_ca_bundle(&frontend_config.client_ca_bundle)?;
+                let certificate_pins =
+                    read_bff_certificate_allowlist(&frontend_config.certificate_allowlist)?;
+                let frontend_adapter = AcaForwardedBffWorkloadCertificateAdapter::new(
+                    &bff_ca_bundle,
+                    certificate_pins,
+                )?;
+                WorkspaceRelay::with_aca_forwarded_frontend_certificate_adapter(
+                    directory.clone(),
+                    authenticator,
+                    frontend_adapter,
+                )
+            } else {
+                WorkspaceRelay::new(directory.clone(), authenticator)
+            };
+            (relay, None)
+        }
+        RelayIngressMode::Native => {
+            let frontend_config = config
+                .frontend_workload
+                .as_ref()
+                .ok_or("native Relay mode requires pinned BFF workload configuration")?;
+            let native_tls = config
+                .native_tls
+                .as_ref()
+                .ok_or("native Relay TLS configuration is missing")?;
+            let certificate_pins =
+                read_bff_certificate_allowlist(&frontend_config.certificate_allowlist)?;
+            let bff_adapter = TonicBffWorkloadCertificateAdapter::new(
+                &native_tls.client_ca_bundle,
+                certificate_pins,
+            )?;
+            let device_validator =
+                RelayPeerCertificateValidator::from_pem_bundle(&native_tls.device_ca_bundle)?;
+            let registry =
+                Arc::new(PostgresWorkspaceDeviceRegistry::connect_relay_from_environment()?);
+            let revocation_checker =
+                Arc::new(PostgresRelayPeerSignedCrlChecker::connect_from_environment()?);
+            let relay = WorkspaceRelay::with_tonic_bff_frontend_certificate_adapter(
+                directory.clone(),
+                authenticator,
+                registry.clone(),
+                device_validator,
+                revocation_checker.clone(),
+                bff_adapter,
+            );
+            let mut trusted_client_roots = native_tls.client_ca_bundle.clone();
+            trusted_client_roots.extend_from_slice(b"\n");
+            trusted_client_roots.extend_from_slice(&native_tls.device_ca_bundle);
+            let tls_config = ServerTlsConfig::new()
+                .identity(Identity::from_pem(
+                    native_tls.server_certificate.clone(),
+                    native_tls.server_private_key.clone(),
+                ))
+                .client_ca_root(Certificate::from_pem(trusted_client_roots));
+            registry_for_readiness = Some(registry);
+            revocation_for_readiness = Some(revocation_checker);
+            (relay, Some(tls_config))
+        }
     };
     let health_listener = TcpListener::bind(config.health_bind).await?;
     let readiness = Arc::new(RelayReadiness {
         directory: directory.clone(),
+        ingress_mode: config.ingress_mode,
         frontend_authentication_configured: config.frontend_workload.is_some(),
-        workspace_peer_certificate_validation_configured: false,
-        workspace_peer_revocation_configured: false,
-        workspace_device_current_registry_configured: false,
+        registry: registry_for_readiness,
+        revocation_checker: revocation_for_readiness,
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let relay_shutdown = shutdown_rx.clone();
     let health_shutdown = shutdown_rx;
-    let relay_server = Server::builder()
+    let server_builder = Server::builder();
+    let mut server_builder = match tls_config {
+        Some(tls_config) => server_builder.tls_config(tls_config)?,
+        None => server_builder,
+    };
+    let relay_server = server_builder
         .add_service(bounded_workspace_relay_server(relay))
         .serve_with_shutdown(config.relay_bind, wait_for_shutdown(relay_shutdown));
     let health_server = serve_health(
@@ -385,20 +664,31 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
         event.name = "platform.workspace_relay.host_started",
         relay_bind = %config.relay_bind,
         health_bind = %config.health_bind,
+        ingress_mode = match config.ingress_mode {
+            RelayIngressMode::Aca => "aca_xfcc",
+            RelayIngressMode::Native => "native_tonic_mtls",
+        },
         frontend_authentication = if config.frontend_workload.is_some() {
             "bff_workload_certificate_and_signed_handoff"
         } else {
             "deny_all_without_bff_workload_and_handoff_config"
         },
         workspace_directory = "postgresql",
-        workspace_device_authentication = "disabled_until_peer_certificate_validation_revocation_and_current_registry_are_composed",
+        workspace_device_authentication = if config.ingress_mode == RelayIngressMode::Native {
+            "native_peer_certificate_signed_crl_and_current_registry"
+        } else {
+            "disabled_in_aca_frontend_mode"
+        },
         ready = false,
         message = "Workspace Relay host is listening with fail-closed authentication",
     );
-    tracing::warn!(
-        event.name = "platform.workspace_relay.production_gate",
-        error.code = "RELAY_PRODUCTION_ACCESS_CONTROL_UNAVAILABLE",
-        message = "Directory membership is backed by PostgreSQL; Directory administration, durable device registry, DeviceAuthorization, CA issuance, WebAuthn, Product private access, and verified deployment topology remain unavailable; /readyz remains unavailable",
+    tracing::info!(
+        event.name = "platform.workspace_relay.dependencies_composed",
+        native_device_authentication = config.ingress_mode == RelayIngressMode::Native,
+        directory_admin_api_mounted = false,
+        device_authorization_api_mounted = false,
+        product_private_access = false,
+        message = "Relay readiness probes the configured ingress dependencies and durable stores; management APIs remain outside this process",
     );
 
     enum HostExit {
@@ -476,10 +766,10 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 
 struct RelayReadiness {
     directory: Arc<PostgresWorkspaceDirectory>,
+    ingress_mode: RelayIngressMode,
     frontend_authentication_configured: bool,
-    workspace_peer_certificate_validation_configured: bool,
-    workspace_peer_revocation_configured: bool,
-    workspace_device_current_registry_configured: bool,
+    registry: Option<Arc<PostgresWorkspaceDeviceRegistry>>,
+    revocation_checker: Option<Arc<PostgresRelayPeerSignedCrlChecker>>,
 }
 
 impl RelayReadiness {
@@ -494,49 +784,42 @@ impl RelayReadiness {
         )
         .await
         .is_ok_and(|result: Result<Vec<String>, DurableDirectoryError>| result.is_ok());
-        let workspace_peer_certificate_validation =
-            self.workspace_peer_certificate_validation_configured;
-        let workspace_peer_revocation = self.workspace_peer_revocation_configured;
-        let workspace_device_current_registry = self.workspace_device_current_registry_configured;
-        let workspace_device_registry = false;
-        let directory_administration = false;
-        let device_authorization = false;
-        let certificate_issuance = false;
-        let webauthn = false;
-        let product_private_access = false;
-        let deployment_topology_verified = false;
+        let native_mtls = self.ingress_mode == RelayIngressMode::Native;
+        let workspace_device_registry = match self.registry.clone() {
+            Some(registry) => timeout(
+                DIRECTORY_READINESS_TIMEOUT,
+                tokio::task::spawn_blocking(move || registry.health_check().is_ok()),
+            )
+            .await
+            .is_ok_and(|result| result.unwrap_or(false)),
+            None => false,
+        };
+        let current_signed_crl = match self.revocation_checker.clone() {
+            Some(checker) => timeout(
+                DIRECTORY_READINESS_TIMEOUT,
+                tokio::task::spawn_blocking(move || checker.check_current_crl().is_ok()),
+            )
+            .await
+            .is_ok_and(|result| result.unwrap_or(false)),
+            None => false,
+        };
         let ready = directory_available
             && self.frontend_authentication_configured
-            && workspace_peer_certificate_validation
-            && workspace_peer_revocation
-            && workspace_device_current_registry
-            && workspace_device_registry
-            && directory_administration
-            && device_authorization
-            && certificate_issuance
-            && webauthn
-            && product_private_access
-            && deployment_topology_verified;
+            && (!native_mtls || (workspace_device_registry && current_signed_crl));
         let (status, reason, state) = if ready {
             (200, "OK", "ready")
         } else {
             (503, "Service Unavailable", "not_ready")
         };
         let body = format!(
-            r#"{{"status":"{}","checks":{{"directoryDatabase":{},"frontendAuthenticationConfigured":{},"workspacePeerCertificateValidation":{},"workspacePeerRevocation":{},"workspaceDeviceCurrentRegistry":{},"directoryAdministration":{},"workspaceDeviceRegistry":{},"deviceAuthorization":{},"certificateIssuance":{},"webauthn":{},"productPrivateAccess":{},"deploymentTopologyVerified":{}}}}}"#,
+            r#"{{"status":"{}","checks":{{"directoryDatabase":{},"frontendAuthenticationConfigured":{},"nativeTonicMtls":{},"workspacePeerCertificateValidation":{},"workspacePeerRevocation":{},"workspaceDeviceCurrentRegistry":{}}}}}"#,
             state,
             directory_available,
             self.frontend_authentication_configured,
-            workspace_peer_certificate_validation,
-            workspace_peer_revocation,
-            workspace_device_current_registry,
-            directory_administration,
+            native_mtls,
+            native_mtls,
+            current_signed_crl,
             workspace_device_registry,
-            device_authorization,
-            certificate_issuance,
-            webauthn,
-            product_private_access,
-            deployment_topology_verified,
         );
         (status, reason, body)
     }
@@ -657,10 +940,12 @@ mod tests {
 
     fn frontend_workload_values(
         aca_ingress_enabled: bool,
+        ingress_mode: RelayIngressMode,
         public_key: String,
     ) -> Result<Option<FrontendWorkloadConfig>, Box<dyn Error>> {
         parse_frontend_workload_config(
             aca_ingress_enabled,
+            ingress_mode,
             Some(PathBuf::from("/etc/cyrene/bff-ca/roots.pem")),
             Some(PathBuf::from("/etc/cyrene/bff-ca/allowlist.json")),
             Some("https://workspace-web-bff.internal".to_string()),
@@ -674,14 +959,24 @@ mod tests {
     }
 
     #[test]
-    fn default_loopback_configuration_does_not_select_aca_identity() {
+    fn ingress_mode_must_be_selected_explicitly() {
+        assert!(parse_ingress_mode(None).is_err());
+        assert_eq!(
+            parse_ingress_mode(Some("native".to_string())).unwrap(),
+            RelayIngressMode::Native
+        );
+        assert_eq!(
+            parse_ingress_mode(Some("aca".to_string())).unwrap(),
+            RelayIngressMode::Aca
+        );
+        assert!(parse_ingress_mode(Some("automatic".to_string())).is_err());
         assert!(!validate_aca_ingress_config(loopback_bind(), None).unwrap());
     }
 
     #[test]
     fn bff_identity_requires_the_explicit_aca_ingress_assertion() {
         let key = URL_SAFE_NO_PAD.encode([7_u8; 32]);
-        assert!(frontend_workload_values(false, key)
+        assert!(frontend_workload_values(false, RelayIngressMode::Aca, key)
             .err()
             .unwrap()
             .to_string()
@@ -709,6 +1004,16 @@ mod tests {
     }
 
     #[test]
+    fn aca_and_native_ingress_configuration_cannot_be_mixed() {
+        assert!(
+            validate_ingress_mode_configuration(RelayIngressMode::Native, true, false).is_err()
+        );
+        assert!(validate_ingress_mode_configuration(RelayIngressMode::Aca, false, true).is_err());
+        assert!(validate_ingress_mode_configuration(RelayIngressMode::Native, false, true).is_ok());
+        assert!(validate_ingress_mode_configuration(RelayIngressMode::Aca, true, false).is_ok());
+    }
+
+    #[test]
     fn bff_ca_bundle_reader_enforces_its_size_limit() {
         let directory = tempfile::tempdir().unwrap();
         let bundle_path = directory.path().join("roots.pem");
@@ -723,15 +1028,51 @@ mod tests {
         assert!(read_bff_client_ca_bundle(&bundle_path).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn frontend_workload_configuration_is_all_or_nothing_and_requires_aca() {
-        assert!(
-            parse_frontend_workload_config(false, None, None, None, None, None)
-                .unwrap()
-                .is_none()
+    fn native_server_key_requires_owner_only_file_and_directory() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key_path = directory.path().join("server.key");
+        std::fs::write(&key_path, b"private-key").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_restricted_private_key(key_path.clone(), MAX_NATIVE_SERVER_KEY_BYTES).unwrap(),
+            b"private-key"
         );
+
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            read_restricted_private_key(key_path.clone(), MAX_NATIVE_SERVER_KEY_BYTES).is_err()
+        );
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let alias_path = directory.path().join("server-key-alias");
+        symlink(&key_path, &alias_path).unwrap();
+        assert!(read_restricted_private_key(alias_path, MAX_NATIVE_SERVER_KEY_BYTES).is_err());
+
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(read_restricted_private_key(key_path, MAX_NATIVE_SERVER_KEY_BYTES).is_err());
+    }
+
+    #[test]
+    fn frontend_workload_configuration_is_all_or_nothing_and_requires_selected_ingress() {
+        assert!(parse_frontend_workload_config(
+            false,
+            RelayIngressMode::Aca,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .is_none());
         assert!(parse_frontend_workload_config(
             true,
+            RelayIngressMode::Native,
             None,
             None,
             Some("issuer".to_string()),
@@ -741,16 +1082,32 @@ mod tests {
         .is_err());
 
         let key = URL_SAFE_NO_PAD.encode([7_u8; 32]);
-        assert!(frontend_workload_values(false, key.clone()).is_err());
-        assert!(frontend_workload_values(true, key).unwrap().is_some());
+        assert!(frontend_workload_values(false, RelayIngressMode::Aca, key.clone()).is_err());
+        assert!(
+            frontend_workload_values(true, RelayIngressMode::Aca, key.clone())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            frontend_workload_values(true, RelayIngressMode::Native, key)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
     fn frontend_handoff_public_key_must_be_canonical_ed25519_bytes() {
-        assert!(frontend_workload_values(true, URL_SAFE_NO_PAD.encode([1_u8; 31])).is_err());
-        assert!(
-            frontend_workload_values(true, format!("{}=", URL_SAFE_NO_PAD.encode([1_u8; 32])))
-                .is_err()
-        );
+        assert!(frontend_workload_values(
+            true,
+            RelayIngressMode::Aca,
+            URL_SAFE_NO_PAD.encode([1_u8; 31])
+        )
+        .is_err());
+        assert!(frontend_workload_values(
+            true,
+            RelayIngressMode::Aca,
+            format!("{}=", URL_SAFE_NO_PAD.encode([1_u8; 32]))
+        )
+        .is_err());
     }
 }

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/platform/product-operation-catalog.v2.schema.json",
+  "title": "Cyrene Product operation catalog v2",
+  "description": "Owner-published operation metadata. Route method/path and JSON schemas resolve from the source-pinned OpenAPI closure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogVersion", "ownerId", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "cyrene.product.operation-catalog.v2" },
+    "catalogVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "ownerId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/operation" }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "routeId",
+        "openapiPath",
+        "kind",
+        "requestSchemaPointer",
+        "responseSchemaPointers",
+        "resourceId",
+        "idempotency",
+        "scope"
+      ],
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "routeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "openapiPath": {
+          "type": "string",
+          "pattern": "^contracts/product/v[1-9][0-9]*/[^?#]+\\.ya?ml$"
+        },
+        "kind": { "enum": ["READ", "COMMAND"] },
+        "requestSchemaPointer": {
+          "oneOf": [
+            { "type": "string", "pattern": "^#/" },
+            { "type": "null" }
+          ]
+        },
+        "responseSchemaPointers": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^#/" },
+          "uniqueItems": true
+        },
+        "resourceId": { "$ref": "#/$defs/resourceId" },
+        "idempotency": { "$ref": "#/$defs/idempotency" },
+        "scope": { "$ref": "#/$defs/scope" }
+      }
+    },
+    "resourceId": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "pathParameter", "minLength", "maxLength", "pattern"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "pathParameter": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "minLength": { "type": "integer", "minimum": 1, "maximum": 512 },
+        "maxLength": { "type": "integer", "minimum": 1, "maximum": 512 },
+        "pattern": { "type": ["string", "null"], "maxLength": 512 }
+      }
+    },
+    "idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "header", "minLength", "maxLength"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "header": { "type": ["string", "null"], "maxLength": 128 },
+        "minLength": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "maxLength": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "organizationPathParameter",
+        "workspacePathParameter",
+        "requestBindings",
+        "responseBindings"
+      ],
+      "properties": {
+        "organizationPathParameter": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "workspacePathParameter": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "requestBindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonScopeBinding" },
+          "uniqueItems": true
+        },
+        "responseBindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonScopeBinding" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "jsonScopeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonPointer", "matches"],
+      "properties": {
+        "jsonPointer": { "type": "string", "pattern": "^/", "maxLength": 1024 },
+        "matches": { "enum": ["ORGANIZATION_ID", "WORKSPACE_ID", "RESOURCE_ID"] }
+      }
+    }
+  }
+}

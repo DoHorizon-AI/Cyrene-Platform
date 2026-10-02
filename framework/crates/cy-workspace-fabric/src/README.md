@@ -8,7 +8,7 @@
 | `aca_forwarded_certificate.rs` | Explicit ACA XFCC parsing and Rustls-webpki client-certificate validation. | 显式 ACA XFCC 解析与 Rustls-webpki 客户端证书校验。 |
 | `device_auth.rs` | Tonic TLS peer-certificate extraction and registry-backed connector verification. | Tonic TLS 对端证书提取与注册表驱动的 Connector 校验。 |
 | `device_registry.rs` | Import and revocation port for approved device certificates. | 已批准设备证书的导入与撤销接口。 |
-| `directory.rs` | Membership and descriptor validation. | 成员关系与 descriptor 校验。 |
+| `directory.rs` | Membership port; descriptor validation is shared with the client SDK. | 成员关系 port；descriptor 校验由 client SDK 共享。 |
 | `persistent_directory.rs` | Private, single-owner snapshot storage for Directory and device records. | Directory 与设备记录的私有单实例快照存储。 |
 | `durable_directory.rs` | Async PostgreSQL Directory and stable device-registration authority. | 异步 PostgreSQL Directory 与稳定设备 registration authority。 |
 | `api.rs` | Workspace-owned API port, LOCAL adapter, and bounded gRPC server builders. | Workspace 权威 API port、LOCAL adapter 与有界 gRPC server 构造器。 |
@@ -18,8 +18,9 @@
 | `direct.rs` | Session- and membership-checked private API endpoint. | 校验会话与成员关系的私网 API 端点。 |
 | `frontend_relay_client.rs` | Verified-principal Web Frontend client for the outbound mTLS Relay session. | 基于已验证主体的 Web Frontend 出站 mTLS Relay 客户端。 |
 | `relay.rs` | Ephemeral authenticated routing. | 临时认证路由。 |
-| `transport.rs` | Direct candidate selection and outbound mTLS transport. | 直连候选选择与出站 mTLS 传输。 |
-| `sidecar.rs` | External-credential consumer and authenticated local gRPC bridge. | 外部凭据 consumer 与本地认证 gRPC 代理。 |
+| `transport.rs` | Connector-facing Relay session service path; outbound client transport is in the SDK. | Connector 侧 Relay session service path；出站 client transport 位于 SDK。 |
+| `../../cy-workspace-client-sdk/` | Lightweight outbound Workspace discovery and Relay client. | 轻量级 Workspace 发现与 Relay 出站 client。 |
+| `../../cy-workspace-sidecar/src/sidecar.rs` | Local gRPC bridge implementation with no Fabric dependency. | 不依赖 Fabric 的本地 gRPC bridge 实现。 |
 | `user_code_secret.rs` | Versioned HMAC key ring for user-code storage and verification. | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
 
@@ -62,7 +63,7 @@ identity 权威。
 | `aca_forwarded_certificate.rs` | 仅在显式 ACA 模式中解析 XFCC 并校验客户端证书链。 |
 | `device_auth.rs` | Tonic TLS 对端证书提取与注册表驱动的 Connector 校验。 |
 | `device_registry.rs` | 已批准设备证书的导入与撤销接口。 |
-| `directory.rs` | 成员关系和 descriptor 校验。 |
+| `directory.rs` | 成员关系 port；descriptor 校验与 client SDK 共享。 |
 | `persistent_directory.rs` | Directory 与设备记录的私有单实例持久化快照存储。 |
 | `durable_directory.rs` | 异步 PostgreSQL Directory 与稳定设备 registration authority。 |
 | `api.rs` | Workspace 所有的 API port、LOCAL adapter 与有界 gRPC server 构造器。 |
@@ -72,7 +73,9 @@ identity 权威。
 | `direct.rs` | 校验会话与成员关系的私网 API 端点。 |
 | `frontend_relay_client.rs` | 基于已验证主体的 Web Frontend 出站 mTLS Relay 客户端。 |
 | `relay.rs` | 临时认证路由。 |
-| `transport.rs` | 直连候选选择与出站 mTLS 传输。 |
+| `transport.rs` | Connector 侧 Relay session service path；出站 client transport 位于 SDK。 |
+| `../../cy-workspace-client-sdk/` | 轻量级 Workspace 发现与 Relay 出站 client。 |
+| `../../cy-workspace-sidecar/src/sidecar.rs` | 不依赖 Fabric 的本地 gRPC bridge 实现。 |
 | `user_code_secret.rs` | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixture 与受限 Directory 配置 CLI。 |
 

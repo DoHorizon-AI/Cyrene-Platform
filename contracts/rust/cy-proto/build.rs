@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider_proto = proto_dir.join("cyrene/provider/v1/kernel_provider.proto");
     let service_supervision_proto = proto_dir.join("cyrene/core/v1/service_supervision.proto");
     let workspace_fabric_proto = proto_dir.join("cyrene/workspace/v1/workspace_fabric.proto");
+    let workspace_product_v2_proto =
+        proto_dir.join("cyrene/workspace/product/v2/product_api.proto");
     let workspace_sidecar_proto =
         proto_dir.join("cyrene/workspace/local/v1/workspace_sidecar.proto");
     let device_enrollment_proto = proto_dir.join("cyrene/device/v1/device_enrollment.proto");
@@ -41,6 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "cargo:rerun-if-changed={}",
         workspace_fabric_proto.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_product_v2_proto.display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -64,11 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         semantic_contract_proto.display()
     );
     println!("cargo:rerun-if-changed={}", provider_proto.display());
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SERVER");
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
+    let generate_server = std::env::var_os("CARGO_FEATURE_SERVER").is_some();
 
     tonic_build::configure()
         .build_client(true)
-        .build_server(true)
+        .build_server(generate_server)
         .build_transport(false)
         .compile_protos(
             &[
@@ -77,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 authority_v2_proto,
                 service_supervision_proto,
                 workspace_fabric_proto,
+                workspace_product_v2_proto,
                 workspace_sidecar_proto,
                 hardware_adapter_proto,
                 sandbox_adapter_proto,

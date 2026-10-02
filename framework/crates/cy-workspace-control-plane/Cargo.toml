@@ -1,0 +1,40 @@
+[package]
+name = "cy-workspace-control-plane"
+version = "0.1.0"
+edition = "2021"
+description = "Trusted Workspace identity, authorization, and control-plane services for Platform hosts."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+base64 = "0.22"
+cy-observability = { version = "0.1.0", path = "../cy-observability" }
+cy-mtls-channel-client = { version = "0.1.0", path = "../cy-mtls-channel-client" }
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-client-sdk = { version = "0.1.0", path = "../cy-workspace-client-sdk" }
+cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts" }
+ed25519-dalek = "2.2"
+futures-util = "0.3"
+hmac = "0.12"
+jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto", "use_pem"] }
+prost = "0.13"
+prost-types = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = "1.0"
+tokio = { version = "1.35", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+tonic = "0.12"
+tracing = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3.8"

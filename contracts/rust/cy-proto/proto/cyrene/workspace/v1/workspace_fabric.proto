@@ -13,6 +13,7 @@ package cyrene.workspace.v1;
 
 import "cyrene/core/v1/node_control.proto";
 import "cyrene/semantic/v1/kernel_contract.proto";
+import "cyrene/workspace/product/v2/product_api.proto";
 import "google/protobuf/timestamp.proto";
 import "google/rpc/status.proto";
 
@@ -175,6 +176,7 @@ message WorkspaceApiRequest {
     StartWorkspaceOperationRequest start_operation = 10;
     GetWorkspaceOperationRequest get_operation = 11;
     WorkspaceProductApiRequest product_api = 12;
+    cyrene.workspace.product.v2.ProductApiInvocationV2 product_api_v2 = 13;
   }
 }
 
@@ -208,6 +210,7 @@ message WorkspaceApiResponse {
     WorkspaceOperationView operation = 10;
     google.rpc.Status error = 11;
     WorkspaceProductApiResponse product_api = 12;
+    cyrene.workspace.product.v2.ProductApiResponseV2 product_api_v2 = 13;
   }
 }
 

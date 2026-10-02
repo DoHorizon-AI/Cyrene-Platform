@@ -11,6 +11,8 @@ on:
       - "agents/**"
       - "adapters/**"
       - "sdk/rust/**"
+      - "tooling/workspace-product-contract-bundle/**"
+      - "tooling/release/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -25,6 +27,8 @@ on:
       - "agents/**"
       - "adapters/**"
       - "sdk/rust/**"
+      - "tooling/workspace-product-contract-bundle/**"
+      - "tooling/release/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -40,166 +44,45 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    runs-on: ubuntu-24.04
     steps:
-      - name: Check out the pinned Platform source commit
+      - name: Check out the exact source commit
         uses: actions/checkout@v5
         with:
-          path: image-source
-          ref: ${{ github.sha }}
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
-      - name: Check out pinned Product sources
-        uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Catalyst
-          ref: 8aa3432fc17fb0b1de50a4e0d5eb0ca37f4f21c9
-          path: Cyrene-Services/Cyrene-Catalyst
-          persist-credentials: false
-      - uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Echo
-          ref: fcd641832d0d154c18e5ab5811ee7232d6d91fbc
-          path: Cyrene-Services/Cyrene-Echo
-          persist-credentials: false
-      - uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Exchange
-          ref: 85e30c402151b8928ca2d17caaeef923b3669c77
-          path: Cyrene-Services/Cyrene-Exchange
-          persist-credentials: false
-      - uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Navigator
-          ref: 7d5fce9790f719ea6371338b5f3cab3b0372991c
-          path: Cyrene-Services/Cyrene-Navigator
-          persist-credentials: false
-      - uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Reactor
-          ref: 5f211b3a1eaec05dd14b47f5a2341816f61bbf51
-          path: Cyrene-Services/Cyrene-Reactor
-          persist-credentials: false
-      - uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Yield
-          ref: 6b90c62675a0b54134512471cf0d1680989cf184
-          path: Cyrene-Services/Cyrene-Yield
-          persist-credentials: false
-
-      - name: Set up Python for the offline bundle builder
+      - name: Set up Python for the pinned bundle verifier
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Verify lock pins and build the exact Product contract bundle
-        id: verify_bundle
-        env:
-          WORKSPACE_ROOT: ${{ github.workspace }}
-          IMAGE_SOURCE: ${{ github.workspace }}/image-source
-          SOURCE_SHA: ${{ github.sha }}
-          PRODUCT_CONTRACT_OUTPUT: ${{ runner.temp }}/product-contracts-stage2
+      - name: Install bundle builder dependencies
+        run: python -m pip install --disable-pip-version-check -r tooling/workspace-product-contract-bundle/requirements.txt
+
+      - name: Rebuild Product contract context from exact lock SHAs
+        id: product-contracts
         run: |
           set -euo pipefail
-          platform_root="$IMAGE_SOURCE"
-          lock="$platform_root/tooling/workspace-product-contract-bundle/releases/product-contract-bundle-stage2.json"
-          mapfile -t platform_tck < <(
-            python - "$lock" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          lock = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          tck = lock["platformTck"]
-          print(tck["commit"])
-          print(tck["path"])
-          print(tck["sha256"])
-          PY
-          )
-          test "${#platform_tck[@]}" -eq 3
-          tck_commit="${platform_tck[0]}"
-          tck_path="${platform_tck[1]}"
-          tck_sha256="${platform_tck[2]}"
-          test "$tck_path" = "contracts/tck/distributed-workspace-fabric/v1/product-projections.tsv"
-          [[ "$tck_commit" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$tck_sha256" =~ ^[0-9a-f]{64}$ ]]
-
-          test "$(git -C "$platform_root" rev-parse HEAD)" = "$SOURCE_SHA"
-          git -C "$platform_root" cat-file -e "$tck_commit^{commit}"
-          locked_tck_sha256="$(git -C "$platform_root" show "$tck_commit:$tck_path" | sha256sum | cut -d ' ' -f 1)"
-          source_tck_sha256="$(sha256sum "$platform_root/$tck_path" | cut -d ' ' -f 1)"
-          test "$locked_tck_sha256" = "$tck_sha256"
-          test "$source_tck_sha256" = "$tck_sha256"
-
-          python -m venv "$RUNNER_TEMP/product-contract-bundle-venv"
-          "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" -m pip install \
-            --requirement "$platform_root/tooling/workspace-product-contract-bundle/requirements.txt"
-
-          "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" \
-            "$platform_root/tooling/workspace-product-contract-bundle/build_bundle.py" \
-            --source "Cyrene-Catalyst=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Catalyst" \
-            --commit Cyrene-Catalyst=8aa3432fc17fb0b1de50a4e0d5eb0ca37f4f21c9 \
-            --source "Cyrene-Yield=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Yield" \
-            --commit Cyrene-Yield=6b90c62675a0b54134512471cf0d1680989cf184 \
-            --source "Cyrene-Reactor=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Reactor" \
-            --commit Cyrene-Reactor=5f211b3a1eaec05dd14b47f5a2341816f61bbf51 \
-            --source "Cyrene-Exchange=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Exchange" \
-            --commit Cyrene-Exchange=85e30c402151b8928ca2d17caaeef923b3669c77 \
-            --source "Cyrene-Echo=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Echo" \
-            --commit Cyrene-Echo=fcd641832d0d154c18e5ab5811ee7232d6d91fbc \
-            --source "Cyrene-Navigator=$WORKSPACE_ROOT/Cyrene-Services/Cyrene-Navigator" \
-            --commit Cyrene-Navigator=7d5fce9790f719ea6371338b5f3cab3b0372991c \
-            --output "$PRODUCT_CONTRACT_OUTPUT"
-
-          "$RUNNER_TEMP/product-contract-bundle-venv/bin/python" - \
-            "$lock" "$PRODUCT_CONTRACT_OUTPUT/product-contract-bundle.json" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          lock_path, manifest_path = map(Path, sys.argv[1:])
-          lock = json.loads(lock_path.read_text(encoding="utf-8"))
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          expected_repositories = [
-              {"name": row["name"], "commit": row["commit"]}
-              for row in lock["repositories"]
-          ]
-          assert manifest["canonicalTckSha256"] == lock["platformTck"]["sha256"]
-          assert manifest["repositories"] == expected_repositories
-          assert len(manifest["files"]) == 36
-          print("Validated 36 contract files against the Stage 2 source lock.")
-          PY
-          {
-            printf 'platform_tck_commit=%s\n' "$tck_commit"
-            printf 'platform_tck_sha256=%s\n' "$tck_sha256"
-          } >> "$GITHUB_OUTPUT"
+          output="$RUNNER_TEMP/workspace-product-contracts"
+          python tooling/release/prepare_workspace_product_contracts.py \
+            --repository . \
+            --output "$output" \
+            --checkout-root "$RUNNER_TEMP/pinned-product-sources"
+          echo "root=$output" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build the BFF image with the pinned bundle context
+      - name: Build Web BFF image only
         uses: docker/build-push-action@v6
         with:
-          context: ./image-source
-          file: ./image-source/framework/crates/cy-workspace-web-bff/Dockerfile
+          context: .
+          file: framework/crates/cy-workspace-web-bff/Dockerfile
           build-contexts: |
-            product-contracts=${{ runner.temp }}/product-contracts-stage2
-          tags: ghcr.io/dohorizon-ai/cyrene-workspace-web-bff:build-${{ github.sha }}
+            product-contracts=${{ steps.product-contracts.outputs.root }}
+          platforms: linux/amd64
           push: false
-          provenance: false
-
-      - name: Record build-only result
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-          PLATFORM_TCK_COMMIT: ${{ steps.verify_bundle.outputs.platform_tck_commit }}
-          PLATFORM_TCK_SHA256: ${{ steps.verify_bundle.outputs.platform_tck_sha256 }}
-        run: |
-          set -euo pipefail
-          {
-            printf 'Source commit: `%s`\n\n' "$SOURCE_SHA"
-            printf 'Product bundle: offline builder and Stage 2 lock from pinned source commit `%s`; Platform TCK `%s` (`%s`) with a BuildKit `product-contracts` context.\n\n' "$SOURCE_SHA" "$PLATFORM_TCK_COMMIT" "$PLATFORM_TCK_SHA256"
-            printf 'This workflow builds locally on the runner only. It does not log in to GHCR, publish an image, deploy to Azure, or assert production readiness.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
+          tags: ghcr.io/dohorizon-ai/cyrene-workspace-web-bff:build-${{ github.sha }}
+          provenance: mode=max
+          sbom: true
