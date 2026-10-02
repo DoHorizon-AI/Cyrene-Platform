@@ -909,38 +909,42 @@ impl WorkspaceApi for PrincipalScopedBridgeApi {
         match bridge_call {
             Ok(resp) => {
                 let inner = resp.into_inner();
-                if inner.success && inner.product_response.is_some() {
-                    let product_resp = inner.product_response.unwrap();
-                    let _ = self
-                        .authority_service
-                        .submit_invocation_result(tonic::Request::new(
-                            SubmitInvocationResultRequest {
-                                invocation_id: invocation_id.clone(),
-                                credential: credential.clone(),
-                                outcome_status: ExecutionOutcomeStatus::Success as i32,
-                                product_response: Some(product_resp.clone()),
-                                error_message: String::new(),
-                            },
-                        ))
-                        .await;
-                    WorkspaceApiResponse {
-                        request_id,
-                        outcome: Some(workspace_api_response::Outcome::ProductApiV2(product_resp)),
+                match (inner.success, inner.product_response) {
+                    (true, Some(product_resp)) => {
+                        let _ = self
+                            .authority_service
+                            .submit_invocation_result(tonic::Request::new(
+                                SubmitInvocationResultRequest {
+                                    invocation_id: invocation_id.clone(),
+                                    credential: credential.clone(),
+                                    outcome_status: ExecutionOutcomeStatus::Success as i32,
+                                    product_response: Some(product_resp.clone()),
+                                    error_message: String::new(),
+                                },
+                            ))
+                            .await;
+                        WorkspaceApiResponse {
+                            request_id,
+                            outcome: Some(workspace_api_response::Outcome::ProductApiV2(
+                                product_resp,
+                            )),
+                        }
                     }
-                } else {
-                    let _ = self
-                        .authority_service
-                        .submit_invocation_result(tonic::Request::new(
-                            SubmitInvocationResultRequest {
-                                invocation_id: invocation_id.clone(),
-                                credential: credential.clone(),
-                                outcome_status: ExecutionOutcomeStatus::Failed as i32,
-                                product_response: None,
-                                error_message: inner.error_message.clone(),
-                            },
-                        ))
-                        .await;
-                    workspace_error(request_id, 13, "WORKSPACE_BRIDGE_EXECUTION_FAILED")
+                    _ => {
+                        let _ = self
+                            .authority_service
+                            .submit_invocation_result(tonic::Request::new(
+                                SubmitInvocationResultRequest {
+                                    invocation_id: invocation_id.clone(),
+                                    credential: credential.clone(),
+                                    outcome_status: ExecutionOutcomeStatus::Failed as i32,
+                                    product_response: None,
+                                    error_message: inner.error_message.clone(),
+                                },
+                            ))
+                            .await;
+                        workspace_error(request_id, 13, "WORKSPACE_BRIDGE_EXECUTION_FAILED")
+                    }
                 }
             }
             Err(status) => {

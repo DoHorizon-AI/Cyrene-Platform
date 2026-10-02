@@ -100,6 +100,7 @@ impl ContractSnapshotManager {
 /// Abstract storage trait for the persistent Outbox queue.
 #[async_trait]
 pub trait AuthorityOutboxStore: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue(
         &self,
         invocation_id: &str,
@@ -150,6 +151,7 @@ pub struct InMemoryAuthorityOutbox {
 
 #[async_trait]
 impl AuthorityOutboxStore for InMemoryAuthorityOutbox {
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue(
         &self,
         invocation_id: &str,
@@ -488,7 +490,7 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
                 max_batch,
             )
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         for inv in &mut invocations {
             if let Some(ref mut cred) = inv.credential {
@@ -508,7 +510,7 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
             .outbox
             .acknowledge_delivery(&req.invocation_id, &req.connector_id, &req.delivery_receipt)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         Ok(Response::new(AcknowledgeDeliveryResponse {
             acknowledged: acked,
@@ -569,7 +571,7 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
                 },
             )
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         Ok(Response::new(SubmitInvocationResultResponse {
             accepted: updated,

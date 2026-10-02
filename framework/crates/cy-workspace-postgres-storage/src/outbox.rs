@@ -39,6 +39,7 @@ impl OutboxStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "CLAIMED" => Self::Claimed,
@@ -48,6 +49,14 @@ impl OutboxStatus {
             "CANCELLED" => Self::Cancelled,
             _ => Self::Pending,
         }
+    }
+}
+
+impl std::str::FromStr for OutboxStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_str(s))
     }
 }
 
@@ -406,6 +415,7 @@ impl PostgresWorkspaceOutbox {
 impl cy_workspace_control_plane::authority_service::AuthorityOutboxStore
     for PostgresWorkspaceOutbox
 {
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue(
         &self,
         invocation_id: &str,
