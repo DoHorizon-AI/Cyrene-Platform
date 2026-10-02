@@ -130,19 +130,19 @@ pub use cyrene::sandbox::v1 as sandbox_v1;
 /// Transport projection of the Kernel Semantic Contract v1 nouns.
 /// 中文：Kernel Semantic Contract v1 术语的传输投影。
 pub use cyrene::semantic::v1 as semantic_v1;
-/// Loopback cross-language Workspace sidecar boundary.
-pub use cyrene::workspace::local::v1 as workspace_local_v1;
-/// Transport-neutral Workspace discovery and relay API projection.
-/// 中文：与传输方式无关的 Workspace 发现与中继 API 投影。
-pub use cyrene::workspace::v1 as workspace_v1;
 /// Decoupled Authority and invocation lifecycle RPC contract.
 pub use cyrene::workspace::authority::v1 as workspace_authority_v1;
 /// Local frontend bridge RPC contract for BFF decoupling.
 pub use cyrene::workspace::bridge::v1 as workspace_bridge_v1;
+/// Loopback cross-language Workspace sidecar boundary.
+pub use cyrene::workspace::local::v1 as workspace_local_v1;
 /// Product API v2 invocation messages.
 pub use cyrene::workspace::product::v2 as workspace_product_v2;
 /// Decoupled Workspace Relay protocol.
 pub use cyrene::workspace::relay::v1 as workspace_relay_v1;
+/// Transport-neutral Workspace discovery and relay API projection.
+/// 中文：与传输方式无关的 Workspace 发现与中继 API 投影。
+pub use cyrene::workspace::v1 as workspace_v1;
 
 #[cfg(test)]
 #[allow(deprecated)]

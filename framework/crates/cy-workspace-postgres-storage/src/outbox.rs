@@ -7,11 +7,11 @@
 //! │  · 事务内原子检查代次与撤销；相同调用 ID 相同摘要幂等返回，不同摘要拒绝。│
 //! └─────────────────────────────────────────────────────────────────────┘
 
-use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
+use std::fmt;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const OUTBOX_TABLE: &str = "cyrene_workspace_device_registry.workspace_invocation_outbox";
@@ -107,7 +107,9 @@ pub enum EnqueueOutcome {
 
 #[derive(Debug, Error)]
 pub enum OutboxError {
-    #[error("Idempotency conflict: invocation ID or key already used with different request digest")]
+    #[error(
+        "Idempotency conflict: invocation ID or key already used with different request digest"
+    )]
     IdempotencyConflict,
     #[error("Device revoked or generation mismatch")]
     DeviceRevokedOrGenerationMismatch,
@@ -375,7 +377,10 @@ impl PostgresWorkspaceOutbox {
     }
 
     /// Query an invocation by ID.
-    pub async fn get_invocation(&self, invocation_id: &str) -> Result<Option<OutboxRecord>, OutboxError> {
+    pub async fn get_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<OutboxRecord>, OutboxError> {
         let row = sqlx::query(&format!(
             "SELECT * FROM {OUTBOX_TABLE} WHERE invocation_id = $1"
         ))
@@ -398,7 +403,9 @@ impl PostgresWorkspaceOutbox {
 }
 
 #[async_trait::async_trait]
-impl cy_workspace_control_plane::authority_service::AuthorityOutboxStore for PostgresWorkspaceOutbox {
+impl cy_workspace_control_plane::authority_service::AuthorityOutboxStore
+    for PostgresWorkspaceOutbox
+{
     async fn enqueue(
         &self,
         invocation_id: &str,
@@ -462,19 +469,23 @@ impl cy_workspace_control_plane::authority_service::AuthorityOutboxStore for Pos
                 }),
                 authority_signature: vec![],
             };
-            invocations.push(cy_proto::cyrene::workspace::authority::v1::ApprovedInvocation {
-                invocation_id: rec.invocation_id,
-                credential: Some(cred),
-                raw_invocation: Some(cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2 {
-                    owner_id: rec.target_component.clone(),
-                    operation_id: String::new(),
-                    json_body: rec.raw_invocation_json,
-                    resource_id: String::new(),
-                    idempotency_key: rec.idempotency_key.unwrap_or_default(),
-                }),
-                resolved_target_url: rec.resolved_target_url,
-                timeout_seconds: 60,
-            });
+            invocations.push(
+                cy_proto::cyrene::workspace::authority::v1::ApprovedInvocation {
+                    invocation_id: rec.invocation_id,
+                    credential: Some(cred),
+                    raw_invocation: Some(
+                        cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2 {
+                            owner_id: rec.target_component.clone(),
+                            operation_id: String::new(),
+                            json_body: rec.raw_invocation_json,
+                            resource_id: String::new(),
+                            idempotency_key: rec.idempotency_key.unwrap_or_default(),
+                        },
+                    ),
+                    resolved_target_url: rec.resolved_target_url,
+                    timeout_seconds: 60,
+                },
+            );
         }
         Ok(invocations)
     }

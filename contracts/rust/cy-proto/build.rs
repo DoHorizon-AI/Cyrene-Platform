@@ -35,8 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         proto_dir.join("cyrene/workspace/bridge/v1/workspace_frontend_bridge.proto");
     let workspace_sidecar_proto =
         proto_dir.join("cyrene/workspace/local/v1/workspace_sidecar.proto");
-    let workspace_relay_proto =
-        proto_dir.join("cyrene/workspace/relay/v1/workspace_relay.proto");
+    let workspace_relay_proto = proto_dir.join("cyrene/workspace/relay/v1/workspace_relay.proto");
     let device_enrollment_proto = proto_dir.join("cyrene/device/v1/device_enrollment.proto");
 
     println!("cargo:rerun-if-changed={}", core_proto.display());
@@ -66,10 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rerun-if-changed={}",
         workspace_sidecar_proto.display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_relay_proto.display()
-    );
+    println!("cargo:rerun-if-changed={}", workspace_relay_proto.display());
     println!(
         "cargo:rerun-if-changed={}",
         device_enrollment_proto.display()

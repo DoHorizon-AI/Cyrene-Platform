@@ -76,7 +76,10 @@ impl ContractSnapshotManager {
     }
 
     /// Atomically switch to a newer snapshot with monotonic generation check.
-    pub fn activate_snapshot(&self, new_snapshot: ContractSnapshot) -> Result<(), SnapshotActivationError> {
+    pub fn activate_snapshot(
+        &self,
+        new_snapshot: ContractSnapshot,
+    ) -> Result<(), SnapshotActivationError> {
         let new_gen = new_snapshot.generation;
         let mut current_guard = self.current.write().expect("write lock");
         let current_high = self.highest_generation.load(Ordering::SeqCst);
@@ -171,7 +174,10 @@ impl AuthorityOutboxStore for InMemoryAuthorityOutbox {
                     return Err("IDEMPOTENCY_CONFLICT".to_string());
                 }
             }
-            id_map.insert(map_key, (invocation_id.to_string(), request_digest.to_string()));
+            id_map.insert(
+                map_key,
+                (invocation_id.to_string(), request_digest.to_string()),
+            );
         }
 
         let mut recs = self.records.lock().await;
@@ -273,8 +279,8 @@ impl WorkspaceAuthorityServiceImpl {
     }
 
     fn sign_credential(&self, cred: &mut DeliveryCredential) {
-        let mut mac = HmacSha256::new_from_slice(&self.hmac_key)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC can take key of any size");
         mac.update(cred.invocation_id.as_bytes());
         mac.update(cred.request_digest_sha256.as_bytes());
         mac.update(cred.target_component.as_bytes());
@@ -289,8 +295,8 @@ impl WorkspaceAuthorityServiceImpl {
     }
 
     fn verify_credential_signature(&self, cred: &DeliveryCredential) -> bool {
-        let mut mac = HmacSha256::new_from_slice(&self.hmac_key)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC can take key of any size");
         mac.update(cred.invocation_id.as_bytes());
         mac.update(cred.request_digest_sha256.as_bytes());
         mac.update(cred.target_component.as_bytes());
@@ -354,9 +360,9 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
         request: Request<ApproveAndEnqueueInvocationRequest>,
     ) -> Result<Response<ApproveAndEnqueueInvocationResponse>, Status> {
         let req = request.into_inner();
-        let raw_inv = req.invocation.ok_or_else(|| {
-            Status::invalid_argument("ProductApiInvocationV2 is required")
-        })?;
+        let raw_inv = req
+            .invocation
+            .ok_or_else(|| Status::invalid_argument("ProductApiInvocationV2 is required"))?;
 
         // 1. Wire bounds validation
         let validated_inv = validate_product_invocation(raw_inv)
@@ -411,21 +417,28 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
             Some(validated_inv.idempotency_key.as_str())
         };
 
-        let resolved_url = format!("http://{}.internal/api/v1/{}", validated_inv.owner_id, validated_inv.operation_id);
+        let resolved_url = format!(
+            "http://{}.internal/api/v1/{}",
+            validated_inv.owner_id, validated_inv.operation_id
+        );
 
-        match self.outbox.enqueue(
-            &invocation_id,
-            &req.workspace_id,
-            ikey,
-            &digest_hex,
-            "cyrene-workspace-connector",
-            &resolved_url,
-            &validated_inv.json_body,
-            1,
-            1,
-            snapshot.generation,
-            Duration::from_secs(60),
-        ).await {
+        match self
+            .outbox
+            .enqueue(
+                &invocation_id,
+                &req.workspace_id,
+                ikey,
+                &digest_hex,
+                "cyrene-workspace-connector",
+                &resolved_url,
+                &validated_inv.json_body,
+                1,
+                1,
+                snapshot.generation,
+                Duration::from_secs(60),
+            )
+            .await
+        {
             Ok(_) => {
                 let approved = ApprovedInvocation {
                     invocation_id,
@@ -449,9 +462,9 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
                     }),
                 }))
             }
-            Err(e) => {
-                Err(Status::internal(format!("Failed to enqueue invocation: {e}")))
-            }
+            Err(e) => Err(Status::internal(format!(
+                "Failed to enqueue invocation: {e}"
+            ))),
         }
     }
 
@@ -460,14 +473,22 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
         request: Request<ClaimInvocationsRequest>,
     ) -> Result<Response<ClaimInvocationsResponse>, Status> {
         let req = request.into_inner();
-        let max_batch = if req.max_batch_size == 0 { 10 } else { req.max_batch_size as usize };
+        let max_batch = if req.max_batch_size == 0 {
+            10
+        } else {
+            req.max_batch_size as usize
+        };
 
-        let mut invocations = self.outbox.claim(
-            &req.connector_id,
-            &req.workspace_id,
-            &req.supported_components,
-            max_batch,
-        ).await.map_err(|e| Status::internal(e))?;
+        let mut invocations = self
+            .outbox
+            .claim(
+                &req.connector_id,
+                &req.workspace_id,
+                &req.supported_components,
+                max_batch,
+            )
+            .await
+            .map_err(|e| Status::internal(e))?;
 
         for inv in &mut invocations {
             if let Some(ref mut cred) = inv.credential {
@@ -483,13 +504,15 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
         request: Request<AcknowledgeDeliveryRequest>,
     ) -> Result<Response<AcknowledgeDeliveryResponse>, Status> {
         let req = request.into_inner();
-        let acked = self.outbox.acknowledge_delivery(
-            &req.invocation_id,
-            &req.connector_id,
-            &req.delivery_receipt,
-        ).await.map_err(|e| Status::internal(e))?;
+        let acked = self
+            .outbox
+            .acknowledge_delivery(&req.invocation_id, &req.connector_id, &req.delivery_receipt)
+            .await
+            .map_err(|e| Status::internal(e))?;
 
-        Ok(Response::new(AcknowledgeDeliveryResponse { acknowledged: acked }))
+        Ok(Response::new(AcknowledgeDeliveryResponse {
+            acknowledged: acked,
+        }))
     }
 
     async fn submit_invocation_result(
@@ -522,19 +545,31 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
         };
 
         let (code, body, content_type) = if let Some(resp) = req.product_response {
-            (Some(resp.status_code), Some(resp.json_body), Some(resp.content_type))
+            (
+                Some(resp.status_code),
+                Some(resp.json_body),
+                Some(resp.content_type),
+            )
         } else {
             (None, None, None)
         };
 
-        let updated = self.outbox.submit_result(
-            &req.invocation_id,
-            outcome_str,
-            code,
-            body.as_deref(),
-            content_type.as_deref(),
-            if req.error_message.is_empty() { None } else { Some(&req.error_message) },
-        ).await.map_err(|e| Status::internal(e))?;
+        let updated = self
+            .outbox
+            .submit_result(
+                &req.invocation_id,
+                outcome_str,
+                code,
+                body.as_deref(),
+                content_type.as_deref(),
+                if req.error_message.is_empty() {
+                    None
+                } else {
+                    Some(&req.error_message)
+                },
+            )
+            .await
+            .map_err(|e| Status::internal(e))?;
 
         Ok(Response::new(SubmitInvocationResultResponse {
             accepted: updated,
@@ -555,7 +590,8 @@ impl WorkspaceAuthorityService for WorkspaceAuthorityServiceImpl {
                 operation_id: op.operation_id().to_string(),
                 description: format!("{}.{}", op.owner_id(), op.operation_id()),
                 requires_idempotency_key: op.idempotency().required,
-                is_read_only: op.kind() == cy_workspace_product_contracts::ProductOperationKind::Read,
+                is_read_only: op.kind()
+                    == cy_workspace_product_contracts::ProductOperationKind::Read,
             });
         }
 
@@ -605,7 +641,10 @@ mod tests {
             activated_at_unix_ms: now_unix_ms(),
         };
         let err = manager.activate_snapshot(snapshot_downgrade).unwrap_err();
-        assert!(matches!(err, SnapshotActivationError::GenerationNotMonotonic { .. }));
+        assert!(matches!(
+            err,
+            SnapshotActivationError::GenerationNotMonotonic { .. }
+        ));
         assert_eq!(manager.active_snapshot().generation, 2);
 
         // Same generation 2 -> must fail
@@ -617,7 +656,10 @@ mod tests {
             activated_at_unix_ms: now_unix_ms(),
         };
         let err = manager.activate_snapshot(snapshot_same).unwrap_err();
-        assert!(matches!(err, SnapshotActivationError::GenerationNotMonotonic { .. }));
+        assert!(matches!(
+            err,
+            SnapshotActivationError::GenerationNotMonotonic { .. }
+        ));
     }
 
     #[tokio::test]
@@ -633,7 +675,11 @@ mod tests {
         };
         let manager = Arc::new(ContractSnapshotManager::new(snapshot));
         let outbox = Arc::new(InMemoryAuthorityOutbox::default());
-        let service = WorkspaceAuthorityServiceImpl::new(manager, outbox, b"test-secret-key-32-bytes-long!!!".to_vec());
+        let service = WorkspaceAuthorityServiceImpl::new(
+            manager,
+            outbox,
+            b"test-secret-key-32-bytes-long!!!".to_vec(),
+        );
 
         let mut cred = DeliveryCredential {
             invocation_id: "inv-100".to_string(),
@@ -643,7 +689,10 @@ mod tests {
             device_generation: 1,
             session_generation: 1,
             contract_activation_generation: 1,
-            expires_at: Some(prost_types::Timestamp { seconds: 1800000000, nanos: 0 }),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: 1800000000,
+                nanos: 0,
+            }),
             authority_signature: vec![],
         };
 

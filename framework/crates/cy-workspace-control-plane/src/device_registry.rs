@@ -326,4 +326,3 @@ pub trait RelayPeerCertificateRevocationChecker: Send + Sync {
         query: &RelayPeerRevocationQuery<'_>,
     ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError>;
 }
-

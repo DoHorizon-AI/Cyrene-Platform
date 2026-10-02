@@ -28,8 +28,8 @@ use x509_parser::parse_x509_certificate;
 
 pub use crate::device_registry::{
     AuthenticatedRelayWorkspaceDevice, CurrentRelayPeerRevocationEvidence,
-    RelayPeerCertificateRevocationChecker, RelayPeerRevocationCheckError,
-    RelayPeerRevocationQuery, WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey,
+    RelayPeerCertificateRevocationChecker, RelayPeerRevocationCheckError, RelayPeerRevocationQuery,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey,
 };
 
 const MAX_TRUST_ROOTS: usize = 32;

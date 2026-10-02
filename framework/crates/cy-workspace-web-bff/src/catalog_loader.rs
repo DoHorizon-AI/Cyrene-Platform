@@ -74,7 +74,13 @@ pub fn load_product_operation_catalog_from_environment(
 /// Load both the operation catalog and the pinned contract snapshot.
 pub fn load_product_catalog_and_snapshot(
     contract_root: impl AsRef<Path>,
-) -> Result<(ProductOperationCatalog, cy_workspace_control_plane::ContractSnapshot), ProductCatalogError> {
+) -> Result<
+    (
+        ProductOperationCatalog,
+        cy_workspace_control_plane::ContractSnapshot,
+    ),
+    ProductCatalogError,
+> {
     let pins = expected_product_bundle_pins()?;
     let root = contract_root
         .as_ref()
@@ -107,8 +113,13 @@ pub fn load_product_catalog_and_snapshot(
     Ok((catalog, snapshot))
 }
 
-pub fn load_product_catalog_and_snapshot_from_environment(
-) -> Result<(ProductOperationCatalog, cy_workspace_control_plane::ContractSnapshot), ProductCatalogError> {
+pub fn load_product_catalog_and_snapshot_from_environment() -> Result<
+    (
+        ProductOperationCatalog,
+        cy_workspace_control_plane::ContractSnapshot,
+    ),
+    ProductCatalogError,
+> {
     let root = std::env::var_os(PRODUCT_CONTRACT_ROOT_ENV)
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())

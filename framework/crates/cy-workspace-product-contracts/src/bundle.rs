@@ -97,10 +97,12 @@ impl ProductBundlePins {
     pub fn empty_for_test() -> Self {
         Self {
             wire_api_version: "cyrene.workspace.product.v2".to_string(),
-            manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             owner_source_shas: BTreeMap::new(),
             policy_schema_version: "cyrene.workspace.product.authorization-policy.v2".to_string(),
-            policy_sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            policy_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
         }
     }
 
@@ -430,7 +432,8 @@ impl ProductContractBundle {
     #[cfg(any(test, feature = "test-support"))]
     pub fn empty_for_test() -> Self {
         Self {
-            manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             owner_source_shas: BTreeMap::new(),
             operations: BTreeMap::new(),
         }

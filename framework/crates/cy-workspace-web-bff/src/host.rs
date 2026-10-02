@@ -18,11 +18,18 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::routing::get;
 use axum::Router;
+use cy_proto::cyrene::workspace::authority::v1::workspace_authority_service_server::WorkspaceAuthorityService;
+use cy_proto::cyrene::workspace::authority::v1::*;
+use cy_proto::cyrene::workspace::bridge::v1::workspace_frontend_bridge_service_client::WorkspaceFrontendBridgeServiceClient;
+use cy_proto::cyrene::workspace::bridge::v1::*;
 use cy_proto::google::rpc::Status as RpcStatus;
 use cy_proto::workspace_v1::UserIdentityRef;
 use cy_proto::workspace_v1::{
     workspace_api_request, workspace_api_response, WorkspaceApiRequest, WorkspaceApiResponse,
     WorkspaceConnectionDescriptor,
+};
+use cy_workspace_control_plane::authority_service::{
+    ContractSnapshotManager, WorkspaceAuthorityServiceImpl,
 };
 use cy_workspace_control_plane::{
     AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, UserCodeKeyRing, VerifiedWebPrincipal,
@@ -30,15 +37,7 @@ use cy_workspace_control_plane::{
     WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceDirectory,
     WORKSPACE_MEMBER_ROLE,
 };
-use cy_proto::cyrene::workspace::authority::v1::workspace_authority_service_server::WorkspaceAuthorityService;
-use cy_proto::cyrene::workspace::authority::v1::*;
-use cy_proto::cyrene::workspace::bridge::v1::workspace_frontend_bridge_service_client::WorkspaceFrontendBridgeServiceClient;
-use cy_proto::cyrene::workspace::bridge::v1::*;
-use cy_workspace_control_plane::authority_service::{
-    ContractSnapshotManager, WorkspaceAuthorityServiceImpl,
-};
 use cy_workspace_postgres_storage::PostgresWorkspaceOutbox;
-use tonic::transport::{Channel, Endpoint};
 use cy_workspace_postgres_storage::{
     device_enrollment_device_v1_router, webauthn_http_router, DeviceAuthorizationPolicy,
     DeviceAuthorizationPortError, DeviceCertificateIssuer, DeviceCertificatePublicMetadataPort,
@@ -60,15 +59,15 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tonic::transport::{Channel, Endpoint};
 use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
 use cy_workspace_web_bff::{
-    router_with_device_approval,
-    with_verified_web_session_routes, DeviceApprovalDependencies, FabricWorkspaceProductGateway,
-    WebBffConfig, WebBffState, WorkspaceApiBinding, WorkspaceApiResolutionError,
-    WorkspaceApiResolver,
+    router_with_device_approval, with_verified_web_session_routes, DeviceApprovalDependencies,
+    FabricWorkspaceProductGateway, WebBffConfig, WebBffState, WorkspaceApiBinding,
+    WorkspaceApiResolutionError, WorkspaceApiResolver,
 };
 
 const MAX_CERTIFICATE_FILE_BYTES: u64 = 256 * 1024;
@@ -947,15 +946,13 @@ impl WorkspaceApi for PrincipalScopedBridgeApi {
             Err(status) => {
                 let _ = self
                     .authority_service
-                    .submit_invocation_result(tonic::Request::new(
-                        SubmitInvocationResultRequest {
-                            invocation_id: invocation_id.clone(),
-                            credential: credential.clone(),
-                            outcome_status: ExecutionOutcomeStatus::UnknownResult as i32,
-                            product_response: None,
-                            error_message: format!("Transport error: {}", status.message()),
-                        },
-                    ))
+                    .submit_invocation_result(tonic::Request::new(SubmitInvocationResultRequest {
+                        invocation_id: invocation_id.clone(),
+                        credential: credential.clone(),
+                        outcome_status: ExecutionOutcomeStatus::UnknownResult as i32,
+                        product_response: None,
+                        error_message: format!("Transport error: {}", status.message()),
+                    }))
                     .await;
                 workspace_error(request_id, 14, "WORKSPACE_BRIDGE_UNAVAILABLE")
             }
