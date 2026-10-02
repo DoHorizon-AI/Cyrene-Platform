@@ -44,7 +44,8 @@ def check_rejected_handshake(
     server_ca: Path,
     cert: Path | None,
     key: Path | None,
-) -> dict[str, str]:
+    check_name: str,
+) -> dict[str, str | None]:
     context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(server_ca))
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.set_alpn_protocols(["h2"])
@@ -52,21 +53,125 @@ def check_rejected_handshake(
         context.load_cert_chain(certfile=str(cert), keyfile=str(key))
 
     raw_socket = socket.create_connection((host, port), timeout=3.0)
-    raw_socket.settimeout(3.0)
     try:
-        wrapped_socket = context.wrap_socket(raw_socket, server_hostname=server_name)
-    except ssl.SSLCertVerificationError as error:
-        raise RuntimeError(
-            "Relay server certificate verification failed; the client rejection is inconclusive"
-        ) from error
-    except ssl.SSLError as error:
-        return {"result": "rejected", "reason": error.reason or type(error).__name__}
-    else:
-        negotiated_alpn = wrapped_socket.selected_alpn_protocol() or "none"
-        wrapped_socket.close()
-        raise RuntimeError(f"Relay accepted a client TLS handshake without required trust; ALPN={negotiated_alpn}")
+        try:
+            raw_socket.settimeout(3.0)
+            wrapped_socket = context.wrap_socket(raw_socket, server_hostname=server_name)
+        except ssl.SSLCertVerificationError as error:
+            raise RuntimeError(
+                "Relay server certificate verification failed; the client rejection is inconclusive"
+            ) from error
+        except ssl.SSLError as error:
+            return classify_tls_error(error, check_name, None, None, "handshake")
+        try:
+            tls_version = wrapped_socket.version()
+            negotiated_alpn = wrapped_socket.selected_alpn_protocol() or "none"
+            if tls_version == "TLSv1.2":
+                return {
+                    "result": "tls_auth_bypass",
+                    "reason": "client TLS 1.2 handshake completed",
+                    "tlsVersion": tls_version,
+                    "alpn": negotiated_alpn,
+                }
+
+            # TLS 1.3 clients may return from wrap_socket after sending Finished but
+            # before reading the server's mandatory-client-certificate alert.
+            wrapped_socket.settimeout(0.25)
+            try:
+                first_response = wrapped_socket.recv(1)
+            except socket.timeout:
+                first_response = None
+            except ssl.SSLError as error:
+                return classify_tls_error(error, check_name, tls_version, negotiated_alpn, "application_read")
+            except OSError as error:
+                return classify_transport_close(error, tls_version, negotiated_alpn, "application_read")
+            if first_response == b"":
+                return classify_transport_close(None, tls_version, negotiated_alpn, "application_read")
+            if first_response:
+                return {
+                    "result": "application_data_received",
+                    "reason": "server sent application data before the client HTTP/2 preface",
+                    "tlsVersion": tls_version,
+                    "alpn": negotiated_alpn,
+                    "phase": "application_read",
+                }
+
+            # If no alert is pending, send HTTP/2's connection preface so an
+            # optional-auth server can expose itself with SETTINGS/application data.
+            try:
+                wrapped_socket.settimeout(3.0)
+                wrapped_socket.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+                response = wrapped_socket.recv(1)
+            except ssl.SSLError as error:
+                return classify_tls_error(error, check_name, tls_version, negotiated_alpn, "application_write_or_read")
+            except socket.timeout:
+                return {
+                    "result": "timeout_requires_tonic_rpc",
+                    "reason": "no server response after HTTP/2 preface",
+                    "tlsVersion": tls_version,
+                    "alpn": negotiated_alpn,
+                    "phase": "application_read_after_http2_preface",
+                }
+            except OSError as error:
+                return classify_transport_close(error, tls_version, negotiated_alpn, "application_write_or_read")
+            if response == b"":
+                return classify_transport_close(
+                    None, tls_version, negotiated_alpn, "application_read_after_http2_preface"
+                )
+            return {
+                "result": "application_data_received",
+                "reason": "server returned application data after HTTP/2 preface",
+                "tlsVersion": tls_version,
+                "alpn": negotiated_alpn,
+                "phase": "application_read_after_http2_preface",
+            }
+        finally:
+            wrapped_socket.close()
     finally:
         raw_socket.close()
+
+
+def classify_tls_error(
+    error: ssl.SSLError,
+    check_name: str,
+    tls_version: str | None,
+    negotiated_alpn: str | None,
+    phase: str,
+) -> dict[str, str | None]:
+    reason = (error.reason or type(error).__name__).upper()
+    expected_alerts = {
+        "missing": ("CERTIFICATE_REQUIRED", "HANDSHAKE_FAILURE"),
+        "untrusted": ("UNKNOWN_CA", "HANDSHAKE_FAILURE", "BAD_CERTIFICATE", "CERTIFICATE_UNKNOWN"),
+    }[check_name]
+    if any(alert in reason for alert in expected_alerts):
+        result = "rejected"
+    elif any(marker in reason for marker in ("UNEXPECTED_EOF", "EOF", "ZERO_RETURN")):
+        result = "transport_closed_after_client_data"
+    else:
+        result = "unexpected_tls_error"
+    return {
+        "result": result,
+        "reason": reason,
+        "tlsVersion": tls_version,
+        "alpn": negotiated_alpn,
+        "phase": phase,
+    }
+
+
+def classify_transport_close(
+    error: OSError | None,
+    tls_version: str,
+    negotiated_alpn: str,
+    phase: str,
+) -> dict[str, str | None]:
+    reason = "peer closed the connection" if error is None else type(error).__name__
+    return {
+        "result": "transport_closed_after_client_data",
+        "reason": reason,
+        "tlsVersion": tls_version,
+        "alpn": negotiated_alpn,
+        "phase": phase,
+    }
 
 
 def main() -> int:
@@ -118,6 +223,12 @@ def main() -> int:
                     str(client_certificate),
                     "-days",
                     "1",
+                    "-addext",
+                    "basicConstraints=critical,CA:FALSE",
+                    "-addext",
+                    "keyUsage=critical,digitalSignature,keyEncipherment",
+                    "-addext",
+                    "extendedKeyUsage=clientAuth",
                 ],
                 check=True,
                 stdout=subprocess.DEVNULL,
@@ -136,6 +247,7 @@ def main() -> int:
                 server_ca=server_ca,
                 cert=None,
                 key=None,
+                check_name="missing",
             )
             untrusted_certificate = check_rejected_handshake(
                 host=host,
@@ -144,39 +256,41 @@ def main() -> int:
                 server_ca=server_ca,
                 cert=client_certificate,
                 key=client_private_key,
+                check_name="untrusted",
             )
         except (OSError, ssl.SSLError, RuntimeError) as error:
             raise SystemExit(f"Native Relay mTLS rejection probe failed: {error}") from error
 
-        missing_reason = missing_certificate["reason"].upper()
-        untrusted_reason = untrusted_certificate["reason"].upper()
-        missing_is_rejected = "CERTIFICATE_REQUIRED" in missing_reason or ("HANDSHAKE_FAILURE" in missing_reason)
-        if not missing_is_rejected:
-            raise SystemExit(
-                "Relay did not return a client-certificate rejection alert for the missing-certificate case"
-            )
-        untrusted_is_rejected = "UNKNOWN_CA" in untrusted_reason or ("HANDSHAKE_FAILURE" in untrusted_reason)
-        if not untrusted_is_rejected:
-            raise SystemExit("Relay did not return an untrusted-client-certificate rejection alert")
+        bypass_results = {"tls_auth_bypass", "application_data_received", "unexpected_tls_error"}
+        for label, result in (
+            ("missing-certificate", missing_certificate),
+            ("untrusted-certificate", untrusted_certificate),
+        ):
+            if result["result"] in bypass_results:
+                raise SystemExit(f"Relay did not reject the {label} at TLS/transport level: {result['reason']}")
+
+        explicit_rejection = all(
+            result["result"] == "rejected" for result in (missing_certificate, untrusted_certificate)
+        )
 
     report = {
-        "status": "PASS",
+        "status": "PASS" if explicit_rejection else "TONIC_RPC_REQUIRED",
         "category": "REAL_NATIVE_RELAY_TLS_NEGATIVE_LOCAL_ONLY",
         "endpoint": f"{host}:{port}",
         "serverName": server_name,
         "serverCaSha256": hashlib.sha256(server_ca.read_bytes()).hexdigest(),
-        "transport": "TLS 1.2+ with h2 ALPN; no gRPC RPC was sent",
+        "transport": "TLS 1.2+ with h2 ALPN; TLS 1.3 outcomes are read from the server before any Tonic RPC",
         "checks": {
             "missingClientCertificate": missing_certificate,
             "untrustedClientCertificate": untrusted_certificate,
         },
-        "scope": ("Native Relay TLS listener rejection only; not Tonic RPC, identity approval, ACK, CRL, or dispatch"),
+        "scope": "Raw Native Relay TLS evidence only; transport close/timeout must be adjudicated by the paired Tonic RPC probe",
         "runAtUtc": datetime.now(UTC).isoformat(),
         **source_details(platform_root),
     }
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     os.chmod(report_path, 0o600)
-    print(f"REAL_NATIVE_RELAY_TLS_NEGATIVE_LOCAL_ONLY PASS: report={report_path}")
+    print(f"REAL_NATIVE_RELAY_TLS_NEGATIVE_LOCAL_ONLY {report['status']}: report={report_path}")
     return 0
 
 

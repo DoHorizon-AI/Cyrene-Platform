@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cy_proto::workspace_v1::workspace_relay_service_client::WorkspaceRelayServiceClient;
 use cy_proto::workspace_v1::{relay_frame, RelayFrame, RelayHello, RelayParticipantRole};
@@ -45,12 +45,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let tls_report_path = required_path("CYRENE_NATIVE_RELAY_TLS_NEGATIVE_REPORT_FILE")?;
     let bff_certificate_path = required_path("CYRENE_NATIVE_RELAY_CLIENT_CERT_FILE")?;
     let bff_key_path = required_path("CYRENE_NATIVE_RELAY_CLIENT_KEY_FILE")?;
+    let acceptance_root = PathBuf::from(
+        env::var("CYRENE_NATIVE_ACCEPTANCE_DIR")
+            .unwrap_or_else(|_| "/tmp/cyrene-components-v2-acceptance/native-relay".into()),
+    );
+    fs::create_dir_all(&acceptance_root)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&acceptance_root, fs::Permissions::from_mode(0o700))?;
     let server_ca_bytes = fs::read(&server_ca_path)?;
     let server_ca_hash = hex_sha256(&server_ca_bytes);
-    read_tls_probe_report(&tls_report_path, &host, port, &server_name, &server_ca_hash)?;
+    let tls_probe_report =
+        read_tls_probe_report(&tls_report_path, &host, port, &server_name, &server_ca_hash)?;
     let tls_report_hash = hex_sha256(&fs::read(&tls_report_path)?);
     let bff_certificate = fs::read(&bff_certificate_path)?;
     let bff_private_key = fs::read(&bff_key_path)?;
+    let (untrusted_certificate, untrusted_private_key) =
+        generate_untrusted_client_identity(&acceptance_root)?;
 
     let socket_address: SocketAddr = format!("{host}:{port}").parse()?;
     timeout(Duration::from_secs(3), TcpStream::connect(socket_address)).await??;
@@ -108,7 +118,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // A second, identity-free client proves XFCC cannot substitute for a TLS certificate.
     let no_identity_tls = ClientTlsConfig::new()
-        .ca_certificate(Certificate::from_pem(server_ca_bytes))
+        .ca_certificate(Certificate::from_pem(server_ca_bytes.clone()))
         .domain_name(server_name.clone());
     let no_identity_endpoint =
         Endpoint::from_shared(format!("https://{host}:{port}"))?.tls_config(no_identity_tls)?;
@@ -126,39 +136,42 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(XFCC_VALUE),
     )
     .await?;
-    let status = match no_identity_result {
-        Err(status) => status,
-        Ok(()) => {
-            return Err("Relay accepted XFCC without a TLS client certificate".into());
-        }
-    };
-    if status.code() != Code::Unavailable {
-        return Err(format!(
-            "identity-free Tonic Connect failed outside the expected transport layer: {:?}",
-            status.code()
-        )
-        .into());
-    }
-    let transport_message = status.message().to_ascii_lowercase();
-    if !["transport", "tls", "certificate", "handshake"]
-        .iter()
-        .any(|needle| transport_message.contains(needle))
-    {
-        return Err("Tonic Connect returned Unavailable without a TLS/transport failure".into());
-    }
+    let no_identity_status =
+        require_transport_rejection(no_identity_result, "client without a certificate")?;
+
+    // An unrelated self-signed client leaf must fail the real Tonic RPC at
+    // TLS/transport setup, even when it supplies the same forged XFCC value.
+    let untrusted_tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(server_ca_bytes))
+        .identity(Identity::from_pem(
+            untrusted_certificate,
+            untrusted_private_key,
+        ))
+        .domain_name(server_name.clone());
+    let untrusted_endpoint =
+        Endpoint::from_shared(format!("https://{host}:{port}"))?.tls_config(untrusted_tls)?;
+    let untrusted_channel = untrusted_endpoint.connect_lazy();
+    let untrusted_result = call_connect(
+        untrusted_channel,
+        RelayHello {
+            role: RelayParticipantRole::WorkspaceConnector as i32,
+            session_credential: String::new(),
+            user: None,
+            organization_id: String::new(),
+            workspace_id: String::new(),
+            device: None,
+        },
+        Some(XFCC_VALUE),
+    )
+    .await?;
+    let untrusted_status =
+        require_transport_rejection(untrusted_result, "client with an untrusted certificate")?;
 
     let platform_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(4)
         .ok_or("could not locate the Platform source root")?;
     let source = source_details(platform_root)?;
-    let acceptance_root = PathBuf::from(
-        env::var("CYRENE_NATIVE_ACCEPTANCE_DIR")
-            .unwrap_or_else(|_| "/tmp/cyrene-components-v2-acceptance/native-relay".into()),
-    );
-    fs::create_dir_all(&acceptance_root)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&acceptance_root, fs::Permissions::from_mode(0o700))?;
     let report_path = acceptance_root.join("native-tonic-xfcc-negative-report.json");
     let report = json!({
         "status": "PASS",
@@ -180,12 +193,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
             },
             "missingCertificateWithForgedXfcc": {
                 "result": "rejected",
-                "transportStatus": "Unavailable",
-                "transportMessage": status.message()
+                "transportStatus": no_identity_status.code,
+                "transportMessage": no_identity_status.message,
+                "transportSourceChain": no_identity_status.source_chain
+            },
+            "untrustedCertificateWithForgedXfcc": {
+                "result": "rejected",
+                "transportStatus": untrusted_status.code,
+                "transportMessage": untrusted_status.message,
+                "transportSourceChain": untrusted_status.source_chain
             }
         },
-        "observedTonicStatus": { "code": "Unavailable", "message": status.message() },
-        "transportEvidence": "Tonic completed a verified mTLS handshake with the pinned local BFF workload certificate; native Relay rejected caller XFCC, and a client with no certificate failed at TLS/transport setup",
+        "observedTonicStatuses": {
+            "missingCertificate": {
+                "code": no_identity_status.code,
+                "message": no_identity_status.message,
+                "sourceChain": no_identity_status.source_chain
+            },
+            "untrustedCertificate": {
+                "code": untrusted_status.code,
+                "message": untrusted_status.message,
+                "sourceChain": untrusted_status.source_chain
+            }
+        },
+        "pairedTlsProbeChecks": tls_probe_report["checks"],
+        "transportEvidence": "Tonic completed a verified mTLS handshake with the pinned local BFF workload certificate; native Relay rejected caller XFCC, while clients with no certificate and an untrusted certificate failed at TLS/transport setup",
         "pairedTlsProbeReport": tls_report_path,
         "pairedTlsProbeReportSha256": tls_report_hash,
         "scope": "Local workload-certificate transport only; invalid handoff was rejected; no AAD principal, device approval, ACK, CRL, or Product dispatch",
@@ -255,6 +287,73 @@ fn require_status(
     }
 }
 
+fn require_transport_rejection(
+    result: Result<(), tonic::Status>,
+    client_label: &str,
+) -> Result<TransportRejection, Box<dyn Error>> {
+    let status = match result {
+        Err(status) => status,
+        Ok(()) => return Err(format!("Relay accepted the {client_label}").into()),
+    };
+    if status.code() != Code::Unknown || status.message() != "transport error" {
+        return Err(format!(
+            "the {client_label} did not produce the expected source-backed Tonic transport failure: {:?} {}",
+            status.code(),
+            status.message()
+        )
+        .into());
+    }
+    let first_source = Error::source(&status)
+        .ok_or_else(|| format!("the {client_label} transport status has no error source"))?;
+    let source_debug = format!("{first_source:?}");
+    if !source_debug.contains("tonic::transport::Error(Transport") {
+        return Err(format!(
+            "the {client_label} source-backed Unknown did not originate from tonic::transport::Error: {}",
+            bounded_error_text(&source_debug)
+        )
+        .into());
+    }
+    let source_chain = bounded_error_chain(&status);
+    if source_chain.is_empty() {
+        return Err(format!("the {client_label} transport error chain was empty").into());
+    }
+    Ok(TransportRejection {
+        code: "Unknown",
+        message: status.message().to_string(),
+        source_chain,
+    })
+}
+
+struct TransportRejection {
+    code: &'static str,
+    message: String,
+    source_chain: Vec<Value>,
+}
+
+fn bounded_error_chain(status: &tonic::Status) -> Vec<Value> {
+    let mut chain = Vec::new();
+    let mut source = Error::source(status);
+    for _ in 0..5 {
+        let Some(error) = source else {
+            break;
+        };
+        chain.push(json!({
+            "display": bounded_error_text(&error.to_string()),
+            "debug": bounded_error_text(&format!("{error:?}")),
+        }));
+        source = error.source();
+    }
+    chain
+}
+
+fn bounded_error_text(value: &str) -> String {
+    let mut text = value.chars().take(512).collect::<String>();
+    if value.chars().count() > 512 {
+        text.push_str("...");
+    }
+    text
+}
+
 fn required_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     let value = env::var_os(name).ok_or_else(|| format!("{name} is required"))?;
     let path = PathBuf::from(value).canonicalize()?;
@@ -262,6 +361,64 @@ fn required_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
         return Err(format!("{name} must reference a regular file").into());
     }
     Ok(path)
+}
+
+fn generate_untrusted_client_identity(
+    acceptance_root: &Path,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let directory = acceptance_root.join(format!(
+        ".native-mtls-untrusted-{}-{timestamp}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let _private_directory = PrivateTempDirectory(directory.clone());
+    let certificate_path = directory.join("untrusted-client.crt");
+    let key_path = directory.join("untrusted-client.key");
+    let result = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=native-relay-tonic-untrusted-acceptance-client",
+            "-keyout",
+        ])
+        .arg(&key_path)
+        .arg("-out")
+        .arg(&certificate_path)
+        .args([
+            "-days",
+            "1",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyEncipherment",
+            "-addext",
+            "extendedKeyUsage=clientAuth",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !result.success() {
+        return Err("could not generate the temporary untrusted Tonic client certificate".into());
+    }
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(&certificate_path, fs::Permissions::from_mode(0o600))?;
+    Ok((fs::read(certificate_path)?, fs::read(key_path)?))
+}
+
+struct PrivateTempDirectory(PathBuf);
+
+impl Drop for PrivateTempDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn read_tls_probe_report(
@@ -272,13 +429,32 @@ fn read_tls_probe_report(
     server_ca_hash: &str,
 ) -> Result<Value, Box<dyn Error>> {
     let report: Value = serde_json::from_slice(&fs::read(path)?)?;
-    if report["status"] != "PASS"
+    let status_is_supported = report["status"] == "PASS";
+    let missing_result = report["checks"]["missingClientCertificate"]["result"]
+        .as_str()
+        .unwrap_or_default();
+    let untrusted_result = report["checks"]["untrustedClientCertificate"]["result"]
+        .as_str()
+        .unwrap_or_default();
+    if !status_is_supported
         || report["category"] != "REAL_NATIVE_RELAY_TLS_NEGATIVE_LOCAL_ONLY"
         || report["endpoint"] != format!("{host}:{port}")
         || report["serverName"] != server_name
         || report["serverCaSha256"] != server_ca_hash
-        || report["checks"]["missingClientCertificate"]["result"] != "rejected"
-        || report["checks"]["untrustedClientCertificate"]["result"] != "rejected"
+        || missing_result != "rejected"
+        || untrusted_result != "rejected"
+        || report["checks"]["missingClientCertificate"]["tlsVersion"] != "TLSv1.3"
+        || report["checks"]["untrustedClientCertificate"]["tlsVersion"] != "TLSv1.3"
+        || report["checks"]["missingClientCertificate"]["phase"] != "application_read"
+        || report["checks"]["untrustedClientCertificate"]["phase"] != "application_read"
+        || !report["checks"]["missingClientCertificate"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("CERTIFICATE_REQUIRED")
+        || !report["checks"]["untrustedClientCertificate"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("UNKNOWN_CA")
     {
         return Err("paired Native Relay TLS probe report does not match this endpoint".into());
     }

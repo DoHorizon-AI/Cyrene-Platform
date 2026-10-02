@@ -64,6 +64,7 @@ acceptance_root = Path(sys.argv[1])
 repo_root = Path(sys.argv[2])
 tls_report = json.loads((acceptance_root / "native-mtls-negative-report.json").read_text())
 tonic_report = json.loads((acceptance_root / "native-tonic-xfcc-negative-report.json").read_text())
+ready_before = json.loads((acceptance_root / "native-relay-readiness.json").read_text())
 health_report = json.loads((acceptance_root / "native-relay-health-after-probe.json").read_text())
 head = subprocess.run(
     ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True
@@ -73,10 +74,14 @@ report = {
     "category": "REAL_NATIVE_TONIC_MTLS_TRANSPORT_LOCAL_ONLY",
     "runAtUtc": datetime.now(timezone.utc).isoformat(),
     "platformHead": head,
-    "relayReadyDuringProbe": health_report.get("status") == "ready",
+    "relayReadyBeforeProbe": ready_before.get("status") == "ready",
+    "relayReadyBeforeHttpStatus": 200,
+    "relayReadyAfterProbe": health_report.get("status") == "ready",
+    "relayReadyAfterHttpStatus": 200,
     "certificateTransportProbe": {
         "category": tls_report.get("category"),
         "status": tls_report.get("status"),
+        "checks": tls_report.get("checks"),
         "report": str(acceptance_root / "native-mtls-negative-report.json"),
     },
     "tonicProbe": {
@@ -89,13 +94,15 @@ report = {
     "sourceFiles": [
         "framework/crates/cy-workspace-relay-host/src/main.rs",
         "framework/crates/cy-workspace-postgres-storage/src/restricted_device_ca.rs",
+        "tooling/acceptance/native-workspace-v2/probe-native-mtls-negative.py",
         "tooling/acceptance/native-workspace-v2/native-mtls-xfcc-probe/src/main.rs",
     ],
 }
 if (
     tls_report.get("status") != "PASS"
     or tonic_report.get("status") != "PASS"
-    or not report["relayReadyDuringProbe"]
+    or not report["relayReadyBeforeProbe"]
+    or not report["relayReadyAfterProbe"]
 ):
     raise SystemExit("Local Native Relay transport acceptance reports are incomplete.")
 target = acceptance_root / "native-mtls-transport-acceptance-report.json"
