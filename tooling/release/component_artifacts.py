@@ -37,6 +37,7 @@ RUN_PATH_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-
 ATTACHMENT_KINDS = {"native-binary", "python-bundle"}
 ARTIFACT_KINDS = ATTACHMENT_KINDS | {"oci-image"}
 ATTESTATION_PREDICATE = "https://slsa.dev/provenance/v1"
+SEMVER_RANGE_TERM = re.compile(r"^(?:=|>=|>|<=|<|\^|~)?[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$")
 
 
 class ComponentArtifactError(ValueError):
@@ -281,6 +282,8 @@ def _validate_compatibility(value: Any) -> list[str]:
     for key in ("groupId", "contractApiVersion", "wireApiVersion"):
         if not isinstance(value.get(key), str) or not value[key]:
             errors.append(f"compatibility.{key} must be a non-empty string")
+    if "groupVersion" in value and (not isinstance(value["groupVersion"], str) or not value["groupVersion"]):
+        errors.append("compatibility.groupVersion must be a non-empty string")
     lock = value.get("contractLock")
     if not isinstance(lock, dict):
         errors.append("compatibility.contractLock must be an object")
@@ -304,7 +307,7 @@ def _validate_compatibility(value: Any) -> list[str]:
     return errors
 
 
-def _dependency_rows(value: Any, label: str) -> list[tuple[str, str | None]]:
+def _dependency_rows(value: Any, label: str, *, strict: bool = False) -> list[tuple[str, str | None]]:
     """Validate and normalize catalog or manifest dependency rows."""
     if not isinstance(value, list):
         raise ComponentArtifactError(f"{label} must be an array")
@@ -324,6 +327,12 @@ def _dependency_rows(value: Any, label: str) -> list[tuple[str, str | None]]:
             not isinstance(version_range, str) or not version_range.strip() or len(version_range) > 128
         ):
             raise ComponentArtifactError(f"{label} entry has an invalid versionRange")
+        if version_range is not None and any(
+            not SEMVER_RANGE_TERM.fullmatch(term.strip()) for term in version_range.split(",")
+        ):
+            raise ComponentArtifactError(f"{label} entry has a malformed SemVer versionRange")
+        if strict and version_range is None:
+            raise ComponentArtifactError(f"{label} v2 entry must pin versionRange")
         normalized.append((component_id, version_range))
     return sorted(normalized, key=lambda row: (row[0], row[1] or ""))
 
@@ -348,8 +357,17 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
     missing = sorted(required - set(document))
     if missing:
         errors.append("missing manifest keys: " + ", ".join(missing))
-    if document.get("schemaVersion") != SCHEMA_VERSION:
-        errors.append(f"schemaVersion must be {SCHEMA_VERSION}")
+    schema_version = document.get("schemaVersion")
+    if schema_version not in {1, 2}:
+        errors.append("schemaVersion must be 1 or 2")
+    if schema_version == 2:
+        required.update({"protocolVersion", "contentDigest"})
+        missing_v2 = sorted(required - set(document))
+        if missing_v2:
+            errors.append("missing v2 manifest keys: " + ", ".join(missing_v2))
+        protocol_version = document.get("protocolVersion")
+        if not isinstance(protocol_version, str) or not re.fullmatch(r"[a-z][a-z0-9._-]{0,127}", protocol_version):
+            errors.append("protocolVersion must be a valid wire/API identifier")
     component_id = document.get("componentId")
     if not isinstance(component_id, str) or not COMPONENT_ID_RE.fullmatch(component_id):
         errors.append("componentId must use lower-case hyphen-separated identifiers")
@@ -374,6 +392,17 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
         ref = source.get("ref")
         if not isinstance(ref, str) or not re.fullmatch(r"refs/(heads|tags)/[A-Za-z0-9._/-]+", ref):
             errors.append("source.ref must identify a Git branch or tag")
+        if schema_version == 2:
+            if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+                errors.append("v2 source.commit must be a full 40-character lowercase Git SHA")
+            if document.get("releaseId") != f"{document.get('channel')}-{commit}":
+                errors.append("v2 releaseId must equal channel plus exact source.commit")
+            allowed_refs = {
+                "preview": {"refs/heads/develop"},
+                "stable": {"refs/heads/main", "refs/heads/release"},
+            }
+            if ref not in allowed_refs.get(document.get("channel"), set()):
+                errors.append("v2 source.ref does not match the release channel")
         errors.extend(_validate_provenance(source, document.get("provenance")))
 
     artifact = document.get("artifact")
@@ -427,7 +456,7 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
             errors.append("OCI artifact.platform requires supported os and architecture values")
 
     try:
-        _dependency_rows(document.get("dependencies"), "dependencies")
+        _dependency_rows(document.get("dependencies"), "dependencies", strict=schema_version == 2)
     except ComponentArtifactError as error:
         errors.append(str(error))
     if not isinstance(document.get("restart"), dict):
@@ -435,6 +464,13 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
     if isinstance(source, dict):
         errors.extend(_validate_provenance(source, document.get("provenance")))
     errors.extend(_validate_compatibility(document.get("compatibility")))
+    if schema_version == 2:
+        compatibility_value = document.get("compatibility")
+        if isinstance(compatibility_value, dict) and not isinstance(compatibility_value.get("groupVersion"), str):
+            errors.append("v2 compatibility.groupVersion is required")
+        artifact_digest = artifact.get("sha256", artifact.get("digest")) if isinstance(artifact, dict) else None
+        if document.get("contentDigest") != artifact_digest:
+            errors.append("contentDigest must equal the exact artifact payload digest")
     digest = document.get("manifestDigest")
     if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
         errors.append("manifestDigest must be sha256:<64 lowercase hex>")
@@ -474,6 +510,8 @@ def create_manifest(
         artifact.setdefault("uri", _release_asset_uri(document, artifact_file.name))
     elif artifact.get("kind") != "oci-image":
         raise ComponentArtifactError("descriptor artifact kind is unsupported")
+    if document.get("schemaVersion") == 2:
+        document["contentDigest"] = artifact.get("sha256", artifact.get("digest"))
     document["manifestDigest"] = _manifest_digest(document)
     errors = _validate_manifest(document)
     if errors:
@@ -667,6 +705,70 @@ def _verify_contract_lock(compatibility: dict[str, Any]) -> None:
         raise ComponentArtifactError("tracked compatibility lock bytes do not match contractLock.sha256")
 
 
+def trusted_catalog_compatibility(
+    catalog_path: Path,
+    catalog: dict[str, Any],
+    component: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build compatibility metadata only from the pinned catalog and lock commit.
+
+    The source repository's Product bundle lock is deliberately not consulted
+    here: it governs data-bundle inputs, while this pin governs shared wire/API
+    compatibility for independently released connection components.
+    """
+    group_id = component.get("compatibilityGroup")
+    if group_id is None:
+        return None
+    groups = catalog.get("compatibilityGroups")
+    if not isinstance(groups, list):
+        raise ComponentArtifactError("trusted catalog has no compatibilityGroups array")
+    group = next(
+        (row for row in groups if isinstance(row, dict) and row.get("groupId") == group_id),
+        None,
+    )
+    if not isinstance(group, dict):
+        raise ComponentArtifactError(f"component references an unknown compatibility group: {component.get('componentId')}")
+    lock = group.get("contractLock")
+    if not isinstance(lock, dict):
+        raise ComponentArtifactError("trusted compatibility group has no immutable contractLock pin")
+    if lock.get("repository") != "DoHorizon-AI/Cyrene-Workspace":
+        raise ComponentArtifactError("connection protocol lock must be pinned to Cyrene-Workspace")
+    commit = lock.get("commit")
+    path = lock.get("path")
+    digest = lock.get("sha256")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ComponentArtifactError("trusted contractLock commit must be a full lower-case Git SHA")
+    if not isinstance(path, str) or path != "governance/workspace-connection-protocols-v2.lock.json":
+        raise ComponentArtifactError("trusted connection contractLock path is not the frozen protocol lock")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ComponentArtifactError("trusted contractLock sha256 must be sha256:<64 lowercase hex>")
+
+    checkout = catalog_path.resolve().parent.parent
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{commit}:{path}"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ComponentArtifactError("cannot read contractLock bytes from the pinned Workspace commit") from error
+    actual_digest = "sha256:" + hashlib.sha256(result.stdout).hexdigest()
+    if actual_digest != digest:
+        raise ComponentArtifactError("pinned Workspace protocol lock bytes do not match catalog contractLock.sha256")
+
+    for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion"):
+        if not isinstance(group.get(key), str) or not group[key]:
+            raise ComponentArtifactError(f"trusted compatibility group {key} must be a non-empty string")
+    return {
+        "groupId": group["groupId"],
+        "groupVersion": group["groupVersion"],
+        "contractApiVersion": group["contractApiVersion"],
+        "wireApiVersion": group["wireApiVersion"],
+        "contractLock": dict(lock),
+    }
+
+
 def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], manifest_path: Path) -> None:
     source = document["source"]
     attestation = document["provenance"]["attestation"]
@@ -677,8 +779,9 @@ def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], 
     component = _component_target(catalog, document["componentId"], document["artifact"], document["target"])
     if component.get("publisher") != repository:
         raise ComponentArtifactError("component publisher does not match manifest source.repository")
-    actual_dependencies = _dependency_rows(document.get("dependencies"), "manifest dependencies")
-    expected_dependencies = _dependency_rows(component.get("dependencies"), "catalog dependencies")
+    strict_dependencies = document.get("schemaVersion") == 2
+    actual_dependencies = _dependency_rows(document.get("dependencies"), "manifest dependencies", strict=strict_dependencies)
+    expected_dependencies = _dependency_rows(component.get("dependencies"), "catalog dependencies", strict=strict_dependencies)
     if actual_dependencies != expected_dependencies:
         raise ComponentArtifactError("manifest dependencies do not match the trusted component catalog")
     compatibility_groups = catalog.get("compatibilityGroups", [])
@@ -707,9 +810,24 @@ def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], 
             "wireApiVersion"
         ) != group_definition.get("wireApiVersion"):
             raise ComponentArtifactError("manifest compatibility API versions do not match the catalog")
+        if compatibility.get("groupVersion") != group_definition.get("groupVersion"):
+            raise ComponentArtifactError("manifest compatibility groupVersion does not match the catalog")
         _verify_contract_lock(compatibility)
     elif compatibility is not None:
         raise ComponentArtifactError("manifest declares an unknown compatibility group")
+    if document.get("schemaVersion") == 2:
+        expected_protocol = component.get("protocolVersion")
+        if expected_protocol is None and expected_group is not None:
+            expected_member = next(
+                (
+                    member for member in catalog_groups[expected_group].get("members", [])
+                    if isinstance(member, dict) and member.get("componentId") == document["componentId"]
+                ),
+                None,
+            )
+            expected_protocol = expected_member.get("protocolVersion") if isinstance(expected_member, dict) else None
+        if document.get("protocolVersion") != expected_protocol:
+            raise ComponentArtifactError("manifest protocolVersion does not match the trusted component or group pin")
     expected_ref_tag = f"{document['channel']}-{source['commit']}"
     if document["releaseId"] != expected_ref_tag:
         raise ComponentArtifactError("releaseId must be the immutable channel plus full source commit")
@@ -770,6 +888,8 @@ def _verify_index_metadata(document: dict[str, Any], catalog: dict[str, Any]) ->
             "wireApiVersion"
         ] != definition.get("wireApiVersion"):
             raise ComponentArtifactError("index compatibility versions do not match the catalog")
+        if group.get("groupVersion") != definition.get("groupVersion"):
+            raise ComponentArtifactError("index compatibility groupVersion does not match the catalog")
         required_members = {
             member["componentId"]
             for member in definition.get("members", [])
@@ -992,6 +1112,7 @@ def _validate_index(document: dict[str, Any]) -> list[str]:
                 _validate_compatibility(
                     {
                         "groupId": group.get("groupId"),
+                        "groupVersion": group.get("groupVersion"),
                         "contractApiVersion": group.get("contractApiVersion"),
                         "wireApiVersion": group.get("wireApiVersion"),
                         "contractLock": group.get("contractLock"),
@@ -1087,6 +1208,7 @@ def create_index(
             group_id = compatibility["groupId"]
             metadata = {
                 "groupId": group_id,
+                "groupVersion": compatibility["groupVersion"],
                 "contractApiVersion": compatibility["contractApiVersion"],
                 "wireApiVersion": compatibility["wireApiVersion"],
                 "contractLock": compatibility["contractLock"],

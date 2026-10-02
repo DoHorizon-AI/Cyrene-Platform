@@ -14,8 +14,79 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  native-components:
+    if: github.event_name != 'pull_request'
+    name: native components / ${{ matrix.target_id }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target_id: linux-ubuntu-22.04-x86_64-systemd
+          - runner: ubuntu-24.04
+            target_id: linux-ubuntu-24.04-x86_64-systemd
+    permissions:
+      contents: read
+    env:
+      SOURCE_COMMIT: ${{ github.sha }}
+      SOURCE_REF: ${{ github.ref }}
+      CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+      CATALOG_COMMIT: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
+      CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: DoHorizon-AI/Cyrene-Workspace
+          ref: ${{ env.CATALOG_COMMIT }}
+          path: workspace-catalog
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.96.1
+        with:
+          components: rustfmt, clippy
+          target: x86_64-unknown-linux-gnu
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install release dependencies and verify immutable source inputs
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check build pyyaml pytest -r tooling/release/requirements.txt
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          case "$CHANNEL:$SOURCE_REF" in
+            stable:refs/heads/main|stable:refs/heads/release|preview:refs/heads/develop) ;;
+            *) echo "release channel does not match exact source ref" >&2; exit 2 ;;
+          esac
+          test "$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)" = "$CATALOG_SHA256"
+      - name: Build supported native target artifacts
+        run: |
+          set -euo pipefail
+          python tooling/release/build_native_components.py \
+            --repository . \
+            --output "$RUNNER_TEMP/native-components" \
+            --channel "$CHANNEL" --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+            --catalog workspace-catalog/governance/component-catalog-v1.json \
+            --catalog-sha256 "$CATALOG_SHA256" \
+            --target-id "${{ matrix.target_id }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-native-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/native-components
+          if-no-files-found: error
+          retention-days: 30
+
   component-release:
     if: github.event_name != 'pull_request'
+    needs: [native-components]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -33,8 +104,8 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RELEASE_ID: ${{ (github.ref == 'refs/heads/develop' && 'preview-' || 'stable-') }}${{ github.sha }}
       IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      CATALOG_COMMIT: 522524b86a8f79c70e948fed8cb27c4cc70f29c4
-      CATALOG_SHA256: 248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35
+      CATALOG_COMMIT: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
+      CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@v5
@@ -49,6 +120,7 @@ jobs:
           repository: DoHorizon-AI/Cyrene-Workspace
           ref: ${{ env.CATALOG_COMMIT }}
           path: workspace-catalog
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify source, channel, and catalog pins
@@ -83,7 +155,7 @@ jobs:
 
       - name: Prove immutable release is enabled and unused
         env:
-          CYRENE_IMMUTABLE_RELEASE_SETTINGS_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASE_SETTINGS_READ_TOKEN }}
+          CYRENE_IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASES_READ_TOKEN }}
         run: |
           set -euo pipefail
           python tooling/release/preflight_component_release.py \
@@ -102,36 +174,12 @@ jobs:
       - name: Run release test gates
         run: unshare --user --map-root-user cargo test --locked --workspace --all-targets
 
-      - name: Build V2 Product contracts from the tracked owner SHAs
-        id: product-contracts
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check \
-            -r tooling/workspace-product-contract-bundle/requirements.txt
-          output="$RUNNER_TEMP/workspace-product-contracts"
-          checkout_root="$RUNNER_TEMP/pinned-product-sources"
-          python tooling/release/prepare_workspace_product_contracts.py \
-            --repository . \
-            --output "$output" \
-            --checkout-root "$checkout_root"
-          test -f "$output/product-contract-bundle.json"
-          test -f "$output/workspace-product-policy-v2.json"
-          echo "root=$output" >> "$GITHUB_OUTPUT"
-
-      - name: Build and attest native binaries
-        run: |
-          set -euo pipefail
-          python tooling/release/build_native_components.py \
-            --repository . \
-            --output "$OUTPUT_ROOT/native" \
-            --channel "$CHANNEL" \
-            --source-ref "$SOURCE_REF" \
-            --source-commit "$SOURCE_COMMIT" \
-            --run-id "$RUN_ID" \
-            --run-attempt "$RUN_ATTEMPT" \
-            --catalog workspace-catalog/governance/component-catalog-v1.json \
-            --catalog-sha256 "$CATALOG_SHA256" \
-            --product-contracts-root "${{ steps.product-contracts.outputs.root }}"
+      - name: Download Ubuntu 22.04 and 24.04 native component builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: platform-native-*
+          path: ${{ runner.temp }}/component-release/native
+          merge-multiple: true
 
       - name: Build and attest the Runtime Maintenance SDK bundle
         id: runtime-sdk
@@ -186,8 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           for image in \
-            ghcr.io/dohorizon-ai/cyrene-workspace-relay \
-            ghcr.io/dohorizon-ai/cyrene-workspace-connector \
+            ghcr.io/dohorizon-ai/cyrene-workspace-authority \
             ghcr.io/dohorizon-ai/cyrene-workspace-web-bff \
             ghcr.io/dohorizon-ai/cyrene-runtime-maintenance; do
             if docker buildx imagetools inspect "$image:$RELEASE_ID-$IMAGE_TAG" >/dev/null 2>&1; then
@@ -196,51 +243,32 @@ jobs:
             fi
           done
 
-      - name: Build and push immutable Relay OCI image
-        id: relay-image
+      - name: Build and push immutable Workspace Authority OCI image
+        id: authority-image-build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: framework/crates/cy-workspace-relay-host/Dockerfile
+          file: framework/crates/cy-workspace-authority-host/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/dohorizon-ai/cyrene-workspace-relay:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
+          tags: ghcr.io/dohorizon-ai/cyrene-workspace-authority:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
           labels: |
+            io.cyrene.component.id=cy-workspace-authority-host
+            io.cyrene.component.target-id=windows-10.0-x86_64-docker-linux
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.RELEASE_ID }}
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+            COMPONENT_VERSION=0.1.0
           provenance: mode=max
           sbom: true
 
-      - name: Attest Relay OCI image
+      - name: Attest Workspace Authority OCI image
         uses: actions/attest@v4
         with:
-          subject-name: ghcr.io/dohorizon-ai/cyrene-workspace-relay
-          subject-digest: ${{ steps.relay-image.outputs.digest }}
-          push-to-registry: true
-          github-token: ${{ github.token }}
-
-      - name: Build and push immutable Connector OCI image
-        id: connector-image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: framework/crates/cy-workspace-connector-host/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/dohorizon-ai/cyrene-workspace-connector:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ env.RELEASE_ID }}
-          provenance: mode=max
-          sbom: true
-
-      - name: Attest Connector OCI image
-        uses: actions/attest@v4
-        with:
-          subject-name: ghcr.io/dohorizon-ai/cyrene-workspace-connector
-          subject-digest: ${{ steps.connector-image.outputs.digest }}
+          subject-name: ghcr.io/dohorizon-ai/cyrene-workspace-authority
+          subject-digest: ${{ steps.authority-image-build.outputs.digest }}
           push-to-registry: true
           github-token: ${{ github.token }}
 
@@ -250,12 +278,12 @@ jobs:
         with:
           context: .
           file: framework/crates/cy-workspace-web-bff/Dockerfile
-          build-contexts: |
-            product-contracts=${{ steps.product-contracts.outputs.root }}
           platforms: linux/amd64
           push: true
           tags: ghcr.io/dohorizon-ai/cyrene-workspace-web-bff:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
           labels: |
+            io.cyrene.component.id=cy-workspace-web-bff
+            io.cyrene.component.target-id=windows-10.0-x86_64-docker-linux
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.RELEASE_ID }}
@@ -279,9 +307,10 @@ jobs:
           from pathlib import Path
           rows = [json.loads(path.read_text(encoding="utf-8")) for path in Path(sys.argv[1]).glob("*.manifest.json")]
           matches = [row for row in rows if row.get("componentId") == "cyrene-runtime-maintenance" and row.get("artifact", {}).get("kind") == "native-binary"]
-          if len(matches) != 1:
-              raise SystemExit("expected one native Runtime Maintenance manifest")
-          print(matches[0]["version"])
+          versions = {row["version"] for row in matches}
+          if len(matches) != 2 or len(versions) != 1:
+              raise SystemExit("expected matching Ubuntu 22.04/24.04 Runtime Maintenance manifests")
+          print(next(iter(versions)))
           PY
           )"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -325,33 +354,13 @@ jobs:
 
       - name: Create attestable OCI manifests
         env:
-          RELAY_DIGEST: ${{ steps.relay-image.outputs.digest }}
-          CONNECTOR_DIGEST: ${{ steps.connector-image.outputs.digest }}
+          AUTHORITY_DIGEST: ${{ steps.authority-image-build.outputs.digest }}
           BFF_DIGEST: ${{ steps.bff-image.outputs.digest }}
           RUNTIME_DIGEST: ${{ steps.runtime-image.outputs.digest }}
         run: |
           set -euo pipefail
-          lock="tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
-          compatibility="$(python - "$lock" "$SOURCE_COMMIT" <<'PY'
-          import hashlib, json, sys
-          from pathlib import Path
-          lock_path = Path(sys.argv[1])
-          lock = json.loads(lock_path.read_text(encoding="utf-8"))
-          print(json.dumps({
-              "groupId": "workspace-product-v2",
-              "contractApiVersion": lock["contractApiVersion"],
-              "wireApiVersion": lock["wireApiVersion"],
-              "contractLock": {
-                  "repository": "DoHorizon-AI/Cyrene-Platform",
-                  "commit": sys.argv[2],
-                  "path": lock_path.as_posix(),
-                  "sha256": "sha256:" + hashlib.sha256(lock_path.read_bytes()).hexdigest(),
-              },
-          }, sort_keys=True))
-          PY
-          )"
           make_oci_manifest() {
-            component_id="$1" image_repository="$2" digest="$3" target="$4" needs_group="$5"
+            component_id="$1" image_repository="$2" digest="$3" target="$4"
             version="$(python - "$OUTPUT_ROOT/native/manifests" "$component_id" <<'PY'
           import json, sys
           from pathlib import Path
@@ -381,18 +390,15 @@ jobs:
               --oci-platform-json '{"os":"linux","architecture":"amd64"}'
               --output "$OUTPUT_ROOT/descriptor-$component_id.json"
             )
-            if [ "$needs_group" = true ]; then args+=(--compatibility-json "$compatibility"); fi
             python tooling/release/component_descriptor.py "${args[@]}"
             python tooling/release/create_component_manifest.py \
               --descriptor "$OUTPUT_ROOT/descriptor-$component_id.json" \
               --output-dir "$OUTPUT_ROOT/native/manifests"
           }
-          linux_docker_target='{"os":"linux","osVersion":"24.04","distribution":"ubuntu","distributionVersion":"24.04","architecture":"x86_64","abi":"glibc-2.39","runtime":"docker:linux"}'
           windows_docker_target='{"os":"windows","osVersion":"10.0","architecture":"x86_64","runtime":"docker-desktop:linux"}'
-          make_oci_manifest cy-workspace-relay ghcr.io/dohorizon-ai/cyrene-workspace-relay "$RELAY_DIGEST" "$linux_docker_target" true
-          make_oci_manifest cy-workspace-connector ghcr.io/dohorizon-ai/cyrene-workspace-connector "$CONNECTOR_DIGEST" "$linux_docker_target" true
-          make_oci_manifest cy-workspace-web-bff ghcr.io/dohorizon-ai/cyrene-workspace-web-bff "$BFF_DIGEST" "$linux_docker_target" true
-          make_oci_manifest cyrene-runtime-maintenance ghcr.io/dohorizon-ai/cyrene-runtime-maintenance "$RUNTIME_DIGEST" "$windows_docker_target" false
+          make_oci_manifest cy-workspace-authority-host ghcr.io/dohorizon-ai/cyrene-workspace-authority "$AUTHORITY_DIGEST" "$windows_docker_target"
+          make_oci_manifest cy-workspace-web-bff ghcr.io/dohorizon-ai/cyrene-workspace-web-bff "$BFF_DIGEST" "$windows_docker_target"
+          make_oci_manifest cyrene-runtime-maintenance ghcr.io/dohorizon-ai/cyrene-runtime-maintenance "$RUNTIME_DIGEST" "$windows_docker_target"
 
       - name: Create and attest the immutable component index
         run: |
@@ -507,8 +513,9 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Workspace
-          ref: 522524b86a8f79c70e948fed8cb27c4cc70f29c4
+          ref: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
           path: workspace-catalog
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -529,7 +536,7 @@ jobs:
       - name: Validate component tooling and RFC 8785 fixtures
         env:
           CYRENE_COMPONENT_CATALOG: workspace-catalog/governance/component-catalog-v1.json
-          CYRENE_COMPONENT_CATALOG_SHA256: 248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35
+          CYRENE_COMPONENT_CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
         run: |
           set -euo pipefail
           python -m pytest tooling/release/tests -q

@@ -25,6 +25,7 @@ SCHEMAS = {
     "manifest": "component-release-manifest-v1.schema.json",
     "index": "component-release-index-v1.schema.json",
 }
+V2_MANIFEST_SCHEMA = "component-release-manifest-v2.schema.json"
 
 
 class ComponentSchemaError(ValueError):
@@ -42,7 +43,7 @@ def validate_document(document_path: Path, schema_dir: Path, kind: str) -> list[
         A sorted list of human-readable JSON Schema violations.
     """
     schema_name = SCHEMAS[kind]
-    paths = {name: schema_dir / name for name in set(SCHEMAS.values())}
+    paths = {name: schema_dir / name for name in {*SCHEMAS.values(), V2_MANIFEST_SCHEMA}}
     schemas: dict[str, dict[str, Any]] = {}
     for name, path in paths.items():
         try:
@@ -62,7 +63,10 @@ def validate_document(document_path: Path, schema_dir: Path, kind: str) -> list[
     registry = Registry()
     for schema in schemas.values():
         registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
-    validator = Draft202012Validator(schemas[schema_name], registry=registry)
+    selected_schema = schemas[schema_name]
+    if kind == "manifest" and isinstance(document, dict) and document.get("schemaVersion") == 2:
+        selected_schema = schemas[V2_MANIFEST_SCHEMA]
+    validator = Draft202012Validator(selected_schema, registry=registry)
     failures = sorted(
         validator.iter_errors(document),
         key=lambda error: (list(error.absolute_path), error.message),
