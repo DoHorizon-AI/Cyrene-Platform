@@ -28,8 +28,9 @@ PROFILE = "CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU"
 NATIVE_PROFILE = "NATIVE_LINUX_PROFILE"
 WSL_DEV_PROFILE = "WSL_DEV_PROFILE"
 SCHEMA_VERSION = 1
-COMPONENT_ORDER = ("nvidiaAdapter", "sandboxd", "kernel")
+COMPONENT_ORDER = ("systemAdapter", "nvidiaAdapter", "sandboxd", "kernel")
 EXECUTABLES = {
+    "systemAdapter": "cyrene-linux-sys-adapter",
     "nvidiaAdapter": "cyrene-nvidia-adapter",
     "sandboxd": "cyrene-sandboxd",
     "kernel": "cyrene-kernel",
@@ -185,6 +186,8 @@ def _build_binaries(root: Path, layout: Layout) -> dict[str, Path]:
     cargo = shutil.which("cargo")
     if cargo is None:
         raise BootstrapFailure("CARGO_UNAVAILABLE", "Install the pinned Rust toolchain")
+    start_time = time.monotonic()
+    print("Building Platform native components (cargo build --locked --release)...", file=sys.stderr)
     build_log = layout.logs / "platform-build.log"
     with build_log.open("ab") as output:
         command = [cargo, "build", "--locked", "--release", "--target-dir", str(layout.build)]
@@ -197,8 +200,13 @@ def _build_binaries(root: Path, layout: Layout) -> dict[str, Path]:
             stderr=subprocess.STDOUT,
             timeout=1800,
         )
+    elapsed = time.monotonic() - start_time
     if result.returncode:
-        raise BootstrapFailure("PLATFORM_BUILD_FAILED", "Platform runtime binaries did not build from the lockfile")
+        raise BootstrapFailure(
+            "PLATFORM_BUILD_FAILED",
+            f"Platform runtime binaries did not build from the lockfile (failed after {elapsed:.2f}s)",
+        )
+    print(f"Platform native components built successfully in {elapsed:.2f}s", file=sys.stderr)
     installed: dict[str, Path] = {}
     for component, executable in EXECUTABLES.items():
         source = layout.build / "release" / executable
@@ -320,7 +328,7 @@ def _start_component(
 
 
 def _remove_owned_sockets(layout: Layout) -> None:
-    for name in ("nvidia.sock", "sandboxd.sock", "kernel.sock", "worker.sock", "provider.sock"):
+    for name in ("system.sock", "nvidia.sock", "sandboxd.sock", "kernel.sock", "worker.sock", "provider.sock"):
         path = layout.run / name
         try:
             if path.is_socket():
@@ -448,12 +456,24 @@ def up(args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
     binaries = _installed_binaries(layout) if args.no_build else _build_binaries(root, layout)
     uid = os.getuid()
     sockets = {
+        "systemAdapter": layout.run / "system.sock",
         "nvidiaAdapter": layout.run / "nvidia.sock",
         "sandboxd": layout.run / "sandboxd.sock",
         "kernel": layout.run / "kernel.sock",
     }
     _remove_owned_sockets(layout)
+    dev_mode = getattr(args, "dev_mode", False) or wsl
+    disable_device_bpf = getattr(args, "disable_device_bpf", False) or dev_mode
     commands = {
+        "systemAdapter": [
+            str(binaries["systemAdapter"]),
+            "--socket",
+            str(sockets["systemAdapter"]),
+            "--allowed-client-uid",
+            str(uid),
+            "--adapter-id",
+            "linux-sys",
+        ],
         "nvidiaAdapter": [
             str(binaries["nvidiaAdapter"]),
             "--socket",
@@ -470,7 +490,8 @@ def up(args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
             str(layout.workers),
             "--allowed-client-uid",
             str(uid),
-            *(["--dev-mode"] if wsl else []),
+            *(["--dev-mode"] if dev_mode else []),
+            *(["--disable-device-bpf"] if disable_device_bpf and not dev_mode else []),
             *(["--cgroup-root", str(args.sandbox_cgroup_root)] if args.sandbox_cgroup_root else []),
         ],
         "kernel": [
@@ -483,6 +504,10 @@ def up(args: argparse.Namespace, layout: Layout) -> dict[str, Any]:
             str(layout.run / "worker.sock"),
             "--provider-socket",
             str(layout.run / "provider.sock"),
+            "--system-adapter",
+            "linux-sys=" + str(sockets["systemAdapter"]),
+            "--system-adapter-peer-uid",
+            "linux-sys=" + str(uid),
             "--hardware-adapter",
             "nvidia-smi=" + str(sockets["nvidiaAdapter"]),
             "--hardware-adapter-peer-uid",
@@ -588,6 +613,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--node-id", default=os.environ.get("CYRENE_NODE_ID", "cyrene-reference-node"))
     value.add_argument("--sandbox-cgroup-root", type=Path)
     value.add_argument("--no-build", action="store_true")
+    value.add_argument("--dev-mode", action="store_true", help="Enable dev mode (bypasses device BPF enforcement)")
+    value.add_argument("--disable-device-bpf", action="store_true", help="Disable device BPF in sandboxd")
     return value
 
 

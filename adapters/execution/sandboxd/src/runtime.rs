@@ -44,7 +44,7 @@ use cy_kernel_api::{
 #[cfg(target_os = "linux")]
 use crate::sys::{open_pidfd, spawn_gated_process, try_wait_pid, wait_pid};
 use crate::{
-    bpf::attach_device_bpf_filter,
+    bpf::{attach_device_bpf_filter, probe_device_bpf_capable},
     config::{fact, is_owned_instance_name, CgroupV2Config, OwnedCgroupCleanupReport},
     sys::{
         pidfd_available, proc_start_time, read_key_values, read_oom_kill_count, read_trimmed,
@@ -524,6 +524,16 @@ impl CgroupV2Runtime {
                 "HARD binding performs a real load and attach at launch",
             ),
             fact(
+                "device-bpf-capable",
+                if self.config.device_bpf_enabled {
+                    probe_device_bpf_capable()
+                } else {
+                    false
+                },
+                false,
+                "host kernel and process permissions permit cgroup device BPF loading",
+            ),
+            fact(
                 "dev-mode",
                 self.config.dev_mode,
                 false,
@@ -896,11 +906,21 @@ impl CgroupV2Runtime {
         if binding.enforcement != EnforcementMode::Hard {
             return Ok(());
         }
+        if self.config.dev_mode {
+            return Ok(());
+        }
         if !self.config.device_bpf_enabled {
             return Err(ProviderError::new(
                 "linux-device-bpf",
                 "HARD_ENFORCEMENT_UNAVAILABLE",
                 "device BPF is disabled; a HARD accelerator allocation cannot launch",
+            ));
+        }
+        if !probe_device_bpf_capable() {
+            return Err(ProviderError::new(
+                "linux-device-bpf",
+                "DEVICE_BPF_PERMISSION_DENIED",
+                "cgroup device BPF requires root or CAP_BPF / CAP_SYS_ADMIN capabilities; grant capabilities or run with --dev-mode / --disable-device-bpf for unprivileged local dev",
             ));
         }
         attach_device_bpf_filter(cgroup_path, binding)
