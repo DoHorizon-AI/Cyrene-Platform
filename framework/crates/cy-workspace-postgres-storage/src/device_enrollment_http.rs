@@ -31,7 +31,7 @@ use crate::device_authorization::{
     DeviceAuthorizationStartDisposition, DeviceAuthorizationState, DeviceCsrValidator,
     DeviceRegistrationKeyDigest,
 };
-use cy_workspace_relay_runtime::AuthenticatedRelayWorkspaceDevice;
+use cy_workspace_control_plane::device_registry::AuthenticatedRelayWorkspaceDevice;
 
 const MAX_CSR_DER_BYTES: usize = 16 * 1024;
 const MAX_WEBAUTHN_ASSERTION_BYTES: usize = 64 * 1024;

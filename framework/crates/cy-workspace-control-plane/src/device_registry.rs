@@ -168,3 +168,162 @@ pub trait WorkspaceDeviceRegistry: Send + Sync {
         ))
     }
 }
+
+/// Certificate facts plus the matched Directory binding needed to fence rotations.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthenticatedRelayWorkspaceDevice {
+    pub registration_binding_id: [u8; 16],
+    pub key: WorkspaceDeviceKey,
+    pub authorization_generation: u64,
+    pub csr_sha256: [u8; 32],
+    pub spki_sha256: [u8; 32],
+    pub certificate_sha256: [u8; 32],
+    pub serial_number: Vec<u8>,
+    pub not_after_unix_ms: u64,
+}
+
+impl AuthenticatedRelayWorkspaceDevice {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        registration_binding_id: [u8; 16],
+        key: WorkspaceDeviceKey,
+        authorization_generation: u64,
+        csr_sha256: [u8; 32],
+        spki_sha256: [u8; 32],
+        certificate_sha256: [u8; 32],
+        serial_number: Vec<u8>,
+        not_after_unix_ms: u64,
+    ) -> Self {
+        Self {
+            registration_binding_id,
+            key,
+            authorization_generation,
+            csr_sha256,
+            spki_sha256,
+            certificate_sha256,
+            serial_number,
+            not_after_unix_ms,
+        }
+    }
+
+    pub fn registration_binding_id(&self) -> &[u8; 16] {
+        &self.registration_binding_id
+    }
+
+    pub fn key(&self) -> &WorkspaceDeviceKey {
+        &self.key
+    }
+
+    pub fn authorization_generation(&self) -> u64 {
+        self.authorization_generation
+    }
+
+    pub fn csr_sha256(&self) -> &[u8; 32] {
+        &self.csr_sha256
+    }
+
+    pub fn spki_sha256(&self) -> &[u8; 32] {
+        &self.spki_sha256
+    }
+
+    pub fn certificate_sha256(&self) -> &[u8; 32] {
+        &self.certificate_sha256
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        &self.serial_number
+    }
+
+    pub fn not_after_unix_ms(&self) -> u64 {
+        self.not_after_unix_ms
+    }
+}
+
+pub struct RelayPeerRevocationQuery<'a> {
+    pub certificate_der: &'a [u8],
+    pub intermediate_chain_der: &'a [Vec<u8>],
+    pub trusted_roots_der: &'a [Vec<u8>],
+    pub serial_number: &'a [u8],
+    pub certificate_sha256: [u8; 32],
+    pub checked_at_unix_ms: u64,
+}
+
+impl<'a> RelayPeerRevocationQuery<'a> {
+    pub fn new(
+        certificate_der: &'a [u8],
+        intermediate_chain_der: &'a [Vec<u8>],
+        trusted_roots_der: &'a [Vec<u8>],
+        serial_number: &'a [u8],
+        certificate_sha256: [u8; 32],
+        checked_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            certificate_der,
+            intermediate_chain_der,
+            trusted_roots_der,
+            serial_number,
+            certificate_sha256,
+            checked_at_unix_ms,
+        }
+    }
+
+    pub fn certificate_der(&self) -> &[u8] {
+        self.certificate_der
+    }
+
+    pub fn intermediate_chain_der(&self) -> &[Vec<u8>] {
+        self.intermediate_chain_der
+    }
+
+    pub fn trusted_roots_der(&self) -> &[Vec<u8>] {
+        self.trusted_roots_der
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        self.serial_number
+    }
+
+    pub fn certificate_sha256(&self) -> &[u8; 32] {
+        &self.certificate_sha256
+    }
+
+    pub fn checked_at_unix_ms(&self) -> u64 {
+        self.checked_at_unix_ms
+    }
+}
+
+pub struct CurrentRelayPeerRevocationEvidence {
+    pub certificate_sha256: [u8; 32],
+    pub this_update_unix_ms: u64,
+    pub next_update_unix_ms: u64,
+}
+
+impl CurrentRelayPeerRevocationEvidence {
+    pub fn from_verified_good_status(
+        certificate_sha256: [u8; 32],
+        this_update_unix_ms: u64,
+        next_update_unix_ms: u64,
+    ) -> Self {
+        Self {
+            certificate_sha256,
+            this_update_unix_ms,
+            next_update_unix_ms,
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayPeerRevocationCheckError {
+    #[error("certificate is revoked")]
+    Revoked,
+    #[error("current certificate revocation status is unknown")]
+    Unknown,
+}
+
+pub trait RelayPeerCertificateRevocationChecker: Send + Sync {
+    fn require_current_good_status(
+        &self,
+        query: &RelayPeerRevocationQuery<'_>,
+    ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError>;
+}
+
