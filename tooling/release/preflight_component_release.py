@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 SOURCE_COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-IMMUTABLE_SETTINGS_READ_TOKEN = "CYRENE_IMMUTABLE_RELEASE_SETTINGS_READ_TOKEN"
+IMMUTABLE_SETTINGS_READ_TOKEN = "CYRENE_IMMUTABLE_RELEASES_READ_TOKEN"
 
 
 class ReleasePreflightError(ValueError):
@@ -76,6 +76,7 @@ def preflight(
     source_ref: str,
     source_commit: str,
     repository_root: Path,
+    release_namespace: str = "component",
 ) -> None:
     """Require enabled immutable releases and prove release/tag absence.
 
@@ -92,8 +93,12 @@ def preflight(
     allowed_refs = {"stable": {"refs/heads/main", "refs/heads/release"}, "preview": {"refs/heads/develop"}}
     if channel not in allowed_refs or source_ref not in allowed_refs[channel]:
         raise ReleasePreflightError("source ref is not allowed by the immutable release channel policy")
-    if release_id != f"{channel}-{source_commit}":
-        raise ReleasePreflightError("release ID must equal the selected channel plus full source SHA")
+    expected_release_id = {
+        "component": f"{channel}-{source_commit}",
+        "product-policy-v2": f"product-policy-v2-{channel}-{source_commit}",
+    }.get(release_namespace)
+    if expected_release_id is None or release_id != expected_release_id:
+        raise ReleasePreflightError("release ID must match the selected immutable release namespace and source SHA")
 
     owner, name = repository.split("/", 1)
     base_url = f"https://api.github.com/repos/{owner}/{name}"
@@ -151,6 +156,7 @@ def main() -> int:
     parser.add_argument("--channel", choices=("stable", "preview"), required=True)
     parser.add_argument("--source-ref", required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--release-namespace", choices=("component", "product-policy-v2"), default="component")
     parser.add_argument("--repository-root", type=Path, required=True)
     arguments = parser.parse_args()
     try:
@@ -161,6 +167,7 @@ def main() -> int:
             source_ref=arguments.source_ref,
             source_commit=arguments.source_commit,
             repository_root=arguments.repository_root.resolve(),
+            release_namespace=arguments.release_namespace,
         )
     except (OSError, ReleasePreflightError, ValueError) as error:
         print(f"Component release preflight failed: {error}", file=sys.stderr)

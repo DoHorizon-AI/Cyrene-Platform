@@ -34,6 +34,46 @@
     },
     {
       "ownerId": "yield",
+      "operationId": "workspaceGetRun",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/organizationId", "matches": "ORGANIZATION_ID" },
+        { "jsonPointer": "/workspaceId", "matches": "WORKSPACE_ID" },
+        { "jsonPointer": "/trainingRunId", "matches": "RESOURCE_ID" },
+        { "jsonPointer": "/id", "matches": "RESOURCE_ID" }
+      ]
+    },
+    {
+      "ownerId": "yield",
+      "operationId": "workspaceListRunEvents",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/organizationId", "matches": "ORGANIZATION_ID" },
+        { "jsonPointer": "/workspaceId", "matches": "WORKSPACE_ID" },
+        { "jsonPointer": "/trainingRunId", "matches": "RESOURCE_ID" }
+      ]
+    },
+    {
+      "ownerId": "yield",
+      "operationId": "workspaceListRunAttempts",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/organizationId", "matches": "ORGANIZATION_ID" },
+        { "jsonPointer": "/workspaceId", "matches": "WORKSPACE_ID" },
+        { "jsonPointer": "/trainingRunId", "matches": "RESOURCE_ID" }
+      ]
+    },
+    {
+      "ownerId": "yield",
       "operationId": "workspaceStartRun",
       "principalKinds": ["DIRECTORY_USER"],
       "requiredRoles": [
