@@ -32,6 +32,7 @@ core_copyleft = [
 ]
 
 separate_decision = [
+    "cy-workspace-authority-host",
     "cy-workspace-connector-host",
     "cy-workspace-control-plane",
     "cy-workspace-postgres-storage",

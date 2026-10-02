@@ -6,11 +6,11 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 
 pub mod outbox;
+pub mod service;
 pub mod snapshot;
 pub mod trust;
-pub mod service;
 
 pub use outbox::*;
+pub use service::*;
 pub use snapshot::*;
 pub use trust::*;
-pub use service::*;

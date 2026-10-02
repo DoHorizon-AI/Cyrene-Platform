@@ -1417,8 +1417,11 @@ mod tests {
         let mut encoder =
             zstd::stream::write::Encoder::new(Vec::new(), 0).expect("create zstd encoder");
         encoder.write_all(&tar_bytes).expect("compress tar archive");
-        fs::write(&archive_path, encoder.finish().expect("finish zstd archive"))
-            .expect("write archive file");
+        fs::write(
+            &archive_path,
+            encoder.finish().expect("finish zstd archive"),
+        )
+        .expect("write archive file");
 
         assert!(verify_archive_matches_tree(&archive_path, &artifact_root).is_err());
     }

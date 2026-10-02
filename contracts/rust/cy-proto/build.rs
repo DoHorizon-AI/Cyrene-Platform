@@ -80,7 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace_sidecar_v2_proto.display()
     );
     println!("cargo:rerun-if-changed={}", workspace_relay_proto.display());
-    println!("cargo:rerun-if-changed={}", workspace_tunnel_proto.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_tunnel_proto.display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         device_enrollment_proto.display()

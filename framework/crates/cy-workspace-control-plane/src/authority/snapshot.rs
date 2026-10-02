@@ -645,11 +645,9 @@ mod tests {
                 .expect("missing state means first boot"),
             None
         );
-        let manager = ContractSnapshotManager::open(
-            &state_dir,
-            verified_snapshot(1, &content_digest(0x11)),
-        )
-        .expect("first verified artifact bootstraps state");
+        let manager =
+            ContractSnapshotManager::open(&state_dir, verified_snapshot(1, &content_digest(0x11)))
+                .expect("first verified artifact bootstraps state");
         assert_eq!(manager.highest_generation(), 1);
     }
 }
