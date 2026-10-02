@@ -91,8 +91,13 @@ jobs:
             --source-commit "$SOURCE_COMMIT" \
             --repository-root .
 
+      - name: Enable user namespaces for authority acceptance
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Run release test gates
-        run: cargo test --locked --workspace --all-targets
+        run: unshare --user --map-root-user cargo test --locked --workspace --all-targets
 
       - name: Build V2 Product contracts from the tracked owner SHAs
         id: product-contracts
@@ -510,7 +515,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --disable-pip-version-check build pyyaml pytest -r tooling/release/requirements.txt
-      - run: cargo test --locked --workspace --all-targets
+      - name: Enable user namespaces for authority acceptance
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Run workspace tests in a user namespace
+        run: unshare --user --map-root-user cargo test --locked --workspace --all-targets
       - name: Validate component tooling and RFC 8785 fixtures
         env:
           CYRENE_COMPONENT_CATALOG: workspace-catalog/governance/component-catalog-v1.json
