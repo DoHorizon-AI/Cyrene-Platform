@@ -44,6 +44,19 @@ impl ProductHttpApiAdapter {
         configs: Vec<ProductEndpointConfig>,
         catalog: &ProductContractBundle,
     ) -> Result<Self, ProductInvocationError> {
+        Self::from_private_config_with_ca_bundle(configs, catalog, None)
+    }
+
+    /// Creates the production transport with an optional operator-owned CA bundle.
+    ///
+    /// The bundle only adds trust roots; embedded WebPKI roots and certificate
+    /// hostname validation remain enabled. Callers must load this value from
+    /// private process configuration, never from a Product invocation.
+    pub fn from_private_config_with_ca_bundle(
+        configs: Vec<ProductEndpointConfig>,
+        catalog: &ProductContractBundle,
+        additional_ca_bundle: Option<Vec<u8>>,
+    ) -> Result<Self, ProductInvocationError> {
         validate_product_endpoint_configs(&configs)
             .map_err(|_| ProductInvocationError::Unavailable)?;
         validate_endpoint_owners(&configs, |owner_id| catalog.contains_owner_id(owner_id))?;
@@ -59,7 +72,12 @@ impl ProductHttpApiAdapter {
                 })
             })
             .collect::<Result<Vec<_>, ProductInvocationError>>()?;
-        let client = build_http_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT, true)?;
+        let client = build_http_client(
+            CONNECT_TIMEOUT,
+            REQUEST_TIMEOUT,
+            true,
+            additional_ca_bundle.as_deref(),
+        )?;
         Ok(Self {
             endpoints,
             transport: Arc::new(ReqwestProductHttpTransport { client }),
@@ -183,15 +201,76 @@ fn build_http_client(
     connect_timeout: Duration,
     request_timeout: Duration,
     https_only: bool,
+    additional_ca_bundle: Option<&[u8]>,
 ) -> Result<Client, ProductInvocationError> {
-    Client::builder()
+    let mut builder = Client::builder()
         .https_only(https_only)
         .no_proxy()
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(bundle) = additional_ca_bundle {
+        for certificate in parse_certificate_bundle(bundle)? {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+    builder
         .build()
         .map_err(|_| ProductInvocationError::Unavailable)
+}
+
+fn parse_certificate_bundle(
+    bundle: &[u8],
+) -> Result<Vec<reqwest::Certificate>, ProductInvocationError> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+
+    let pem = std::str::from_utf8(bundle).map_err(|_| ProductInvocationError::Unavailable)?;
+    let mut certificates = Vec::new();
+    let mut current = None::<String>;
+    for line in pem.lines() {
+        let line = line.trim();
+        if line.is_empty() && current.is_none() {
+            continue;
+        }
+        if current.is_none() {
+            if line != BEGIN {
+                return Err(ProductInvocationError::Unavailable);
+            }
+            current = Some(format!("{BEGIN}\n"));
+            continue;
+        }
+        if line == END {
+            let mut certificate = current.take().ok_or(ProductInvocationError::Unavailable)?;
+            certificate.push_str(END);
+            certificate.push('\n');
+            certificates.push(
+                reqwest::Certificate::from_pem(certificate.as_bytes())
+                    .map_err(|_| ProductInvocationError::Unavailable)?,
+            );
+            continue;
+        }
+        if line == BEGIN
+            || line.starts_with("-----")
+            || line
+                .bytes()
+                .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'/' | b'='))
+        {
+            return Err(ProductInvocationError::Unavailable);
+        }
+        current
+            .as_mut()
+            .ok_or(ProductInvocationError::Unavailable)?
+            .push_str(line);
+        current
+            .as_mut()
+            .ok_or(ProductInvocationError::Unavailable)?
+            .push('\n');
+    }
+    if current.is_some() || certificates.is_empty() {
+        return Err(ProductInvocationError::Unavailable);
+    }
+    Ok(certificates)
 }
 
 fn validate_endpoint_owners(
@@ -394,8 +473,10 @@ fn parse_content_type(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, SanType};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use std::io::Write;
-    use std::net::TcpListener;
+    use std::net::{IpAddr, Ipv4Addr, TcpListener};
     use std::thread;
 
     use super::*;
@@ -408,6 +489,167 @@ mod tests {
             "https://product.example.test/",
             "product-service-private-token-value-0123456789",
         )
+    }
+
+    #[test]
+    fn private_ca_bundle_requires_only_valid_certificate_pem_blocks() {
+        assert!(matches!(
+            parse_certificate_bundle(b""),
+            Err(ProductInvocationError::Unavailable)
+        ));
+        assert!(matches!(
+            parse_certificate_bundle(b"not pem"),
+            Err(ProductInvocationError::Unavailable)
+        ));
+        assert!(matches!(
+            parse_certificate_bundle(
+                b"-----BEGIN CERTIFICATE-----\nnot-base64!\n-----END CERTIFICATE-----\n"
+            ),
+            Err(ProductInvocationError::Unavailable)
+        ));
+        assert!(matches!(
+            parse_certificate_bundle(
+                b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n"
+            ),
+            Err(ProductInvocationError::Unavailable)
+        ));
+        assert!(matches!(
+            parse_certificate_bundle(
+                b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\ntrailing"
+            ),
+            Err(ProductInvocationError::Unavailable)
+        ));
+        assert!(matches!(
+            build_http_client(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                true,
+                Some(b"invalid CA bundle"),
+            ),
+            Err(ProductInvocationError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn default_https_client_builds_without_operator_ca_configuration() {
+        build_http_client(Duration::from_secs(1), Duration::from_secs(1), true, None)
+            .expect("default HTTPS roots remain available without a private CA");
+    }
+
+    fn self_signed_ca_fixture() -> (String, CertificateDer<'static>, PrivateKeyDer<'static>) {
+        let ca_key = KeyPair::generate().expect("generate fixture CA key");
+        let mut ca_parameters =
+            CertificateParams::new(Vec::<String>::new()).expect("create fixture CA parameters");
+        ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_certificate = ca_parameters
+            .self_signed(&ca_key)
+            .expect("self-sign fixture CA");
+        let issuer = Issuer::new(ca_parameters.clone(), ca_key);
+
+        let leaf_key = KeyPair::generate().expect("generate fixture leaf key");
+        let mut leaf_parameters =
+            CertificateParams::new(Vec::<String>::new()).expect("create fixture leaf parameters");
+        leaf_parameters
+            .subject_alt_names
+            .push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let leaf_certificate = leaf_parameters
+            .signed_by(&leaf_key, &issuer)
+            .expect("sign fixture leaf");
+        (
+            ca_certificate.pem(),
+            leaf_certificate.der().clone(),
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+        )
+    }
+
+    async fn serve_one_tls_connection(
+        listener: tokio::net::TcpListener,
+        certificate: CertificateDer<'static>,
+        private_key: PrivateKeyDer<'static>,
+    ) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|error| format!("accept HTTPS fixture: {error}"))?;
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .map_err(|error| format!("configure HTTPS fixture: {error}"))?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let mut stream = acceptor
+            .accept(stream)
+            .await
+            .map_err(|error| format!("TLS fixture handshake: {error}"))?;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .map_err(|error| format!("write HTTPS fixture response: {error}"))?;
+        stream
+            .shutdown()
+            .await
+            .map_err(|error| format!("close HTTPS fixture response: {error}"))
+    }
+
+    #[tokio::test]
+    async fn additional_ca_trusts_the_certificate_but_keeps_hostname_validation() {
+        let (ca_pem, certificate, private_key) = self_signed_ca_fixture();
+        let client = build_http_client(
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            true,
+            Some(ca_pem.as_bytes()),
+        )
+        .expect("build client with operator CA");
+        assert_eq!(
+            parse_certificate_bundle(ca_pem.as_bytes()).unwrap().len(),
+            1
+        );
+
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+            .await
+            .expect("bind HTTPS fixture");
+        let address = listener.local_addr().expect("read HTTPS fixture address");
+        let fixture = tokio::spawn(serve_one_tls_connection(
+            listener,
+            certificate.clone(),
+            private_key.clone_key(),
+        ));
+        let trusted_result = client
+            .get(format!("https://127.0.0.1:{}/", address.port()))
+            .send()
+            .await;
+        let trusted_result = match trusted_result {
+            Ok(response) => {
+                let status = response.status();
+                response.bytes().await.map(|_| status)
+            }
+            Err(error) => Err(error),
+        };
+        let fixture_result = fixture.await.expect("finish trusted HTTPS fixture");
+        let trusted_status = trusted_result.unwrap_or_else(|error| {
+            panic!("configured CA should trust the fixture certificate: {error}; fixture: {fixture_result:?}")
+        });
+        assert_eq!(trusted_status, StatusCode::OK);
+
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+            .await
+            .expect("bind wrong-host HTTPS fixture");
+        let address = listener
+            .local_addr()
+            .expect("read wrong-host fixture address");
+        let fixture = tokio::spawn(serve_one_tls_connection(listener, certificate, private_key));
+        let result = client
+            .get(format!("https://127.0.0.2:{}/", address.port()))
+            .send()
+            .await;
+        let fixture_result = fixture.await.expect("finish wrong-host HTTPS fixture");
+        assert!(
+            result.is_err() && fixture_result.is_err(),
+            "an additive CA must not bypass hostname validation; response: {result:?}; fixture: {fixture_result:?}"
+        );
     }
 
     #[test]
@@ -461,8 +703,13 @@ mod tests {
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
             );
         });
-        let client = build_http_client(Duration::from_secs(1), Duration::from_millis(30), false)
-            .expect("create bounded test client");
+        let client = build_http_client(
+            Duration::from_secs(1),
+            Duration::from_millis(30),
+            false,
+            None,
+        )
+        .expect("create bounded test client");
         let transport = ReqwestProductHttpTransport { client };
         let result = transport
             .send(ProductHttpRequest {

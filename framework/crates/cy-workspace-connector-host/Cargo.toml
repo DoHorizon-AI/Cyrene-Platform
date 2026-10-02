@@ -13,6 +13,7 @@ cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-contro
 cy-workspace-product-adapters = { version = "0.1.0", path = "../cy-workspace-product-adapters" }
 cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts" }
 cy-workspace-fabric = { version = "0.1.0", path = "../cy-workspace-fabric" }
+libc = "0.2"
 openssl = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -33,8 +33,10 @@ use url::Url;
 use x509_parser::parse_x509_certificate;
 
 const PRIVATE_ROOT: &str = "/run/cyrene/workspace-connector";
-const PRIVATE_SECRET_ROOT: &str = "/run/cyrene/workspace-connector/secrets";
-const PRODUCT_ENDPOINT_MANIFEST: &str = "/run/cyrene/workspace-connector/product-endpoints.json";
+const CONNECTOR_CONFIG_ROOT_ENV: &str = "CYRENE_WORKSPACE_CONNECTOR_CONFIG_ROOT";
+const PRODUCT_ENDPOINT_MANIFEST: &str = "product-endpoints.json";
+const PRODUCT_SERVER_CA_FILE: &str = "product-server-ca.pem";
+const MAX_PRODUCT_SERVER_CA_BYTES: usize = 1024 * 1024;
 const PRODUCT_CONTRACT_ROOT_ENV: &str = "CYRENE_WORKSPACE_CONNECTOR_PRODUCT_CONTRACT_ROOT_V2";
 const DEFAULT_PRODUCT_CONTRACT_ROOT: &str = "/run/cyrene-workspace-product-contracts";
 const PRODUCT_POLICY_BUNDLE_FILENAME: &str = "workspace-product-policy-v2.json";
@@ -123,6 +125,13 @@ struct LoadedHostConfiguration {
     workspace_id: String,
 }
 
+struct PrivateConfigPaths {
+    root: PathBuf,
+    secrets: PathBuf,
+    endpoint_manifest: PathBuf,
+    product_server_ca: PathBuf,
+}
+
 /// Product-neutral operation routes remain unavailable until their separate
 /// Product authority adapter is composed. Product API requests use the
 /// configured `ProductHttpApiAdapter` below.
@@ -174,16 +183,21 @@ async fn run_host() -> Result<(), Box<dyn Error>> {
         )
         .map_err(|_| HostConfigurationError::ProductManifestInvalid)?,
     );
+    let private_paths = private_config_paths()?;
     let endpoint_configs = load_product_endpoint_configs_for_workspace(
-        Path::new(PRODUCT_ENDPOINT_MANIFEST),
-        Path::new(PRIVATE_SECRET_ROOT),
+        &private_paths.endpoint_manifest,
+        &private_paths.secrets,
         &configuration.organization_id,
         &configuration.workspace_id,
     )
     .map_err(|_| HostConfigurationError::ProductManifestInvalid)?;
     let product_api = Arc::new(
-        ProductHttpApiAdapter::from_private_config(endpoint_configs, &product_contracts)
-            .map_err(|_| HostConfigurationError::ProductManifestInvalid)?,
+        ProductHttpApiAdapter::from_private_config_with_ca_bundle(
+            endpoint_configs,
+            &product_contracts,
+            load_optional_product_server_ca(&private_paths)?,
+        )
+        .map_err(|_| HostConfigurationError::ProductManifestInvalid)?,
     );
     let dispatcher = Arc::new(UnavailableOperationDispatcher);
     let control_plane = WorkspaceControlPlane::new(
@@ -351,10 +365,11 @@ async fn serve_until_shutdown(
 
 #[cfg(unix)]
 fn load_host_configuration() -> Result<LoadedHostConfiguration, HostConfigurationError> {
-    let private_owner = validate_private_directory(Path::new(PRIVATE_ROOT), None)?;
-    validate_private_directory(Path::new(PRIVATE_SECRET_ROOT), Some(private_owner))?;
+    let paths = private_config_paths()?;
+    let private_owner = validate_private_directory(&paths.root, Some(current_effective_uid()))?;
+    validate_private_directory(&paths.secrets, Some(private_owner))?;
     let manifest_bytes = read_private_file(
-        Path::new(PRIVATE_ROOT),
+        &paths.root,
         "connector.json",
         private_owner,
         MAX_CONNECTOR_MANIFEST_BYTES,
@@ -372,19 +387,19 @@ fn load_host_configuration() -> Result<LoadedHostConfiguration, HostConfiguratio
     }
 
     let ca_certificate_pem = read_private_file(
-        Path::new(PRIVATE_SECRET_ROOT),
+        &paths.secrets,
         RELAY_CA_FILE,
         private_owner,
         MAX_RELAY_CA_BYTES,
     )?;
     let client_certificate_pem = read_private_file(
-        Path::new(PRIVATE_SECRET_ROOT),
+        &paths.secrets,
         DEVICE_CERTIFICATE_FILE,
         private_owner,
         MAX_DEVICE_CERTIFICATE_BYTES,
     )?;
     let client_key_pem = read_private_file(
-        Path::new(PRIVATE_SECRET_ROOT),
+        &paths.secrets,
         DEVICE_PRIVATE_KEY_FILE,
         private_owner,
         MAX_DEVICE_PRIVATE_KEY_BYTES,
@@ -419,6 +434,67 @@ fn load_host_configuration() -> Result<LoadedHostConfiguration, HostConfiguratio
         organization_id: manifest.organization_id,
         workspace_id: manifest.workspace_id,
     })
+}
+
+fn private_config_paths() -> Result<PrivateConfigPaths, HostConfigurationError> {
+    let root = std::env::var_os(CONNECTOR_CONFIG_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(PRIVATE_ROOT));
+    private_config_paths_for_root(root)
+}
+
+fn private_config_paths_for_root(
+    root: PathBuf,
+) -> Result<PrivateConfigPaths, HostConfigurationError> {
+    validate_connector_config_root(&root)?;
+    let secrets = root.join("secrets");
+    Ok(PrivateConfigPaths {
+        endpoint_manifest: root.join(PRODUCT_ENDPOINT_MANIFEST),
+        product_server_ca: secrets.join(PRODUCT_SERVER_CA_FILE),
+        root,
+        secrets,
+    })
+}
+
+fn validate_connector_config_root(root: &Path) -> Result<(), HostConfigurationError> {
+    if root.as_os_str().is_empty()
+        || !root.is_absolute()
+        || root == Path::new("/")
+        || root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(HostConfigurationError::PrivateFileUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn load_optional_product_server_ca(
+    paths: &PrivateConfigPaths,
+) -> Result<Option<Vec<u8>>, HostConfigurationError> {
+    match fs::symlink_metadata(&paths.product_server_ca) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(HostConfigurationError::PrivateFileUnavailable),
+        Ok(_) => {
+            let owner = validate_private_directory(&paths.root, Some(current_effective_uid()))?;
+            validate_private_directory(&paths.secrets, Some(owner))?;
+            let bytes = read_private_file(
+                &paths.secrets,
+                PRODUCT_SERVER_CA_FILE,
+                owner,
+                MAX_PRODUCT_SERVER_CA_BYTES,
+            )?;
+            Ok(Some(bytes))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn load_optional_product_server_ca(
+    _paths: &PrivateConfigPaths,
+) -> Result<Option<Vec<u8>>, HostConfigurationError> {
+    Err(HostConfigurationError::UnsupportedPlatform)
 }
 
 #[cfg(not(unix))]
@@ -458,6 +534,12 @@ fn validate_private_directory(
         return Err(HostConfigurationError::PrivateFileUnavailable);
     }
     Ok(opened_metadata.uid())
+}
+
+#[cfg(unix)]
+fn current_effective_uid() -> u32 {
+    // SAFETY: geteuid has no pointer arguments or preconditions and only reads process credentials.
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(unix)]
@@ -652,5 +734,103 @@ mod product_contract_root_tests {
                 Err(HostConfigurationError::ProductManifestInvalid)
             ));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod connector_config_root_tests {
+    use super::{
+        load_optional_product_server_ca, private_config_paths_for_root,
+        validate_connector_config_root, validate_private_directory, HostConfigurationError,
+        CONNECTOR_CONFIG_ROOT_ENV, PRIVATE_ROOT,
+    };
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    #[test]
+    fn defaults_to_the_existing_runtime_root_and_accepts_absolute_private_roots() {
+        assert_eq!(
+            CONNECTOR_CONFIG_ROOT_ENV,
+            "CYRENE_WORKSPACE_CONNECTOR_CONFIG_ROOT"
+        );
+        let default_paths = private_config_paths_for_root(Path::new(PRIVATE_ROOT).to_path_buf())
+            .expect("existing runtime default remains supported");
+        assert_eq!(default_paths.root, Path::new(PRIVATE_ROOT));
+
+        let native_paths =
+            private_config_paths_for_root(Path::new("/opt/cyrene/connector").to_path_buf())
+                .expect("absolute native installation roots are supported");
+        assert_eq!(
+            native_paths.secrets,
+            Path::new("/opt/cyrene/connector/secrets")
+        );
+    }
+
+    #[test]
+    fn rejects_relative_parent_and_symlink_roots() {
+        for root in ["connector-config", "/opt/cyrene/../connector", "/"] {
+            assert!(matches!(
+                validate_connector_config_root(Path::new(root)),
+                Err(HostConfigurationError::PrivateFileUnavailable)
+            ));
+        }
+
+        let directory = tempfile::tempdir().expect("create private test directory");
+        let target = directory.path().join("real-root");
+        fs::create_dir(&target).expect("create target root");
+        let link = directory.path().join("linked-root");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink root");
+        assert!(matches!(
+            validate_private_directory(&link, None),
+            Err(HostConfigurationError::PrivateFileUnavailable)
+        ));
+    }
+
+    #[test]
+    fn requires_current_uid_and_exact_private_directory_mode() {
+        let directory = tempfile::tempdir().expect("create private test directory");
+        let root = directory.path().join("root");
+        fs::create_dir(&root).expect("create root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("set private root mode");
+        let current_uid = super::current_effective_uid();
+        assert!(matches!(
+            validate_private_directory(&root, Some(current_uid)),
+            Ok(uid) if uid == current_uid
+        ));
+        assert!(validate_private_directory(&root, Some(current_uid.saturating_add(1))).is_err());
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o750))
+            .expect("set overly broad mode");
+        assert!(validate_private_directory(&root, Some(current_uid)).is_err());
+    }
+
+    #[test]
+    fn optional_ca_must_be_a_private_regular_file_when_present() {
+        let directory = tempfile::tempdir().expect("create private test directory");
+        let root = directory.path().join("root");
+        let secrets = root.join("secrets");
+        fs::create_dir(&root).expect("create root");
+        fs::create_dir(&secrets).expect("create secrets");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private root");
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700)).expect("private secrets");
+        let paths = private_config_paths_for_root(root.clone()).expect("valid root");
+        assert_eq!(load_optional_product_server_ca(&paths).unwrap(), None);
+
+        fs::write(&paths.product_server_ca, b"not a certificate").expect("write optional local CA");
+        fs::set_permissions(&paths.product_server_ca, fs::Permissions::from_mode(0o600))
+            .expect("private CA file");
+        assert_eq!(
+            load_optional_product_server_ca(&paths).unwrap(),
+            Some(b"not a certificate".to_vec())
+        );
+
+        fs::set_permissions(&paths.product_server_ca, fs::Permissions::from_mode(0o640))
+            .expect("broaden CA file mode");
+        assert!(matches!(
+            load_optional_product_server_ca(&paths),
+            Err(HostConfigurationError::PrivateFileUnavailable)
+        ));
     }
 }
