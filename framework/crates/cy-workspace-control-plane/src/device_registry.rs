@@ -8,6 +8,7 @@
 
 use crate::directory::WorkspaceDirectoryError;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Authorization state for a certificate imported after external approval.
 ///
@@ -72,6 +73,8 @@ pub struct WorkspaceDeviceRecord {
 pub struct WorkspaceDeviceCertificateIdentity {
     pub key: WorkspaceDeviceKey,
     pub certificate_fingerprint_sha256: String,
+    /// Stable Directory authorization record UUID owning this certificate.
+    pub authorization_id: Uuid,
     pub registration_binding_id: [u8; 16],
     pub authorization_generation: u64,
     pub csr_sha256: [u8; 32],

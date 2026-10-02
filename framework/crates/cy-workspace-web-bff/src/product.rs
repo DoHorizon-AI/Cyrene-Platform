@@ -77,6 +77,17 @@ impl ProductOperationCatalog {
         }
     }
 
+    /// Construct a deny-all placeholder while the host fetches authenticated catalog snapshots.
+    ///
+    /// This value cannot authorize product operations; the Authority-backed gateway loads the
+    /// current pinned catalog for each request before any product request is accepted.
+    pub fn unavailable() -> Self {
+        Self {
+            bundle: None,
+            policy: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn deny_all_for_tests() -> Self {
         Self {
@@ -108,12 +119,21 @@ impl ProductOperationCatalog {
 /// BFF router 使用的已认证 Workspace API adapter。
 #[async_trait]
 pub trait WorkspaceProductGateway: Send + Sync + 'static {
+    /// Load and validate the current Authority catalog view for this request.
+    async fn catalog_for_request(
+        &self,
+        principal: &cy_workspace_control_plane::VerifiedWebPrincipal,
+        access_token: &str,
+        workspace_id: &str,
+    ) -> Result<ProductOperationCatalog, WorkspaceGatewayError>;
+
     /// Dispatch one v2 Product request with the verified web identity context.
     ///
     /// 使用已验证的 Web identity context 派发一个 v2 Product request。
     async fn invoke(
         &self,
         principal: &cy_workspace_control_plane::VerifiedWebPrincipal,
+        access_token: &str,
         request: WorkspaceApiRequest,
     ) -> Result<WorkspaceApiResponse, WorkspaceGatewayError>;
 }

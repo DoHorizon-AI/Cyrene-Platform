@@ -7,6 +7,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod authority;
 pub mod authority_service;
 pub mod caller;
 pub mod connector_session;

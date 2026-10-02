@@ -1,0 +1,67 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 workspace_sidecar.proto                                        │
+// │  Package: cyrene.workspace.local.v2                                │
+// │  Role: Versioned local API for approved Workspace Product calls.   │
+// │                                                                     │
+// │  协议职责：本机 Sidecar 的版本化接口；所有执行经 Authority outbox。    │
+// │  · 不接受客户端角色、principal、路由或目录版本；token只用于身份核验。  │
+// └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.workspace.local.v2;
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.workspace.local.v2";
+
+import "cyrene/workspace/authority/v2/workspace_authority.proto";
+import "cyrene/workspace/product/v2/product_api.proto";
+
+message NegotiateVersionRequest {
+  uint32 minimum_version = 1;
+  uint32 maximum_version = 2;
+}
+
+message NegotiateVersionResponse {
+  uint32 selected_version = 1;
+  repeated uint32 supported_versions = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool local_ready = 1;
+}
+
+message DiscoverWorkspacesRequest {
+  string caller_token = 1;
+}
+
+message WorkspaceSummary {
+  string workspace_id = 1;
+  string display_name = 2;
+}
+
+message DiscoverWorkspacesResponse {
+  repeated WorkspaceSummary workspaces = 1;
+}
+
+message ExecuteRequest {
+  string workspace_id = 1;
+  string caller_token = 2;
+  cyrene.workspace.product.v2.ProductApiInvocationV2 invocation = 3;
+}
+
+message ExecuteResponse {
+  cyrene.workspace.authority.v2.InvocationState state = 1;
+  cyrene.workspace.product.v2.ProductApiResponseV2 product_response = 2;
+  string error_code = 3;
+  string error_message = 4;
+}
+
+service WorkspaceSidecarService {
+  rpc NegotiateVersion(NegotiateVersionRequest) returns (NegotiateVersionResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc DiscoverWorkspaces(DiscoverWorkspacesRequest) returns (DiscoverWorkspacesResponse);
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+}

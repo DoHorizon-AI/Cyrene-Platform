@@ -1,0 +1,94 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 workspace_tunnel.proto                                         │
+// │  Package: cyrene.workspace.tunnel.v1                               │
+// │  Role: Bounded byte tunnel for end-to-end Authority gRPC traffic.  │
+// │                                                                     │
+// │  协议职责：Relay 仅转发有界双向字节流，不解析、持久化或重放业务数据。 │
+// │  · 目标固定为 Authority；Bridge/Connector 身份必须来自 mTLS SAN。     │
+// └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.workspace.tunnel.v1;
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.workspace.tunnel.v1";
+
+enum TunnelTarget {
+  TUNNEL_TARGET_UNSPECIFIED = 0;
+  TUNNEL_TARGET_AUTHORITY = 1;
+}
+
+message RegisterAuthorityBridge {
+  TunnelTarget target = 1;
+}
+
+message AuthorityBridgeRegistered {
+  bool accepted = 1;
+  string error_code = 2;
+}
+
+message OpenTunnel {
+  TunnelTarget target = 1;
+}
+
+message TunnelOpened {
+  string stream_id = 1;
+}
+
+// A new connector stream is announced to the already registered Authority Bridge.
+message TunnelAccepted {
+  string stream_id = 1;
+}
+
+// Relay policy caps payloads at 64 KiB, each stream's in-memory buffering at
+// 1 MiB, and active substreams per Authority Bridge at 128. Senders split
+// larger byte sequences into bounded frames; Relay enforces all three limits.
+message TunnelData {
+  string stream_id = 1;
+  bytes payload = 2;
+}
+
+message TunnelHalfClose {
+  string stream_id = 1;
+}
+
+message TunnelClosed {
+  string stream_id = 1;
+}
+
+message TunnelError {
+  string stream_id = 1;
+  string code = 2;
+  string message = 3;
+  bool retryable = 4;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool ready = 1;
+  bool authority_bridge_registered = 2;
+}
+
+message TunnelFrame {
+  string frame_id = 1;
+  oneof payload {
+    RegisterAuthorityBridge register_authority_bridge = 10;
+    AuthorityBridgeRegistered authority_bridge_registered = 11;
+    OpenTunnel open_tunnel = 12;
+    TunnelOpened opened = 13;
+    TunnelAccepted accepted = 14;
+    TunnelData data = 15;
+    TunnelHalfClose half_close = 16;
+    TunnelClosed closed = 17;
+    TunnelError error = 18;
+  }
+}
+
+// The first frame is either RegisterAuthorityBridge or OpenTunnel. After the
+// handshake, only an opened peer may send data/half-close/close/error frames.
+service WorkspaceTunnelService {
+  rpc Tunnel(stream TunnelFrame) returns (stream TunnelFrame);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}

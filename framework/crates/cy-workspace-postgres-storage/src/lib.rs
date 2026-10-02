@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod authority_execution_target;
+pub mod authority_web_session;
 pub mod device_authorization;
 pub mod device_authorization_postgres;
 mod device_certificate_issuance_binding;
@@ -24,6 +26,13 @@ pub mod webauthn_http_binding_postgres;
 pub mod webauthn_postgres_store;
 pub mod webauthn_verifier;
 
+pub use authority_execution_target::{
+    AuthorityExecutionTargetBinding, AuthorityExecutionTargetError, AuthorityExecutionTargetImport,
+    PostgresAuthorityExecutionTargetAdmin, PostgresAuthorityExecutionTargetStore,
+};
+pub use authority_web_session::{
+    AuthorityWebSession, AuthorityWebSessionError, PostgresAuthorityWebSessionStore,
+};
 pub use cy_workspace_control_plane::{
     device_registry, directory, UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest,
     MAX_USER_CODE_KEY_VERSIONS,
