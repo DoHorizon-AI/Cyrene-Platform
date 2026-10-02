@@ -344,7 +344,7 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
 
     let policy = DeviceAuthorizationPolicy::default();
     let user_code_keys = user_code_key_ring_from_environment()?;
-    let csr_validator = Arc::new(ProductionDeviceCsrValidator::default());
+    let csr_validator = Arc::new(ProductionDeviceCsrValidator);
     let trust_roots = vec![ca.trusted_root_der().to_vec()];
     let revocation_checker = ca.revocation_checker();
     let revocation_checker_for_issuance: Arc<dyn DeviceCertificateRevocationChecker> =

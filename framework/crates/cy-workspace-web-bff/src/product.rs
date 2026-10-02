@@ -128,27 +128,31 @@ pub enum WorkspaceGatewayError {
 /// Construct the Workspace v2 envelope from values checked by the BFF.
 ///
 /// 使用 BFF 已校验的值构造 Workspace v2 envelope。
+pub(crate) struct WorkspaceProductRequestInput<'a> {
+    pub(crate) owner_id: &'a str,
+    pub(crate) operation_id: &'a str,
+    pub(crate) workspace_id: &'a str,
+    pub(crate) resource_id: Option<&'a str>,
+    pub(crate) json_body: Option<&'a [u8]>,
+    pub(crate) idempotency_key: Option<&'a str>,
+    pub(crate) traceparent: &'a str,
+    pub(crate) request_id: &'a str,
+}
+
 pub(crate) fn workspace_product_request(
-    owner_id: &str,
-    operation_id: &str,
-    workspace_id: &str,
-    resource_id: Option<&str>,
-    json_body: Option<&[u8]>,
-    idempotency_key: Option<&str>,
-    traceparent: &str,
-    request_id: String,
+    input: WorkspaceProductRequestInput<'_>,
 ) -> WorkspaceApiRequest {
     WorkspaceApiRequest {
-        request_id,
-        workspace_id: workspace_id.to_owned(),
-        traceparent: traceparent.to_owned(),
+        request_id: input.request_id.to_owned(),
+        workspace_id: input.workspace_id.to_owned(),
+        traceparent: input.traceparent.to_owned(),
         request: Some(workspace_api_request::Request::ProductApiV2(
             ProductApiInvocationV2 {
-                owner_id: owner_id.to_owned(),
-                operation_id: operation_id.to_owned(),
-                json_body: json_body.unwrap_or_default().to_vec(),
-                resource_id: resource_id.unwrap_or_default().to_owned(),
-                idempotency_key: idempotency_key.unwrap_or_default().to_owned(),
+                owner_id: input.owner_id.to_owned(),
+                operation_id: input.operation_id.to_owned(),
+                json_body: input.json_body.unwrap_or_default().to_vec(),
+                resource_id: input.resource_id.unwrap_or_default().to_owned(),
+                idempotency_key: input.idempotency_key.unwrap_or_default().to_owned(),
             },
         )),
     }
@@ -195,16 +199,16 @@ mod tests {
     #[test]
     fn workspace_request_uses_the_generic_v2_envelope_and_preserves_body_bytes() {
         let original_body = b"{ \"workspaceId\" : \"workspace-a\" }\n";
-        let request = workspace_product_request(
-            "navigator",
-            "observeWorkspaceSnapshot",
-            "workspace-a",
-            Some("snapshot-1"),
-            Some(original_body),
-            Some("request-1"),
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-            "request-1".to_owned(),
-        );
+        let request = workspace_product_request(WorkspaceProductRequestInput {
+            owner_id: "navigator",
+            operation_id: "observeWorkspaceSnapshot",
+            workspace_id: "workspace-a",
+            resource_id: Some("snapshot-1"),
+            json_body: Some(original_body),
+            idempotency_key: Some("request-1"),
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            request_id: "request-1",
+        });
         assert_eq!(request.workspace_id, "workspace-a");
         let Some(workspace_api_request::Request::ProductApiV2(invocation)) = request.request else {
             panic!("request must use the v2 Product invocation oneof");

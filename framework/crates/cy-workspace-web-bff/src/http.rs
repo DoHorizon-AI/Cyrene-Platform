@@ -41,7 +41,7 @@ use crate::device_approval::{device_approval_router, DeviceApprovalDependencies}
 use crate::problem::{problem_response, ProblemCode};
 use crate::product::{
     product_response, workspace_product_request, ProductOperationCatalog, WorkspaceGatewayError,
-    WorkspaceProductGateway,
+    WorkspaceProductGateway, WorkspaceProductRequestInput,
 };
 
 /// Maximum UTF-8 JSON request or response body size, in bytes.
@@ -591,16 +591,16 @@ async fn product_route(
         Err(_) => return upstream_unavailable(Some(&trace.trace_id)),
     }
     let request_id = Uuid::new_v4().to_string();
-    let workspace_request = workspace_product_request(
-        &envelope.owner_id,
-        &envelope.operation_id,
-        &workspace_id,
-        resource_id.as_deref(),
-        json_body.as_deref(),
-        idempotency_key.as_deref(),
-        &trace.traceparent,
-        request_id.clone(),
-    );
+    let workspace_request = workspace_product_request(WorkspaceProductRequestInput {
+        owner_id: &envelope.owner_id,
+        operation_id: &envelope.operation_id,
+        workspace_id: &workspace_id,
+        resource_id: resource_id.as_deref(),
+        json_body: json_body.as_deref(),
+        idempotency_key: idempotency_key.as_deref(),
+        traceparent: &trace.traceparent,
+        request_id: &request_id,
+    });
     let upstream = match state
         .workspace_api
         .invoke(&authenticated.principal, workspace_request)
