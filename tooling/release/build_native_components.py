@@ -20,13 +20,22 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-from component_artifacts import (
-    ComponentArtifactError,
-    _component_target,
-    _write_deterministic_tar_gz,
-    create_manifest,
-    manifest_asset_name,
-)
+if __package__:
+    from .component_artifacts import (
+        ComponentArtifactError,
+        _component_target,
+        _write_deterministic_tar_gz,
+        create_manifest,
+        manifest_asset_name,
+    )
+else:
+    from component_artifacts import (
+        ComponentArtifactError,
+        _component_target,
+        _write_deterministic_tar_gz,
+        create_manifest,
+        manifest_asset_name,
+    )
 
 
 PLATFORM_REPOSITORY = "https://github.com/DoHorizon-AI/Cyrene-Platform"
@@ -55,6 +64,23 @@ COMPONENTS = (
     {"id": "cy-workspace-web-bff", "package": "cy-workspace-web-bff", "binary": "cy-workspace-web-bff"},
     {"id": "cyrene-runtime-maintenance", "package": "cy-runtime-maintenance", "binary": "cyrene-runtime-maintenance"},
 )
+
+# Host units travel inside the same immutable artifact as their executable.
+# Installation is performed separately from this builder and may only install
+# a missing unit after the active component release has been verified.
+SYSTEMD_UNIT_COMPONENTS = {
+    "cyrene-linux-sys-adapter": "cyrene-linux-sys-adapter.service",
+    "cyrene-nvidia-adapter": "cyrene-nvidia-adapter.service",
+    "cyrene-sandboxd": "cyrene-sandboxd.service",
+    "cyrene-kernel": "cyrene-kernel.service",
+    "cy-node-agent": "cy-node-agent.service",
+    "cy-workspace-relay": "cy-workspace-relay.service",
+    "cy-workspace-connector": "cy-workspace-connector.service",
+    "cy-workspace-sidecar": "cy-workspace-sidecar.service",
+    "cy-workspace-web-bff": "cy-workspace-web-bff.service",
+    "cyrene-runtime-maintenance": "cyrene-runtime-maintenance.service",
+}
+WORKER_SCOPED_COMPONENT_UNITS = {"cy-runtime-agent": "cy-runtime-agent.service"}
 
 
 def _run(command: list[str], *, cwd: Path) -> str:
@@ -194,6 +220,54 @@ def _copy_product_contract_bundle(repository: Path, source_root: Path, payload_r
         shutil.copyfile(source, target)
 
 
+def _copy_systemd_unit_payload(
+    repository: Path,
+    catalog_component: dict[str, Any],
+    payload_root: Path,
+) -> str | None:
+    """Copy a catalog-matched host unit into an immutable component payload.
+
+    Worker-scoped runtime agents intentionally have no fixed host unit even
+    though the current catalog retains a legacy ``systemdUnit`` value. Their
+    deployed Worker instances must be discovered by the runtime authority;
+    absence of such discovery remains fail-closed at readiness time.
+    """
+
+    component_id = catalog_component.get("componentId")
+    restart = catalog_component.get("restart")
+    catalog_unit = catalog_component.get("systemdUnit")
+    if not isinstance(catalog_unit, str) and isinstance(restart, dict):
+        catalog_unit = restart.get("unit")
+
+    expected_unit = SYSTEMD_UNIT_COMPONENTS.get(component_id)
+    if expected_unit is None:
+        worker_unit = WORKER_SCOPED_COMPONENT_UNITS.get(component_id)
+        if worker_unit is not None and catalog_unit == worker_unit:
+            return None
+        raise ComponentArtifactError(f"component has no supported native systemd policy: {component_id}")
+    if catalog_unit != expected_unit:
+        raise ComponentArtifactError(
+            f"catalog unit does not match the native payload policy for {component_id}: {catalog_unit!r}"
+        )
+
+    source = repository / "infrastructure" / "systemd" / expected_unit
+    try:
+        source_info = source.lstat()
+    except OSError as error:
+        raise ComponentArtifactError(f"native systemd unit source is missing for {component_id}: {source}") from error
+    if not stat.S_ISREG(source_info.st_mode):
+        raise ComponentArtifactError(f"native systemd unit source is not a regular file: {source}")
+
+    relative_path = f"systemd/{expected_unit}"
+    destination = payload_root / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        raise ComponentArtifactError(f"native systemd unit payload destination already exists: {destination}")
+    shutil.copyfile(source, destination)
+    destination.chmod(0o644)
+    return relative_path
+
+
 def build(
     repository: Path,
     output: Path,
@@ -322,6 +396,7 @@ def build(
         target_binary.chmod(0o755)
         if component["id"] in {"cy-workspace-connector", "cy-workspace-web-bff"}:
             _copy_product_contract_bundle(repository, product_contracts_root, payload_root)
+        _copy_systemd_unit_payload(repository, catalog_component, payload_root)
         archive = artifacts_dir / f"{component['id']}-linux-ubuntu-24.04-x86_64-systemd.tar.gz"
         _write_deterministic_tar_gz(payload_root, archive)
         subject_name = archive.name

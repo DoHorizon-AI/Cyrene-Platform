@@ -1,0 +1,27 @@
+[Unit]
+Description=CYRENE Workspace Relay Host
+After=network-online.target cyrene-runtime-maintenance.service
+Wants=network-online.target
+Requires=cyrene-runtime-maintenance.service
+
+[Service]
+Type=simple
+User=cyrene
+Group=cyrene
+EnvironmentFile=-/etc/cyrene/workspace-relay.env
+ExecStart=/usr/bin/cyrene component-run cy-workspace-relay --
+Restart=on-failure
+RestartSec=2s
+StateDirectory=cyrene/workspace-relay
+StateDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cyrene/workspace-relay
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

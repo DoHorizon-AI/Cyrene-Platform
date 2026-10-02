@@ -8,7 +8,7 @@ User=root
 Group=cyrene
 # The Linux System Adapter is the required host-facts provider for the Linux
 # build. Kernel admission remains fail-closed on the peer identity below.
-ExecStart=/usr/bin/cyrene-linux-sys-adapter --socket /run/cyrene/linux-sys-adapter.sock --adapter-id linux-system --allowed-client-uid 991 --allowed-client-gid 992
+ExecStart=/usr/bin/cyrene component-run cyrene-linux-sys-adapter -- --socket /run/cyrene/linux-sys-adapter.sock --adapter-id linux-system --allowed-client-uid 991 --allowed-client-gid 992
 Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene
