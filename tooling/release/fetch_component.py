@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -27,6 +28,8 @@ from component_artifacts import (
     manifest_asset_name,
 )
 from validate_component_schema import validate_document
+
+SOURCE_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 def _request(url: str, *, api_json: bool = False) -> bytes:
@@ -107,13 +110,23 @@ def _channel_refs(catalog: dict[str, Any], channel: str) -> set[str]:
 
 
 def _download_release_index(
-    catalog: dict[str, Any], publisher: str, channel: str, destination: Path
+    catalog_path: Path,
+    catalog: dict[str, Any],
+    publisher: str,
+    channel: str,
+    destination: Path,
+    expected_source_commit: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     channels = catalog.get("channels", {})
     policy = channels.get(channel) if isinstance(channels, dict) else None
     prerelease = policy.get("releasePrerelease") if isinstance(policy, dict) else None
     if not isinstance(prerelease, bool):
         raise ComponentArtifactError(f"trusted catalog has no release policy for {channel}")
+    if expected_source_commit is not None and not SOURCE_COMMIT_RE.fullmatch(expected_source_commit):
+        raise ComponentArtifactError("expected source commit must be a full lowercase Git SHA")
+    expected_release_id = (
+        f"{channel}-{expected_source_commit}" if expected_source_commit is not None else None
+    )
     publisher_rows = catalog.get("publishers")
     if not isinstance(publisher_rows, list):
         raise ComponentArtifactError("trusted catalog has no publisher list")
@@ -131,9 +144,21 @@ def _download_release_index(
             continue
         if discovery.get("indexAssetName") != "component-release-index-v1.json":
             continue
-        releases = _api_json(api_uri)
-        if not isinstance(releases, list):
-            raise ComponentArtifactError("GitHub Releases API must return a release array")
+        if expected_release_id is not None:
+            canonical_api_uri = f"https://api.github.com/repos/{publisher}/releases?per_page=100"
+            if api_uri != canonical_api_uri:
+                raise ComponentArtifactError("trusted release discovery URI is not canonical for exact release lookup")
+            exact_release_uri = (
+                f"https://api.github.com/repos/{publisher}/releases/tags/{expected_release_id}"
+            )
+            release = _api_json(exact_release_uri)
+            if not isinstance(release, dict):
+                raise ComponentArtifactError("GitHub exact release lookup must return one release object")
+            releases = [release]
+        else:
+            releases = _api_json(api_uri)
+            if not isinstance(releases, list):
+                raise ComponentArtifactError("GitHub Releases API must return a release array")
         for release in releases:
             if not isinstance(release, dict):
                 continue
@@ -144,6 +169,7 @@ def _download_release_index(
                 and release.get("prerelease") is prerelease
                 and isinstance(tag, str)
                 and tag.startswith(f"{channel}-")
+                and (expected_release_id is None or tag == expected_release_id)
             ):
                 candidates.append((api_uri, release))
     candidates.sort(
@@ -187,6 +213,8 @@ def _download_release_index(
         source = index.get("source", {})
         if source.get("ref") not in refs or tag != f"{channel}-{source.get('commit')}":
             continue
+        if expected_source_commit is not None and source.get("commit") != expected_source_commit:
+            continue
         errors = _validate_index(index)
         if errors:
             raise ComponentArtifactError("invalid component index: " + "; ".join(errors))
@@ -208,6 +236,7 @@ def fetch_component(
     target_id: str,
     channel: str,
     output: Path,
+    expected_source_commit: str | None = None,
 ) -> dict[str, Any]:
     catalog = _read_object(catalog_path)
     target_row = next(
@@ -221,8 +250,15 @@ def fetch_component(
     if not isinstance(publisher, str):
         raise ComponentArtifactError("trusted component has no canonical publisher")
     index, _release, _index_uri = _download_release_index(
-        catalog, publisher, channel, output / "component-release-index-v1.json"
+        catalog_path,
+        catalog,
+        publisher,
+        channel,
+        output / "component-release-index-v1.json",
+        expected_source_commit,
     )
+    if expected_source_commit is not None and index.get("source", {}).get("commit") != expected_source_commit:
+        raise ComponentArtifactError("component release index source commit differs from the requested exact commit")
     publisher_row = next(
         (row for row in catalog.get("publishers", []) if isinstance(row, dict) and row.get("repository") == publisher),
         None,
@@ -267,6 +303,8 @@ def fetch_component(
         raise ComponentArtifactError("downloaded manifest identity does not match requested component target")
     if manifest["source"]["repository"] != f"https://github.com/{publisher}":
         raise ComponentArtifactError("manifest source repository does not match trusted publisher")
+    if expected_source_commit is not None and manifest["source"].get("commit") != expected_source_commit:
+        raise ComponentArtifactError("component manifest source commit differs from the requested exact commit")
     _verify_release_metadata(manifest, catalog, manifest_path)
     _verify_run(manifest["source"], manifest["provenance"]["attestation"])
     artifact = manifest["artifact"]
@@ -311,10 +349,21 @@ def main() -> int:
     parser.add_argument("--component", required=True)
     parser.add_argument("--target-id", required=True)
     parser.add_argument("--channel", choices=("stable", "preview"), required=True)
+    parser.add_argument(
+        "--source-commit",
+        help="fetch only the immutable release for this full lowercase source SHA; never fall back to channel latest",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = fetch_component(args.catalog, args.component, args.target_id, args.channel, args.output.resolve())
+        result = fetch_component(
+            args.catalog,
+            args.component,
+            args.target_id,
+            args.channel,
+            args.output.resolve(),
+            expected_source_commit=args.source_commit,
+        )
     except (ComponentArtifactError, OSError, ValueError, KeyError) as error:
         print(f"fetch component failed: {error}", file=sys.stderr)
         return 2
