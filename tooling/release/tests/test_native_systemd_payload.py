@@ -113,3 +113,26 @@ def test_symlinked_unit_source_is_rejected(tmp_path: Path) -> None:
             _catalog_components()["cyrene-runtime-maintenance"],
             payload_root,
         )
+
+
+def test_kernel_state_directory_cannot_take_over_broker_acl_tree() -> None:
+    """Keep Kernel StateDirectory ownership away from shared broker descendants."""
+
+    kernel_unit = (REPOSITORY / "infrastructure" / "systemd" / "cyrene-kernel.service").read_text(
+        encoding="utf-8"
+    )
+    broker_unit = (
+        REPOSITORY / "infrastructure" / "systemd" / "cyrene-runtime-maintenance.service"
+    ).read_text(encoding="utf-8")
+    kernel_state_directories = [
+        line.partition("=")[2]
+        for line in kernel_unit.splitlines()
+        if line.startswith("StateDirectory=")
+    ]
+
+    assert kernel_state_directories == []
+    assert "SupplementaryGroups=cyrene-runtime-maintenance" in kernel_unit
+    assert "ReadWritePaths=/run/cyrene /var/lib/cyrene" in kernel_unit
+    assert "StateDirectory=cyrene/runtime-maintenance-private" in broker_unit
+    assert "StateDirectoryMode=0700" in broker_unit
+    assert "Group=cyrene" in broker_unit

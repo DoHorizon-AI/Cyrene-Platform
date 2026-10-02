@@ -28,10 +28,14 @@ Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene
 RuntimeDirectoryMode=0750
-StateDirectory=cyrene
-StateDirectoryMode=0750
 UMask=0007
 SupplementaryGroups=cyrene-runtime-maintenance
+
+# Do not declare StateDirectory=cyrene here. systemd recursively changes the
+# ownership of existing descendants when the declared directory's User/Group
+# differs, which would take over the broker-owned runtime journal and private
+# operator-token subtree. The shared runtime directory is pre-provisioned
+# root:cyrene-runtime-maintenance mode 2770 and accessed through the group above.
 
 # Kernel never owns workers or a cgroup delegation. `cyrene-sandboxd` owns the
 # delegated subtree and worker fate; this service contains only safe decisions
