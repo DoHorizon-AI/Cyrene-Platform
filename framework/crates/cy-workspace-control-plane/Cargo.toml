@@ -11,6 +11,7 @@ default = []
 test-support = []
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 cy-observability = { version = "0.1.0", path = "../cy-observability" }
 cy-mtls-channel-client = { version = "0.1.0", path = "../cy-mtls-channel-client" }
@@ -37,4 +38,5 @@ uuid = { version = "1.0", features = ["v4"] }
 zeroize = "1.8"
 
 [dev-dependencies]
+cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts", features = ["test-support"] }
 tempfile = "3.8"
