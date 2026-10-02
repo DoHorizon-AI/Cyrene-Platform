@@ -5,12 +5,20 @@
 
 from __future__ import annotations
 
+import io
+import json
+import os
+import urllib.error
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
-from preflight_component_release import ReleasePreflightError, preflight
+from preflight_component_release import (
+    IMMUTABLE_SETTINGS_READ_TOKEN,
+    ReleasePreflightError,
+    preflight,
+)
 
 
 class PreflightTests(unittest.TestCase):
@@ -107,6 +115,25 @@ class PreflightTests(unittest.TestCase):
                 )
         run.assert_not_called()
 
+    def test_rejects_non_200_settings_response_even_when_enabled(self) -> None:
+        with (
+            patch(
+                "preflight_component_release._api_get",
+                return_value=(201, {"enabled": True}),
+            ),
+            patch("preflight_component_release.subprocess.run") as run,
+        ):
+            with self.assertRaisesRegex(ReleasePreflightError, "did not return HTTP 200"):
+                preflight(
+                    repository=self.repository,
+                    release_id=self.release_id,
+                    channel="preview",
+                    source_ref="refs/heads/develop",
+                    source_commit=self.source_commit,
+                    repository_root=self.repository_root,
+                )
+        run.assert_not_called()
+
     def test_rejects_an_existing_release_before_tag_lookup(self) -> None:
         with (
             patch(
@@ -149,6 +176,153 @@ class PreflightTests(unittest.TestCase):
                     source_commit=self.source_commit,
                     repository_root=self.repository_root,
                 )
+
+    def test_uses_dedicated_token_only_for_immutable_settings(self) -> None:
+        settings_token = "settings-read-secret"
+        content_token = "contents-write-secret"
+        requests = []
+
+        def open_url(request, timeout):
+            requests.append(request)
+            if request.full_url.endswith("/immutable-releases"):
+                response = MagicMock()
+                response.__enter__.return_value.status = 200
+                response.__enter__.return_value.read.return_value = json.dumps({"enabled": True}).encode()
+                return response
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    IMMUTABLE_SETTINGS_READ_TOKEN: settings_token,
+                    "GH_TOKEN": content_token,
+                    "GITHUB_TOKEN": "fallback-secret",
+                },
+                clear=True,
+            ),
+            patch("preflight_component_release.urllib.request.urlopen", side_effect=open_url),
+            patch(
+                "preflight_component_release.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(stdout="https://github.com/DoHorizon-AI/Cyrene-Catalyst.git\n"),
+                    SimpleNamespace(returncode=2, stdout="", stderr=""),
+                ],
+            ),
+        ):
+            preflight(
+                repository=self.repository,
+                release_id=self.release_id,
+                channel="preview",
+                source_ref="refs/heads/develop",
+                source_commit=self.source_commit,
+                repository_root=self.repository_root,
+            )
+
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[0].full_url.endswith("/immutable-releases"))
+        self.assertEqual(requests[0].get_header("Authorization"), f"Bearer {settings_token}")
+        self.assertTrue(requests[1].full_url.endswith(f"/releases/tags/{self.release_id}"))
+        self.assertEqual(requests[1].get_header("Authorization"), f"Bearer {content_token}")
+
+    def test_requires_dedicated_settings_token_even_when_content_token_exists(self) -> None:
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "contents-write-secret"}, clear=True),
+            patch("preflight_component_release.urllib.request.urlopen") as urlopen,
+        ):
+            with self.assertRaisesRegex(
+                ReleasePreflightError,
+                f"{IMMUTABLE_SETTINGS_READ_TOKEN}.*Administration read",
+            ) as raised:
+                preflight(
+                    repository=self.repository,
+                    release_id=self.release_id,
+                    channel="preview",
+                    source_ref="refs/heads/develop",
+                    source_commit=self.source_commit,
+                    repository_root=self.repository_root,
+                )
+
+        self.assertNotIn("contents-write-secret", str(raised.exception))
+        urlopen.assert_not_called()
+
+    def test_rejects_settings_forbidden_without_leaking_either_token(self) -> None:
+        settings_token = "settings-read-secret"
+        content_token = "contents-write-secret"
+        requests = []
+
+        def deny_settings(request, timeout):
+            requests.append(request)
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                {},
+                io.BytesIO(content_token.encode()),
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    IMMUTABLE_SETTINGS_READ_TOKEN: settings_token,
+                    "GH_TOKEN": content_token,
+                },
+                clear=True,
+            ),
+            patch(
+                "preflight_component_release.urllib.request.urlopen",
+                side_effect=deny_settings,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ReleasePreflightError,
+                f"denied immutable release settings access.*{IMMUTABLE_SETTINGS_READ_TOKEN}",
+            ) as raised:
+                preflight(
+                    repository=self.repository,
+                    release_id=self.release_id,
+                    channel="preview",
+                    source_ref="refs/heads/develop",
+                    source_commit=self.source_commit,
+                    repository_root=self.repository_root,
+                )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].get_header("Authorization"), f"Bearer {settings_token}")
+        self.assertNotIn(settings_token, str(raised.exception))
+        self.assertNotIn(content_token, str(raised.exception))
+
+    def test_rejects_settings_endpoint_404_as_disabled(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {IMMUTABLE_SETTINGS_READ_TOKEN: "settings-read-secret"},
+                clear=True,
+            ),
+            patch(
+                "preflight_component_release.urllib.request.urlopen",
+                side_effect=urllib.error.HTTPError(
+                    "https://api.github.com/repos/DoHorizon-AI/Cyrene-Catalyst/immutable-releases",
+                    404,
+                    "Not Found",
+                    {},
+                    None,
+                ),
+            ),
+            patch("preflight_component_release.subprocess.run") as run,
+        ):
+            with self.assertRaisesRegex(ReleasePreflightError, "immutable releases are disabled"):
+                preflight(
+                    repository=self.repository,
+                    release_id=self.release_id,
+                    channel="preview",
+                    source_ref="refs/heads/develop",
+                    source_commit=self.source_commit,
+                    repository_root=self.repository_root,
+                )
+
+        run.assert_not_called()
 
     def test_rejects_a_channel_and_source_ref_mismatch_before_api_access(self) -> None:
         with patch("preflight_component_release._api_get") as api_get:
