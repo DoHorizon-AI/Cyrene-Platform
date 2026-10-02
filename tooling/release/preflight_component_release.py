@@ -24,19 +24,28 @@ from urllib.parse import quote
 
 SOURCE_COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+IMMUTABLE_SETTINGS_READ_TOKEN = "CYRENE_IMMUTABLE_RELEASE_SETTINGS_READ_TOKEN"
 
 
 class ReleasePreflightError(ValueError):
     """Raised when a release cannot be proven safe to create."""
 
 
-def _api_get(url: str) -> tuple[int, dict[str, object] | None]:
+def _api_get(url: str, *, immutable_settings: bool = False) -> tuple[int, dict[str, object] | None]:
     """Fetch one GitHub API object and preserve HTTP status for 404 checks."""
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if immutable_settings:
+        token = os.environ.get(IMMUTABLE_SETTINGS_READ_TOKEN)
+        if not token:
+            raise ReleasePreflightError(
+                "immutable release settings require "
+                f"{IMMUTABLE_SETTINGS_READ_TOKEN} with repository Administration read access"
+            )
+    else:
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
@@ -49,6 +58,11 @@ def _api_get(url: str) -> tuple[int, dict[str, object] | None]:
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return 404, None
+        if immutable_settings and error.code in {401, 403}:
+            raise ReleasePreflightError(
+                "GitHub denied immutable release settings access; configure "
+                f"{IMMUTABLE_SETTINGS_READ_TOKEN} with repository Administration read access"
+            ) from error
         raise ReleasePreflightError(f"GitHub API returned HTTP {error.code} for {url}") from error
     except (OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ReleasePreflightError(f"cannot verify GitHub release state over HTTPS: {error}") from error
@@ -83,7 +97,13 @@ def preflight(
 
     owner, name = repository.split("/", 1)
     base_url = f"https://api.github.com/repos/{owner}/{name}"
-    _settings_status, settings = _api_get(base_url + "/immutable-releases")
+    settings_status, settings = _api_get(base_url + "/immutable-releases", immutable_settings=True)
+    if settings_status == 404:
+        raise ReleasePreflightError("repository immutable releases are disabled; refusing publication")
+    if settings_status != 200:
+        raise ReleasePreflightError(
+            "GitHub did not return HTTP 200 for immutable release settings; refusing publication"
+        )
     if settings is None or settings.get("enabled") is not True:
         raise ReleasePreflightError("repository immutable releases are disabled; refusing publication")
 
