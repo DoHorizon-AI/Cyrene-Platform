@@ -743,19 +743,9 @@ def trusted_catalog_compatibility(
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ComponentArtifactError("trusted contractLock sha256 must be sha256:<64 lowercase hex>")
 
-    checkout = catalog_path.resolve().parent.parent
-    try:
-        result = subprocess.run(
-            ["git", "show", f"{commit}:{path}"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise ComponentArtifactError("cannot read contractLock bytes from the pinned Workspace commit") from error
-    actual_digest = "sha256:" + hashlib.sha256(result.stdout).hexdigest()
-    if actual_digest != digest:
-        raise ComponentArtifactError("pinned Workspace protocol lock bytes do not match catalog contractLock.sha256")
+    # Signed catalog downloads need no checkout; lock bytes remain pinned.
+    # 独立下载的目录仍按固定来源与摘要校验协议锁。
+    _verify_contract_lock(lock)
 
     for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion"):
         if not isinstance(group.get(key), str) or not group[key]:
