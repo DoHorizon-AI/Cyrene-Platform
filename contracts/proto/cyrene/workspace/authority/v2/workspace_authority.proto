@@ -11,11 +11,11 @@ syntax = "proto3";
 
 package cyrene.workspace.authority.v2;
 
+import "cyrene/workspace/product/v2/product_api.proto";
+import "google/protobuf/timestamp.proto";
+
 option java_multiple_files = true;
 option java_package = "io.cyrene.proto.workspace.authority.v2";
-
-import "google/protobuf/timestamp.proto";
-import "cyrene/workspace/product/v2/product_api.proto";
 
 enum InvocationState {
   INVOCATION_STATE_UNSPECIFIED = 0;
