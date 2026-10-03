@@ -198,6 +198,14 @@ impl TrustedProductPolicy {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn empty_for_test() -> Self {
+        Self {
+            policy_version: "2.0.0".to_string(),
+            grants: BTreeMap::new(),
+        }
+    }
+
     /// Returns the pinned Platform policy version.
     pub fn policy_version(&self) -> &str {
         &self.policy_version

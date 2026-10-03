@@ -952,6 +952,7 @@ impl RegistrySnapshot {
         WorkspaceDeviceCertificateIdentity {
             key: self.delivery.key.clone(),
             certificate_fingerprint_sha256: hex(&self.delivery.certificate_sha256),
+            authorization_id: Uuid::from_bytes(self.delivery.authorization_id),
             registration_binding_id: *self.delivery.binding_id.as_bytes(),
             authorization_generation: self.delivery.generation,
             csr_sha256: self.delivery.csr_sha256,

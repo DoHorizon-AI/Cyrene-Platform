@@ -357,6 +357,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "005ec2760ca554fae18df7a11195552ec576cd665632a881bc011d5bb2fd4d80"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -536,7 +538,7 @@ version = "0.1.0"
 dependencies = [
  "cy-kernel-contract",
  "cy-proto",
- "nix",
+ "nix 0.29.0",
  "prost",
  "prost-types",
 ]
@@ -633,7 +635,7 @@ dependencies = [
  "cy-runtime-maintenance",
  "hyper-util",
  "libc",
- "nix",
+ "nix 0.29.0",
  "prost-types",
  "tempfile",
  "tokio",
@@ -758,7 +760,7 @@ dependencies = [
  "cy-kernel-contract",
  "cy-observability",
  "cy-proto",
- "nix",
+ "nix 0.29.0",
  "prost",
  "prost-types",
  "rustix",
@@ -780,7 +782,7 @@ version = "0.1.0"
 dependencies = [
  "cy-proto",
  "hyper-util",
- "nix",
+ "nix 0.29.0",
  "serde",
  "serde_json",
  "sha2",
@@ -799,8 +801,37 @@ dependencies = [
  "cy-adapter-client",
  "cy-kernel-api",
  "cy-proto",
- "nix",
+ "nix 0.29.0",
  "prost",
+]
+
+[[package]]
+name = "cy-workspace-authority-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "cy-proto",
+ "cy-workspace-control-plane",
+ "cy-workspace-postgres-storage",
+ "ed25519-dalek",
+ "http",
+ "libc",
+ "nix 0.30.1",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -846,6 +877,7 @@ dependencies = [
 name = "cy-workspace-control-plane"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "cy-mtls-channel-client",
  "cy-observability",
@@ -863,6 +895,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -871,6 +904,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]
@@ -901,11 +935,11 @@ dependencies = [
  "base64 0.22.1",
  "cy-proto",
  "cy-workspace-control-plane",
- "cy-workspace-relay-runtime",
  "getrandom 0.2.17",
  "hmac",
  "openssl",
  "prost",
+ "prost-types",
  "rcgen",
  "rusqlite",
  "rustls",
@@ -1033,12 +1067,12 @@ dependencies = [
  "cy-mtls-channel-client",
  "cy-proto",
  "cy-workspace-control-plane",
- "cy-workspace-fabric",
  "cy-workspace-postgres-storage",
  "cy-workspace-product-contracts",
  "hmac",
  "http",
  "http-body-util",
+ "hyper-util",
  "jsonschema",
  "mime",
  "prost-types",
@@ -1048,7 +1082,8 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "tokio",
- "tower 0.5.3",
+ "tonic",
+ "tower 0.4.13",
  "url",
  "uuid",
  "zeroize",
@@ -1097,7 +1132,7 @@ version = "0.1.0"
 dependencies = [
  "cy-kernel-contract",
  "cy-proto",
- "nix",
+ "nix 0.29.0",
  "prost",
  "prost-types",
  "tempfile",
@@ -1112,7 +1147,7 @@ dependencies = [
  "cy-proto",
  "cy-sandbox-client",
  "libc",
- "nix",
+ "nix 0.29.0",
  "prost",
  "tempfile",
  "tracing",
@@ -1358,6 +1393,16 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -2016,6 +2061,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2244,6 +2299,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -3742,6 +3809,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4719,6 +4797,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
+]
+
+[[package]]
 name = "yasna"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4878,4 +4966,32 @@ dependencies = [
  "crc32fast",
  "log",
  "simd-adler32",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.0+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]

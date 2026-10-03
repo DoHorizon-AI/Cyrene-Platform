@@ -62,6 +62,8 @@ jobs:
         run: python tooling/ci/check-license-metadata.py
       - name: Verify package-local protocol sources
         run: bash tooling/ci/check-public-proto-sync.sh
+      - name: Verify shared Workspace contract fingerprints
+        run: bash contracts/check-workspace-contract-digests.sh
       - name: Package public Rust interfaces
         run: bash tooling/ci/check-public-packages.sh
       - name: Compile independent external consumers

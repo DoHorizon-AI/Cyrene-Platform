@@ -11,7 +11,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from component_artifacts import _component_target
+from component_artifacts import _component_target, trusted_catalog_compatibility
+
+SEMVER_TERM = re.compile(r"^(?:=|>=|>|<=|<|\^|~)?[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$")
 
 
 def _json_value(raw: str, label: str) -> Any:
@@ -80,6 +82,10 @@ def _catalog_component(
             )
         ):
             raise ValueError("catalog dependency has a missing, duplicate, or malformed component/version range")
+        if not isinstance(version_range, str) or any(
+            not SEMVER_TERM.fullmatch(term.strip()) for term in version_range.split(",")
+        ):
+            raise ValueError("catalog dependency must pin a valid SemVer versionRange")
         seen.add(dependency_id)
         copied = {"componentId": dependency_id}
         if version_range is not None:
@@ -174,7 +180,7 @@ def main() -> int:
         source_url = f"https://github.com/{args.repository}"
         run_url = f"{source_url}/actions/runs/{args.run_id}/attempts/{args.run_attempt}"
         descriptor: dict[str, Any] = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "releaseId": f"{args.channel}-{args.source_commit}",
             "componentId": args.component_id,
             "version": args.version,
@@ -196,6 +202,20 @@ def main() -> int:
             },
         }
         artifact = descriptor["artifact"]
+        protocol_version = catalog_component.get("protocolVersion")
+        if protocol_version is None:
+            group_id = catalog_component.get("compatibilityGroup")
+            groups = catalog.get("compatibilityGroups", [])
+            group = next((row for row in groups if isinstance(row, dict) and row.get("groupId") == group_id), None)
+            member = next(
+                (row for row in group.get("members", []) if isinstance(row, dict) and row.get("componentId") == args.component_id),
+                None,
+            ) if isinstance(group, dict) else None
+            protocol_version = member.get("protocolVersion") if isinstance(member, dict) else None
+        is_v2 = isinstance(protocol_version, str) and bool(protocol_version)
+        descriptor["schemaVersion"] = 2 if is_v2 else 1
+        if is_v2:
+            descriptor["protocolVersion"] = protocol_version
         if args.artifact_kind == "oci-image":
             if not args.oci_repository or not args.oci_digest or not args.oci_platform_json:
                 raise ValueError("OCI manifests require repository, digest, and platform")
@@ -206,6 +226,8 @@ def main() -> int:
                     "platform": _json_value(args.oci_platform_json, "oci-platform-json"),
                 }
             )
+            if is_v2:
+                descriptor["contentDigest"] = args.oci_digest
         else:
             if not args.format:
                 raise ValueError("file manifests require --format")
@@ -215,11 +237,13 @@ def main() -> int:
                     raise ValueError("native binary manifests require --entrypoint")
                 artifact["entrypoint"] = args.entrypoint
         _component_target(catalog, args.component_id, artifact, target)
-        if args.compatibility_json:
-            compatibility = _json_value(args.compatibility_json, "compatibility-json")
-            if not isinstance(compatibility, dict):
-                raise ValueError("compatibility-json must be a JSON object")
+        compatibility = trusted_catalog_compatibility(args.catalog, catalog, catalog_component)
+        if compatibility is not None:
             descriptor["compatibility"] = compatibility
+        if args.compatibility_json:
+            supplied_compatibility = _json_value(args.compatibility_json, "compatibility-json")
+            if supplied_compatibility != compatibility:
+                raise ValueError("compatibility-json cannot override the trusted catalog protocol lock")
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(descriptor, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, json.JSONDecodeError) as error:

@@ -10,14 +10,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any
 
 if __package__:
@@ -27,6 +25,7 @@ if __package__:
         _write_deterministic_tar_gz,
         create_manifest,
         manifest_asset_name,
+        trusted_catalog_compatibility,
     )
 else:
     from component_artifacts import (
@@ -35,20 +34,21 @@ else:
         _write_deterministic_tar_gz,
         create_manifest,
         manifest_asset_name,
+        trusted_catalog_compatibility,
     )
 
 
 PLATFORM_REPOSITORY = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 PLATFORM_WORKFLOW = "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml"
-LOCK_RELATIVE_PATH = "tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
-TARGET = {
-    "os": "linux",
-    "osVersion": "24.04",
-    "distribution": "ubuntu",
-    "distributionVersion": "24.04",
-    "architecture": "x86_64",
-    "abi": "glibc-2.39",
-    "runtime": "systemd",
+TARGETS = {
+    "linux-ubuntu-22.04-x86_64-systemd": {
+        "os": "linux", "osVersion": "22.04", "distribution": "ubuntu",
+        "distributionVersion": "22.04", "architecture": "x86_64", "abi": "glibc-2.35", "runtime": "systemd",
+    },
+    "linux-ubuntu-24.04-x86_64-systemd": {
+        "os": "linux", "osVersion": "24.04", "distribution": "ubuntu",
+        "distributionVersion": "24.04", "architecture": "x86_64", "abi": "glibc-2.39", "runtime": "systemd",
+    },
 }
 
 COMPONENTS = (
@@ -58,9 +58,7 @@ COMPONENTS = (
     {"id": "cyrene-kernel", "package": "cyrene-kernel", "binary": "cyrene-kernel"},
     {"id": "cy-node-agent", "package": "cy-node-agent", "binary": "cy-node-agent"},
     {"id": "cy-runtime-agent", "package": "cy-runtime-agent", "binary": "cy-runtime-agent"},
-    {"id": "cy-workspace-relay", "package": "cy-workspace-relay-host", "binary": "cy-workspace-relay-host"},
-    {"id": "cy-workspace-connector", "package": "cy-workspace-connector-host", "binary": "cy-workspace-connector-host"},
-    {"id": "cy-workspace-sidecar", "package": "cy-workspace-sidecar", "binary": "cy-workspace-sidecar"},
+    {"id": "cy-workspace-authority-host", "package": "cy-workspace-authority-host", "binary": "cy-workspace-authority-host"},
     {"id": "cy-workspace-web-bff", "package": "cy-workspace-web-bff", "binary": "cy-workspace-web-bff"},
     {"id": "cyrene-runtime-maintenance", "package": "cy-runtime-maintenance", "binary": "cyrene-runtime-maintenance"},
 )
@@ -74,9 +72,7 @@ SYSTEMD_UNIT_COMPONENTS = {
     "cyrene-sandboxd": "cyrene-sandboxd.service",
     "cyrene-kernel": "cyrene-kernel.service",
     "cy-node-agent": "cy-node-agent.service",
-    "cy-workspace-relay": "cy-workspace-relay.service",
-    "cy-workspace-connector": "cy-workspace-connector.service",
-    "cy-workspace-sidecar": "cy-workspace-sidecar.service",
+    "cy-workspace-authority-host": "cyrene-workspace-authority.service",
     "cy-workspace-web-bff": "cy-workspace-web-bff.service",
     "cyrene-runtime-maintenance": "cyrene-runtime-maintenance.service",
 }
@@ -92,132 +88,6 @@ def _cargo_packages(repository: Path) -> dict[str, dict[str, Any]]:
     raw = _run(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], cwd=repository)
     document = json.loads(raw)
     return {package["name"]: package for package in document["packages"]}
-
-
-def _compatibility(repository: Path, source_commit: str, group: dict[str, Any]) -> dict[str, Any]:
-    lock_path = repository / LOCK_RELATIVE_PATH
-    if lock_path.is_symlink() or not lock_path.is_file():
-        raise ComponentArtifactError(f"tracked V2 contract lock is missing: {lock_path}")
-    raw = lock_path.read_bytes()
-    lock = json.loads(raw)
-    if lock.get("wireApiVersion") != group.get("wireApiVersion"):
-        raise ComponentArtifactError("tracked V2 lock wire API does not match the trusted compatibility group")
-    contract_api_version = lock.get("contractApiVersion")
-    if not isinstance(contract_api_version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", contract_api_version):
-        raise ComponentArtifactError("tracked V2 lock has an invalid contractApiVersion")
-    if contract_api_version != group.get("contractApiVersion"):
-        raise ComponentArtifactError("tracked V2 lock contract API does not match the trusted compatibility group")
-    return {
-        "groupId": group["groupId"],
-        "contractApiVersion": contract_api_version,
-        "wireApiVersion": lock["wireApiVersion"],
-        "contractLock": {
-            "repository": "DoHorizon-AI/Cyrene-Platform",
-            "commit": source_commit,
-            "path": LOCK_RELATIVE_PATH,
-            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
-        },
-    }
-
-
-def _verified_product_contract_files(repository: Path, bundle_root: Path) -> dict[str, Path]:
-    """Verify the generated Product bundle and return its exact regular files."""
-    if bundle_root.is_symlink() or not bundle_root.is_dir():
-        raise ComponentArtifactError(f"Product contract bundle root is missing or unsafe: {bundle_root}")
-    lock_path = repository / LOCK_RELATIVE_PATH
-    if lock_path.is_symlink() or not lock_path.is_file():
-        raise ComponentArtifactError(f"tracked Product contract lock is missing or unsafe: {lock_path}")
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
-
-    def safe_file(relative: str) -> Path:
-        pure = PurePosixPath(relative)
-        if (
-            not relative
-            or "\\" in relative
-            or pure.is_absolute()
-            or pure.as_posix() != relative
-            or any(part in {"", ".", ".."} for part in pure.parts)
-        ):
-            raise ComponentArtifactError("tracked Product contract lock contains an unsafe relative path")
-        current = bundle_root
-        for part in pure.parts[:-1]:
-            current = current / part
-            info = current.lstat()
-            if not stat.S_ISDIR(info.st_mode):
-                raise ComponentArtifactError(f"Product contract bundle traverses an unsafe directory: {relative}")
-        path = current / pure.parts[-1]
-        if not stat.S_ISREG(path.lstat().st_mode):
-            raise ComponentArtifactError(f"Product contract bundle input is not a regular file: {relative}")
-        path.resolve(strict=True).relative_to(bundle_root.resolve(strict=True))
-        return path
-
-    manifest_path = safe_file(lock["bundle"]["manifestPath"])
-    policy_path = safe_file(lock["policy"]["bundlePath"])
-    manifest_raw = manifest_path.read_bytes()
-    if hashlib.sha256(manifest_raw).hexdigest() != lock["bundle"]["manifestSha256"]:
-        raise ComponentArtifactError("Product contract bundle manifest does not match the tracked lock")
-    manifest = json.loads(manifest_raw)
-    if (
-        manifest.get("formatVersion") != lock.get("formatVersion")
-        or manifest.get("wireApiVersion") != lock.get("wireApiVersion")
-        or manifest.get("owners") != lock.get("owners")
-    ):
-        raise ComponentArtifactError("Product contract bundle identity differs from the tracked lock")
-    policy_raw = policy_path.read_bytes()
-    if hashlib.sha256(policy_raw).hexdigest() != lock["policy"]["sha256"]:
-        raise ComponentArtifactError("Product authorization policy does not match the tracked lock")
-    entries = manifest.get("files")
-    if not isinstance(entries, list) or not entries:
-        raise ComponentArtifactError("Product contract bundle manifest has no files array")
-    expected: dict[str, Path] = {manifest_path.name: manifest_path}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise ComponentArtifactError("Product contract bundle file entry is malformed")
-        relative = entry.get("path")
-        digest = entry.get("sha256")
-        if (
-            not isinstance(relative, str)
-            or not isinstance(digest, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", digest)
-            or relative in expected
-        ):
-            raise ComponentArtifactError("Product contract bundle manifest contains an unsafe or duplicate path")
-        path = safe_file(relative)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise ComponentArtifactError(f"Product contract bundle file digest differs: {relative}")
-        expected[relative] = path
-
-    policy_relative = lock["policy"]["bundlePath"]
-    if expected.get(policy_relative) != policy_path:
-        raise ComponentArtifactError("tracked policy path is absent from the Product bundle manifest")
-    actual: set[str] = set()
-    for current, directory_names, file_names in os.walk(bundle_root, followlinks=False):
-        current_path = Path(current)
-        for name in directory_names:
-            path = current_path / name
-            if path.is_symlink() or not stat.S_ISDIR(path.lstat().st_mode):
-                raise ComponentArtifactError(f"Product contract bundle contains an unsafe directory: {path}")
-        for name in file_names:
-            path = current_path / name
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode):
-                raise ComponentArtifactError(f"Product contract bundle contains a non-regular file: {path}")
-            actual.add(path.relative_to(bundle_root).as_posix())
-    if actual != set(expected):
-        raise ComponentArtifactError("Product contract bundle contains missing or unlisted files")
-    return expected
-
-
-def _copy_product_contract_bundle(repository: Path, source_root: Path, payload_root: Path) -> None:
-    """Place the verified V2 closure next to the host binary in its release."""
-    files = _verified_product_contract_files(repository, source_root)
-    destination = payload_root / "share" / "cyrene" / "product-contracts"
-    if destination.exists() or destination.is_symlink():
-        raise ComponentArtifactError("native payload already contains a Product contract directory")
-    for relative, source in files.items():
-        target = destination.joinpath(*Path(relative).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
 
 
 def _copy_systemd_unit_payload(
@@ -279,7 +149,7 @@ def build(
     run_attempt: int,
     catalog_path: Path,
     catalog_sha256: str,
-    product_contracts_root: Path,
+    target_id: str,
 ) -> list[Path]:
     if channel not in {"stable", "preview"}:
         raise ComponentArtifactError("channel must be stable or preview")
@@ -307,6 +177,9 @@ def build(
         raise ComponentArtifactError("trusted component catalog has no compatibilityGroups array")
     if run_attempt < 1 or not run_id.isdigit():
         raise ComponentArtifactError("workflow run identity is invalid")
+    target = TARGETS.get(target_id)
+    if target is None:
+        raise ComponentArtifactError(f"unsupported native target: {target_id}")
 
     packages = _cargo_packages(repository)
     release_id = f"{channel}-{source_commit}"
@@ -331,7 +204,7 @@ def build(
             not isinstance(catalog_component, dict)
             or catalog_component.get("publisher") != "DoHorizon-AI/Cyrene-Platform"
         ):
-            raise ComponentArtifactError(f"component is missing from the pinned static catalog: {component['id']}")
+            continue
         dependencies = catalog_component.get("dependencies")
         restart = catalog_component.get("restart")
         if not isinstance(dependencies, list) or not isinstance(restart, dict):
@@ -370,6 +243,16 @@ def build(
             raise ComponentArtifactError(
                 f"Cargo package {component['package']} has no binary target {component['binary']}"
             )
+        target_declaration = next(
+            (
+                row for row in catalog_component.get("targets", [])
+                if isinstance(row, dict) and row.get("targetId") == target_id
+                and row.get("artifactKind") == "native-binary"
+            ),
+            None,
+        )
+        if not isinstance(target_declaration, dict) or target_declaration.get("support") != "supported":
+            continue
         _run(
             [
                 "cargo",
@@ -394,10 +277,8 @@ def build(
         target_binary = payload_root / "bin" / component["binary"]
         target_binary.write_bytes(binary_path.read_bytes())
         target_binary.chmod(0o755)
-        if component["id"] in {"cy-workspace-connector", "cy-workspace-web-bff"}:
-            _copy_product_contract_bundle(repository, product_contracts_root, payload_root)
         _copy_systemd_unit_payload(repository, catalog_component, payload_root)
-        archive = artifacts_dir / f"{component['id']}-linux-ubuntu-24.04-x86_64-systemd.tar.gz"
+        archive = artifacts_dir / f"{component['id']}-{target_id}.tar.gz"
         _write_deterministic_tar_gz(payload_root, archive)
         subject_name = archive.name
         artifact = {
@@ -405,14 +286,25 @@ def build(
             "format": "tar.gz",
             "entrypoint": f"bin/{component['binary']}",
         }
-        _component_target(catalog, component["id"], artifact, TARGET)
+        _component_target(catalog, component["id"], artifact, target)
+        protocol_version = catalog_component.get("protocolVersion")
+        if protocol_version is None and isinstance(group_id, str):
+            protocol_member = next(
+                (
+                    row for row in component_compatibility.get("members", [])
+                    if isinstance(row, dict) and row.get("componentId") == component["id"]
+                ),
+                None,
+            ) if isinstance(component_compatibility, dict) else None
+            protocol_version = protocol_member.get("protocolVersion") if isinstance(protocol_member, dict) else None
+        is_v2 = isinstance(protocol_version, str) and bool(protocol_version)
         descriptor: dict[str, Any] = {
-            "schemaVersion": 1,
+            "schemaVersion": 2 if is_v2 else 1,
             "releaseId": release_id,
             "componentId": component["id"],
             "version": package["version"],
             "channel": channel,
-            "target": TARGET,
+            "target": target,
             "artifact": artifact,
             "dependencies": dependencies,
             "restart": restart,
@@ -432,8 +324,14 @@ def build(
                 }
             },
         }
+        if is_v2:
+            descriptor["protocolVersion"] = protocol_version
         if component_compatibility is not None:
-            descriptor["compatibility"] = _compatibility(repository, source_commit, component_compatibility)
+            descriptor["compatibility"] = trusted_catalog_compatibility(
+                catalog_path,
+                catalog,
+                catalog_component,
+            )
         descriptor_path = component_dir / "descriptor.json"
         descriptor_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n", encoding="utf-8")
@@ -455,7 +353,7 @@ def main() -> int:
     parser.add_argument("--run-attempt", type=int, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--catalog-sha256", required=True)
-    parser.add_argument("--product-contracts-root", type=Path, required=True)
+    parser.add_argument("--target-id", choices=tuple(TARGETS), required=True)
     args = parser.parse_args()
     try:
         manifests = build(
@@ -468,7 +366,7 @@ def main() -> int:
             run_attempt=args.run_attempt,
             catalog_path=args.catalog.resolve(),
             catalog_sha256=args.catalog_sha256,
-            product_contracts_root=args.product_contracts_root.resolve(),
+            target_id=args.target_id,
         )
     except (ComponentArtifactError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(f"native component build failed: {error}", file=sys.stderr)

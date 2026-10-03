@@ -17,7 +17,7 @@ from component_artifacts import ComponentArtifactError, _component_target
 from prepare_product_component import IMAGE_PRODUCTS, PRODUCTS
 
 
-CATALOG_SHA256 = "248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35"
+CATALOG_SHA256 = "f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816"
 CATALOG_PATH = Path("workspace-catalog/governance/component-catalog-v1.json")
 PYTHON_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12"
 WINDOWS_DOCKER_TARGET_ID = "windows-10.0-x86_64-docker-linux"

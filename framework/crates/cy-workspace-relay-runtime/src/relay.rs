@@ -1432,6 +1432,7 @@ fn registry_identity_for_authenticated_device(
     WorkspaceDeviceCertificateIdentity {
         key: device.key().clone(),
         certificate_fingerprint_sha256,
+        authorization_id: device.authorization_id(),
         registration_binding_id: *device.registration_binding_id(),
         authorization_generation: device.authorization_generation(),
         csr_sha256: *device.csr_sha256(),

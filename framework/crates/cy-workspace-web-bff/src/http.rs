@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::csrf::{csrf_set_cookie, CsrfPrincipalBinding, CsrfSigner};
 use crate::device_approval::{device_approval_router, DeviceApprovalDependencies};
@@ -122,7 +123,7 @@ pub struct WebBffState {
     principal_verifier: Arc<dyn WebPrincipalVerifier>,
     directory: Arc<dyn WorkspaceDirectory>,
     workspace_api: Arc<dyn WorkspaceProductGateway>,
-    product_operations: ProductOperationCatalog,
+    product_operations: std::sync::RwLock<ProductOperationCatalog>,
 }
 
 impl std::fmt::Debug for WebBffState {
@@ -156,7 +157,7 @@ impl WebBffState {
             principal_verifier,
             directory,
             workspace_api,
-            product_operations,
+            product_operations: std::sync::RwLock::new(product_operations),
         })
     }
 }
@@ -257,7 +258,7 @@ struct TraceInfo {
 
 struct AuthenticatedRequest {
     principal: VerifiedWebPrincipal,
-    access_token: String,
+    access_token: Zeroizing<String>,
 }
 
 /// Authenticate one browser route and insert its typed session context.
@@ -513,10 +514,22 @@ async fn product_route(
     if !is_valid_owner_id(&envelope.owner_id) || !is_valid_operation_id(&envelope.operation_id) {
         return invalid_request(Some(&trace.trace_id));
     }
-    let Some(contract) = state
-        .product_operations
-        .get(&envelope.owner_id, &envelope.operation_id)
-    else {
+    let current_catalog = match state
+        .workspace_api
+        .catalog_for_request(
+            &authenticated.principal,
+            authenticated.access_token.as_str(),
+            &workspace_id,
+        )
+        .await
+    {
+        Ok(catalog) => catalog,
+        Err(error) => return gateway_error(error, Some(&trace.trace_id)),
+    };
+    if let Ok(mut cached) = state.product_operations.write() {
+        *cached = current_catalog.clone();
+    }
+    let Some(contract) = current_catalog.get(&envelope.owner_id, &envelope.operation_id) else {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             ProblemCode::UnsupportedOperation,
@@ -524,10 +537,7 @@ async fn product_route(
             Some(&trace.trace_id),
         );
     };
-    if !state
-        .product_operations
-        .has_grant(&envelope.owner_id, &envelope.operation_id)
-    {
+    if !current_catalog.has_grant(&envelope.owner_id, &envelope.operation_id) {
         return forbidden(Some(&trace.trace_id));
     }
     let json_body = match decode_product_body(envelope.json_body.as_deref()) {
@@ -603,7 +613,11 @@ async fn product_route(
     });
     let upstream = match state
         .workspace_api
-        .invoke(&authenticated.principal, workspace_request)
+        .invoke(
+            &authenticated.principal,
+            authenticated.access_token.as_str(),
+            workspace_request,
+        )
         .await
     {
         Ok(value) => value,
@@ -1035,7 +1049,7 @@ async fn authenticate(
     }
     Ok(AuthenticatedRequest {
         principal,
-        access_token: token.to_owned(),
+        access_token: Zeroizing::new(token.to_owned()),
     })
 }
 
@@ -1470,9 +1484,19 @@ mod tests {
 
     #[async_trait]
     impl WorkspaceProductGateway for CountingGateway {
+        async fn catalog_for_request(
+            &self,
+            _principal: &VerifiedWebPrincipal,
+            _access_token: &str,
+            _workspace_id: &str,
+        ) -> Result<ProductOperationCatalog, WorkspaceGatewayError> {
+            Ok(ProductOperationCatalog::deny_all_for_tests())
+        }
+
         async fn invoke(
             &self,
             _principal: &VerifiedWebPrincipal,
+            _access_token: &str,
             _request: WorkspaceApiRequest,
         ) -> Result<
             cy_workspace_control_plane::workspace_v1::WorkspaceApiResponse,

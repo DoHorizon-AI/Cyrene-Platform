@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::device_certificate_validation::DeviceCertificateValidationError;
 use crate::{UserCodeKeyRing, UserCodeSecretError, VersionedUserCodeDigest};
-use cy_workspace_relay_runtime::AuthenticatedRelayWorkspaceDevice;
+use cy_workspace_control_plane::device_registry::AuthenticatedRelayWorkspaceDevice;
 
 /// Opaque server-generated identifier for one authorization attempt.
 ///

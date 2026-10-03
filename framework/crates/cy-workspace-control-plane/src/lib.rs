@@ -7,6 +7,8 @@
 
 pub mod api;
 pub mod auth;
+pub mod authority;
+pub mod authority_service;
 pub mod caller;
 pub mod connector_session;
 pub mod control_plane;
@@ -29,6 +31,7 @@ pub use auth::{
     DevelopmentSessionVerifier, RelayAuthenticationError, RelayAuthenticator, RelaySessionClaims,
     SessionPrincipal,
 };
+pub use authority_service::*;
 pub use caller::{
     WorkspaceAuthorizationError, WorkspaceCallerContext, WorkspaceCallerContextError,
     WorkspaceCallerPrincipal, WorkspaceDeviceIdentity, NAVIGATOR_SERVICE_WRITER_ROLE,

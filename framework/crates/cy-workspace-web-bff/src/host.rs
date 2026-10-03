@@ -1,9 +1,9 @@
 //! ╔══════════════════════════════════════════════════════════════════════╗
 //! ║ File: framework/crates/cy-workspace-web-bff/src/host.rs             ║
 //! ║ Module: cy_workspace_web_bff::host                                 ║
-//! ║ Role: Compose real identity, Directory, catalog, and Relay providers.║
+//! ║ Role: Compose real identity, Directory, and Authority RPC providers.║
 //! ║                                                                    ║
-//! ║ 模块职责：装配真实身份、Directory、合同 catalog 与 Relay provider。    ║
+//! ║ 模块职责：装配真实身份、Directory 与 Authority RPC provider。       ║
 //! ╚══════════════════════════════════════════════════════════════════════╝
 
 use std::collections::BTreeMap;
@@ -18,20 +18,11 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::routing::get;
 use axum::Router;
-use cy_proto::google::rpc::Status as RpcStatus;
+use cy_proto::cyrene::workspace::authority::v2::workspace_authority_service_client::WorkspaceAuthorityServiceClient;
 use cy_proto::workspace_v1::UserIdentityRef;
-use cy_proto::workspace_v1::{
-    workspace_api_request, workspace_api_response, WorkspaceApiRequest, WorkspaceApiResponse,
-    WorkspaceConnectionDescriptor,
-};
 use cy_workspace_control_plane::{
-    AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, UserCodeKeyRing, VerifiedWebPrincipal,
-    WebIdentityDirectory, WebIdentityDirectoryError, WebPrincipalVerifier, WebRelaySessionIssuer,
-    WorkspaceApi, WorkspaceCallerContext, WorkspaceCallerPrincipal, WorkspaceDirectory,
-    WORKSPACE_MEMBER_ROLE,
-};
-use cy_workspace_fabric::{
-    FrontendRelayClient, FrontendRelayClientConfig, FrontendRelayClientError,
+    AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, UserCodeKeyRing, WebIdentityDirectory,
+    WebIdentityDirectoryError, WebPrincipalVerifier, WorkspaceDirectory,
 };
 use cy_workspace_postgres_storage::{
     device_enrollment_device_v1_router, webauthn_http_router, DeviceAuthorizationPolicy,
@@ -52,32 +43,23 @@ use http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use http::{Response, StatusCode};
 use serde_json::json;
 use thiserror::Error;
-use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tonic::transport::Endpoint;
 use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
 use cy_workspace_web_bff::{
-    load_product_operation_catalog_from_environment, router_with_device_approval,
-    with_verified_web_session_routes, DeviceApprovalDependencies, FabricWorkspaceProductGateway,
-    WebBffConfig, WebBffState, WorkspaceApiBinding, WorkspaceApiResolutionError,
-    WorkspaceApiResolver,
+    router_with_device_approval, with_verified_web_session_routes,
+    AuthorityWorkspaceProductGateway, DeviceApprovalDependencies, ProductOperationCatalog,
+    WebBffConfig, WebBffState,
 };
 
-const MAX_CERTIFICATE_FILE_BYTES: u64 = 256 * 1024;
 const CSRF_KEY_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_CSRF_KEY_FILE";
 const TENANT_ID_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_AAD_TENANT_ID";
 const AUDIENCE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_AAD_AUDIENCE";
 const CLIENT_ORIGIN_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_CLIENT_ORIGIN";
-const RELAY_ENDPOINT_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_ENDPOINT";
-const RELAY_SERVER_NAME_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_SERVER_NAME";
-const RELAY_CA_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_CA_FILE";
-const RELAY_CLIENT_CERT_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_CERT_FILE";
-const RELAY_CLIENT_KEY_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_RELAY_CLIENT_KEY_FILE";
-const HANDOFF_ISSUER_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_ISSUER";
-const HANDOFF_AUDIENCE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_AUDIENCE";
-const HANDOFF_SIGNING_SEED_FILE_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_HANDOFF_SIGNING_SEED_FILE";
+const AUTHORITY_UDS_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_AUTHORITY_UDS";
 const DEVICE_AUTHORIZATION_USER_CODE_KEY_FILE_ENV: &str =
     "CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_USER_CODE_HMAC_KEY_FILE";
 const DEVICE_AUTHORIZATION_VERIFICATION_URI_ENV: &str =
@@ -99,10 +81,6 @@ pub(crate) enum HostStartupError {
     Directory,
     #[error("Workspace Web identity verifier could not be initialized")]
     Identity,
-    #[error("Workspace Relay transport configuration is invalid")]
-    Relay,
-    #[error("trusted Product contract bundle could not be loaded")]
-    ProductCatalog,
     #[error("WebAuthn HTTP session-binding store could not be initialized")]
     WebAuthnSessionBinding,
     #[error("device enrollment authorization dependencies could not be initialized")]
@@ -115,43 +93,12 @@ pub(crate) enum HostStartupError {
     Listener(#[from] io::Error),
 }
 
-#[derive(Clone)]
-struct RelaySettings {
-    endpoint: String,
-    server_name: String,
-    ca_certificate: Vec<u8>,
-    client_certificate: Vec<u8>,
-    client_key: Vec<u8>,
-}
-
-impl RelaySettings {
-    fn client_config(&self) -> Result<FrontendRelayClientConfig, HostStartupError> {
-        FrontendRelayClientConfig::new(
-            self.endpoint.clone(),
-            self.server_name.clone(),
-            self.ca_certificate.clone(),
-            self.client_certificate.clone(),
-            self.client_key.clone(),
-        )
-        .map_err(|_| HostStartupError::Relay)
-    }
-}
-
-impl Drop for RelaySettings {
-    fn drop(&mut self) {
-        self.client_key.zeroize();
-    }
-}
-
 struct HostSettings {
     client_origin: String,
     csrf_mac_key: Secret32,
     tenant_id: Uuid,
     audience: String,
-    relay: RelaySettings,
-    handoff_issuer: String,
-    handoff_audience: String,
-    handoff_signing_seed: Secret32,
+    authority_uds: PathBuf,
 }
 
 struct Secret32([u8; 32]);
@@ -176,41 +123,7 @@ impl HostSettings {
             .map_err(|_| HostStartupError::Configuration)?;
         let audience = required_text(AUDIENCE_ENV)?;
         let csrf_mac_key = read_secret_32(CSRF_KEY_FILE_ENV)?;
-        let handoff_issuer = required_text(HANDOFF_ISSUER_ENV)?;
-        let handoff_audience = required_text(HANDOFF_AUDIENCE_ENV)?;
-        let handoff_signing_seed = read_secret_32(HANDOFF_SIGNING_SEED_FILE_ENV)?;
-
-        let relay = RelaySettings {
-            endpoint: required_text(RELAY_ENDPOINT_ENV)?,
-            server_name: required_text(RELAY_SERVER_NAME_ENV)?,
-            ca_certificate: read_regular_file(
-                RELAY_CA_FILE_ENV,
-                MAX_CERTIFICATE_FILE_BYTES,
-                false,
-            )?,
-            client_certificate: read_regular_file(
-                RELAY_CLIENT_CERT_FILE_ENV,
-                MAX_CERTIFICATE_FILE_BYTES,
-                false,
-            )?,
-            client_key: read_regular_file(
-                RELAY_CLIENT_KEY_FILE_ENV,
-                MAX_CERTIFICATE_FILE_BYTES,
-                true,
-            )?,
-        };
-
-        // Validate fixed HTTPS/SNI/mTLS settings before any listener can accept traffic.
-        drop(relay.client_config()?);
-        let mut seed_for_validation = handoff_signing_seed.duplicate();
-        let issuer_validation = WebRelaySessionIssuer::new(
-            handoff_issuer.clone(),
-            handoff_audience.clone(),
-            seed_for_validation,
-        )
-        .map_err(|_| HostStartupError::Relay);
-        seed_for_validation.zeroize();
-        issuer_validation?;
+        let authority_uds = PathBuf::from(required_text(AUTHORITY_UDS_ENV)?);
 
         if client_origin.is_empty() || audience.is_empty() || tenant_id.is_nil() {
             return Err(HostStartupError::Configuration);
@@ -221,25 +134,20 @@ impl HostSettings {
             csrf_mac_key,
             tenant_id,
             audience,
-            relay,
-            handoff_issuer,
-            handoff_audience,
-            handoff_signing_seed,
+            authority_uds,
         })
     }
 }
 
 /// Compose every required production dependency before opening the HTTP listener.
 ///
-/// PostgreSQL reachability, OIDC verifier setup, the complete pinned Product bundle,
-/// exact Relay TLS routing, and the signed handoff issuer are required. Relay sessions
-/// are created only after a real inbound token has produced a `VerifiedWebPrincipal`;
-/// no synthetic user is used for a readiness probe.
+/// PostgreSQL reachability, OIDC verifier setup, and Authority RPC are required.
+/// Product catalog snapshots are authenticated and refreshed through Authority for each
+/// request; no static local catalog is treated as an authority.
 ///
 /// 在打开 HTTP listener 前装配所有必要生产依赖。Relay session 只会在真实 token 验证后创建，不使用合成用户探测。
 pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     let settings = HostSettings::from_environment()?;
-    let relay = Arc::new(settings.relay);
     let mut csrf_mac_key = settings.csrf_mac_key.duplicate();
     let web_config = WebBffConfig::new(settings.client_origin.clone(), csrf_mac_key)
         .map_err(|_| HostStartupError::Application);
@@ -262,35 +170,18 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
             .map_err(|_| HostStartupError::Identity)?,
     );
     let principal_verifier: Arc<dyn WebPrincipalVerifier> = identity_verifier.clone();
-    let mut signing_seed = settings.handoff_signing_seed.duplicate();
-    let handoff_issuer = Arc::new(
-        WebRelaySessionIssuer::new(
-            settings.handoff_issuer.clone(),
-            settings.handoff_audience.clone(),
-            signing_seed,
-        )
-        .map_err(|_| HostStartupError::Relay)?,
-    );
-    signing_seed.zeroize();
-
-    let resolver: Arc<dyn WorkspaceApiResolver> = Arc::new(PrincipalScopedRelayResolver {
-        relay: Arc::clone(&relay),
-        handoff_issuer,
-    });
     let workspace_directory: Arc<dyn WorkspaceDirectory> = directory.clone();
-    let workspace_gateway = Arc::new(FabricWorkspaceProductGateway::new(
+    let workspace_gateway = Arc::new(AuthorityWorkspaceProductGateway::new(
         Arc::clone(&workspace_directory),
-        resolver,
+        settings.authority_uds.clone(),
     ));
-    let product_catalog = load_product_operation_catalog_from_environment()
-        .map_err(|_| HostStartupError::ProductCatalog)?;
     let state = Arc::new(
         WebBffState::new(
             web_config,
             principal_verifier,
             workspace_directory,
             workspace_gateway,
-            product_catalog,
+            ProductOperationCatalog::unavailable(),
         )
         .map_err(|_| HostStartupError::Application)?,
     );
@@ -458,14 +349,13 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
     let readiness = Arc::new(HostReadiness {
         directory,
         identity_verifier,
-        relay,
+        authority_uds: settings.authority_uds,
         authorization_store,
         attempt_reservation,
         registry,
         ca,
         credential_store,
         session_bindings,
-        product_catalog_loaded: true,
     });
 
     Ok(with_probes(application, readiness))
@@ -473,11 +363,10 @@ pub(crate) async fn compose() -> Result<Router, HostStartupError> {
 
 /// Start liveness and check each live trust dependency without inventing a user identity.
 ///
-/// Readiness probes the current PostgreSQL schemas, signed CRL, pinned OIDC discovery/JWKS, and
-/// the native mTLS connection to Relay. Product authorization remains request-scoped and is
-/// checked only after a real verified browser principal arrives.
+/// Readiness probes current PostgreSQL schemas, signed CRL, OIDC discovery/JWKS, and Authority RPC.
+/// Catalog state is authenticated and refreshed for each Product request.
 ///
-/// 启动 liveness 并逐项探测真实 PostgreSQL schema、签名 CRL、OIDC metadata 与 Relay native mTLS；不伪造用户身份。
+/// 启动 liveness 并逐项探测 PostgreSQL schema、签名 CRL、OIDC metadata 与 Authority RPC。
 fn with_probes(application: Router, readiness: Arc<HostReadiness>) -> Router {
     Router::new()
         .merge(application)
@@ -492,14 +381,13 @@ async fn health() -> Response<Body> {
 struct HostReadiness {
     directory: Arc<PostgresWorkspaceDirectory>,
     identity_verifier: Arc<AzureAdWebPrincipalVerifier>,
-    relay: Arc<RelaySettings>,
+    authority_uds: PathBuf,
     authorization_store: Arc<PostgresDeviceAuthorizationStore>,
     attempt_reservation: Arc<PostgresUserCodeAttemptReservation>,
     registry: Arc<PostgresWorkspaceDeviceRegistry>,
     ca: Arc<PostgresRestrictedDeviceCa>,
     credential_store: Arc<PostgresWebAuthnCredentialStore>,
     session_bindings: Arc<PostgresWebAuthnHttpSessionBindingStore>,
-    product_catalog_loaded: bool,
 }
 
 impl HostReadiness {
@@ -513,19 +401,12 @@ impl HostReadiness {
         )
         .await
         .is_ok_and(|result| result.is_ok());
-        let relay_mtls = timeout(
+        let authority_rpc = timeout(
             READINESS_TIMEOUT,
-            cy_mtls_channel_client::connect_mtls_channel(
-                &self.relay.endpoint,
-                &self.relay.server_name,
-                &self.relay.ca_certificate,
-                &self.relay.client_certificate,
-                &self.relay.client_key,
-                Some(READINESS_TIMEOUT),
-            ),
+            authority_socket_ready(&self.authority_uds),
         )
         .await
-        .is_ok_and(|result| result.is_ok());
+        .is_ok_and(|ready| ready);
         let authorization_database = blocking_readiness({
             let store = Arc::clone(&self.authorization_store);
             move || store.database_time_unix_ms().is_ok()
@@ -557,14 +438,13 @@ impl HostReadiness {
         json!({
             "directoryDatabase": directory,
             "oidcDiscoveryAndJwks": identity_provider,
-            "relayNativeMtls": relay_mtls,
+            "authorityRpc": authority_rpc,
             "deviceAuthorizationDatabase": authorization_database,
             "userCodeAttemptStore": user_code_attempt_store,
             "deviceCertificateRegistry": registry,
             "deviceCaSignedCrl": current_signed_crl,
             "webauthnCredentialStore": webauthn_credentials,
             "webauthnSessionBindingStore": webauthn_session_bindings,
-            "productContractBundle": self.product_catalog_loaded,
         })
     }
 }
@@ -631,6 +511,45 @@ where
         .is_ok_and(|result| result.is_ok_and(|ready| ready))
 }
 
+async fn authority_socket_ready(socket_path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        let path = socket_path.to_path_buf();
+        let endpoint = match Endpoint::try_from("http://[::]:50051") {
+            Ok(endpoint) => endpoint,
+            Err(_) => return false,
+        };
+        let channel = match endpoint
+            .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                let path = path.clone();
+                async move {
+                    let stream = tokio::net::UnixStream::connect(path).await?;
+                    Ok::<_, io::Error>(hyper_util::rt::tokio::TokioIo::new(stream))
+                }
+            }))
+            .await
+        {
+            Ok(channel) => channel,
+            Err(_) => return false,
+        };
+        let mut client = WorkspaceAuthorityServiceClient::new(channel);
+        client
+            .negotiate_version(tonic::Request::new(
+                cy_proto::cyrene::workspace::authority::v2::NegotiateVersionRequest {
+                    minimum_version: 2,
+                    maximum_version: 2,
+                },
+            ))
+            .await
+            .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        false
+    }
+}
+
 async fn ready(readiness: Arc<HostReadiness>) -> Response<Body> {
     let checks = timeout(READINESS_TIMEOUT, readiness.checks())
         .await
@@ -671,7 +590,7 @@ struct PostgresIdentityDirectory {
 impl WebIdentityDirectory for PostgresIdentityDirectory {
     async fn organizations_for_verified_identity(
         &self,
-        identity: &cy_workspace_fabric::workspace_v1::UserIdentityRef,
+        identity: &UserIdentityRef,
     ) -> Result<Vec<String>, WebIdentityDirectoryError> {
         self.directory
             .organizations_for_verified_identity(identity)
@@ -687,149 +606,6 @@ impl WebIdentityDirectory for PostgresIdentityDirectory {
                 _ => WebIdentityDirectoryError::Unavailable,
             })
     }
-}
-
-struct PrincipalScopedRelayResolver {
-    relay: Arc<RelaySettings>,
-    handoff_issuer: Arc<WebRelaySessionIssuer>,
-}
-
-#[async_trait]
-impl WorkspaceApiResolver for PrincipalScopedRelayResolver {
-    async fn resolve(
-        &self,
-        principal: &VerifiedWebPrincipal,
-        descriptor: &WorkspaceConnectionDescriptor,
-    ) -> Result<WorkspaceApiBinding, WorkspaceApiResolutionError> {
-        let config = self
-            .relay
-            .client_config()
-            .map_err(|_| WorkspaceApiResolutionError::NotConfigured)?;
-        let mut transport =
-            FrontendRelayClient::connect(config, principal, self.handoff_issuer.as_ref())
-                .await
-                .map_err(map_relay_resolution_error)?;
-        let discovered = transport
-            .discover_workspaces()
-            .await
-            .map_err(map_relay_resolution_error)?;
-        let mut exact = discovered
-            .iter()
-            .filter(|candidate| candidate.workspace_id == descriptor.workspace_id);
-        let discovered_descriptor = exact
-            .next()
-            .ok_or(WorkspaceApiResolutionError::NotConfigured)?;
-        if exact.next().is_some() || discovered_descriptor != descriptor {
-            return Err(WorkspaceApiResolutionError::InvalidBinding);
-        }
-        let mut candidates = descriptor.candidates.iter().filter(|candidate| {
-            candidate.mode == cy_proto::core_v1::ConnectivityMode::Relay as i32
-                && candidate.connection_uri == self.relay.endpoint
-                && candidate.server_name == self.relay.server_name
-        });
-        let candidate = candidates
-            .next()
-            .ok_or(WorkspaceApiResolutionError::NotConfigured)?;
-        if candidates.next().is_some() {
-            return Err(WorkspaceApiResolutionError::InvalidBinding);
-        }
-
-        let api: Arc<dyn WorkspaceApi> = Arc::new(PrincipalScopedWorkspaceApi {
-            transport: Mutex::new(transport),
-            identity: principal.identity().clone(),
-            organization_id: principal.organization_id().to_owned(),
-            workspace_id: descriptor.workspace_id.clone(),
-            expires_at_unix_ms: principal.expires_at_unix_ms(),
-        });
-        WorkspaceApiBinding::for_candidate(principal, descriptor, candidate, api)
-    }
-}
-
-struct PrincipalScopedWorkspaceApi {
-    transport: Mutex<FrontendRelayClient>,
-    identity: cy_workspace_fabric::workspace_v1::UserIdentityRef,
-    organization_id: String,
-    workspace_id: String,
-    expires_at_unix_ms: i64,
-}
-
-#[async_trait]
-impl WorkspaceApi for PrincipalScopedWorkspaceApi {
-    async fn handle_authenticated(
-        &self,
-        request: WorkspaceApiRequest,
-        caller: WorkspaceCallerContext,
-    ) -> WorkspaceApiResponse {
-        let request_id = request.request_id.clone();
-        let caller_matches = matches!(
-            caller.principal(),
-            WorkspaceCallerPrincipal::User(user) if user == &self.identity
-        ) && caller.organization_id() == self.organization_id
-            && caller.workspace_id() == self.workspace_id
-            && caller.is_member()
-            && caller.roles().contains(WORKSPACE_MEMBER_ROLE)
-            && request.workspace_id == self.workspace_id
-            && matches!(
-                request.request.as_ref(),
-                Some(workspace_api_request::Request::ProductApiV2(_))
-            );
-        if !caller_matches {
-            return workspace_error(request_id, 7, "WORKSPACE_CALLER_CONTEXT_REQUIRED");
-        }
-        if self.expires_at_unix_ms <= unix_now_ms().unwrap_or(i64::MAX) {
-            return workspace_error(request_id, 16, "WORKSPACE_CALLER_EXPIRED");
-        }
-
-        match self.transport.lock().await.execute(request).await {
-            Ok(response) => response,
-            Err(error) => {
-                let (code, message) = match error {
-                    FrontendRelayClientError::Timeout => (4, "WORKSPACE_RELAY_REQUEST_TIMEOUT"),
-                    FrontendRelayClientError::RelayUnavailable
-                    | FrontendRelayClientError::SessionExpired
-                    | FrontendRelayClientError::CredentialUnavailable => {
-                        (14, "WORKSPACE_RELAY_UNAVAILABLE")
-                    }
-                    _ => (13, "WORKSPACE_RELAY_RESPONSE_INVALID"),
-                };
-                workspace_error(request_id, code, message)
-            }
-        }
-    }
-}
-
-fn workspace_error(request_id: String, code: i32, message: &'static str) -> WorkspaceApiResponse {
-    WorkspaceApiResponse {
-        request_id,
-        outcome: Some(workspace_api_response::Outcome::Error(RpcStatus {
-            code,
-            message: message.to_owned(),
-            details: Vec::new(),
-        })),
-    }
-}
-
-fn map_relay_resolution_error(error: FrontendRelayClientError) -> WorkspaceApiResolutionError {
-    match error {
-        FrontendRelayClientError::Configuration => WorkspaceApiResolutionError::NotConfigured,
-        FrontendRelayClientError::Timeout
-        | FrontendRelayClientError::RelayUnavailable
-        | FrontendRelayClientError::CredentialUnavailable
-        | FrontendRelayClientError::SessionExpired => WorkspaceApiResolutionError::Unavailable,
-        FrontendRelayClientError::DescriptorInvalid
-        | FrontendRelayClientError::WorkspaceNotDiscovered
-        | FrontendRelayClientError::RequestInvalid
-        | FrontendRelayClientError::ResponseInvalid
-        | FrontendRelayClientError::CorrelationUnavailable
-        | FrontendRelayClientError::ClockUnavailable => WorkspaceApiResolutionError::InvalidBinding,
-    }
-}
-
-fn unix_now_ms() -> Option<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
 }
 
 fn required_text(name: &'static str) -> Result<String, HostStartupError> {
