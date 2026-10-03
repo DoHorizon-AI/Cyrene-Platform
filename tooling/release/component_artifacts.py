@@ -608,14 +608,30 @@ def _verify_channel_pin(catalog: dict[str, Any], channel: str, source_ref: str) 
         raise ComponentArtifactError("source.ref is not allowed for this channel by the trusted catalog")
 
 
-def _target_id(catalog: dict[str, Any], target: dict[str, Any]) -> str | None:
-    targets = catalog.get("targets")
-    if not isinstance(targets, list):
-        return None
-    for row in targets:
-        if isinstance(row, dict) and row.get("target") == target and isinstance(row.get("id"), str):
-            return row["id"]
-    return None
+def _declared_targets_for_json(
+    catalog: dict[str, Any],
+    component: dict[str, Any],
+    target: dict[str, Any],
+    artifact_kind: str | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    declarations = component.get("targets")
+    global_targets = catalog.get("targets")
+    if not isinstance(declarations, list) or not isinstance(global_targets, list):
+        return []
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for declaration in declarations:
+        if not isinstance(declaration, dict) or (
+            artifact_kind is not None and declaration.get("artifactKind") != artifact_kind
+        ):
+            continue
+        for global_target in global_targets:
+            if (
+                isinstance(global_target, dict)
+                and global_target.get("id") == declaration.get("targetId")
+                and global_target.get("target") == target
+            ):
+                matches.append((declaration, global_target))
+    return matches
 
 
 def _component_target(
@@ -631,30 +647,19 @@ def _component_target(
     artifact_kind = artifact.get("kind")
     if component.get("artifactKinds", [component.get("kind")]).count(artifact_kind) != 1:
         raise ComponentArtifactError("artifact kind is not allowed for this component by the catalog")
-    target_id = _target_id(catalog, target)
-    if target_id is None:
+    global_targets = catalog.get("targets")
+    if not isinstance(global_targets, list) or not any(
+        isinstance(row, dict) and row.get("target") == target for row in global_targets
+    ):
         raise ComponentArtifactError("manifest target is not defined by trusted catalog")
-    declared = component.get("targets")
-    entry = next(
-        (
-            row
-            for row in declared or []
-            if isinstance(row, dict) and row.get("targetId") == target_id and row.get("artifactKind") == artifact_kind
-        ),
-        None,
-    )
     build_dependency = component.get("role") == "build-dependency"
     publication_target = artifact_kind == "oci-image"
-    if not isinstance(entry, dict) or entry.get("support") not in (
-        {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
-    ):
+    permitted_support = {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
+    matches = _declared_targets_for_json(catalog, component, target, artifact_kind)
+    if len(matches) != 1 or matches[0][0].get("support") not in permitted_support:
         raise ComponentArtifactError("target is not authorized for this component by the catalog")
-    host_target = next(
-        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("id") == target_id),
-        None,
-    )
-    permitted_host_support = {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
-    if not isinstance(host_target, dict) or host_target.get("hostSupport") not in permitted_host_support:
+    host_target = matches[0][1]
+    if not isinstance(host_target, dict) or host_target.get("hostSupport") not in permitted_support:
         raise ComponentArtifactError("host target is not authorized by the catalog")
     if artifact_kind == "oci-image" and component.get("ociImageRepository") != artifact.get("repository"):
         raise ComponentArtifactError("OCI repository does not match the component catalog pin")
@@ -669,25 +674,19 @@ def _component_has_supported_target(catalog: dict[str, Any], component_id: str, 
     )
     if not isinstance(component, dict):
         return False
-    target_id = _target_id(catalog, target)
-    if target_id is None:
-        return False
-    global_target = next(
-        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("id") == target_id),
-        None,
-    )
     build_dependency = component.get("role") == "build-dependency"
-    declarations = [
-        row for row in component.get("targets", []) if isinstance(row, dict) and row.get("targetId") == target_id
-    ]
-    publication_target = any(row.get("artifactKind") == "oci-image" for row in declarations)
-    authorized_support = {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
-    if not isinstance(global_target, dict) or global_target.get("hostSupport") not in authorized_support:
+    matches = _declared_targets_for_json(catalog, component, target)
+    if not matches or len({row.get("targetId") for row, _ in matches}) != 1:
         return False
-    return any(
-        isinstance(row, dict) and row.get("targetId") == target_id and row.get("support") in authorized_support
-        for row in component.get("targets", [])
-    )
+    for row, global_target in matches:
+        permitted_support = (
+            {"supported", "contract-only"}
+            if build_dependency or row.get("artifactKind") == "oci-image"
+            else {"supported"}
+        )
+        if row.get("support") in permitted_support and global_target.get("hostSupport") in permitted_support:
+            return True
+    return False
 
 
 def _verify_contract_lock(compatibility: dict[str, Any]) -> None:
