@@ -873,6 +873,15 @@ def _verify_index_catalog_metadata(
     _verify_channel_pin(catalog, document["channel"], source["ref"])
     expected_release_id = f"{document['channel']}-{source['commit']}"
     for row in document["releases"]:
+        component_rows = [
+            component
+            for component in catalog.get("components", [])
+            if isinstance(component, dict) and component.get("componentId") == row["componentId"]
+        ]
+        if len(component_rows) != 1 or component_rows[0].get("publisher") != repository:
+            raise ComponentArtifactError(
+                f"index component publisher does not match the index repository: {row['componentId']}"
+            )
         if not _component_has_supported_target(catalog, row["componentId"], row["target"]):
             raise ComponentArtifactError(f"index contains unsupported component target: {row['componentId']}")
         expected_uri = _release_asset_uri(
