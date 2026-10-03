@@ -100,14 +100,17 @@ pub(crate) fn attach_device_bpf_filter(
         )
     };
     if program_fd < 0 {
+        let err = std::io::Error::last_os_error();
         let verifier_log = String::from_utf8_lossy(&log)
             .trim_matches(char::from(0))
             .trim()
             .to_string();
-        let detail = if verifier_log.is_empty() {
-            std::io::Error::last_os_error().to_string()
-        } else {
+        let detail = if !verifier_log.is_empty() {
             verifier_log
+        } else if err.raw_os_error() == Some(libc::EPERM) || err.raw_os_error() == Some(libc::EACCES) {
+            format!("{err}: cgroup device BPF requires root or CAP_BPF / CAP_SYS_ADMIN capabilities; grant capabilities or run with --dev-mode / --disable-device-bpf for unprivileged local dev")
+        } else {
+            err.to_string()
         };
         return Err(ProviderError::new(
             "linux-device-bpf",
@@ -315,3 +318,48 @@ pub(crate) const BPF_JMP_JEQ_K: u8 = 0x15;
 pub(crate) const BPF_JMP_A: u8 = 0x05;
 #[cfg(target_os = "linux")]
 pub(crate) const BPF_JMP_EXIT: u8 = 0x95;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_device_bpf_capable() -> bool {
+    let dummy_program = vec![
+        insn(BPF_ALU64_MOV_K, 0, 0, 0, 1),
+        insn(BPF_JMP_EXIT, 0, 0, 0, 0),
+    ];
+    let license = b"GPL\0";
+    let attr = BpfProgLoadAttr {
+        prog_type: BPF_PROG_TYPE_CGROUP_DEVICE,
+        insn_cnt: dummy_program.len() as u32,
+        insns: dummy_program.as_ptr() as u64,
+        license: license.as_ptr() as u64,
+        log_level: 0,
+        log_size: 0,
+        log_buf: 0,
+        kern_version: 0,
+        prog_flags: 0,
+        prog_name: *b"cy_bpf_probe\0\0\0\0",
+        prog_ifindex: 0,
+        expected_attach_type: BPF_CGROUP_DEVICE,
+    };
+    let program_fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_PROG_LOAD,
+            &attr,
+            std::mem::size_of::<BpfProgLoadAttr>(),
+        )
+    };
+    if program_fd >= 0 {
+        unsafe {
+            libc::close(program_fd as libc::c_int);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_device_bpf_capable() -> bool {
+    false
+}
+
