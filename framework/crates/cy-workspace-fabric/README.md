@@ -1,26 +1,29 @@
 # cy-workspace-fabric
 
-`cy-workspace-fabric` provides the product-neutral Account/Directory boundary,
-transport-neutral Workspace connection descriptor, stable Workspace API port,
-an authenticated private mTLS direct endpoint, and the outbound mTLS
-application relay used by the v1 reference vertical. Candidate selection tries
-`LAN_DIRECT` before `RELAY` according to descriptor priority.
+`cy-workspace-fabric` retains the legacy V1 Account/Directory boundary,
+transport-neutral Workspace connection descriptor, API port, and mTLS relay
+used by Platform acceptance fixtures. It is not the production Connector or
+Relay process. Current Connector and Relay runtimes are owned by
+`Cyrene-Plugins-Official` under `runtime/rust/`; Platform continues to own the
+Authority control plane, identity, authorization, and directory storage.
 
 The reusable outbound Workspace client transport lives in
 [`../cy-workspace-client-sdk/`](../cy-workspace-client-sdk/README.md), and its
 low-level HTTPS mTLS dialer lives in
 [`../cy-mtls-channel-client/`](../cy-mtls-channel-client/README.md). Fabric
-retains identity and authorization gates, direct-versus-
-Relay selection, fallback policy, and Workspace request dispatch.
+retains the legacy fixture's identity and authorization gates,
+direct-versus-Relay selection, fallback policy, and Workspace request
+dispatch.
 
-本 crate 提供产品无关的 Account/Directory 边界、transport-neutral Workspace
-连接描述符、稳定 Workspace API port、私网 mTLS 直连端点与 v1 参考纵向使用的出站
-mTLS 应用层 Relay。候选选择按描述符优先级先尝试 `LAN_DIRECT`，再选择 `RELAY`。
+本 crate 保留旧 V1 Account/Directory 边界、transport-neutral Workspace 连接描述符、API
+port，以及 Platform 验收 fixture 使用的 mTLS Relay。它不是生产 Connector 或 Relay 进程。
+当前 Connector 与 Relay runtime 由 `Cyrene-Plugins-Official` 的 `runtime/rust/` 持有；
+Platform 继续持有 Authority control plane、身份、授权与 Directory storage。
 
 可复用的 Workspace 出站 client transport 位于
 [`../cy-workspace-client-sdk/`](../cy-workspace-client-sdk/README.md)，底层 HTTPS mTLS dialer 位于
 [`../cy-mtls-channel-client/`](../cy-mtls-channel-client/README.md)。Fabric 继续持有
-身份与授权 gate、直连/Relay 选择、fallback policy 和 Workspace request
+旧 fixture 的身份与授权 gate、直连/Relay 选择、fallback policy 和 Workspace request
 dispatch。
 
 It consumes the existing Execution Fabric connectivity provider and semantic
@@ -47,136 +50,39 @@ identity；不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact id
 | `src/transport.rs` | Connector-facing Relay session service path; client dialing is in the SDK. | Connector 侧 Relay session service path；client dialing 位于 SDK。 |
 | `../cy-mtls-channel-client/` | Reusable HTTPS mTLS Tonic channel construction; no identity, authorization, routing, or dispatch authority. | 可复用的 HTTPS mTLS Tonic channel 构造；不持有身份、授权、路由或 dispatch 权限。 |
 | `src/bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
-| `../cy-workspace-relay-host/` | Independently versioned fail-closed Relay Host package and image. | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
-| `../cy-workspace-connector-host/` | Independently versioned outbound Connector Host package and image. | 独立版本化的出站 Connector Host package 与镜像。 |
-| `../cy-workspace-sidecar/` | Independently versioned loopback Sidecar package. | 独立版本化的 loopback Sidecar package。 |
 
-The Web Frontend Relay adapter's trust boundaries and required host wiring are
-documented in [`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md).
+The legacy V1 Web Frontend Relay adapter's trust boundaries are documented in
+[`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md); it is retained
+for compatibility context and does not configure the current runtime.
 
-Web Frontend Relay adapter 的信任边界与 host 接线要求见
-[`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md)。
+旧 V1 Web Frontend Relay adapter 的信任边界见
+[`WEB_FRONTEND_RELAY_CLIENT.md`](WEB_FRONTEND_RELAY_CLIENT.md)；该文档仅供兼容背景参考，
+不配置当前 runtime。
 
-The production outbound Connector host's fixed private-file layout, exact
-device identity construction, Product scope checks, and external Relay registry
-gate are documented in [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.md).
+Product API v2 authorization and projection remain in
+`cy-workspace-control-plane` and `cy-workspace-product-contracts`. The former
+Platform-only generic HTTP adapter and its Connector composition were retired
+with the old Platform Connector host. Current connection runtime source and
+package validation belong to `Cyrene-Plugins-Official`.
 
-生产出站 Connector host 的固定私有文件布局、设备身份构造、Product scope 校验与
-Relay 外部注册表 gate 见 [`WORKSPACE_CONNECTOR_HOST.md`](WORKSPACE_CONNECTOR_HOST.md)。
+Product API v2 授权与投影仍位于 `cy-workspace-control-plane` 和
+`cy-workspace-product-contracts`。Platform 旧 generic HTTP adapter 与 Connector 组合已随旧
+Platform Connector host 退役。当前连接 runtime 源码与 package 验证由
+`Cyrene-Plugins-Official` 持有。
 
-Product API v2 dispatch and authorization live in `cy-workspace-control-plane`.
-The generic HTTPS adapter lives in `cy-workspace-product-adapters`, while
-operation routes and schemas come from release-pinned owner catalogs. Platform
-policy, caller scope, response schema, and response-scope checks remain
-control-plane gates. The Connector composition and its fixed release inputs are
-documented in
-[`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md).
+## Retired Platform Local Sidecar
 
-Product API v2 dispatch 与授权位于 `cy-workspace-control-plane`。通用 HTTPS adapter 位于
-`cy-workspace-product-adapters`；operation route 和 schema 来自 release 固定的 owner catalog。
-Platform policy、caller scope、响应 schema 与 response-scope 校验仍由 control plane 执行。
-Connector composition 与固定 release 输入见
-[`PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md`](PRODUCT_ADAPTER_COMPONENT_BOUNDARY.md)。
+The former Platform `cy-workspace-sidecar` process and its dedicated binary
+artifact workflow have been removed. The production component with ID
+`cy-workspace-sidecar` is owned by `Cyrene-Plugins-Official` at
+`runtime/rust/cyrene-workspace-sidecar`; Platform's systemd unit resolves that
+component through `cyrene component-run`.
 
-## Local Python bridge
-
-`cy-workspace-sidecar` exposes the versioned local gRPC contract in
-`cyrene.workspace.local.v1` on `127.0.0.1:41680` by default. It accepts only a
-local `Authorization: Bearer ...` token, returns Workspace IDs and display
-names without private route candidates, and forwards the existing generic
-Workspace Operation API. The bind address is fixed to IPv4 loopback; only the
-port can be changed with `CYRENE_WORKSPACE_SIDECAR_PORT`.
-
-The Python service must share the sidecar's network namespace so its own
-`127.0.0.1` reaches this listener. A host loopback binding is not reachable from
-an unrelated container namespace.
-
-Python clients should generate their gRPC stub from
-`contracts/proto/cyrene/workspace/local/v1/workspace_sidecar.proto` and attach
-`authorization: Bearer <local-token>` metadata to every RPC.
-
-The sidecar never issues identity. A trusted credential/profile provisioner
-must place the externally issued session credential, user identity, and local
-allowlist in a protected JSON bundle, with the client key at an absolute path:
-
-```json
-{
-  "relay_endpoint": "https://relay.example.invalid",
-  "relay_server_name": "relay.example.invalid",
-  "relay_ca_certificate_file": "/run/secrets/relay-ca.pem",
-  "client_certificate_file": "/run/secrets/workspace-client.pem",
-  "client_key_file": "/run/secrets/workspace-client-key.pem",
-  "session_credential": "<short-lived issuer-provided credential>",
-  "user_issuer": "https://identity.example.invalid",
-  "user_subject": "<issuer-provided subject>",
-  "organization_id": "<issuer-provided organization>",
-  "allowed_workspace_ids": ["<deployment-approved-workspace>"],
-  "allowed_operations": ["get_operation", "start_operation"]
-}
-```
-
-Set `CYRENE_WORKSPACE_SIDECAR_CREDENTIAL_BUNDLE` and
-`CYRENE_WORKSPACE_SIDECAR_LOCAL_TOKEN_FILE` to absolute paths. On Unix, the
-credential bundle and client key must be mode `0600` or `0400`; the local token
-may be `0640` or `0440` when its group contains only the sidecar and authorized
-Python client. Generate the local bearer independently as a high-entropy secret;
-never reuse or derive it from a Relay session or device-enrollment credential.
-Startup and every bundle reload reject a local bearer equal to the current Relay
-session credential. The `allowed_workspace_ids` and `allowed_operations` fields are
-deployment policy: keep them scoped to one sidecar instance and never use `*`.
-Python services sharing a local token share that instance's full allowlist, so
-use a separate sidecar profile/token for each service trust boundary. The local
-token must contain at least 32 ASCII letters, digits, dots,
-underscores, or hyphens. Missing, malformed, or overly accessible secrets make
-the process fail closed. Credentials are re-read on each remote call, so an
-issuer can rotate the bundle through an atomic file replacement. The local
-bearer token is read at startup and changes require a restart.
-
-`Health` reports local configuration/listener readiness only, not Relay health.
-Each `Execute` call discovers the requested Workspace and selects the current
-`LAN_DIRECT` or `RELAY` candidate. The local API currently forwards only the
-generic Start/Get Operation contract; it does not define Product-specific
-Python APIs, which still require the Phase 3 Workspace projections.
-
-`FileWorkspaceDirectory::open` needs a private directory on a persistent volume
-with one active owner. `replace` publishes a complete membership and descriptor
-revision atomically while preserving device records. The registry imports a
-certificate record only after external approval and issuance have completed;
-the imported authorization state is `Approved`. It stores a scoped identity
-and a supplied SHA-256 certificate fingerprint, supports lookup by device key
-or fingerprint, rejects duplicate identities and fingerprints, and allows
-revocation. Revoked identities and fingerprints cannot be re-imported; a
-replacement certificate needs a future explicit rotation operation. The
-registry does not represent pending requests or perform approval decisions.
-
-`RegistryWorkspaceDeviceVerifier` authorizes Relay `WorkspaceConnector`
-participants from the leaf certificate returned by Tonic's TLS peer metadata.
-Tonic's server TLS layer validates the peer chain; this adapter computes a
-lowercase SHA-256 fingerprint over the leaf DER, reads its `notAfter` time, and
-requires a matching `Approved` registry record that matches the RelayHello
-organization, Workspace, and device IDs. RelayHello `user`,
-`session_credential`, and `enrollment_state` do not establish connector
-identity. `WorkspaceRelay::new` leaves connector authentication disabled;
-callers must explicitly provide a device registry with
-`with_workspace_device_registry`. Frontend Relay sessions and the direct
-Workspace endpoint continue to use user-session authentication and membership
-checks.
-
-This certificate authenticates the Workspace connector to the Relay; it does
-not authenticate the Relay service to the connector. A Workspace receiver may
-trust forwarded `caller_roles` only on a Relay session whose server certificate
-chains to its configured Relay CA and matches the configured server name. The
-outbound transport verifies those server facts independently from the
-connector's registered client certificate. The Direct endpoint remains a
-Frontend user-session path and must not use a Workspace device certificate as
-its user identity.
-
-The registry store validates fingerprint syntax but does not parse
-certificates, verify TLS peers, or issue credentials. The PostgreSQL
-authorization store persists issued certificate DER and CA-chain bytes in its
-versioned state payload for delivery acknowledgement and retirement recovery.
-It never stores device private keys, raw enrollment codes, or session
-credentials, and this crate does not itself run a Directory service.
+The Platform client SDK and local Sidecar wire contracts remain available for
+compatibility and Authority-facing APIs. Earlier Platform Sidecar profile,
+credential-bundle, and runtime instructions do not configure the Plugins
+process. Platform continues to own Authority identity, authorization,
+WebAuthn, Directory, and PostgreSQL storage.
 
 ## Durable device authorization records
 
@@ -231,9 +137,11 @@ idempotent after that window, but a new stage still requires fresh validation.
 Activation and reconciliation also require a fresh marker when moving a
 `pending_ack` row to `active`; an older marker leaves the durable ACK pending
 until the Manager revalidates it and retries. Repeated activation of an already
-active row remains idempotent. The Relay dispatch fence still checks the active
-registry and identity tuple, while the Relay independently checks current
-certificate revocation on every request.
+active row remains idempotent. Historically, the retired Platform V1 Relay
+dispatch fence checked the active registry and identity tuple, and that host
+independently checked current certificate revocation on every request. This
+documents the former Platform host only; it is not evidence that the Plugins
+Relay exposes or enforces the same path.
 Registry migration `0003_certificate_validation_provenance` refuses to proceed
 while legacy `active` or `pending_ack` rows lack matching V5 provenance. It
 leaves those rows unchanged for controlled audit and recovery, and requires the
@@ -281,73 +189,21 @@ the composite. Runtime connections continue to use
 `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL` and PostgreSQL
 `sslmode=verify-full`.
 
-## Relay host security state
+## Retired Platform connection hosts
 
-`cy-workspace-relay-host` is the non-fixture process entrypoint around
-`WorkspaceRelay`. Startup requires `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`
-and connects to the read-only PostgreSQL Directory; it has no file-backed
-fallback. PostgreSQL TLS uses certificate and hostname verification. Configure
-`sslrootcert` for a private database CA. Missing or unavailable database
-configuration fails startup, and database errors are mapped to fixed safe
-errors.
+The standalone Platform Connector and Relay hosts described by earlier V1
+notes have been removed with their source packages and image build paths.
+`cy-workspace-fabric` remains for legacy V1 compatibility fixtures; it is not a
+production Connector or Relay runtime. Current connection runtime packages are
+owned by `Cyrene-Plugins-Official` under `runtime/rust/cyrene-workspace-connector`
+and `runtime/rust/cyrene-workspace-relay`.
 
-Frontend authentication is deny-all unless all five BFF trust settings are
-configured. When configured, the Relay checks the same RPC's ACA-overwritten
-XFCC against a dedicated BFF CA, exact subject, and active fingerprint pin
-before verifying the short-lived signed handoff. The browser's AAD access token
-is not the Relay credential. WorkspaceConnector authentication remains
-disabled: this host does not load a device CA or accept Connector sessions
-until the durable device registry adapter is composed. Directory
-administration, DeviceAuthorization, certificate issuance, and WebAuthn are not
-composed in this Relay host.
+Platform continues to own the Authority control plane, identity, authorization,
+WebAuthn, Directory, and PostgreSQL storage. Historical Platform host probes
+under `tooling/acceptance/native-workspace-v2/` are marked retired and do not
+provide acceptance evidence for the current Plugins runtime.
 
-The Connector host composes the Product v2 control plane and
-`ProductHttpApiAdapter`. Frontend Relay authentication alone does not create a
-Product request path; this Relay host rejects Connector sessions, so those
-calls cannot currently reach their owners through this host.
-
-`GET /healthz` reports process liveness. `GET /readyz` performs a bounded,
-read-only PostgreSQL Directory probe and returns fixed dependency booleans; it
-remains HTTP 503 until every required service and the deployment topology are
-verified. The host cannot infer live ACA ingress configuration or private
-network reachability from configuration values. This is a fail-closed
-composition stage, not a production Relay deployment. See
-[`../cy-workspace-relay-host/RUNTIME.md`](../cy-workspace-relay-host/RUNTIME.md)
-for exact runtime settings and health behavior.
-
-Run locally with the trusted database URL in the environment:
-
-```bash
-export CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL='postgresql://<reader>@<host>/<database>?sslmode=verify-full&sslrootcert=/path/to/postgres-roots.pem'
-cargo run --locked -p cy-workspace-relay-host
-```
-
-The default listeners are `127.0.0.1:8080` for gRPC and `127.0.0.1:8081` for
-health probes. A non-loopback Relay bind requires
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`. A
-configured Frontend requires the same explicit assertion even with loopback
-binding. A non-loopback health bind requires
-`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`. These
-settings are operator assertions, not proof of live ACA configuration.
-
-ACA must use private HTTP/2 ingress on port 8080 with
-`clientCertificateMode: require`, `allowInsecure: false`, and no direct path
-around Envoy. Health probes use port 8081, which must not be exposed as ingress;
-`/healthz` is liveness and `/readyz` is readiness. ACA ingress requires a client
-certificate before the participant role is known, after which the Relay picks
-the role-specific BFF path. It trusts XFCC only when ACA overwrites incoming
-values and direct bypass is prevented. The review-only ACA template remains
-unapplied. Product APIs currently use internal East Asia ACA endpoints while
-the East Asia environment has no VNet; the separate West US 2 VNet environment
-is not connected, and no PostgreSQL Flexible Server is provisioned. A reviewed
-private network topology that reaches both Directory and the owning Product
-services is a production prerequisite.
-
-The Relay transports Workspace requests only. Product, Kernel/Lease, Runtime,
-and Artifact authorities stay in their owning components; this host does not
-load fixture handlers or acquire their state.
-
-## PostgreSQL authority (async Directory port)
+## PostgreSQL authority and Directory ports
 
 `PostgresWorkspaceDirectory` provides async reads of memberships, assigned
 Product roles, and published descriptors. `organizations_for_verified_identity`
@@ -356,13 +212,13 @@ returns the distinct organization candidates; callers reject zero or multiple
 candidates. The strict convenience method `organization_for_verified_identity`
 returns an error unless there is exactly one organization. This store does not
 validate OIDC tokens or create memberships from identity claims. It implements
-the object-safe async `WorkspaceDirectory` port, and Relay and Direct await each
-read while preserving storage errors separately from non-membership. The
-adapter can be injected into those services without `block_on` or synchronous
-database calls. The Relay host uses this async port and requires
-`CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`; there is no file-backed fallback.
-The database server, credentials, TLS trust, network path, and deployment are
-not provisioned by this crate or the current ACA template.
+the object-safe async `WorkspaceDirectory` port. The retained Platform
+Authority and Web BFF await its reads while preserving storage errors separately
+from non-membership, without `block_on` or synchronous database calls. The
+earlier Platform Relay-host composition used this port and was removed; these
+settings do not configure the Plugins-owned Relay. The database server,
+credentials, TLS trust, network path, and deployment are not provisioned by
+this crate or the current ACA template.
 
 The migrations create `memberships`, `roles`, `descriptors`, append-only
 `audit_events`, and stable device-registration binding tables. Operator grant/revoke operations write their changes and
@@ -427,7 +283,10 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 
 # cy-workspace-fabric
 
-`cy-workspace-fabric` 提供与 Product 无关的 Account/Directory 边界、transport-neutral Workspace connection descriptor、稳定 Workspace API port，以及 v1 参考纵向使用的出站 mTLS application relay。
+`cy-workspace-fabric` 保留旧 V1 Account/Directory 边界、transport-neutral Workspace
+connection descriptor、API port，以及 Platform 验收 fixture 使用的 mTLS relay。它不是生产
+Connector 或 Relay 进程。当前 Connector 与 Relay runtime 由 `Cyrene-Plugins-Official` 的
+`runtime/rust/` 持有；Platform 继续持有 Authority control plane、身份、授权与 Directory storage。
 
 它使用既有 Execution Fabric connectivity provider 和 semantic Operation identity。不拥有 Product 状态、Lease/Fence、Runtime 状态、Artifact identity/content 或用户凭据签发。
 
@@ -446,46 +305,17 @@ cargo clippy --locked -p cy-workspace-fabric --all-targets -- -D warnings
 | `src/transport.rs` | Connector 侧 Relay session service path；client dialing 位于 SDK。 |
 | `../cy-mtls-channel-client/` | 可复用的 HTTPS mTLS Tonic channel 构造，不拥有身份、授权、路由或 dispatch authority。 |
 | `src/bin/` | 验收 fixture 与受限 Directory 配置 CLI。 |
-| `../cy-workspace-relay-host/` | 独立版本化且 fail-closed 的 Relay Host package 与镜像。 |
-| `../cy-workspace-connector-host/` | 独立版本化的出站 Connector Host package 与镜像。 |
-| `../cy-workspace-sidecar/` | 独立版本化的 loopback Sidecar package。 |
 
-## 本地 Python 代理
+## 已退役的 Platform Local Sidecar
 
-`cy-workspace-sidecar` 默认在 `127.0.0.1:41680` 提供版本化本地 gRPC 合同
-`cyrene.workspace.local.v1`。每个调用都必须携带单独配置的 local bearer token；代理只返回
-Workspace ID 与显示名称，不向 Python 暴露私有路由候选，并转发现有的通用 Workspace
-Operation API。监听地址固定为 IPv4 loopback，只能通过
-`CYRENE_WORKSPACE_SIDECAR_PORT` 调整端口。Python service 必须与 sidecar 共享 network
-namespace，才能通过自己的 `127.0.0.1` 访问；独立 container namespace 无法访问宿主机 loopback。
+Platform 旧 `cy-workspace-sidecar` 进程及其专属 binary artifact workflow 已移除。组件 ID
+`cy-workspace-sidecar` 对应的生产组件由 `Cyrene-Plugins-Official` 持有，源码位于
+`runtime/rust/cyrene-workspace-sidecar`；Platform systemd unit 通过
+`cyrene component-run` 按组件 ID 解析该组件。
 
-Sidecar 不签发身份。受信任的 credential/profile provisioner 必须把外部签发的 session
-credential、user identity 与本地 allowlist 写入受保护的 JSON bundle，并通过绝对路径设置
-`CYRENE_WORKSPACE_SIDECAR_CREDENTIAL_BUNDLE` 和
-`CYRENE_WORKSPACE_SIDECAR_LOCAL_TOKEN_FILE`；bundle 示例字段见英文部分。Unix 上 bundle 与 client key 权限必须为
-`0600` 或 `0400`；若 local token 使用 `0640` 或 `0440`，共享组只能包含 sidecar 与获准的 Python
-client。`allowed_workspace_ids` 与 `allowed_operations` 是部署策略，应限制在单个 sidecar
-instance 内，不能使用 `*`。local bearer 必须独立生成并具有高熵，不能复用或派生自 Relay
-session 或 device enrollment credential；启动时及每次 bundle reload 都会拒绝与当前 Relay
-session credential 相同的 local bearer。共享 local token 的 Python service 共用该实例的完整 allowlist；
-不同的 service trust boundary 应使用不同的 sidecar profile/token。权限不安全、凭据缺失或格式错误都会让进程 fail closed。每次远端调用都会重新读取
-bundle，因此外部 issuer 可以通过原子替换文件轮换凭据；local bearer token 在启动时读取，变更后
-需重启 sidecar。
-
-`Health` 只报告本地 listener/config 状态，不代表 Relay 可达。每次 `Execute` 都会重新发现
-Workspace，并按当前 descriptor 在 `LAN_DIRECT` 与 `RELAY` 中选路。当前代理仅转发通用
-Start/Get Operation contract；Product 专属 Python API 仍需 Phase 3 Workspace projection。
-Python client 应基于
-`contracts/proto/cyrene/workspace/local/v1/workspace_sidecar.proto` 生成 gRPC stub，并为每个
-RPC 附加 `authorization: Bearer <local-token>` metadata。
-
-`FileWorkspaceDirectory::open` 需要挂载在持久卷上的私有目录，同一时间仅允许一个实例持有。`replace` 原子发布成员关系和描述符版本，并保留设备记录。注册表只导入已经外部批准并签发的证书记录，导入时状态为 `Approved`；记录作用域身份和调用方提供的 SHA-256 证书指纹，支持按设备键或指纹查找，拒绝重复身份/指纹，并允许撤销。撤销后的身份和指纹不能重新导入；证书轮换需由未来的显式操作处理。注册表不表示待审批请求，也不执行审批决策。
-
-`RegistryWorkspaceDeviceVerifier` 只从 Tonic TLS 对端元数据取得叶子证书，由 Tonic 服务端 TLS 层先验证证书链；适配器再计算 DER 的小写 SHA-256 指纹、读取 `notAfter`，并要求指纹匹配已批准的注册表记录，同时校验 RelayHello 中的组织、Workspace 和设备 ID。RelayHello 的 `user`、`session_credential` 和 `enrollment_state` 不构成 Connector 身份。`WorkspaceRelay::new` 默认关闭 Connector 认证；调用方必须显式通过 `with_workspace_device_registry` 提供设备注册表。Frontend Relay 会话和 Workspace 直连端点仍使用用户会话认证与成员关系校验。
-
-此证书只认证 Workspace Connector 到 Relay 的客户端身份，不认证 Relay 服务到 Connector 的服务端身份。Workspace 接收端只能在 Relay 会话的服务端证书由配置的 Relay CA 验证且匹配配置的 server name 时信任转发的 `caller_roles`。出站 transport 会独立校验这些服务端事实与 Connector 已注册客户端证书。Direct 端点仍是 Frontend 用户会话路径，不得把 Workspace 设备证书用作用户身份。
-
-注册表只校验指纹格式，不解析证书、不验证 TLS 对端、不签发凭据。PostgreSQL 授权存储会在版本化状态载荷中保存签发证书的 DER 与 CA 链，以支持交付确认和撤销恢复；它不会保存设备私钥、明文注册 code 或 session credential，crate 也不自行运行 Directory 服务。
+Platform client SDK 与 local Sidecar wire contract 仍供兼容及 Authority API 使用。早期 Platform
+Sidecar 的 profile、凭据 bundle 和运行说明不适用于 Plugins 进程。Platform 继续持有 Authority
+身份、授权、WebAuthn、Directory 与 PostgreSQL storage。
 
 ## 设备授权的 PostgreSQL 持久记录
 
@@ -505,8 +335,9 @@ SHA-256 和 Directory registration binding 必须匹配。Stage 要求 PostgreSQ
 时钟下的验证时间不超过 30 秒。已精确持久化的 V5 stage 重试在该时限后仍保持幂等，
 新 stage 仍要求新鲜验证。`pending_ack` 转为 `active` 时，Activation/reconcile 也要求
 验证标记新鲜；较早的标记会让持久 ACK 保持待处理，直到 Manager 重新验证、刷新标记并重试。
-对已 active 行重复激活仍保持幂等。Relay dispatch fence 仍校验 active registry 与身份元组，
-Relay 还会在每次请求上独立检查当前证书撤销状态。Registry 迁移
+对已 active 行重复激活仍保持幂等。历史上的 Platform V1 Relay dispatch fence 会校验
+active registry 与身份元组，且该旧宿主会在每次请求上独立检查当前证书撤销状态。这只记录已退役
+Platform 宿主的行为，不证明 Plugins Relay 提供或执行相同路径。Registry 迁移
 `0003_certificate_validation_provenance` 遇到缺少匹配 V5 来源证明的旧
 `active` 或 `pending_ack` 行时会拒绝迁移，不会修改这些审计行，需在受控窗口盘点并恢复。
 迁移要求使用 `READ COMMITTED` 隔离级别下的 SQLx transactional runner，使阻止写入的表锁覆盖
@@ -531,36 +362,21 @@ session、user code 或其他身份值。部署 composite 前，使用
 `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_MIGRATION_DATABASE_URL` 运行现有设备授权迁移。Runtime
 仍使用 `CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL`，并强制 PostgreSQL `sslmode=verify-full`。
 
-## Relay host 安全状态
+## 已退役的 Platform 连接宿主
 
-`cy-workspace-relay-host` 是围绕 `WorkspaceRelay` 的非 fixture 进程入口。启动必须设置
-`CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL` 并连接只读 PostgreSQL Directory；host 不再回退到文件存储。
-PostgreSQL TLS 会校验证书和主机名；私有数据库 CA 需要通过 `sslrootcert` 配置。数据库配置缺失或不可用时启动失败，并将数据库错误转换为固定安全错误。
+早期 V1 文档描述的 Platform 独立 Connector 与 Relay host 已随源码 package
+和镜像构建入口一起移除。`cy-workspace-fabric` 仅为旧 V1 兼容 fixture 保留；它不提供
+生产 Connector 或 Relay runtime。当前连接 runtime package 由 `Cyrene-Plugins-Official`
+持有，路径为 `runtime/rust/cyrene-workspace-connector` 与
+`runtime/rust/cyrene-workspace-relay`。
 
-未完整配置五项 BFF 信任设置时，Frontend 认证默认拒绝。配置后，Relay 会在同一 RPC 上先使用独立 BFF CA、精确 subject 和未撤销指纹 pin 验证 ACA 覆盖写入的 XFCC，再验证短时签名 handoff。浏览器 AAD access token 不是 Relay credential。此 host 仍禁用 WorkspaceConnector：持久设备注册表 adapter 接通前，不加载 device CA，也不接受 Connector session。Directory 管理、DeviceAuthorization、证书签发和 WebAuthn 尚未在此 Relay host 组合。Connector host 已组合 Product v2 control plane 与 `ProductHttpApiAdapter`；但 Frontend Relay authentication 不会自动创建 Product 请求通路，此 Relay host 拒绝 Connector session，因此当前不能经由此 Relay host 到达 Product owner。
+Platform 继续持有 Authority control plane、身份、授权、WebAuthn、Directory 与
+PostgreSQL storage。`tooling/acceptance/native-workspace-v2/` 下标记为退役的旧 Platform
+host probe 不构成当前 Plugins runtime 的验收证据。
 
-`GET /healthz` 表示进程存活。`GET /readyz` 会在有界时间内执行只读 PostgreSQL Directory 探测，并返回固定依赖布尔值；全部必需服务和部署拓扑验证完成前，保持 HTTP 503。host 无法从配置值推断 ACA 实际 ingress 设置或私网连通性。这是 fail-closed 的分阶段组合，不是生产 Relay 部署。准确运行配置和探针行为见 [`../cy-workspace-relay-host/RUNTIME.md`](../cy-workspace-relay-host/RUNTIME.md)。
+## PostgreSQL 权威存储与 Directory 接口
 
-本地运行时，在环境变量中提供可信数据库 URL：
-
-```bash
-export CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL='postgresql://<reader>@<host>/<database>?sslmode=verify-full&sslrootcert=/path/to/postgres-roots.pem'
-cargo run --locked -p cy-workspace-relay-host
-```
-
-默认 gRPC listener 为 `127.0.0.1:8080`，健康探针 listener 为
-`127.0.0.1:8081`。Relay 使用非 loopback bind 时必须设置
-`CYRENE_WORKSPACE_RELAY_ACA_INGRESS_ASSERTION=client-certificate-required`；配置 Frontend 时，即使 loopback bind 也需要该显式声明。健康 listener 使用非 loopback bind 时必须设置
-`CYRENE_WORKSPACE_RELAY_HEALTH_BIND_ASSERTION=probe-only-not-ingress`。这些配置只是运维声明，不能证明 ACA 实际设置。
-
-ACA 必须使用 8080 私有 HTTP/2 ingress，设置 `clientCertificateMode: require`、
-`allowInsecure: false`，并阻止绕过 Envoy 的直连。健康 probe 使用 8081，该端口不得暴露为 ingress；`/healthz` 用于存活，`/readyz` 用于就绪。ACA 会在 Relay 确认参与者角色前要求客户端证书，之后 Relay 才按角色选择 BFF 路径。只有 ACA 覆盖输入的 XFCC 并阻止直连绕过时，转发证书才可信。ACA review template 尚未应用。当前 Product API 位于 East Asia internal ACA，而 East Asia 环境没有 VNet；West US 2 的 VNet 属于另一个未连接环境，且 Azure 尚未配置 PostgreSQL Flexible Server。生产前必须评审能够同时访问 Directory 和各 Product owner 服务的私网拓扑。
-
-Relay 只传输 Workspace request。Product、Kernel/Lease、Runtime 和 Artifact authority 仍属于各自组件；host 不加载 fixture handler，也不取得 fixture 状态。
-
-## PostgreSQL 权威存储（独立异步接口）
-
-`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organizations_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject 并返回候选 organization；无候选或多个候选由调用方拒绝。严格便利方法 `organization_for_verified_identity` 在无映射或多 organization 时返回错误。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它实现 object-safe async `WorkspaceDirectory` port；Relay 和 Direct await 目录读取，并区分存储错误与非成员。适配器可注入这些服务，不使用 `block_on` 或同步数据库调用。Relay host 使用此异步 port，并要求 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL`；没有文件存储回退。数据库服务、凭据、TLS 信任、网络路径和部署不会由本 crate 或当前 ACA 模板创建。
+`PostgresWorkspaceDirectory` 提供成员关系、已分配 Product 角色和已发布 descriptor 的异步读取。`organizations_for_verified_identity` 只接收独立可信 OIDC verifier 提供的 issuer/subject 并返回候选 organization；无候选或多个候选由调用方拒绝。严格便利方法 `organization_for_verified_identity` 在无映射或多 organization 时返回错误。此存储不验证 OIDC token，也不根据身份声明自动创建成员关系。它实现 object-safe async `WorkspaceDirectory` port。保留的 Platform Authority 与 Web BFF await 目录读取，并区分存储错误与非成员，不使用 `block_on` 或同步数据库调用。早期 Platform Relay-host 组合曾使用该 port，现已移除；这些设置不配置 Plugins 所有的 Relay。数据库服务、凭据、TLS 信任、网络路径和部署不会由本 crate 或当前 ACA 模板创建。
 
 迁移创建 `memberships`、`roles`、`descriptors` 和只追加的 `audit_events` 表。Operator 授权/撤销与审计行在同一数据库事务中提交；撤销成员时级联删除其角色，并在同一事务记录被移除角色。仅允许分配当前五种 Product 用户命令角色；成员标记和 workload 角色由其他 authority 管理。审计表拒绝 UPDATE/DELETE，reader 角色仅有 SELECT 权限。
 Operator role 仅对 `memberships.provisioned_at` 具有列级 UPDATE 权限，这是 PostgreSQL 对成员行使用 `SELECT FOR UPDATE` 的要求；其不能 UPDATE 其他成员列。

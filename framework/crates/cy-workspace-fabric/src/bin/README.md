@@ -1,25 +1,28 @@
 # cy-workspace-fabric binaries | cy-workspace-fabric 可执行程序
 
-This directory contains only the fabric acceptance fixture and the restricted
-Directory provisioning CLI. Production Relay, Connector, and Sidecar hosts are
-separate Cargo packages under `framework/crates/`.
+This directory contains only the legacy V1 fabric acceptance fixture and the
+restricted Directory provisioning CLI. The fixture is not a production
+connection entrypoint. Current Connector and Relay runtime packages are owned
+by `Cyrene-Plugins-Official` under `runtime/rust/`; the Platform Authority host
+remains Platform-owned.
 
 | File | Responsibility |
 | --- | --- |
 | `cy-workspace-fabric-fixture.rs` | Acceptance-only Relay and Connector fixture. |
 | `cy-workspace-directory-admin.rs` | Restricted local PostgreSQL Directory provisioning CLI. |
 
-Read the Relay package's [`RUNTIME.md`](../../../cy-workspace-relay-host/RUNTIME.md)
-for Relay runtime settings. Connector package and identity requirements are in
-[`WORKSPACE_CONNECTOR_HOST.md`](../../WORKSPACE_CONNECTOR_HOST.md).
+The fixture preserves old Fabric protocol behavior for scoped compatibility
+checks only. It does not validate the Plugins-owned Connector or Relay runtime,
+Platform Authority deployment, device approval, or production connectivity.
 
-本目录只包含 fabric acceptance fixture 与受限 Directory 配置 CLI。生产 Relay、Connector
-和 Sidecar host 是位于 `framework/crates/` 下的独立 Cargo package。
+本目录只包含旧 V1 fabric 验收 fixture 与受限 Directory 配置 CLI。fixture 不是生产连接入口。
+当前 Connector 与 Relay runtime package 由 `Cyrene-Plugins-Official` 的 `runtime/rust/` 持有；
+Platform Authority host 仍由 Platform 持有。
 
 | 文件 | 职责 |
 | --- | --- |
 | `cy-workspace-fabric-fixture.rs` | 仅用于验收的 Relay 与 Connector fixture。 |
 | `cy-workspace-directory-admin.rs` | 受限的本地 PostgreSQL Directory 配置 CLI。 |
 
-Relay 运行配置见 Relay package 的 [`RUNTIME.md`](../../../cy-workspace-relay-host/RUNTIME.md)。
-Connector package 与 identity 要求见 [`WORKSPACE_CONNECTOR_HOST.md`](../../WORKSPACE_CONNECTOR_HOST.md)。
+fixture 仅保留旧 Fabric 协议行为以供范围明确的兼容检查；它不验证 Plugins 所有的 Connector
+或 Relay runtime、Platform Authority 部署、设备审批或生产连接。

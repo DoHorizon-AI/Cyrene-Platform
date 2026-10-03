@@ -33,13 +33,9 @@ core_copyleft = [
 
 separate_decision = [
     "cy-workspace-authority-host",
-    "cy-workspace-connector-host",
     "cy-workspace-control-plane",
     "cy-workspace-postgres-storage",
-    "cy-workspace-product-adapters",
     "cy-workspace-relay-runtime",
-    "cy-workspace-relay-host",
-    "cy-workspace-sidecar",
     "cy-workspace-web-bff",
     "cyrene-linux-sys-adapter",
     "cyrene-nvidia-adapter",
