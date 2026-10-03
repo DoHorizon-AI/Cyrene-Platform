@@ -119,6 +119,7 @@ impl ValidatedRelayPeerCertificate {
         Ok(AuthenticatedRelayWorkspaceDevice {
             registration_binding_id: record.registration_binding_id,
             key: self.identity.key.clone(),
+            authorization_id: record.authorization_id,
             authorization_generation: self.identity.authorization_generation,
             csr_sha256: self.identity.csr_sha256,
             spki_sha256: self.identity.spki_sha256,
@@ -631,4 +632,53 @@ fn timestamp_millis(unix_seconds: i64) -> Option<u64> {
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        lowercase_hex, RelayPeerCertificateIdentity, ValidatedRelayPeerCertificate,
+        WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey,
+    };
+
+    #[test]
+    fn matched_registry_identity_preserves_authorization_id() {
+        let key = WorkspaceDeviceKey {
+            organization_id: "org-1".into(),
+            workspace_id: "workspace-1".into(),
+            device_id: "device-1".into(),
+        };
+        let certificate_sha256 = [0x42; 32];
+        let authorization_id = "01234567-89ab-cdef-0123-456789abcdef"
+            .parse()
+            .expect("authorization UUID is valid");
+        let record = WorkspaceDeviceCertificateIdentity {
+            key: key.clone(),
+            certificate_fingerprint_sha256: lowercase_hex(&certificate_sha256),
+            authorization_id,
+            registration_binding_id: [0x24; 16],
+            authorization_generation: 7,
+            csr_sha256: [0x31; 32],
+            spki_sha256: [0x53; 32],
+            serial_number: vec![0x11, 0x22],
+            not_after_unix_ms: 1_800_000_000_000,
+        };
+        let certificate = ValidatedRelayPeerCertificate {
+            identity: RelayPeerCertificateIdentity {
+                key,
+                authorization_generation: 7,
+                csr_sha256: [0x31; 32],
+                spki_sha256: [0x53; 32],
+            },
+            certificate_sha256,
+            serial_number: vec![0x11, 0x22],
+            not_after_unix_ms: 1_800_000_000_000,
+        };
+
+        let authenticated = certificate
+            .match_registry_identity(&record)
+            .expect("matching current Registry facts authenticate the certificate");
+
+        assert_eq!(authenticated.authorization_id(), authorization_id);
+    }
 }

@@ -177,6 +177,8 @@ pub trait WorkspaceDeviceRegistry: Send + Sync {
 pub struct AuthenticatedRelayWorkspaceDevice {
     pub registration_binding_id: [u8; 16],
     pub key: WorkspaceDeviceKey,
+    /// Stable Directory authorization record UUID owning this certificate.
+    pub authorization_id: Uuid,
     pub authorization_generation: u64,
     pub csr_sha256: [u8; 32],
     pub spki_sha256: [u8; 32],
@@ -190,6 +192,7 @@ impl AuthenticatedRelayWorkspaceDevice {
     pub fn new(
         registration_binding_id: [u8; 16],
         key: WorkspaceDeviceKey,
+        authorization_id: Uuid,
         authorization_generation: u64,
         csr_sha256: [u8; 32],
         spki_sha256: [u8; 32],
@@ -200,6 +203,7 @@ impl AuthenticatedRelayWorkspaceDevice {
         Self {
             registration_binding_id,
             key,
+            authorization_id,
             authorization_generation,
             csr_sha256,
             spki_sha256,
@@ -215,6 +219,11 @@ impl AuthenticatedRelayWorkspaceDevice {
 
     pub fn key(&self) -> &WorkspaceDeviceKey {
         &self.key
+    }
+
+    /// Stable Directory authorization record UUID owning this certificate.
+    pub fn authorization_id(&self) -> Uuid {
+        self.authorization_id
     }
 
     pub fn authorization_generation(&self) -> u64 {
