@@ -15,7 +15,6 @@ client_sdk_crate=framework/crates/cy-workspace-client-sdk
 control_plane_crate=framework/crates/cy-workspace-control-plane
 relay_runtime_crate=framework/crates/cy-workspace-relay-runtime
 storage_crate=framework/crates/cy-workspace-postgres-storage
-sidecar_crate=framework/crates/cy-workspace-sidecar
 tck_root=contracts/tck/distributed-workspace-fabric/v1
 acceptance_root=tooling/acceptance/distributed-workspace-fabric
 projection_manifest=${tck_root}/product-projections.tsv
@@ -30,7 +29,6 @@ for path in \
   "${control_plane_crate}/src/README.md" \
   "${relay_runtime_crate}/src/README.md" \
   "${storage_crate}/src/README.md" \
-  "${sidecar_crate}/src/README.md" \
   "${workspace_crate}/src/bin/README.md" \
   "${tck_root}/README.md" \
   "${tck_root}/scenarios.tsv" \
@@ -62,12 +60,6 @@ if rg -n 'sqlx|webauthn-rs|axum' "${workspace_crate}/Cargo.toml"; then
   printf 'Fabric facade must not contain database, WebAuthn, or HTTP server implementations\n' >&2
   exit 1
 fi
-if rg -n 'sqlx|webauthn-rs|axum|cy-workspace-fabric|cy-workspace-control-plane|cy-workspace-relay-runtime|cy-workspace-postgres-storage' \
-  "${sidecar_crate}/Cargo.toml"; then
-  printf 'Sidecar client dependency closure contains a Platform host implementation crate\n' >&2
-  exit 1
-fi
-rg -q 'cy-workspace-client-sdk' "${sidecar_crate}/Cargo.toml"
 rg -q 'default-features = false' "${client_sdk_crate}/Cargo.toml"
 rg -q 'features = \["channel", "tls", "codegen", "prost"\]' \
   "${client_sdk_crate}/Cargo.toml"
@@ -301,12 +293,10 @@ command -v "${buf_bin}" >/dev/null 2>&1 || {
 
 workspace_packages=(
   cy-workspace-client-sdk
-  cy-workspace-sidecar
   cy-workspace-control-plane
   cy-workspace-relay-runtime
   cy-workspace-postgres-storage
   cy-workspace-product-contracts
-  cy-workspace-product-adapters
   cy-workspace-fabric
   cy-runtime-agent
 )

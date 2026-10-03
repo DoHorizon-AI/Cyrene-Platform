@@ -849,31 +849,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-workspace-connector-host"
-version = "0.1.0"
-dependencies = [
- "cy-observability",
- "cy-proto",
- "cy-workspace-control-plane",
- "cy-workspace-fabric",
- "cy-workspace-product-adapters",
- "cy-workspace-product-contracts",
- "libc",
- "openssl",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tonic",
- "tracing",
- "url",
- "uuid",
- "x509-parser 0.18.1",
-]
-
-[[package]]
 name = "cy-workspace-control-plane"
 version = "0.1.0"
 dependencies = [
@@ -964,24 +939,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cy-workspace-product-adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cy-workspace-product-contracts",
- "rcgen",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
 name = "cy-workspace-product-contracts"
 version = "0.1.0"
 dependencies = [
@@ -994,24 +951,6 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "cy-workspace-relay-host"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cy-observability",
- "cy-proto",
- "cy-workspace-control-plane",
- "cy-workspace-fabric",
- "cy-workspace-postgres-storage",
- "cy-workspace-relay-runtime",
- "serde_json",
- "tempfile",
- "tokio",
- "tonic",
- "tracing",
 ]
 
 [[package]]
@@ -1037,22 +976,6 @@ dependencies = [
  "tonic",
  "tracing",
  "x509-parser 0.18.1",
-]
-
-[[package]]
-name = "cy-workspace-sidecar"
-version = "0.1.0"
-dependencies = [
- "cy-proto",
- "cy-workspace-client-sdk",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tonic",
- "uuid",
 ]
 
 [[package]]

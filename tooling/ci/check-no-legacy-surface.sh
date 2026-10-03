@@ -291,8 +291,6 @@ workspace_app_host_product_name_paths=(
   "framework/crates/cy-workspace-control-plane/src/caller.rs"
   "framework/crates/cy-workspace-control-plane/src/product_authorization.rs"
   "framework/crates/cy-workspace-control-plane/src/product_projection.rs"
-  "framework/crates/cy-workspace-product-adapters/src/endpoint_manifest.rs"
-  "framework/crates/cy-workspace-product-adapters/src/lib.rs"
   "framework/crates/cy-workspace-web-bff/README.md"
   "framework/crates/cy-workspace-web-bff/src/catalog_loader.rs"
 )
@@ -330,13 +328,10 @@ if [ -n "$product_name_matches" ]; then
   status=1
 fi
 
-# The retained Workspace hosts may not add Product-owned state or persistence.
+# The retained Platform Authority and BFF may not add Product-owned state or persistence.
 # Product v2 operation identifiers remain data from pinned owner catalogs.
-# 保留的 Workspace host 不得新增 Product 自有状态或持久化。
+# Platform Authority 与 BFF 不得新增 Product 自有状态或持久化。
 product_private_state_pattern='(CREATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE|sqlx::|rusqlite::|diesel::|sea_orm::|Product[A-Z][[:alnum:]]*(State|Store|Repository|Persistence|Database|Migration|Lifecycle|Workflow|Entity)|((Catalyst|Echo|Exchange|Navigator|Reactor|Yield)[A-Z][[:alnum:]]*(State|Store|Repository|Persistence|Database|Migration|Lifecycle|Workflow|Entity)|(^|[^[:alnum:]_])(product|catalyst|echo|exchange|navigator|reactor|yield)_[[:alnum:]_]*(runs?|attempts?|workflows?|lifecycles?|states?|stores?|repositories?|persistence|databases?|migrations?|events?)($|[^[:alnum:]_]))'
-mapfile -t workspace_product_adapter_sources < <(
-  git ls-files 'framework/crates/cy-workspace-product-adapters/src/*.rs'
-)
 mapfile -t workspace_bff_sources < <(
   git ls-files 'framework/crates/cy-workspace-web-bff/src' | grep '\.rs$' || true
 )
@@ -347,8 +342,6 @@ workspace_host_semantic_sources=(
   "framework/crates/cy-workspace-product-contracts/src/bundle.rs"
   "framework/crates/cy-workspace-product-contracts/src/invocation.rs"
   "framework/crates/cy-workspace-product-contracts/src/policy.rs"
-  "${workspace_product_adapter_sources[@]}"
-  "framework/crates/cy-workspace-connector-host/src/main.rs"
   "${workspace_bff_sources[@]}"
 )
 product_private_state_matches=$(
@@ -356,15 +349,14 @@ product_private_state_matches=$(
     "${workspace_host_semantic_sources[@]}" 2>/dev/null || true
 )
 if [ -n "$product_private_state_matches" ]; then
-  echo "FORBIDDEN: Workspace host glue contains Product-private state or persistence:"
+  echo "FORBIDDEN: Platform Authority or BFF contains Product-private state or persistence:"
   echo "$product_private_state_matches" | sed 's/^/  - /'
   status=1
 fi
 
 # Reject new Product-shaped data declarations even when they use neutral names
-# such as `NavigatorSession` instead of a `Product*State` suffix. The listed
-# symbols are the existing bounded Workspace wire/HTTP contracts and read-only
-# Navigator view types; adding another Product DTO/schema requires review.
+# such as `NavigatorSession` instead of a `Product*State` suffix. Adding another
+# Product DTO/schema to the retained Authority contract surface requires review.
 workspace_product_private_type_pattern='^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(struct|enum|type|trait)[[:space:]]+((Catalyst|Echo|Exchange|Navigator|Reactor|Yield)[[:upper:]][[:alnum:]_]*|[[:alnum:]_]*Product[[:alnum:]_]*(State|Session|Store|Repository|Persistence|Database|Migration|Lifecycle|Workflow|Entity|Dto|DTO|Schema|Record|Event|Snapshot|Request|Response|Model|Payload|Document|Cache|Summary|View|Metadata))([[:space:]<{(:;=]|$)'
 workspace_product_private_type_candidates=$(
   git grep -n -E "$workspace_product_private_type_pattern" -- \
@@ -400,25 +392,21 @@ if [ -n "$workspace_product_private_type_matches" ]; then
   status=1
 fi
 
-# Product v2 must remain catalog- and policy-driven. Platform may bind the
-# verified caller and Workspace scope, but it may not duplicate owner grants,
-# business routes, or operation dispatch in this host crate.
+# Product v2 authorization remains catalog- and policy-driven. Platform may
+# bind the verified caller and Workspace scope, but it may not duplicate owner
+# grants or operation dispatch in the Authority control plane.
 workspace_product_auth_source="framework/crates/cy-workspace-control-plane/src/product_authorization.rs"
 workspace_product_projection_source="framework/crates/cy-workspace-control-plane/src/product_projection.rs"
-workspace_product_http_source="framework/crates/cy-workspace-product-adapters/src/http.rs"
 if ! rg -q '[.]authorize\(bundle, invocation, &principal, scope\)' "$workspace_product_auth_source" \
   || ! rg -q 'TrustedProductPolicy' "$workspace_product_auth_source" \
-  || ! rg -q 'ProductApiInvocationV2' "$workspace_product_projection_source" \
-  || ! rg -q 'request[.]route\(\)' "$workspace_product_http_source" \
-  || ! rg -q 'route[.]path_template\(\)' "$workspace_product_http_source"; then
-  echo "FORBIDDEN: Workspace Product v2 must resolve authorization and routes from the pinned contract bundle."
+  || ! rg -q 'ProductApiInvocationV2' "$workspace_product_projection_source"; then
+  echo "FORBIDDEN: Platform Product v2 authorization must use the pinned contract bundle."
   status=1
 fi
 
 hardcoded_workspace_product_dispatch=$(
   git grep -n -E 'WorkspaceProductApiOperation[0-9]+|Owner::(Catalyst|Yield|Reactor|Exchange|Echo|Navigator)|workspace[.]product[.]command[.]' -- \
-    "$workspace_product_auth_source" "$workspace_product_projection_source" \
-    "framework/crates/cy-workspace-product-adapters/src" 2>/dev/null || true
+    "$workspace_product_auth_source" "$workspace_product_projection_source" 2>/dev/null || true
 )
 if [ -n "$hardcoded_workspace_product_dispatch" ]; then
   echo "FORBIDDEN: Workspace Product owner or operation policy is hard-coded in Platform dispatch:"

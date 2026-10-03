@@ -6,6 +6,12 @@ Scope: account and device-code identity, lowest-latency in-cluster connectivity,
 relay connectivity where direct is impossible, Workspace API projection, direct
 Artifact transfer, and the logging error-path close-out that must land first.
 
+> **Runtime ownership update:** the standalone Platform V1 Connector and Relay
+> hosts described in this historical plan have been retired with their source
+> packages and image paths. Current Connector and Relay runtime packages are
+> owned by `Cyrene-Plugins-Official` under `runtime/rust/`. Platform continues
+> to own Authority identity, authorization, WebAuthn, Directory, and storage.
+
 This plan builds on `distributed-workspace-fabric-v1.md`, which is already
 status **V1 REFERENCE VERTICAL IMPLEMENTED**. It does not propose a second
 connectivity system.
@@ -80,12 +86,15 @@ Supporting facts:
   the existing mechanism for "prefer the best path, fall back".
 - `RelayHello` already carries a `DeviceEnrollmentRef device`
   (`workspace_fabric.proto:68`).
-- **Gap:** no product service is a Workspace connector and no real IAM is wired.
-  A non-fixture `cy-workspace-relay-host` process now provides health, structured
-  logging, and graceful shutdown, and opens a private file-backed Directory
-  snapshot. It rejects every Relay session and stays unready until production
-  device IAM and directory administration are connected. It is a fail-closed
-  host scaffold, not a production relay deployment.
+- **Historical V1 observation (superseded):** when this plan was written, no
+  product service was a Workspace connector and no real IAM was wired. A
+  non-fixture `cy-workspace-relay-host` process provided health, structured
+  logging, graceful shutdown, and a private file-backed Directory snapshot. It
+  rejected every Relay session and stayed unready until production device IAM
+  and directory administration were connected. It was a fail-closed scaffold,
+  not a production relay deployment. The Platform host package has since been
+  removed. Current Connector and Relay source packages are in
+  `Cyrene-Plugins-Official/runtime/rust/`.
 
 ### 2.3 Artifact plane
 
@@ -346,8 +355,12 @@ rollback rehearsal, and load testing of direct and cloud-storage artifact transf
 ---
 
 <!-- Chinese Translation / 中文翻译 -->
-
 # 无端口互联计划
+
+> **Runtime 所有权更新：** 本历史计划描述的 Platform V1 独立 Connector 与 Relay host
+> 已随源码 package 和镜像入口退役。当前 Connector 与 Relay runtime package 由
+> `Cyrene-Plugins-Official` 的 `runtime/rust/` 持有。Platform 继续持有 Authority 身份、授权、
+> WebAuthn、Directory 与存储。
 
 状态：**提案中** —— 规划文档，不是实施记录。
 
@@ -421,10 +434,11 @@ API 投影、Artifact 直连传输，以及必须最先完成的日志错误路�
   “优先最优路径、失败回退”的既有机制。
 - `RelayHello` 已携带 `DeviceEnrollmentRef device`
   （`workspace_fabric.proto:68`）。
-- **缺口：** 没有产品服务是 Workspace connector，也没有接通真实 IAM。新的非 fixture
-  `cy-workspace-relay-host` 已提供健康检查、结构化日志和优雅停止，并打开私有文件式 Directory
-  快照。它会拒绝所有 Relay session，并在生产设备 IAM 与目录管理集成完成前保持未就绪。它是
-  fail-closed host 脚手架，不是生产 Relay 部署。
+- **历史 V1 观察（已被后续实现取代）：** 编写本计划时，没有产品服务是 Workspace connector，
+  也没有接通真实 IAM。非 fixture `cy-workspace-relay-host` 曾提供健康检查、结构化日志、优雅停止
+  与私有文件式 Directory 快照；它会拒绝所有 Relay session，并在生产设备 IAM 与目录管理集成前
+  保持未就绪。它是 fail-closed host 脚手架，不是生产 Relay 部署。Platform host package 后续已
+  移除；当前 Connector 与 Relay 源 package 位于 `Cyrene-Plugins-Official/runtime/rust/`。
 
 ### 2.3 Artifact 平面
 

@@ -1,5 +1,10 @@
 # Web Frontend Relay client
 
+Status: legacy V1 transport reference for Fabric compatibility fixtures. The
+Platform Relay host and its XFCC handoff path have been retired; this document
+does not describe the current Plugins-owned Relay runtime or prove its
+production integration.
+
 `FrontendRelayClient` is an outbound caller for a Web BFF. It is created for one
 `VerifiedWebPrincipal` and one trusted `WebRelaySessionCredentialIssuer`:
 
@@ -58,6 +63,9 @@ descriptor before changing the documented routing trust premise.
 ---
 
 # Web Frontend Relay 客户端
+
+状态：旧 V1 Fabric 兼容 fixture 的 transport 参考。Platform Relay host 与其 XFCC
+handoff 路径已退役；本文不描述当前 Plugins 所有的 Relay runtime，也不证明其生产集成。
 
 `FrontendRelayClient` 是 Web BFF 使用的出站 caller。每个客户端绑定一个
 `VerifiedWebPrincipal` 和一个可信 `WebRelaySessionCredentialIssuer`：

@@ -1,8 +1,9 @@
-//! Workspace Fabric compatibility facade.
+//! Legacy Workspace Fabric V1 compatibility facade.
 //!
-//! Client-side callers should depend on `cy-workspace-client-sdk`. Platform hosts use the
-//! control-plane and authenticated Relay runtime crates directly; this facade remains for the
-//! connector's server-serving transport and existing composition entry points.
+//! Client-side callers should depend on `cy-workspace-client-sdk`. The former Platform
+//! Connector and Relay processes have been removed; this facade remains for the V1 fixture and
+//! protocol checks. Platform Authority services depend on their control-plane and storage crates
+//! directly.
 
 #![forbid(unsafe_code)]
 

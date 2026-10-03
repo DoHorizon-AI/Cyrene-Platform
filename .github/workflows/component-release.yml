@@ -13,9 +13,110 @@ concurrency:
   group: component-release-${{ github.repository }}-${{ github.sha }}
   cancel-in-progress: false
 
+env:
+  CATALOG_HELPER_SOURCE_COMMIT: "87b8e676300eb2a9041740e651773cb01a2a7724"
+  CATALOG_RELEASE_ID: ${{ github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) }}
+
 jobs:
+  catalog-input:
+    if: github.event_name != 'pull_request'
+    name: fetch and verify immutable Workspace component catalog
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      catalog_sha256: ${{ steps.fetch.outputs.catalog_sha256 }}
+      catalog_release_id: ${{ steps.fetch.outputs.catalog_release_id }}
+    env:
+      CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the fixed catalog verifier and schemas
+        uses: actions/checkout@v5
+        with:
+          repository: DoHorizon-AI/Cyrene-Workspace
+          ref: ${{ env.CATALOG_HELPER_SOURCE_COMMIT }}
+          path: catalog-helper
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: |
+            packaging/fetch_component_catalog.py
+            packaging/catalog_metadata.py
+            packaging/component_updates.py
+            governance/component-catalog-v1.json
+            governance/component-catalog-v1.schema.json
+            governance/component-release-manifest-v1.schema.json
+            governance/component-release-manifest-v2.schema.json
+            governance/component-release-index-v1.schema.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned catalog verifier dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Fetch and verify an exact immutable catalog release
+        id: fetch
+        env:
+          CATALOG_RELEASE_ID: ${{ env.CATALOG_RELEASE_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p workspace-catalog/governance
+          for schema in \
+            component-catalog-v1.schema.json \
+            component-release-manifest-v1.schema.json \
+            component-release-manifest-v2.schema.json \
+            component-release-index-v1.schema.json; do
+            cp "catalog-helper/governance/$schema" workspace-catalog/governance/
+          done
+          args=(--output workspace-catalog/governance/component-catalog-v1.json \
+            --metadata-output workspace-catalog/component-catalog-release.json \
+            --schema-root catalog-helper/governance)
+          if [[ -n "$CATALOG_RELEASE_ID" ]]; then
+            args+=(--release-id "$CATALOG_RELEASE_ID")
+          else
+            args+=(--latest-channel "$CHANNEL")
+          fi
+          python catalog-helper/packaging/fetch_component_catalog.py "${args[@]}"
+          catalog_sha256="$(python - workspace-catalog/component-catalog-release.json <<'PY'
+          import json, os, re, sys
+          metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+          digest = metadata.get("catalogSha256")
+          channel = os.environ["CHANNEL"]
+          commit = metadata.get("sourceCommit")
+          allowed_refs = {"preview": {"refs/heads/develop"}, "stable": {"refs/heads/main", "refs/heads/release"}}
+          if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              raise SystemExit("verified catalog metadata has an invalid digest")
+          if metadata.get("repository") != "DoHorizon-AI/Cyrene-Workspace" or metadata.get("workflow") != "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml":
+              raise SystemExit("verified metadata does not identify the trusted catalog publisher")
+          if metadata.get("channel") != channel or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("verified catalog release channel or source commit differs from Platform")
+          if metadata.get("releaseId") != f"catalog-{channel}-{commit}" or metadata.get("sourceRef") not in allowed_refs[channel]:
+              raise SystemExit("verified catalog release tag or source ref does not match its channel")
+          if not isinstance(metadata.get("generation"), int) or isinstance(metadata.get("generation"), bool):
+              raise SystemExit("verified catalog generation is not an integer")
+          print(digest.removeprefix("sha256:"))
+          PY
+          )"
+          actual="$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)"
+          test "$actual" = "$catalog_sha256"
+          catalog_release_id="$(python - workspace-catalog/component-catalog-release.json <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["releaseId"])
+          PY
+          )"
+          echo "catalog_sha256=$catalog_sha256" >> "$GITHUB_OUTPUT"
+          echo "catalog_release_id=$catalog_release_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-workspace-component-catalog
+          path: workspace-catalog
+          if-no-files-found: error
+          retention-days: 30
+
   native-components:
     if: github.event_name != 'pull_request'
+    needs: [catalog-input]
     name: native components / ${{ matrix.target_id }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -34,21 +135,17 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RUN_ID: ${{ github.run_id }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
-      CATALOG_COMMIT: 7e6d410017420de72d7688859ae81d675e4555ea
-      CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
+      CATALOG_SHA256: ${{ needs.catalog-input.outputs.catalog_sha256 }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
         with:
-          repository: DoHorizon-AI/Cyrene-Workspace
-          ref: ${{ env.CATALOG_COMMIT }}
+          name: verified-workspace-component-catalog
           path: workspace-catalog
-          fetch-depth: 0
-          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.96.1
         with:
           components: rustfmt, clippy
@@ -65,7 +162,15 @@ jobs:
             stable:refs/heads/main|stable:refs/heads/release|preview:refs/heads/develop) ;;
             *) echo "release channel does not match exact source ref" >&2; exit 2 ;;
           esac
-          test "$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)" = "$CATALOG_SHA256"
+          python - "$CATALOG_SHA256" workspace-catalog/component-catalog-release.json workspace-catalog/governance/component-catalog-v1.json <<'PY'
+          import hashlib, json, sys
+          expected = sys.argv[1]
+          metadata = json.load(open(sys.argv[2], encoding="utf-8"))
+          raw = open(sys.argv[3], "rb").read()
+          actual = hashlib.sha256(raw).hexdigest()
+          if actual != expected or metadata.get("catalogSha256") != f"sha256:{actual}":
+              raise SystemExit("verified Workspace catalog artifact digest changed")
+          PY
       - name: Build supported native target artifacts
         run: |
           set -euo pipefail
@@ -86,7 +191,7 @@ jobs:
 
   component-release:
     if: github.event_name != 'pull_request'
-    needs: [native-components]
+    needs: [native-components, catalog-input]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -104,8 +209,7 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RELEASE_ID: ${{ (github.ref == 'refs/heads/develop' && 'preview-' || 'stable-') }}${{ github.sha }}
       IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      CATALOG_COMMIT: 7e6d410017420de72d7688859ae81d675e4555ea
-      CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
+      CATALOG_SHA256: ${{ needs.catalog-input.outputs.catalog_sha256 }}
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@v5
@@ -114,14 +218,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the trusted component catalog
-        uses: actions/checkout@v5
+      - name: Download the verified immutable component catalog
+        uses: actions/download-artifact@v4
         with:
-          repository: DoHorizon-AI/Cyrene-Workspace
-          ref: ${{ env.CATALOG_COMMIT }}
+          name: verified-workspace-component-catalog
           path: workspace-catalog
-          fetch-depth: 0
-          persist-credentials: false
 
       - name: Verify source, channel, and catalog pins
         run: |
@@ -134,8 +235,15 @@ jobs:
             *) echo "release channel does not match the exact source ref" >&2; exit 2 ;;
           esac
           test "$RELEASE_ID" = "$CHANNEL-$SOURCE_COMMIT"
-          actual_catalog_sha="$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)"
-          test "$actual_catalog_sha" = "$CATALOG_SHA256"
+          python - "$CATALOG_SHA256" workspace-catalog/component-catalog-release.json workspace-catalog/governance/component-catalog-v1.json <<'PY'
+          import hashlib, json, sys
+          expected = sys.argv[1]
+          metadata = json.load(open(sys.argv[2], encoding="utf-8"))
+          raw = open(sys.argv[3], "rb").read()
+          actual = hashlib.sha256(raw).hexdigest()
+          if actual != expected or metadata.get("catalogSha256") != f"sha256:{actual}":
+              raise SystemExit("verified Workspace catalog artifact digest changed")
+          PY
           mkdir -p "$OUTPUT_ROOT"
 
       - name: Set up Rust toolchain
@@ -509,14 +617,24 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Check out the pinned component schemas
+      - name: Check out the fixed catalog verifier and schemas
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Workspace
-          ref: 7e6d410017420de72d7688859ae81d675e4555ea
-          path: workspace-catalog
+          ref: ${{ env.CATALOG_HELPER_SOURCE_COMMIT }}
+          path: catalog-helper
           fetch-depth: 0
           persist-credentials: false
+          sparse-checkout: |
+            packaging/fetch_component_catalog.py
+            packaging/catalog_metadata.py
+            packaging/component_updates.py
+            governance/component-catalog-v1.json
+            governance/component-catalog-v1.schema.json
+            governance/component-release-manifest-v1.schema.json
+            governance/component-release-manifest-v2.schema.json
+            governance/component-release-index-v1.schema.json
+          sparse-checkout-cone-mode: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.96.1
@@ -526,6 +644,21 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --disable-pip-version-check build pyyaml pytest -r tooling/release/requirements.txt
+      - name: Use pinned source catalog bytes for static pull request validation
+        id: catalog
+        run: |
+          set -euo pipefail
+          mkdir -p workspace-catalog/governance
+          for schema in \
+            component-catalog-v1.schema.json \
+            component-release-manifest-v1.schema.json \
+            component-release-manifest-v2.schema.json \
+            component-release-index-v1.schema.json; do
+            cp "catalog-helper/governance/$schema" workspace-catalog/governance/
+          done
+          cp catalog-helper/governance/component-catalog-v1.json workspace-catalog/governance/
+          catalog_sha256="$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)"
+          echo "catalog_sha256=$catalog_sha256" >> "$GITHUB_OUTPUT"
       - name: Enable user namespaces for authority acceptance
         run: |
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
@@ -536,7 +669,7 @@ jobs:
       - name: Validate component tooling and RFC 8785 fixtures
         env:
           CYRENE_COMPONENT_CATALOG: workspace-catalog/governance/component-catalog-v1.json
-          CYRENE_COMPONENT_CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
+          CYRENE_COMPONENT_CATALOG_SHA256: ${{ steps.catalog.outputs.catalog_sha256 }}
         run: |
           set -euo pipefail
           python -m pytest tooling/release/tests -q

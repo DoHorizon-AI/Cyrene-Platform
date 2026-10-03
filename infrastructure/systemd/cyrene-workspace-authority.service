@@ -12,7 +12,7 @@ EnvironmentFile=/etc/cyrene/workspace-authority.env
 EnvironmentFile=/etc/cyrene/workspace-authority-identity.env
 Environment=CYRENE_WORKSPACE_AUTHORITY_BFF_UDS=/run/cyrene-workspace-authority/bff/bff.sock
 Environment=CYRENE_AUTHORITY_ADMIN_PEER_UID=0
-ExecStart=/usr/lib/cyrene/components/cy-workspace-authority-host
+ExecStart=/usr/bin/cyrene component-run cy-workspace-authority-host --
 Restart=on-failure
 RestartSec=2s
 StateDirectory=cyrene-workspace-authority
