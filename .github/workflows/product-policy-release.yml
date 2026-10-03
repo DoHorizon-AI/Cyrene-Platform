@@ -1,6 +1,7 @@
 name: Immutable Workspace Product policy release
 
 on:
+  workflow_dispatch:
   push:
     branches: [develop, main, release]
     paths:
