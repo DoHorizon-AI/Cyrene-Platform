@@ -71,13 +71,14 @@ def _descriptor(release_id: str, kind: str = "native-binary") -> dict[str, objec
         "provenance": {"attestation": _attestation(subject_name)},
         "compatibility": {
             "groupId": "workspace-product-v2",
+            "groupVersion": "2",
             "contractApiVersion": "0.1.0",
             "wireApiVersion": "cyrene.workspace.product.v2",
             "contractLock": {
-                "repository": "DoHorizon-AI/Cyrene-Platform",
-                "commit": SOURCE_SHA,
-                "path": "tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json",
-                "sha256": "sha256:" + "4" * 64,
+                "repository": "DoHorizon-AI/Cyrene-Workspace",
+                "commit": "c7dea28958a97ccab3a9cc3199faf0ac5819a2a5",
+                "path": "governance/workspace-connection-protocols-v2.lock.json",
+                "sha256": "sha256:00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a",
             },
         },
     }

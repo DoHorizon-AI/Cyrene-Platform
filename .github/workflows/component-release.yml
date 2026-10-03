@@ -34,8 +34,8 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RUN_ID: ${{ github.run_id }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
-      CATALOG_COMMIT: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
-      CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
+      CATALOG_COMMIT: 7e6d410017420de72d7688859ae81d675e4555ea
+      CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
     steps:
       - uses: actions/checkout@v5
         with:
@@ -104,8 +104,8 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RELEASE_ID: ${{ (github.ref == 'refs/heads/develop' && 'preview-' || 'stable-') }}${{ github.sha }}
       IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      CATALOG_COMMIT: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
-      CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
+      CATALOG_COMMIT: 7e6d410017420de72d7688859ae81d675e4555ea
+      CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@v5
@@ -513,7 +513,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Workspace
-          ref: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
+          ref: 7e6d410017420de72d7688859ae81d675e4555ea
           path: workspace-catalog
           fetch-depth: 0
           persist-credentials: false
@@ -536,7 +536,7 @@ jobs:
       - name: Validate component tooling and RFC 8785 fixtures
         env:
           CYRENE_COMPONENT_CATALOG: workspace-catalog/governance/component-catalog-v1.json
-          CYRENE_COMPONENT_CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
+          CYRENE_COMPONENT_CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
         run: |
           set -euo pipefail
           python -m pytest tooling/release/tests -q
