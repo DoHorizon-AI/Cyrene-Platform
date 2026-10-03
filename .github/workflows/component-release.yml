@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CATALOG_HELPER_SOURCE_COMMIT: "a11cc779ce563fd8a35e80ecd8cb718af1a2b3d7"
+  CATALOG_HELPER_SOURCE_COMMIT: "69481d10f4a89f4679bc00195bc9caa5db5fb16a"
   CATALOG_RELEASE_ID: ${{ inputs.catalog_release_id || (github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID) || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) || '' }}
 
 jobs:

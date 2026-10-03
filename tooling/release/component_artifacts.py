@@ -745,7 +745,7 @@ def trusted_catalog_compatibility(
 
     # Signed catalog downloads need no checkout; lock bytes remain pinned.
     # 独立下载的目录仍按固定来源与摘要校验协议锁。
-    _verify_contract_lock(lock)
+    _verify_contract_lock({"contractLock": lock})
 
     for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion"):
         if not isinstance(group.get(key), str) or not group[key]:
