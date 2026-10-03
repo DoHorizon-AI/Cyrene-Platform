@@ -728,7 +728,7 @@ fn verify_with_github_cli(
         .arg("--signer-workflow")
         .arg(&trust.workflow)
         .arg("--source-digest")
-        .arg(format!("sha1:{}", source.commit))
+        .arg(&source.commit)
         .arg("--source-ref")
         .arg(&source.git_ref)
         .arg("--predicate-type")

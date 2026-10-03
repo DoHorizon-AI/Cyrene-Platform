@@ -1,6 +1,7 @@
 name: Immutable Workspace Product policy release
 
 on:
+  workflow_dispatch:
   push:
     branches: [develop, main, release]
     paths:
@@ -131,6 +132,6 @@ jobs:
             --draft --target "$SOURCE_COMMIT" \
             --title "Workspace Product policy $RELEASE_ID" \
             --notes "Immutable policy bytes and independently verifiable source attestation for $REPOSITORY@$SOURCE_COMMIT."
-          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_ID" --jq .id)"
+          release_id="$(gh release view "$RELEASE_ID" --repo "$REPOSITORY" --json databaseId --jq .databaseId)"
           gh api --method PATCH "repos/$REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           test "$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)" = true

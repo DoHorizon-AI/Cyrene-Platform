@@ -5,6 +5,13 @@ on:
     branches: [main, release, develop]
   pull_request:
     branches: [main, release, develop]
+  workflow_dispatch:
+    inputs:
+      catalog_release_id:
+        description: Exact immutable Workspace component catalog release ID (optional)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -15,7 +22,7 @@ concurrency:
 
 env:
   CATALOG_HELPER_SOURCE_COMMIT: "87b8e676300eb2a9041740e651773cb01a2a7724"
-  CATALOG_RELEASE_ID: ${{ github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) || '' }}
+  CATALOG_RELEASE_ID: ${{ inputs.catalog_release_id || (github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID) || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) || '' }}
 
 jobs:
   catalog-input:
@@ -563,7 +570,7 @@ jobs:
           )
           if [ "$CHANNEL" = preview ]; then release_args+=(--prerelease); fi
           gh release create "${release_args[@]}"
-          release_id="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .id)"
+          release_id="$(gh release view "$RELEASE_ID" --repo "$SOURCE_REPOSITORY" --json databaseId --jq .databaseId)"
           gh api --method PATCH "repos/$SOURCE_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           immutable="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)"
           if [ "$immutable" != true ]; then
