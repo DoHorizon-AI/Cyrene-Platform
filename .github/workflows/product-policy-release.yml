@@ -129,6 +129,7 @@ jobs:
             workspace-product-policy-v2.json \
             workspace-product-policy-v2.attestation.jsonl \
             policy-publication-v1.json \
+            --repo "$REPOSITORY" \
             --draft --target "$SOURCE_COMMIT" \
             --title "Workspace Product policy $RELEASE_ID" \
             --notes "Immutable policy bytes and independently verifiable source attestation for $REPOSITORY@$SOURCE_COMMIT."
