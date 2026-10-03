@@ -291,6 +291,8 @@ def build_product_service_release(
             sys.executable,
             "--service",
             service,
+            "--service-commit",
+            product_commit,
         ],
         cwd=workspace_root,
     )
