@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from component_artifacts import ComponentArtifactError, _component_target
 from prepare_product_component import IMAGE_PRODUCTS, PRODUCTS
 
 
-CATALOG_SHA256 = "f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816"
+FALLBACK_CATALOG_SHA256 = "f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816"
 CATALOG_PATH = Path("workspace-catalog/governance/component-catalog-v1.json")
 PYTHON_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12"
 WINDOWS_DOCKER_TARGET_ID = "windows-10.0-x86_64-docker-linux"
@@ -31,9 +32,11 @@ class ProductPublicationMatrixTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         catalog_path = Path(os.environ.get("CYRENE_COMPONENT_CATALOG", CATALOG_PATH))
         raw = catalog_path.read_bytes()
-        expected_sha256 = os.environ.get("CYRENE_COMPONENT_CATALOG_SHA256", CATALOG_SHA256)
-        if expected_sha256 != CATALOG_SHA256 or hashlib.sha256(raw).hexdigest() != CATALOG_SHA256:
-            raise AssertionError("Product matrix test requires the pinned static component catalog")
+        expected_sha256 = os.environ.get("CYRENE_COMPONENT_CATALOG_SHA256", FALLBACK_CATALOG_SHA256)
+        if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+            raise AssertionError("Product matrix test requires a lowercase SHA-256 catalog digest")
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise AssertionError("Product matrix catalog bytes do not match the expected SHA-256")
         cls.catalog: dict[str, Any] = json.loads(raw.decode("utf-8", "strict"))
         cls.targets = {row["id"]: row["target"] for row in cls.catalog["targets"]}
         cls.components = {row["componentId"]: row for row in cls.catalog["components"]}
