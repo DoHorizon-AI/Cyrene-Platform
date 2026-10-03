@@ -570,7 +570,7 @@ jobs:
           )
           if [ "$CHANNEL" = preview ]; then release_args+=(--prerelease); fi
           gh release create "${release_args[@]}"
-          release_id="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .id)"
+          release_id="$(gh release view "$RELEASE_ID" --repo "$SOURCE_REPOSITORY" --json databaseId --jq .databaseId)"
           gh api --method PATCH "repos/$SOURCE_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           immutable="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)"
           if [ "$immutable" != true ]; then
