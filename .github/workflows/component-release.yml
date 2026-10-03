@@ -475,21 +475,72 @@ jobs:
         run: |
           set -euo pipefail
           make_oci_manifest() {
-            component_id="$1" image_repository="$2" digest="$3" target="$4"
-            version="$(python - "$OUTPUT_ROOT/native/manifests" "$component_id" <<'PY'
+            component_id="$1" image_repository="$2" digest="$3" native_target_id="$4" oci_target="$5"
+            version="$(python - \
+              "$OUTPUT_ROOT/native/manifests" \
+              workspace-catalog/governance/component-catalog-v1.json \
+              "$component_id" "$native_target_id" \
+              "https://github.com/$SOURCE_REPOSITORY" "$SOURCE_REF" "$SOURCE_COMMIT" \
+              "$RUN_ID" "$RUN_ATTEMPT" <<'PY'
           import json, sys
           from pathlib import Path
-          root = Path(sys.argv[1])
-          component = sys.argv[2]
-          matches = [
-              json.loads(path.read_text(encoding="utf-8"))
-              for path in root.glob("*.manifest.json")
-              if json.loads(path.read_text(encoding="utf-8")).get("componentId") == component
-              and json.loads(path.read_text(encoding="utf-8")).get("artifact", {}).get("kind") == "native-binary"
+          manifest_root = Path(sys.argv[1])
+          catalog = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          component_id, native_target_id = sys.argv[3:5]
+          expected_source = {
+              "repository": sys.argv[5],
+              "ref": sys.argv[6],
+              "commit": sys.argv[7],
+          }
+          expected_run = {"id": sys.argv[8], "attempt": int(sys.argv[9])}
+          component_rows = [
+              row for row in catalog.get("components", [])
+              if isinstance(row, dict) and row.get("componentId") == component_id
           ]
-          if len(matches) != 1:
-              raise SystemExit(f"expected one native release manifest for {component}, got {len(matches)}")
-          print(matches[0]["version"])
+          if len(component_rows) != 1:
+              raise SystemExit(f"expected one trusted component declaration for {component_id}, got {len(component_rows)}")
+          component = component_rows[0]
+          if component.get("kind") != "native-binary" or "oci-image" not in component.get("artifactKinds", []):
+              raise SystemExit(f"catalog does not authorize native and OCI artifacts for {component_id}")
+          native_declarations = [
+              row for row in component.get("targets", [])
+              if isinstance(row, dict)
+              and row.get("targetId") == native_target_id
+              and row.get("artifactKind") == "native-binary"
+          ]
+          if len(native_declarations) != 1 or native_declarations[0].get("support") != "supported":
+              raise SystemExit(f"catalog does not uniquely support {component_id}/{native_target_id} as native-binary")
+          global_targets = [
+              row for row in catalog.get("targets", [])
+              if isinstance(row, dict) and row.get("id") == native_target_id
+          ]
+          if len(global_targets) != 1 or global_targets[0].get("hostSupport") != "supported":
+              raise SystemExit(f"catalog does not uniquely support native target {native_target_id}")
+          native_target = global_targets[0].get("target")
+          if not isinstance(native_target, dict):
+              raise SystemExit(f"catalog native target tuple is malformed: {native_target_id}")
+          candidates = []
+          for path in sorted(manifest_root.glob("*.manifest.json")):
+              manifest = json.loads(path.read_text(encoding="utf-8"))
+              artifact = manifest.get("artifact")
+              if manifest.get("componentId") != component_id or not isinstance(artifact, dict):
+                  continue
+              if artifact.get("kind") != "native-binary" or manifest.get("target") != native_target:
+                  continue
+              attestation = manifest.get("provenance", {}).get("attestation", {})
+              run = attestation.get("run", {})
+              if (
+                  manifest.get("source") == expected_source
+                  and attestation.get("repository") == "DoHorizon-AI/Cyrene-Platform"
+                  and attestation.get("workflow") == "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml"
+                  and {"id": str(run.get("id")), "attempt": run.get("attempt")} == expected_run
+              ):
+                  candidates.append(manifest)
+          if len(candidates) != 1:
+              raise SystemExit(
+                  f"expected one current-source native manifest for {component_id}/{native_target_id}, got {len(candidates)}"
+              )
+          print(candidates[0]["version"])
           PY
           )"
             args=(
@@ -499,7 +550,7 @@ jobs:
               --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
               --catalog workspace-catalog/governance/component-catalog-v1.json
               --catalog-sha256 "$CATALOG_SHA256"
-              --target-json "$target"
+              --target-json "$oci_target"
               --artifact-kind oci-image --subject-name "$image_repository"
               --oci-repository "$image_repository" --oci-digest "$digest"
               --oci-platform-json '{"os":"linux","architecture":"amd64"}'
@@ -511,9 +562,10 @@ jobs:
               --output-dir "$OUTPUT_ROOT/native/manifests"
           }
           windows_docker_target='{"os":"windows","osVersion":"10.0","architecture":"x86_64","runtime":"docker-desktop:linux"}'
-          make_oci_manifest cy-workspace-authority-host ghcr.io/dohorizon-ai/cyrene-workspace-authority "$AUTHORITY_DIGEST" "$windows_docker_target"
-          make_oci_manifest cy-workspace-web-bff ghcr.io/dohorizon-ai/cyrene-workspace-web-bff "$BFF_DIGEST" "$windows_docker_target"
-          make_oci_manifest cyrene-runtime-maintenance ghcr.io/dohorizon-ai/cyrene-runtime-maintenance "$RUNTIME_DIGEST" "$windows_docker_target"
+          ubuntu_24_04_native_target_id='linux-ubuntu-24.04-x86_64-systemd'
+          make_oci_manifest cy-workspace-authority-host ghcr.io/dohorizon-ai/cyrene-workspace-authority "$AUTHORITY_DIGEST" "$ubuntu_24_04_native_target_id" "$windows_docker_target"
+          make_oci_manifest cy-workspace-web-bff ghcr.io/dohorizon-ai/cyrene-workspace-web-bff "$BFF_DIGEST" "$ubuntu_24_04_native_target_id" "$windows_docker_target"
+          make_oci_manifest cyrene-runtime-maintenance ghcr.io/dohorizon-ai/cyrene-runtime-maintenance "$RUNTIME_DIGEST" "$ubuntu_24_04_native_target_id" "$windows_docker_target"
 
       - name: Create and attest the immutable component index
         run: |
@@ -554,15 +606,49 @@ jobs:
           subject-checksums: ${{ runner.temp }}/component-index-checksum.txt
           github-token: ${{ github.token }}
 
+      - name: Verify component catalog metadata and release attestations before publication
+        run: |
+          set -euo pipefail
+          for manifest in "$OUTPUT_ROOT/native/manifests"/*.manifest.json; do
+            verify_args=(
+              verify --manifest "$manifest"
+              --catalog workspace-catalog/governance/component-catalog-v1.json
+              --verify-attestation-only
+            )
+            artifact_kind="$(python - "$manifest" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["artifact"]["kind"])
+          PY
+          )"
+            if [ "$artifact_kind" != oci-image ]; then
+              artifact_name="$(python - "$manifest" <<'PY'
+          import json, sys
+          from urllib.parse import urlparse
+          document = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(urlparse(document["artifact"]["uri"]).path.rsplit("/", 1)[-1])
+          PY
+          )"
+              verify_args+=(--artifact "$OUTPUT_ROOT/native/artifacts/$artifact_name")
+            fi
+            python tooling/release/component_artifacts.py "${verify_args[@]}"
+          done
+          python tooling/release/component_artifacts.py verify-index \
+            --index "$OUTPUT_ROOT/component-release-index-v1.json" \
+            --catalog workspace-catalog/governance/component-catalog-v1.json \
+            --verify-attestation-only
+
       - name: Create the draft release with all durable assets
         id: release
         run: |
           set -euo pipefail
+          asset_paths=(
+            "$OUTPUT_ROOT/native/artifacts"/*.tar.gz
+            "$OUTPUT_ROOT/native/manifests"/*.manifest.json
+            "$OUTPUT_ROOT/component-release-index-v1.json"
+          )
           release_args=(
             "$RELEASE_ID"
-            "$OUTPUT_ROOT/native/artifacts"/*.tar.gz \
-            "$OUTPUT_ROOT/native/manifests"/*.manifest.json \
-            "$OUTPUT_ROOT/component-release-index-v1.json" \
+            "${asset_paths[@]}"
             --draft \
             --target "$SOURCE_COMMIT" \
             --title "Cyrene component release $RELEASE_ID" \
@@ -571,6 +657,33 @@ jobs:
           if [ "$CHANNEL" = preview ]; then release_args+=(--prerelease); fi
           gh release create "${release_args[@]}"
           release_id="$(gh release view "$RELEASE_ID" --repo "$SOURCE_REPOSITORY" --json databaseId --jq .databaseId)"
+          gh api "repos/$SOURCE_REPOSITORY/releases/$release_id" > "$RUNNER_TEMP/draft-release.json"
+          python - "$RUNNER_TEMP/draft-release.json" "$SOURCE_COMMIT" "$RELEASE_ID" "$CHANNEL" "${asset_paths[@]}" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          release = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          source_commit, release_id, channel = sys.argv[2:5]
+          expected = {}
+          for name in sys.argv[5:]:
+              path = Path(name)
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              expected[path.name] = {"size": path.stat().st_size, "digest": f"sha256:{digest}"}
+          if (
+              release.get("tag_name") != release_id
+              or release.get("target_commitish") != source_commit
+              or release.get("draft") is not True
+              or release.get("prerelease") is not (channel == "preview")
+          ):
+              raise SystemExit("uploaded draft release identity does not match source pins")
+          assets = release.get("assets", [])
+          actual = {row.get("name"): row for row in assets if isinstance(row, dict)}
+          if len(actual) != len(assets) or set(actual) != set(expected):
+              raise SystemExit("uploaded draft release assets do not match the exact local asset set")
+          for name, wanted in expected.items():
+              row = actual[name]
+              if row.get("size") != wanted["size"] or row.get("digest") != wanted["digest"]:
+                  raise SystemExit(f"uploaded draft release asset bytes do not match local input: {name}")
+          PY
           gh api --method PATCH "repos/$SOURCE_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           immutable="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)"
           if [ "$immutable" != true ]; then
@@ -579,27 +692,13 @@ jobs:
           fi
           echo "id=$release_id" >> "$GITHUB_OUTPUT"
 
-      - name: Reverify the published index and every release manifest
+      - name: Verify the published immutable index and its release assets
         run: |
           set -euo pipefail
           python tooling/release/component_artifacts.py verify-index \
             --index "$OUTPUT_ROOT/component-release-index-v1.json" \
             --catalog workspace-catalog/governance/component-catalog-v1.json \
-            --verify-run \
-            --verify-attestation
-          for manifest in "$OUTPUT_ROOT/native/manifests"/*.manifest.json; do
-            artifact_name="$(python - "$manifest" <<'PY'
-          import json, sys
-          from urllib.parse import urlparse
-          doc = json.load(open(sys.argv[1], encoding="utf-8"))
-          artifact = doc["artifact"]
-          print(urlparse(artifact["uri"]).path.rsplit("/", 1)[-1] if artifact["kind"] != "oci-image" else "")
-          PY
-          )"
-            verify_args=(--manifest "$manifest" --catalog workspace-catalog/governance/component-catalog-v1.json --verify-run --verify-attestation)
-            if [ -n "$artifact_name" ]; then verify_args+=(--artifact "$OUTPUT_ROOT/native/artifacts/$artifact_name"); fi
-            python tooling/release/component_artifacts.py verify "${verify_args[@]}"
-          done
+            --verify-release
 
       - name: Summarize immutable release identity
         run: |
