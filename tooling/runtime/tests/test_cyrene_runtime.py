@@ -61,3 +61,10 @@ def test_wsl_requires_explicit_development_profile(tmp_path: Path, monkeypatch: 
         runtime.up(args, runtime.Layout.create(tmp_path))
 
     assert caught.value.code == "WSL_PROFILE_REQUIRED"
+
+
+def test_system_adapter_included_in_topology() -> None:
+    assert "systemAdapter" in runtime.COMPONENT_ORDER
+    assert runtime.EXECUTABLES.get("systemAdapter") == "cyrene-linux-sys-adapter"
+    assert runtime.COMPONENT_ORDER.index("systemAdapter") < runtime.COMPONENT_ORDER.index("kernel")
+
