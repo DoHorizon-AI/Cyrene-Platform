@@ -11,6 +11,7 @@ on:
       - "agents/**"
       - "adapters/**"
       - "sdk/rust/**"
+      - "tooling/workspace-product-contract-bundle/**"
       - "tooling/release/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -26,6 +27,7 @@ on:
       - "agents/**"
       - "adapters/**"
       - "sdk/rust/**"
+      - "tooling/workspace-product-contract-bundle/**"
       - "tooling/release/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -50,6 +52,25 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Set up Python for the pinned bundle verifier
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install bundle builder dependencies
+        run: python -m pip install --disable-pip-version-check -r tooling/workspace-product-contract-bundle/requirements.txt
+
+      - name: Rebuild Product contract context from exact lock SHAs
+        id: product-contracts
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/workspace-product-contracts"
+          python tooling/release/prepare_workspace_product_contracts.py \
+            --repository . \
+            --output "$output" \
+            --checkout-root "$RUNNER_TEMP/pinned-product-sources"
+          echo "root=$output" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -58,6 +79,8 @@ jobs:
         with:
           context: .
           file: framework/crates/cy-workspace-web-bff/Dockerfile
+          build-contexts: |
+            product-contracts=${{ steps.product-contracts.outputs.root }}
           platforms: linux/amd64
           push: false
           tags: ghcr.io/dohorizon-ai/cyrene-workspace-web-bff:build-${{ github.sha }}
