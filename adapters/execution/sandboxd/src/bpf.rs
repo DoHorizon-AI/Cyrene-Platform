@@ -323,7 +323,7 @@ pub(crate) const BPF_JMP_EXIT: u8 = 0x95;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn probe_device_bpf_capable() -> bool {
-    let dummy_program = vec![
+    let dummy_program = [
         insn(BPF_ALU64_MOV_K, 0, 0, 0, 1),
         insn(BPF_JMP_EXIT, 0, 0, 0, 0),
     ];
