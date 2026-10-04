@@ -25,9 +25,33 @@
     },
     {
       "ownerId": "yield",
+      "operationId": "workspaceCreateTrainingDraft",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.yield.start_training_run.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "yield",
       "operationId": "workspaceGetDraft",
       "principalKinds": ["DIRECTORY_USER"],
       "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "yield",
+      "operationId": "workspacePrepareDraft",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.yield.start_training_run.v1"
+      ],
       "requiresExactWorkspace": true,
       "requiredRequestBindings": [],
       "requiredResponseBindings": []
