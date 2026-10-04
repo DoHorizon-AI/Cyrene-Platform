@@ -221,6 +221,13 @@ impl core_v1::kernel_service_server::KernelService for KernelServiceAdapter {
                     ));
                 }
             };
+            if let Err(error) = self.daemon.preflight_binding(&binding) {
+                return Err(provider_status(
+                    self.release_owned_lease(owned_lease, &lease)
+                        .err()
+                        .unwrap_or(error),
+                ));
+            }
             let installation = VerifiedInstallation {
                 installation_name: plugin.installation_name.clone(),
                 manifest_digest: plugin.manifest_digest.clone(),

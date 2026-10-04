@@ -51,6 +51,19 @@ fn golden_test_a_real_worker_lost_end_to_end() {
             }
         }
 
+        fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+            let mut capabilities = self.preflight();
+            if binding.enforcement == EnforcementMode::Hard {
+                capabilities.facts.push(CapabilityFact {
+                    name: "device-bpf-capable".to_string(),
+                    available: true,
+                    required: true,
+                    detail: "test-only HARD binding isolation proof".to_string(),
+                });
+            }
+            capabilities
+        }
+
         fn launch(
             &self,
             plan: &LaunchPlan,
@@ -822,6 +835,19 @@ fn golden_test_c_real_process_daemon_crash_restart_and_recovery_smoke_e2e() {
                 }],
                 enforcement: Vec::new(),
             }
+        }
+
+        fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+            let mut capabilities = self.preflight();
+            if binding.enforcement == EnforcementMode::Hard {
+                capabilities.facts.push(CapabilityFact {
+                    name: "device-bpf-capable".to_string(),
+                    available: true,
+                    required: true,
+                    detail: "test-only HARD binding isolation proof".to_string(),
+                });
+            }
+            capabilities
         }
 
         fn launch(

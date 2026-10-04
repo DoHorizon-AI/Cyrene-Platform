@@ -28,7 +28,11 @@ message SandboxRequest {
   }
 }
 
-message SandboxPreflightRequest {}
+message SandboxPreflightRequest {
+  // Absent preserves node-level preflight for older callers. A supplied
+  // binding requests an admission proof for that exact isolation mode.
+  SandboxDeviceBinding binding = 1;
+}
 
 message SandboxLaunchRequest {
   string instance_name = 1;

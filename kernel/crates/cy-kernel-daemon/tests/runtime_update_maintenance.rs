@@ -747,6 +747,19 @@ impl ProcessRuntime for SimulatedTestSandbox {
         }
     }
 
+    fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+        let mut capabilities = self.preflight();
+        if binding.enforcement == EnforcementMode::Hard {
+            capabilities.facts.push(CapabilityFact {
+                name: "device-bpf-capable".to_string(),
+                available: true,
+                required: true,
+                detail: "simulated HARD binding proof for acceptance fixture".to_string(),
+            });
+        }
+        capabilities
+    }
+
     fn launch(
         &self,
         _plan: &LaunchPlan,

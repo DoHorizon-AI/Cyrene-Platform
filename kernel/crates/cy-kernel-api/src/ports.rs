@@ -84,6 +84,17 @@ pub trait ResourceLeaseManager: Send + Sync {
 pub trait ProcessRuntime: Send + Sync {
     /// 节点预检：检查宿主机 cgroup、驱动等基础能力
     fn preflight(&self) -> NodeCapabilities;
+    /// Checks whether this runtime can honor the requested device binding.
+    ///
+    /// The default preserves compatibility for existing in-process runtimes
+    /// that expose only node-level readiness. Privileged adapter clients must
+    /// override this method and reject a binding when the peer cannot prove
+    /// the binding-specific enforcement requirement.
+    ///
+    /// 检查运行时是否能够满足设备绑定要求。默认实现兼容仅提供节点级预检的旧进程内运行时；特权适配器客户端必须覆写此方法，并在对端无法证明绑定级隔离能力时拒绝该绑定。
+    fn preflight_for_binding(&self, _binding: &DeviceBinding) -> NodeCapabilities {
+        self.preflight()
+    }
     /// 在安全沙箱中启动目标进程
     fn launch(
         &self,

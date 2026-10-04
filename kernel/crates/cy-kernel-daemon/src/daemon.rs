@@ -119,6 +119,44 @@ impl KernelDaemon {
         self.sandbox.preflight().ready
     }
 
+    /// Preflights one concrete binding before recording launch intent.
+    ///
+    /// Every HARD binding requires an explicit positive device isolation
+    /// proof. The trait's node-level default remains source-compatible, but
+    /// it cannot authorize a HARD binding without that proof. The privileged
+    /// UDS client also turns missing peer proof into an unavailable fact.
+    ///
+    /// 在记录启动意图前预检具体绑定。每个HARD绑定都必须有明确的正向设备隔离证明；trait节点级默认仅保持源码兼容，不能单独授权HARD绑定。UDS特权客户端也会将旧peer缺少的证明转换为不可用事实。
+    pub fn preflight_binding(&self, binding: &DeviceBinding) -> Result<(), ProviderError> {
+        let capabilities = self.sandbox.preflight_for_binding(binding);
+        let hard_binding = binding.enforcement == cy_kernel_api::EnforcementMode::Hard;
+        let has_required_device_isolation_proof = capabilities
+            .facts
+            .iter()
+            .any(|fact| fact.name == "device-bpf-capable" && fact.required && fact.available);
+        if capabilities.ready && (!hard_binding || has_required_device_isolation_proof) {
+            return Ok(());
+        }
+
+        let detail = capabilities
+            .facts
+            .iter()
+            .find(|fact| fact.required && !fact.available)
+            .map(|fact| format!("{}: {}", fact.name, fact.detail))
+            .or_else(|| {
+                (hard_binding && !has_required_device_isolation_proof).then(|| {
+                    "HARD binding requires an available required device-bpf-capable fact"
+                        .to_string()
+                })
+            })
+            .unwrap_or_else(|| "required sandbox capabilities are unavailable".to_string());
+        Err(ProviderError::new(
+            self.sandbox.backend_id(),
+            "BINDING_PREFLIGHT_FAILED",
+            &detail,
+        ))
+    }
+
     pub(crate) fn hardware_adapter_observations(
         &self,
     ) -> Option<BTreeMap<String, Result<HardwareAdapterObservation, ProviderError>>> {
@@ -308,6 +346,20 @@ impl KernelDaemon {
             .map(to_semantic_proto_resource)
             .collect();
         let runtime = self.sandbox.preflight();
+        let mut feature_flags = snapshot
+            .capabilities
+            .facts
+            .into_iter()
+            .filter(|fact| fact.available)
+            .map(|fact| fact.name)
+            .collect::<Vec<_>>();
+        feature_flags.extend(
+            runtime
+                .facts
+                .iter()
+                .filter(|fact| fact.available)
+                .map(|fact| format!("sandbox.{}", fact.name)),
+        );
         Ok(core_v1::KernelCapabilities {
             node: Some(core_v1::NodeRef {
                 node_id: self.node_id.clone(),
@@ -339,13 +391,7 @@ impl KernelDaemon {
                     reason_code: report.reason_code,
                 })
                 .collect(),
-            feature_flags: snapshot
-                .capabilities
-                .facts
-                .into_iter()
-                .filter(|fact| fact.available)
-                .map(|fact| fact.name)
-                .collect(),
+            feature_flags,
             resources,
         })
     }

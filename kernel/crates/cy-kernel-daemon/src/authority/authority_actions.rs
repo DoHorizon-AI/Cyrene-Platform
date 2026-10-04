@@ -167,6 +167,10 @@ impl KernelAuthority for LocalKernelAuthority {
             .daemon
             .binding_for_lease(&lease)
             .map_err(Self::provider_rejection)?;
+        self.runtime
+            .daemon
+            .preflight_binding(&binding)
+            .map_err(Self::provider_rejection)?;
         let resolved = self
             .runtime
             .resolver

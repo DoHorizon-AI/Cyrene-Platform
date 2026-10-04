@@ -157,12 +157,12 @@ impl UdsSandboxAdapterClient {
     fn cleanup_rpc_timeout(&self, cleanup_budget: Duration) -> Duration {
         bounded_rpc_timeout(self.timeout, cleanup_budget)
     }
-}
 
-impl ProcessRuntime for UdsSandboxAdapterClient {
-    fn preflight(&self) -> NodeCapabilities {
+    fn preflight_report(&self, binding: Option<&DeviceBinding>) -> NodeCapabilities {
         let response = self.call(sandbox_v1::sandbox_request::Body::Preflight(
-            sandbox_v1::SandboxPreflightRequest {},
+            sandbox_v1::SandboxPreflightRequest {
+                binding: binding.map(binding_to_proto),
+            },
         ));
         match response {
             Ok(response) => match response.body {
@@ -173,6 +173,66 @@ impl ProcessRuntime for UdsSandboxAdapterClient {
             },
             Err(error) => unavailable_capabilities(error),
         }
+    }
+}
+
+impl ProcessRuntime for UdsSandboxAdapterClient {
+    fn preflight(&self) -> NodeCapabilities {
+        self.preflight_report(None)
+    }
+
+    fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+        let mut capabilities = self.preflight_report(Some(binding));
+        if binding.enforcement != EnforcementMode::Hard {
+            return capabilities;
+        }
+
+        let proof = capabilities
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable" && fact.required && fact.available);
+        if capabilities.ready && proof.is_some() {
+            return capabilities;
+        }
+
+        // Older peers ignore the additive binding field and return only the
+        // node-level optional BPF fact. Promote absence of a required positive
+        // proof to an explicit failure so old hosts cannot admit a HARD GPU.
+        // 旧peer会忽略增量binding字段并仅返回节点级可选BPF事实。将必需正向证明缺失显式转成失败，避免旧host误放行HARD GPU。
+        let binding_proof_missing = !capabilities
+            .facts
+            .iter()
+            .any(|fact| fact.name == "device-bpf-capable" && fact.required);
+        let fallback_detail = capabilities
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable")
+            .map(|fact| fact.detail.clone())
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or_else(|| "sandbox peer omitted device BPF capability facts".to_string());
+        capabilities.ready = false;
+        if binding_proof_missing {
+            let detail = format!(
+                "DEVICE_BPF_BINDING_PROOF_MISSING: peer returned no required positive HARD-binding proof ({fallback_detail})"
+            );
+            if let Some(fact) = capabilities
+                .facts
+                .iter_mut()
+                .find(|fact| fact.name == "device-bpf-capable")
+            {
+                fact.available = false;
+                fact.required = true;
+                fact.detail = detail;
+            } else {
+                capabilities.facts.push(CapabilityFact {
+                    name: "device-bpf-capable".to_string(),
+                    available: false,
+                    required: true,
+                    detail,
+                });
+            }
+        }
+        capabilities
     }
 
     fn launch(
@@ -761,7 +821,8 @@ mod linux_uds {
 
     use cy_adapter_client::PeerCredentialExpectation;
     use cy_kernel_api::{
-        ProcessHandle, ProcessRuntime, RuntimeProcessEvidence, SandboxBackend, StopRequest,
+        DeviceBinding, EnforcementMode, ProcessHandle, ProcessRuntime, RuntimeProcessEvidence,
+        SandboxBackend, StopRequest,
     };
     use cy_proto::sandbox_v1;
     use prost::Message;
@@ -901,6 +962,119 @@ mod linux_uds {
         });
         let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
         assert!(client.preflight().ready);
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn binding_preflight_rejects_legacy_node_level_bpf_fact() {
+        let endpoint = endpoint("binding-preflight-legacy", own_peer_credentials());
+        let socket = endpoint.socket_path.clone();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let payload = read_frame(&mut stream).unwrap();
+            let request = sandbox_v1::SandboxRequest::decode(payload.as_slice()).unwrap();
+            let Some(sandbox_v1::sandbox_request::Body::Preflight(request)) = request.body else {
+                panic!("client must send a binding-aware preflight request");
+            };
+            let binding = request.binding.expect("HARD binding proof request");
+            assert_eq!(binding.device_id, "gpu-0");
+            assert_eq!(
+                binding.enforcement,
+                sandbox_v1::SandboxEnforcementMode::Hard as i32
+            );
+            let response = sandbox_v1::SandboxResponse {
+                protocol_version: crate::PROTOCOL_VERSION,
+                adapter_id: ADAPTER_ID.to_string(),
+                body: Some(sandbox_v1::sandbox_response::Body::Capabilities(
+                    sandbox_v1::SandboxCapabilities {
+                        ready: true,
+                        // A legacy peer can report generic host capability,
+                        // but cannot claim it proved this binding.
+                        facts: vec![sandbox_v1::SandboxFact {
+                            name: "device-bpf-capable".to_string(),
+                            available: true,
+                            required: false,
+                            detail: "node-level capability only".to_string(),
+                        }],
+                        enforcement: Vec::new(),
+                    },
+                )),
+            };
+            write_frame(&mut stream, &response.encode_to_vec()).unwrap();
+        });
+        let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
+        let capabilities = client.preflight_for_binding(&DeviceBinding {
+            resource_id: "gpu-0".to_string(),
+            nodes: Vec::new(),
+            environment: Default::default(),
+            joinable_environment_keys: Default::default(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Hard,
+            adapter_id: "nvidia".to_string(),
+            reason_code: "DEVICE_BPF_REQUIRED".to_string(),
+        });
+        assert!(!capabilities.ready);
+        assert!(capabilities.facts.iter().any(|fact| {
+            fact.name == "device-bpf-capable"
+                && fact.required
+                && !fact.available
+                && fact.detail.starts_with("DEVICE_BPF_BINDING_PROOF_MISSING:")
+        }));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn binding_preflight_accepts_required_positive_peer_proof() {
+        let endpoint = endpoint("binding-preflight-positive", own_peer_credentials());
+        let socket = endpoint.socket_path.clone();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let payload = read_frame(&mut stream).unwrap();
+            let request = sandbox_v1::SandboxRequest::decode(payload.as_slice()).unwrap();
+            assert!(matches!(
+                request.body,
+                Some(sandbox_v1::sandbox_request::Body::Preflight(
+                    sandbox_v1::SandboxPreflightRequest { binding: Some(_) }
+                ))
+            ));
+            let response = sandbox_v1::SandboxResponse {
+                protocol_version: crate::PROTOCOL_VERSION,
+                adapter_id: ADAPTER_ID.to_string(),
+                body: Some(sandbox_v1::sandbox_response::Body::Capabilities(
+                    sandbox_v1::SandboxCapabilities {
+                        ready: true,
+                        facts: vec![sandbox_v1::SandboxFact {
+                            name: "device-bpf-capable".to_string(),
+                            available: true,
+                            required: true,
+                            detail: "binding-specific probe succeeded".to_string(),
+                        }],
+                        enforcement: Vec::new(),
+                    },
+                )),
+            };
+            write_frame(&mut stream, &response.encode_to_vec()).unwrap();
+        });
+        let client = UdsSandboxAdapterClient::from_endpoint(endpoint).unwrap();
+        let capabilities = client.preflight_for_binding(&DeviceBinding {
+            resource_id: "gpu-0".to_string(),
+            nodes: Vec::new(),
+            environment: Default::default(),
+            joinable_environment_keys: Default::default(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Hard,
+            adapter_id: "nvidia".to_string(),
+            reason_code: "DEVICE_BPF_REQUIRED".to_string(),
+        });
+        assert!(capabilities.ready);
+        assert!(capabilities
+            .facts
+            .iter()
+            .any(|fact| { fact.name == "device-bpf-capable" && fact.required && fact.available }));
         server.join().unwrap();
         let _ = fs::remove_dir_all(socket.parent().unwrap());
     }

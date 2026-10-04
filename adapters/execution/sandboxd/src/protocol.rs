@@ -37,9 +37,13 @@ pub fn handle_request(
         );
     }
     let result = match request.body {
-        Some(sandbox_v1::sandbox_request::Body::Preflight(_)) => {
+        Some(sandbox_v1::sandbox_request::Body::Preflight(request)) => {
+            let capabilities = match request.binding {
+                Some(binding) => runtime.preflight_for_binding(&binding_from_proto(binding)),
+                None => runtime.preflight(),
+            };
             Ok(sandbox_v1::sandbox_response::Body::Capabilities(
-                capabilities_to_proto(runtime.preflight()),
+                capabilities_to_proto(capabilities),
             ))
         }
         Some(sandbox_v1::sandbox_request::Body::Launch(request)) => {
@@ -364,6 +368,7 @@ mod tests {
     struct RecordingBackend {
         launched: Mutex<bool>,
         recovered: Mutex<Vec<RuntimeProcessEvidence>>,
+        preflight_bindings: Mutex<Vec<DeviceBinding>>,
     }
 
     impl ProcessRuntime for RecordingBackend {
@@ -382,6 +387,23 @@ mod tests {
                     adapter_id: "sandboxd".to_string(),
                     reason_code: "TEST".to_string(),
                 }],
+            }
+        }
+
+        fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+            self.preflight_bindings
+                .lock()
+                .unwrap()
+                .push(binding.clone());
+            NodeCapabilities {
+                ready: true,
+                facts: vec![CapabilityFact {
+                    name: "device-bpf-capable".to_string(),
+                    available: true,
+                    required: binding.enforcement == EnforcementMode::Hard,
+                    detail: "TEST_BINDING_PREFLIGHT".to_string(),
+                }],
+                enforcement: Vec::new(),
             }
         }
 
@@ -449,6 +471,7 @@ mod tests {
         let backend = RecordingBackend {
             launched: Mutex::new(false),
             recovered: Mutex::new(Vec::new()),
+            preflight_bindings: Mutex::new(Vec::new()),
         };
         let response = handle_request(
             &backend,
@@ -493,6 +516,7 @@ mod tests {
         let backend = RecordingBackend {
             launched: Mutex::new(false),
             recovered: Mutex::new(Vec::new()),
+            preflight_bindings: Mutex::new(Vec::new()),
         };
         let discovery = handle_request(
             &backend,
@@ -529,5 +553,45 @@ mod tests {
             Some(sandbox_v1::sandbox_response::Body::Cleanup(_))
         ));
         assert_eq!(backend.recovered.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn protocol_preflight_forwards_binding_to_runtime() {
+        let backend = RecordingBackend {
+            launched: Mutex::new(false),
+            recovered: Mutex::new(Vec::new()),
+            preflight_bindings: Mutex::new(Vec::new()),
+        };
+        let response = handle_request(
+            &backend,
+            "sandboxd",
+            sandbox_v1::SandboxRequest {
+                protocol_version: PROTOCOL_VERSION,
+                body: Some(sandbox_v1::sandbox_request::Body::Preflight(
+                    sandbox_v1::SandboxPreflightRequest {
+                        binding: Some(sandbox_v1::SandboxDeviceBinding {
+                            device_id: "gpu-0".to_string(),
+                            nodes: Vec::new(),
+                            environment: Default::default(),
+                            required_gids: Vec::new(),
+                            enforcement: sandbox_v1::SandboxEnforcementMode::Hard as i32,
+                            adapter_id: "nvidia".to_string(),
+                            reason_code: "DEVICE_BPF_REQUIRED".to_string(),
+                        }),
+                    },
+                )),
+            },
+        );
+        let observed = backend.preflight_bindings.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].resource_id, "gpu-0");
+        assert_eq!(observed[0].enforcement, EnforcementMode::Hard);
+        assert!(matches!(
+            response.body,
+            Some(sandbox_v1::sandbox_response::Body::Capabilities(capabilities))
+                if capabilities.facts.iter().any(|fact|
+                    fact.name == "device-bpf-capable" && fact.available && fact.required
+                )
+        ));
     }
 }
