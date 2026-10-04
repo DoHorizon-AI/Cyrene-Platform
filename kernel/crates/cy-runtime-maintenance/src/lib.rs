@@ -317,6 +317,9 @@ struct PersistedState {
     tasks: BTreeMap<String, TaskRecord>,
     runtime_admissions: BTreeMap<String, String>,
     sources: BTreeMap<String, SourceRecord>,
+    /// True only while the journal contains catalog setup and no prior runtime use.
+    #[serde(default)]
+    core_bootstrap_eligible: bool,
 }
 
 impl Default for PersistedState {
@@ -331,6 +334,7 @@ impl Default for PersistedState {
             tasks: BTreeMap::new(),
             runtime_admissions: BTreeMap::new(),
             sources: BTreeMap::new(),
+            core_bootstrap_eligible: true,
         }
     }
 }
@@ -347,6 +351,17 @@ struct MaintenanceRecord {
     expected_activity_sources: Vec<String>,
     plan: MaintenancePlan,
     started_at_unix_ms: u64,
+    /// Identifies the narrowly scoped first-Kernel bootstrap hold.
+    #[serde(default)]
+    origin: MaintenanceOrigin,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum MaintenanceOrigin {
+    #[default]
+    Standard,
+    CoreBootstrap,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,6 +525,14 @@ impl RuntimeMaintenance {
     /// Returns the current readiness generation under the shared file lock.
     pub fn current_gate_generation(&self) -> Result<u64, MaintenanceError> {
         self.with_state(|state| Ok(state.gate_generation))
+    }
+
+    /// Returns the persisted first-CoreRuntime bootstrap eligibility under the shared gate lock.
+    ///
+    /// This is only a freshness fact. It does not claim readiness, runtime idleness,
+    /// or the absence of external legacy processes and compute resources.
+    pub fn core_bootstrap_eligible(&self) -> Result<bool, MaintenanceError> {
+        self.with_state(|state| Ok(state.core_bootstrap_eligible))
     }
 
     /// Returns the source's configured local IPC UID/GID identity.
@@ -787,20 +810,9 @@ impl RuntimeMaintenance {
     ) -> Result<ReadinessSnapshot, MaintenanceError> {
         self.with_state(|state| {
             let catalog = self.catalog_snapshot()?;
-            // Product work and in-flight Kernel admission markers are visible
-            // from the gate journal itself. Return those blockers without
-            // waiting on a live runtime snapshot or cancelling the work.
-            let preliminary = readiness_snapshot(
-                state,
-                &catalog,
-                self.inner.source_staleness,
-                request,
-                RuntimeUsage::default(),
-            );
-            let runtime_usage = if request.target_kind == UpdateTargetKind::CoreRuntime
-                && preliminary.blocker_codes.len() == 1
-                && preliminary.blocker_codes[0] == "RUNTIME_ACTIVITY_UNKNOWN"
-            {
+            // CoreRuntime callers need live counts even when another blocker
+            // is UNKNOWN; zero-valued defaults must never look like proof of idle.
+            let runtime_usage = if request.target_kind == UpdateTargetKind::CoreRuntime {
                 runtime_usage()
             } else {
                 RuntimeUsage::default()
@@ -838,7 +850,8 @@ impl RuntimeMaintenance {
                         .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect::<Vec<_>>();
-                    if &existing.plan != plan
+                    if existing.origin != MaintenanceOrigin::Standard
+                        || &existing.plan != plan
                         || existing.target_kind != request.target_kind
                         || existing.requires_restart != request.requires_restart
                         || existing.user_confirmed_restart != user_confirmed_restart
@@ -911,6 +924,7 @@ impl RuntimeMaintenance {
                     .collect(),
                 plan: plan.clone(),
                 started_at_unix_ms: now_unix_ms(),
+                origin: MaintenanceOrigin::Standard,
             };
             let token = record.token.clone();
             append_and_apply(
@@ -950,7 +964,8 @@ impl RuntimeMaintenance {
                         .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect::<Vec<_>>();
-                    if &existing.plan != plan
+                    if existing.origin != MaintenanceOrigin::Standard
+                        || &existing.plan != plan
                         || existing.target_kind != request.target_kind
                         || existing.requires_restart != request.requires_restart
                         || existing.user_confirmed_restart != user_confirmed_restart
@@ -1046,6 +1061,132 @@ impl RuntimeMaintenance {
                     .collect(),
                 plan: plan.clone(),
                 started_at_unix_ms: now_unix_ms(),
+                origin: MaintenanceOrigin::Standard,
+            };
+            let token = record.token.clone();
+            append_and_apply(
+                &self.inner.directory,
+                state,
+                JournalEvent::MaintenanceBegan { record },
+            )?;
+            Ok(BeginMaintenanceResult {
+                status: ReadinessStatus::MaintenanceActive,
+                maintenance_token: Some(token),
+                gate_generation: state.gate_generation,
+                blocker_codes: Vec::new(),
+            })
+        })
+    }
+
+    /// Persists the one permitted pre-Kernel hold for a strictly fresh install.
+    ///
+    /// Unlike ordinary maintenance, this operation deliberately does not claim
+    /// readiness: it only closes admission while the installer proves legacy
+    /// processes and external compute resources are absent.
+    pub fn begin_core_bootstrap(
+        &self,
+        request_id: &str,
+        plan: &MaintenancePlan,
+        request: &ReadinessRequest,
+        expected_gate_generation: u64,
+        user_confirmed_restart: bool,
+    ) -> Result<BeginMaintenanceResult, MaintenanceError> {
+        validate_identifier(request_id, "request_id")?;
+        validate_plan(plan)?;
+        if request.target_kind != UpdateTargetKind::CoreRuntime
+            || !request.requires_restart
+            || !user_confirmed_restart
+        {
+            return Err(MaintenanceError::InvalidRequest(
+                "core bootstrap requires CORE_RUNTIME restart confirmation".into(),
+            ));
+        }
+        self.with_state(|state| {
+            let catalog = self.catalog_snapshot()?;
+            let expected_sources = request
+                .expected_activity_sources
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if expected_sources.len() != request.expected_activity_sources.len() {
+                return Err(MaintenanceError::InvalidRequest(
+                    "expected_activity_sources must not contain duplicates".into(),
+                ));
+            }
+
+            if let Some(existing) = &state.maintenance {
+                if existing.request_id == request_id
+                    && existing.origin == MaintenanceOrigin::CoreBootstrap
+                {
+                    let current_sources = catalog.source_ids().into_iter().collect::<Vec<_>>();
+                    if &existing.plan != plan
+                        || existing.target_kind != request.target_kind
+                        || existing.requires_restart != request.requires_restart
+                        || !existing.user_confirmed_restart
+                        || existing.expected_gate_generation != expected_gate_generation
+                        || existing.expected_catalog_generation
+                            != request.expected_catalog_generation
+                        || existing.expected_catalog_generation != catalog.generation
+                        || existing.expected_activity_sources != expected_sources
+                        || existing.expected_activity_sources != current_sources
+                    {
+                        return Err(MaintenanceError::AdmissionDenied(
+                            "REQUEST_ID_PLAN_MISMATCH".to_string(),
+                        ));
+                    }
+                    return Ok(BeginMaintenanceResult {
+                        status: ReadinessStatus::MaintenanceActive,
+                        maintenance_token: Some(existing.token.clone()),
+                        gate_generation: state.gate_generation,
+                        blocker_codes: vec!["MAINTENANCE_ALREADY_BEGUN".to_string()],
+                    });
+                }
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_ALREADY_ACTIVE".to_string(),
+                ));
+            }
+            if state.completed_maintenances.contains_key(request_id) {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_REQUEST_ALREADY_COMPLETED".to_string(),
+                ));
+            }
+            if !state.core_bootstrap_eligible
+                || !state.completed_maintenances.is_empty()
+                || !state.tasks.is_empty()
+                || !state.runtime_admissions.is_empty()
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "CORE_BOOTSTRAP_REQUIRES_FRESH_STORE".to_string(),
+                ));
+            }
+            if state.install_catalog_generation != catalog.generation
+                || request.expected_catalog_generation != catalog.generation
+                || expected_sources != catalog.source_ids().into_iter().collect::<Vec<_>>()
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "CORE_BOOTSTRAP_CATALOG_MISMATCH".to_string(),
+                ));
+            }
+            if state.gate_generation != expected_gate_generation {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "CORE_BOOTSTRAP_GATE_GENERATION_MISMATCH".to_string(),
+                ));
+            }
+
+            let record = MaintenanceRecord {
+                request_id: request_id.to_string(),
+                token: Uuid::new_v4().to_string(),
+                target_kind: UpdateTargetKind::CoreRuntime,
+                requires_restart: true,
+                user_confirmed_restart: true,
+                expected_gate_generation: state.gate_generation,
+                expected_catalog_generation: catalog.generation,
+                expected_activity_sources: expected_sources,
+                plan: plan.clone(),
+                started_at_unix_ms: now_unix_ms(),
+                origin: MaintenanceOrigin::CoreBootstrap,
             };
             let token = record.token.clone();
             append_and_apply(
@@ -1390,6 +1531,15 @@ fn readiness_snapshot(
     } else {
         ReadinessStatus::Ready
     };
+    if request.target_kind == UpdateTargetKind::CoreRuntime
+        && state
+            .maintenance
+            .as_ref()
+            .is_some_and(|record| record.origin == MaintenanceOrigin::CoreBootstrap)
+        && !runtime_usage.known
+    {
+        blocker_codes.push("RUNTIME_ACTIVITY_UNKNOWN".to_string());
+    }
     ReadinessSnapshot {
         status,
         gate_generation: state.gate_generation,
@@ -1546,6 +1696,9 @@ fn apply_entry(state: &mut PersistedState, entry: &JournalEntry) -> Result<(), M
             "journal sequence {} does not follow {}",
             entry.sequence, state.journal_sequence
         )));
+    }
+    if !matches!(&entry.event, JournalEvent::CatalogConfigured { .. }) {
+        state.core_bootstrap_eligible = false;
     }
     match &entry.event {
         JournalEvent::CatalogConfigured { generation } => {
@@ -2139,6 +2292,28 @@ mod tests {
         }
     }
 
+    fn bootstrap_setup() -> (TempDir, RuntimeMaintenance, ReadinessRequest) {
+        let dir = TempDir::new().unwrap();
+        let catalog = TrustedActivitySourceCatalog {
+            schema_version: STATE_SCHEMA_VERSION,
+            generation: 7,
+            sources: vec![TrustedActivitySource {
+                source_id: "cyrene-catalogs".to_string(),
+                uid: 1001,
+                gid: Some(1000),
+                source_token_sha256: format!("{:x}", Sha256::digest(b"test-source-token")),
+            }],
+        };
+        let maintenance = RuntimeMaintenance::open(dir.path(), catalog).unwrap();
+        let request = ReadinessRequest {
+            target_kind: UpdateTargetKind::CoreRuntime,
+            requires_restart: true,
+            expected_catalog_generation: 7,
+            expected_activity_sources: vec!["cyrene-catalogs".to_string()],
+        };
+        (dir, maintenance, request)
+    }
+
     #[test]
     fn active_task_rejects_apply_and_preserves_queue_state() {
         let (_dir, maintenance, request) = setup();
@@ -2162,6 +2337,178 @@ mod tests {
             .unwrap();
         assert_eq!(begin.status, ReadinessStatus::ActiveTasks);
         assert!(begin.maintenance_token.is_none());
+    }
+
+    #[test]
+    fn core_bootstrap_holds_unknown_fresh_store_and_restores_without_ready_claim() {
+        let (dir, gate, request) = bootstrap_setup();
+        let readiness = gate
+            .get_update_readiness(&request, RuntimeUsage::default())
+            .unwrap();
+        assert_eq!(readiness.status, ReadinessStatus::Unknown);
+        assert!(!readiness.unknown_activity_sources.is_empty());
+
+        let begun = gate
+            .begin_core_bootstrap("first-kernel", &package_plan(), &request, 0, true)
+            .unwrap();
+        assert_eq!(begun.status, ReadinessStatus::MaintenanceActive);
+        assert!(begun.maintenance_token.is_some());
+        assert_eq!(begun.gate_generation, 1);
+
+        let reopened =
+            RuntimeMaintenance::open(dir.path(), gate.inner.catalog.read().unwrap().clone())
+                .unwrap();
+        let restored = reopened
+            .get_update_readiness(&request, RuntimeUsage::default())
+            .unwrap();
+        assert_eq!(restored.status, ReadinessStatus::Unknown);
+        assert!(restored
+            .blocker_codes
+            .contains(&"RUNTIME_ACTIVITY_UNKNOWN".to_string()));
+        assert!(reopened
+            .with_state(|state| Ok(state
+                .maintenance
+                .as_ref()
+                .is_some_and(|record| record.origin == MaintenanceOrigin::CoreBootstrap)))
+            .unwrap());
+        let held_counts = reopened
+            .get_update_readiness_with(&request, || RuntimeUsage {
+                known: true,
+                active_worker_count: 0,
+                active_allocation_count: 0,
+            })
+            .unwrap();
+        assert_eq!(held_counts.status, ReadinessStatus::Unknown);
+        assert!(held_counts
+            .blocker_codes
+            .contains(&"ACTIVITY_SOURCE_UNKNOWN".to_string()));
+        assert!(!held_counts
+            .blocker_codes
+            .contains(&"RUNTIME_ACTIVITY_UNKNOWN".to_string()));
+        assert!(reopened
+            .admit_task("cyrene-catalogs", "blocked", TaskActivityState::Accepted)
+            .is_err());
+        assert!(matches!(
+            reopened.with_runtime_admission_named("blocked-start", || Ok::<_, ()>(())),
+            Err(RuntimeAdmissionError::Gate(MaintenanceError::AdmissionDenied(code)))
+                if code == "UPDATE_MAINTENANCE_ACTIVE"
+        ));
+        let same = reopened
+            .begin_core_bootstrap("first-kernel", &package_plan(), &request, 0, true)
+            .unwrap();
+        assert_eq!(same.maintenance_token, begun.maintenance_token);
+        assert!(reopened
+            .begin_core_bootstrap("first-kernel", &package_plan(), &request, 1, true)
+            .is_err());
+
+        let mut changed_plan = package_plan();
+        changed_plan.plan_digest = format!("sha256:{}", "c".repeat(64));
+        assert!(reopened
+            .begin_core_bootstrap("first-kernel", &changed_plan, &request, 0, true)
+            .is_err());
+    }
+
+    #[test]
+    fn bootstrap_retry_rejects_changed_current_catalog_generation_or_sources() {
+        for changed_generation in [true, false] {
+            let (dir, gate, request) = bootstrap_setup();
+            gate.begin_core_bootstrap("first-kernel", &package_plan(), &request, 0, true)
+                .unwrap();
+            {
+                let mut catalog = gate.inner.catalog.write().unwrap();
+                if changed_generation {
+                    catalog.generation += 1;
+                } else {
+                    catalog.sources[0].source_id = "cyrene-other".to_string();
+                }
+            }
+            let reopened =
+                RuntimeMaintenance::open(dir.path(), gate.inner.catalog.read().unwrap().clone())
+                    .unwrap();
+            assert!(reopened
+                .begin_core_bootstrap("first-kernel", &package_plan(), &request, 0, true)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn ordinary_core_begin_still_rejects_unknown_sources_and_nonfresh_bootstrap_is_denied() {
+        let (_dir, gate, bootstrap_request) = bootstrap_setup();
+        let sampled = gate
+            .get_update_readiness_with(&bootstrap_request, || RuntimeUsage {
+                known: true,
+                active_worker_count: 3,
+                active_allocation_count: 2,
+            })
+            .unwrap();
+        assert_eq!(sampled.status, ReadinessStatus::Unknown);
+        assert_eq!(sampled.active_worker_count, 3);
+        assert_eq!(sampled.active_allocation_count, 2);
+
+        let ordinary = gate
+            .begin_maintenance(
+                "ordinary-core",
+                &package_plan(),
+                &bootstrap_request,
+                0,
+                true,
+                RuntimeUsage::default(),
+            )
+            .unwrap();
+        assert_eq!(ordinary.status, ReadinessStatus::Unknown);
+        assert!(ordinary.maintenance_token.is_none());
+
+        gate.heartbeat_activity_source("cyrene-catalogs").unwrap();
+        assert!(gate
+            .begin_core_bootstrap("too-late", &package_plan(), &bootstrap_request, 0, true)
+            .is_err());
+    }
+
+    #[test]
+    fn legacy_state_without_bootstrap_field_fails_closed() {
+        let state = PersistedState::default();
+        let mut value = serde_json::to_value(state).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("core_bootstrap_eligible");
+        let restored: PersistedState = serde_json::from_value(value).unwrap();
+        assert!(!restored.core_bootstrap_eligible);
+
+        let mut record = serde_json::json!({
+            "request_id": "old", "token": "token", "target_kind": "PACKAGE_ONLY",
+            "requires_restart": false, "user_confirmed_restart": false,
+            "expected_gate_generation": 0, "expected_catalog_generation": 7,
+            "expected_activity_sources": [], "plan": serde_json::to_value(package_plan()).unwrap(),
+            "started_at_unix_ms": 1
+        });
+        record.as_object_mut().unwrap().remove("origin");
+        let restored: MaintenanceRecord = serde_json::from_value(record).unwrap();
+        assert_eq!(restored.origin, MaintenanceOrigin::Standard);
+    }
+
+    #[test]
+    fn invalid_operator_token_is_rejected() {
+        let (dir, gate, _) = bootstrap_setup();
+        let token = gate
+            .initialize_operator_capability(dir.path().join("private/operator.token"))
+            .unwrap();
+        assert!(gate.verify_operator_token(&token).unwrap());
+        assert!(!gate.verify_operator_token("incorrect-token").unwrap());
+    }
+
+    #[test]
+    fn health_bootstrap_eligibility_is_current_and_consumed_by_authority_activity() {
+        let (_dir, gate, _) = bootstrap_setup();
+        assert!(gate.core_bootstrap_eligible().unwrap());
+
+        // A current catalog refresh is observational setup and must not consume eligibility.
+        gate.inner.catalog.write().unwrap().generation += 1;
+        assert!(gate.core_bootstrap_eligible().unwrap());
+        assert_eq!(gate.current_gate_generation().unwrap(), 0);
+
+        gate.heartbeat_activity_source("cyrene-catalogs").unwrap();
+        assert!(!gate.core_bootstrap_eligible().unwrap());
     }
 
     #[test]

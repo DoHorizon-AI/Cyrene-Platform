@@ -348,6 +348,7 @@ fn dispatch(
     match request.method.as_str() {
         "Health" => Ok(json!({
             "status": "SERVING",
+            "core_bootstrap_eligible": broker.gate.core_bootstrap_eligible().map_err(ApiError::from_maintenance)?,
             "catalog_generation": broker.gate.catalog_generation(),
             "gate_generation": broker.gate.current_gate_generation().map_err(ApiError::from_maintenance)?,
         })),
@@ -408,6 +409,57 @@ fn dispatch(
                     .map_err(ApiError::from_maintenance)?;
                 serde_json::to_value(result).map_err(serialization_error)
             }
+        }
+        "BeginCoreBootstrap" => {
+            authorize_operator(&broker.gate, peer, &request.auth)?;
+            let transaction_id = required_string(&request.params, "request_id")?;
+            if transaction_id != request.request_id {
+                return Err(ApiError::new(
+                    "INVALID_ARGUMENT",
+                    "envelope request_id must equal params.request_id",
+                ));
+            }
+            let readiness = readiness_request(&request.params)?;
+            if readiness.target_kind != UpdateTargetKind::CoreRuntime
+                || !readiness.requires_restart
+                || !optional_bool(&request.params, "user_confirmed_restart", false)?
+            {
+                return Err(ApiError::new(
+                    "INVALID_ARGUMENT",
+                    "BeginCoreBootstrap requires CORE_RUNTIME restart confirmation",
+                ));
+            }
+            let plan = maintenance_plan(&request.params)?;
+            let expected_gate_generation =
+                required_u64(&request.params, "expected_gate_generation")?;
+            let result = broker
+                .gate
+                .begin_core_bootstrap(
+                    &transaction_id,
+                    &plan,
+                    &readiness,
+                    expected_gate_generation,
+                    true,
+                )
+                .map_err(ApiError::from_maintenance)?;
+            let maintenance_token = result
+                .maintenance_token
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| {
+                    ApiError::new(
+                        "MAINTENANCE_STORAGE_UNAVAILABLE",
+                        "bootstrap hold did not produce a durable maintenance token",
+                    )
+                })?;
+            Ok(json!({
+                "status": result.status,
+                "maintenance_token": maintenance_token,
+                "gate_generation": result.gate_generation,
+                "blocker_codes": result.blocker_codes,
+                "maintenance_origin": "CORE_BOOTSTRAP",
+                "readiness_claimed": false,
+                "held": true,
+            }))
         }
         "EndMaintenance" => {
             authorize_operator(&broker.gate, peer, &request.auth)?;
@@ -539,12 +591,7 @@ fn authorize_operator(
     peer: PeerIdentity,
     auth: &RequestAuth,
 ) -> Result<(), ApiError> {
-    if peer.uid != 0 {
-        return Err(ApiError::new(
-            "OPERATOR_AUTH_REQUIRED",
-            "operator broker calls require UID 0",
-        ));
-    }
+    require_operator_uid(peer)?;
     let token = auth.operator_token.as_deref().ok_or_else(|| {
         ApiError::new("OPERATOR_AUTH_REQUIRED", "operator capability is required")
     })?;
@@ -557,6 +604,17 @@ fn authorize_operator(
         Err(ApiError::new(
             "OPERATOR_AUTH_INVALID",
             "operator capability did not match",
+        ))
+    }
+}
+
+fn require_operator_uid(peer: PeerIdentity) -> Result<(), ApiError> {
+    if peer.uid == 0 {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "OPERATOR_AUTH_REQUIRED",
+            "operator broker calls require UID 0",
         ))
     }
 }
@@ -942,16 +1000,7 @@ fn run_request(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
     }
     if is_operator {
         let token = read_private_token(&token_path)?;
-        if !matches!(
-            request.get("method").and_then(Value::as_str),
-            Some("GetUpdateReadiness" | "BeginMaintenance" | "EndMaintenance")
-        ) {
-            return Err("--operator is valid only for readiness and maintenance calls".to_string());
-        }
-        let root = request.as_object_mut().ok_or("request must be an object")?;
-        let auth = root.entry("auth").or_insert_with(|| json!({}));
-        let auth = auth.as_object_mut().ok_or("auth must be an object")?;
-        auth.insert("operator_token".to_string(), Value::String(token));
+        inject_operator_token(&mut request, token)?;
     }
     let encoded = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     let mut stream = UnixStream::connect(&socket_path).map_err(|error| error.to_string())?;
@@ -971,6 +1020,20 @@ fn run_request(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
     io::stdout()
         .write_all(&response)
         .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn inject_operator_token(request: &mut Value, token: String) -> Result<(), String> {
+    if !matches!(
+        request.get("method").and_then(Value::as_str),
+        Some("GetUpdateReadiness" | "BeginMaintenance" | "BeginCoreBootstrap" | "EndMaintenance")
+    ) {
+        return Err("--operator is valid only for readiness and maintenance calls".to_string());
+    }
+    let root = request.as_object_mut().ok_or("request must be an object")?;
+    let auth = root.entry("auth").or_insert_with(|| json!({}));
+    let auth = auth.as_object_mut().ok_or("auth must be an object")?;
+    auth.insert("operator_token".to_string(), Value::String(token));
     Ok(())
 }
 
@@ -1296,5 +1359,43 @@ fn validate_source_id(source_id: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("invalid source_id: {source_id}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_operator_authority_requires_root_peer() {
+        assert!(require_operator_uid(PeerIdentity { uid: 0, gid: 0 }).is_ok());
+        assert_eq!(
+            require_operator_uid(PeerIdentity {
+                uid: 1000,
+                gid: 1000
+            })
+            .unwrap_err()
+            .code,
+            "OPERATOR_AUTH_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn operator_cli_injects_token_for_core_bootstrap_without_opening_source_methods() {
+        let mut request = json!({
+            "request_id": "first-kernel",
+            "method": "BeginCoreBootstrap",
+            "auth": {}
+        });
+        inject_operator_token(&mut request, "private-token".to_string()).unwrap();
+        assert_eq!(request["auth"]["operator_token"], "private-token");
+
+        let mut source_request = json!({
+            "request_id": "task",
+            "method": "AdmitTask",
+            "auth": {}
+        });
+        assert!(inject_operator_token(&mut source_request, "private-token".to_string()).is_err());
+        assert!(source_request["auth"].get("operator_token").is_none());
     }
 }
