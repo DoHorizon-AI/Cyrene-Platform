@@ -138,6 +138,30 @@ def _copy_systemd_unit_payload(
     return relative_path
 
 
+def _copy_managed_runtime_helper(repository: Path, component_id: str, payload_root: Path) -> None:
+    """Include the signed setup/projection helper with its maintenance authority.
+
+    The helper is deliberately absent from other component archives so its
+    installer authority stays with the Runtime Maintenance component.
+    """
+
+    if component_id != "cyrene-runtime-maintenance":
+        return
+    source = repository / "tooling/runtime/cyrene_managed_runtime.py"
+    try:
+        source_info = source.lstat()
+    except OSError as error:
+        raise ComponentArtifactError(f"managed runtime helper is missing: {source}") from error
+    if not stat.S_ISREG(source_info.st_mode):
+        raise ComponentArtifactError(f"managed runtime helper is not a regular file: {source}")
+    destination = payload_root / "share/cyrene-managed-runtime/cyrene_managed_runtime.py"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        raise ComponentArtifactError(f"managed runtime helper payload destination already exists: {destination}")
+    shutil.copyfile(source, destination)
+    destination.chmod(0o644)
+
+
 def build(
     repository: Path,
     output: Path,
@@ -278,6 +302,7 @@ def build(
         target_binary.write_bytes(binary_path.read_bytes())
         target_binary.chmod(0o755)
         _copy_systemd_unit_payload(repository, catalog_component, payload_root)
+        _copy_managed_runtime_helper(repository, component["id"], payload_root)
         archive = artifacts_dir / f"{component['id']}-{target_id}.tar.gz"
         _write_deterministic_tar_gz(payload_root, archive)
         subject_name = archive.name
