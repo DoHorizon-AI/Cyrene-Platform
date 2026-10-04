@@ -200,6 +200,18 @@ fn hard_device_request_fails_closed_when_disabled() {
     );
 }
 
+#[test]
+fn preflight_reports_device_bpf_capable_fact() {
+    let root = std::env::temp_dir().join(format!("cyrene-cgroup-bpf-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let dev_cfg = config(root.clone());
+    let runtime = CgroupV2Runtime::new(dev_cfg);
+    let caps = runtime.preflight_report();
+    let bpf_fact = caps.facts.iter().find(|f| f.name == "device-bpf-capable");
+    assert!(bpf_fact.is_some(), "preflight must report device-bpf-capable fact");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn device_filter_program_is_default_deny_and_has_allow_path() {
