@@ -527,6 +527,14 @@ impl RuntimeMaintenance {
         self.with_state(|state| Ok(state.gate_generation))
     }
 
+    /// Returns the persisted first-CoreRuntime bootstrap eligibility under the shared gate lock.
+    ///
+    /// This is only a freshness fact. It does not claim readiness, runtime idleness,
+    /// or the absence of external legacy processes and compute resources.
+    pub fn core_bootstrap_eligible(&self) -> Result<bool, MaintenanceError> {
+        self.with_state(|state| Ok(state.core_bootstrap_eligible))
+    }
+
     /// Returns the source's configured local IPC UID/GID identity.
     pub fn trusted_source(&self, source_id: &str) -> Option<TrustedActivitySource> {
         self.inner
@@ -2487,6 +2495,20 @@ mod tests {
             .unwrap();
         assert!(gate.verify_operator_token(&token).unwrap());
         assert!(!gate.verify_operator_token("incorrect-token").unwrap());
+    }
+
+    #[test]
+    fn health_bootstrap_eligibility_is_current_and_consumed_by_authority_activity() {
+        let (_dir, gate, _) = bootstrap_setup();
+        assert!(gate.core_bootstrap_eligible().unwrap());
+
+        // A current catalog refresh is observational setup and must not consume eligibility.
+        gate.inner.catalog.write().unwrap().generation += 1;
+        assert!(gate.core_bootstrap_eligible().unwrap());
+        assert_eq!(gate.current_gate_generation().unwrap(), 0);
+
+        gate.heartbeat_activity_source("cyrene-catalogs").unwrap();
+        assert!(!gate.core_bootstrap_eligible().unwrap());
     }
 
     #[test]

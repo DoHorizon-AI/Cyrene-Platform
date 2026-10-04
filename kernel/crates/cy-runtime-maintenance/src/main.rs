@@ -348,6 +348,7 @@ fn dispatch(
     match request.method.as_str() {
         "Health" => Ok(json!({
             "status": "SERVING",
+            "core_bootstrap_eligible": broker.gate.core_bootstrap_eligible().map_err(ApiError::from_maintenance)?,
             "catalog_generation": broker.gate.catalog_generation(),
             "gate_generation": broker.gate.current_gate_generation().map_err(ApiError::from_maintenance)?,
         })),
