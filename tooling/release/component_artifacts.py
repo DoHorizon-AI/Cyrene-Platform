@@ -37,6 +37,7 @@ RUN_PATH_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-
 ATTACHMENT_KINDS = {"native-binary", "python-bundle"}
 ARTIFACT_KINDS = ATTACHMENT_KINDS | {"oci-image"}
 ATTESTATION_PREDICATE = "https://slsa.dev/provenance/v1"
+SEMVER_RANGE_TERM = re.compile(r"^(?:=|>=|>|<=|<|\^|~)?[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$")
 
 
 class ComponentArtifactError(ValueError):
@@ -281,6 +282,8 @@ def _validate_compatibility(value: Any) -> list[str]:
     for key in ("groupId", "contractApiVersion", "wireApiVersion"):
         if not isinstance(value.get(key), str) or not value[key]:
             errors.append(f"compatibility.{key} must be a non-empty string")
+    if "groupVersion" in value and (not isinstance(value["groupVersion"], str) or not value["groupVersion"]):
+        errors.append("compatibility.groupVersion must be a non-empty string")
     lock = value.get("contractLock")
     if not isinstance(lock, dict):
         errors.append("compatibility.contractLock must be an object")
@@ -304,7 +307,7 @@ def _validate_compatibility(value: Any) -> list[str]:
     return errors
 
 
-def _dependency_rows(value: Any, label: str) -> list[tuple[str, str | None]]:
+def _dependency_rows(value: Any, label: str, *, strict: bool = False) -> list[tuple[str, str | None]]:
     """Validate and normalize catalog or manifest dependency rows."""
     if not isinstance(value, list):
         raise ComponentArtifactError(f"{label} must be an array")
@@ -324,6 +327,12 @@ def _dependency_rows(value: Any, label: str) -> list[tuple[str, str | None]]:
             not isinstance(version_range, str) or not version_range.strip() or len(version_range) > 128
         ):
             raise ComponentArtifactError(f"{label} entry has an invalid versionRange")
+        if version_range is not None and any(
+            not SEMVER_RANGE_TERM.fullmatch(term.strip()) for term in version_range.split(",")
+        ):
+            raise ComponentArtifactError(f"{label} entry has a malformed SemVer versionRange")
+        if strict and version_range is None:
+            raise ComponentArtifactError(f"{label} v2 entry must pin versionRange")
         normalized.append((component_id, version_range))
     return sorted(normalized, key=lambda row: (row[0], row[1] or ""))
 
@@ -348,8 +357,17 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
     missing = sorted(required - set(document))
     if missing:
         errors.append("missing manifest keys: " + ", ".join(missing))
-    if document.get("schemaVersion") != SCHEMA_VERSION:
-        errors.append(f"schemaVersion must be {SCHEMA_VERSION}")
+    schema_version = document.get("schemaVersion")
+    if schema_version not in {1, 2}:
+        errors.append("schemaVersion must be 1 or 2")
+    if schema_version == 2:
+        required.update({"protocolVersion", "contentDigest"})
+        missing_v2 = sorted(required - set(document))
+        if missing_v2:
+            errors.append("missing v2 manifest keys: " + ", ".join(missing_v2))
+        protocol_version = document.get("protocolVersion")
+        if not isinstance(protocol_version, str) or not re.fullmatch(r"[a-z][a-z0-9._-]{0,127}", protocol_version):
+            errors.append("protocolVersion must be a valid wire/API identifier")
     component_id = document.get("componentId")
     if not isinstance(component_id, str) or not COMPONENT_ID_RE.fullmatch(component_id):
         errors.append("componentId must use lower-case hyphen-separated identifiers")
@@ -374,6 +392,17 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
         ref = source.get("ref")
         if not isinstance(ref, str) or not re.fullmatch(r"refs/(heads|tags)/[A-Za-z0-9._/-]+", ref):
             errors.append("source.ref must identify a Git branch or tag")
+        if schema_version == 2:
+            if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+                errors.append("v2 source.commit must be a full 40-character lowercase Git SHA")
+            if document.get("releaseId") != f"{document.get('channel')}-{commit}":
+                errors.append("v2 releaseId must equal channel plus exact source.commit")
+            allowed_refs = {
+                "preview": {"refs/heads/develop"},
+                "stable": {"refs/heads/main", "refs/heads/release"},
+            }
+            if ref not in allowed_refs.get(document.get("channel"), set()):
+                errors.append("v2 source.ref does not match the release channel")
         errors.extend(_validate_provenance(source, document.get("provenance")))
 
     artifact = document.get("artifact")
@@ -427,7 +456,7 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
             errors.append("OCI artifact.platform requires supported os and architecture values")
 
     try:
-        _dependency_rows(document.get("dependencies"), "dependencies")
+        _dependency_rows(document.get("dependencies"), "dependencies", strict=schema_version == 2)
     except ComponentArtifactError as error:
         errors.append(str(error))
     if not isinstance(document.get("restart"), dict):
@@ -435,6 +464,13 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
     if isinstance(source, dict):
         errors.extend(_validate_provenance(source, document.get("provenance")))
     errors.extend(_validate_compatibility(document.get("compatibility")))
+    if schema_version == 2:
+        compatibility_value = document.get("compatibility")
+        if isinstance(compatibility_value, dict) and not isinstance(compatibility_value.get("groupVersion"), str):
+            errors.append("v2 compatibility.groupVersion is required")
+        artifact_digest = artifact.get("sha256", artifact.get("digest")) if isinstance(artifact, dict) else None
+        if document.get("contentDigest") != artifact_digest:
+            errors.append("contentDigest must equal the exact artifact payload digest")
     digest = document.get("manifestDigest")
     if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
         errors.append("manifestDigest must be sha256:<64 lowercase hex>")
@@ -474,6 +510,8 @@ def create_manifest(
         artifact.setdefault("uri", _release_asset_uri(document, artifact_file.name))
     elif artifact.get("kind") != "oci-image":
         raise ComponentArtifactError("descriptor artifact kind is unsupported")
+    if document.get("schemaVersion") == 2:
+        document["contentDigest"] = artifact.get("sha256", artifact.get("digest"))
     document["manifestDigest"] = _manifest_digest(document)
     errors = _validate_manifest(document)
     if errors:
@@ -570,14 +608,30 @@ def _verify_channel_pin(catalog: dict[str, Any], channel: str, source_ref: str) 
         raise ComponentArtifactError("source.ref is not allowed for this channel by the trusted catalog")
 
 
-def _target_id(catalog: dict[str, Any], target: dict[str, Any]) -> str | None:
-    targets = catalog.get("targets")
-    if not isinstance(targets, list):
-        return None
-    for row in targets:
-        if isinstance(row, dict) and row.get("target") == target and isinstance(row.get("id"), str):
-            return row["id"]
-    return None
+def _declared_targets_for_json(
+    catalog: dict[str, Any],
+    component: dict[str, Any],
+    target: dict[str, Any],
+    artifact_kind: str | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    declarations = component.get("targets")
+    global_targets = catalog.get("targets")
+    if not isinstance(declarations, list) or not isinstance(global_targets, list):
+        return []
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for declaration in declarations:
+        if not isinstance(declaration, dict) or (
+            artifact_kind is not None and declaration.get("artifactKind") != artifact_kind
+        ):
+            continue
+        for global_target in global_targets:
+            if (
+                isinstance(global_target, dict)
+                and global_target.get("id") == declaration.get("targetId")
+                and global_target.get("target") == target
+            ):
+                matches.append((declaration, global_target))
+    return matches
 
 
 def _component_target(
@@ -593,30 +647,19 @@ def _component_target(
     artifact_kind = artifact.get("kind")
     if component.get("artifactKinds", [component.get("kind")]).count(artifact_kind) != 1:
         raise ComponentArtifactError("artifact kind is not allowed for this component by the catalog")
-    target_id = _target_id(catalog, target)
-    if target_id is None:
+    global_targets = catalog.get("targets")
+    if not isinstance(global_targets, list) or not any(
+        isinstance(row, dict) and row.get("target") == target for row in global_targets
+    ):
         raise ComponentArtifactError("manifest target is not defined by trusted catalog")
-    declared = component.get("targets")
-    entry = next(
-        (
-            row
-            for row in declared or []
-            if isinstance(row, dict) and row.get("targetId") == target_id and row.get("artifactKind") == artifact_kind
-        ),
-        None,
-    )
     build_dependency = component.get("role") == "build-dependency"
     publication_target = artifact_kind == "oci-image"
-    if not isinstance(entry, dict) or entry.get("support") not in (
-        {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
-    ):
+    permitted_support = {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
+    matches = _declared_targets_for_json(catalog, component, target, artifact_kind)
+    if len(matches) != 1 or matches[0][0].get("support") not in permitted_support:
         raise ComponentArtifactError("target is not authorized for this component by the catalog")
-    host_target = next(
-        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("id") == target_id),
-        None,
-    )
-    permitted_host_support = {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
-    if not isinstance(host_target, dict) or host_target.get("hostSupport") not in permitted_host_support:
+    host_target = matches[0][1]
+    if not isinstance(host_target, dict) or host_target.get("hostSupport") not in permitted_support:
         raise ComponentArtifactError("host target is not authorized by the catalog")
     if artifact_kind == "oci-image" and component.get("ociImageRepository") != artifact.get("repository"):
         raise ComponentArtifactError("OCI repository does not match the component catalog pin")
@@ -631,25 +674,19 @@ def _component_has_supported_target(catalog: dict[str, Any], component_id: str, 
     )
     if not isinstance(component, dict):
         return False
-    target_id = _target_id(catalog, target)
-    if target_id is None:
-        return False
-    global_target = next(
-        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("id") == target_id),
-        None,
-    )
     build_dependency = component.get("role") == "build-dependency"
-    declarations = [
-        row for row in component.get("targets", []) if isinstance(row, dict) and row.get("targetId") == target_id
-    ]
-    publication_target = any(row.get("artifactKind") == "oci-image" for row in declarations)
-    authorized_support = {"supported", "contract-only"} if build_dependency or publication_target else {"supported"}
-    if not isinstance(global_target, dict) or global_target.get("hostSupport") not in authorized_support:
+    matches = _declared_targets_for_json(catalog, component, target)
+    if not matches or len({row.get("targetId") for row, _ in matches}) != 1:
         return False
-    return any(
-        isinstance(row, dict) and row.get("targetId") == target_id and row.get("support") in authorized_support
-        for row in component.get("targets", [])
-    )
+    for row, global_target in matches:
+        permitted_support = (
+            {"supported", "contract-only"}
+            if build_dependency or row.get("artifactKind") == "oci-image"
+            else {"supported"}
+        )
+        if row.get("support") in permitted_support and global_target.get("hostSupport") in permitted_support:
+            return True
+    return False
 
 
 def _verify_contract_lock(compatibility: dict[str, Any]) -> None:
@@ -667,7 +704,69 @@ def _verify_contract_lock(compatibility: dict[str, Any]) -> None:
         raise ComponentArtifactError("tracked compatibility lock bytes do not match contractLock.sha256")
 
 
-def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], manifest_path: Path) -> None:
+def trusted_catalog_compatibility(
+    catalog_path: Path,
+    catalog: dict[str, Any],
+    component: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build compatibility metadata only from the pinned catalog and lock commit.
+
+    The source repository's Product bundle lock is deliberately not consulted
+    here: it governs data-bundle inputs, while this pin governs shared wire/API
+    compatibility for independently released connection components.
+    """
+    group_id = component.get("compatibilityGroup")
+    if group_id is None:
+        return None
+    groups = catalog.get("compatibilityGroups")
+    if not isinstance(groups, list):
+        raise ComponentArtifactError("trusted catalog has no compatibilityGroups array")
+    group = next(
+        (row for row in groups if isinstance(row, dict) and row.get("groupId") == group_id),
+        None,
+    )
+    if not isinstance(group, dict):
+        raise ComponentArtifactError(f"component references an unknown compatibility group: {component.get('componentId')}")
+    lock = group.get("contractLock")
+    if not isinstance(lock, dict):
+        raise ComponentArtifactError("trusted compatibility group has no immutable contractLock pin")
+    if lock.get("repository") != "DoHorizon-AI/Cyrene-Workspace":
+        raise ComponentArtifactError("connection protocol lock must be pinned to Cyrene-Workspace")
+    commit = lock.get("commit")
+    path = lock.get("path")
+    digest = lock.get("sha256")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ComponentArtifactError("trusted contractLock commit must be a full lower-case Git SHA")
+    if not isinstance(path, str) or path != "governance/workspace-connection-protocols-v2.lock.json":
+        raise ComponentArtifactError("trusted connection contractLock path is not the frozen protocol lock")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ComponentArtifactError("trusted contractLock sha256 must be sha256:<64 lowercase hex>")
+
+    # Signed catalog downloads need no checkout; lock bytes remain pinned.
+    # 独立下载的目录仍按固定来源与摘要校验协议锁。
+    _verify_contract_lock({"contractLock": lock})
+
+    for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion"):
+        if not isinstance(group.get(key), str) or not group[key]:
+            raise ComponentArtifactError(f"trusted compatibility group {key} must be a non-empty string")
+    return {
+        "groupId": group["groupId"],
+        "groupVersion": group["groupVersion"],
+        "contractApiVersion": group["contractApiVersion"],
+        "wireApiVersion": group["wireApiVersion"],
+        "contractLock": dict(lock),
+    }
+
+
+def _verify_manifest_catalog_metadata(
+    document: dict[str, Any], catalog: dict[str, Any]
+) -> tuple[str, str, dict[str, Any]]:
+    """Verify manifest declarations against the trusted catalog without release API calls.
+
+    This check is safe before a draft is published and includes exact component,
+    target, dependency, compatibility lock, source channel, and publisher pins.
+    在发布前只依赖可信目录验证组件元数据，不要求release已存在。
+    """
     source = document["source"]
     attestation = document["provenance"]["attestation"]
     owner, repository_name = _source_repository_parts(source["repository"])
@@ -677,44 +776,64 @@ def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], 
     component = _component_target(catalog, document["componentId"], document["artifact"], document["target"])
     if component.get("publisher") != repository:
         raise ComponentArtifactError("component publisher does not match manifest source.repository")
-    actual_dependencies = _dependency_rows(document.get("dependencies"), "manifest dependencies")
-    expected_dependencies = _dependency_rows(component.get("dependencies"), "catalog dependencies")
+    strict_dependencies = document.get("schemaVersion") == 2
+    actual_dependencies = _dependency_rows(document.get("dependencies"), "manifest dependencies", strict=strict_dependencies)
+    expected_dependencies = _dependency_rows(component.get("dependencies"), "catalog dependencies", strict=strict_dependencies)
     if actual_dependencies != expected_dependencies:
         raise ComponentArtifactError("manifest dependencies do not match the trusted component catalog")
     compatibility_groups = catalog.get("compatibilityGroups", [])
-    expected_group = next(
-        (
-            group.get("groupId")
-            for group in compatibility_groups
-            if isinstance(group, dict)
-            and any(
-                isinstance(member, dict) and member.get("componentId") == document["componentId"]
-                for member in group.get("members", [])
-            )
-        ),
-        None,
-    )
+    expected_groups = [
+        group
+        for group in compatibility_groups
+        if isinstance(group, dict)
+        and any(
+            isinstance(member, dict) and member.get("componentId") == document["componentId"]
+            for member in group.get("members", [])
+        )
+    ]
+    if len(expected_groups) > 1:
+        raise ComponentArtifactError("component belongs to multiple trusted compatibility groups")
+    group_definition = expected_groups[0] if expected_groups else None
+    expected_group = group_definition.get("groupId") if isinstance(group_definition, dict) else None
     compatibility = document.get("compatibility")
     if expected_group is not None:
         if not isinstance(compatibility, dict) or compatibility.get("groupId") != expected_group:
             raise ComponentArtifactError("manifest omits its trusted compatibility group pin")
-        group_definition = next(
-            group
-            for group in compatibility_groups
-            if isinstance(group, dict) and group.get("groupId") == expected_group
-        )
+        if not isinstance(group_definition, dict):
+            raise ComponentArtifactError("trusted compatibility group is malformed")
         if compatibility.get("contractApiVersion") != group_definition.get("contractApiVersion") or compatibility.get(
             "wireApiVersion"
         ) != group_definition.get("wireApiVersion"):
             raise ComponentArtifactError("manifest compatibility API versions do not match the catalog")
+        if compatibility.get("groupVersion") != group_definition.get("groupVersion"):
+            raise ComponentArtifactError("manifest compatibility groupVersion does not match the catalog")
         _verify_contract_lock(compatibility)
     elif compatibility is not None:
         raise ComponentArtifactError("manifest declares an unknown compatibility group")
+    if document.get("schemaVersion") == 2:
+        expected_protocol = component.get("protocolVersion")
+        if expected_protocol is None and expected_group is not None:
+            expected_member = next(
+                (
+                    member for member in group_definition.get("members", [])
+                    if isinstance(member, dict) and member.get("componentId") == document["componentId"]
+                ),
+                None,
+            )
+            expected_protocol = expected_member.get("protocolVersion") if isinstance(expected_member, dict) else None
+        if document.get("protocolVersion") != expected_protocol:
+            raise ComponentArtifactError("manifest protocolVersion does not match the trusted component or group pin")
     expected_ref_tag = f"{document['channel']}-{source['commit']}"
     if document["releaseId"] != expected_ref_tag:
         raise ComponentArtifactError("releaseId must be the immutable channel plus full source commit")
+    return owner, repository_name, publisher
+
+
+def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], manifest_path: Path) -> None:
+    owner, repository_name, publisher = _verify_manifest_catalog_metadata(document, catalog)
     api_url = (
-        f"https://api.github.com/repos/{owner}/{repository_name}/releases/tags/{quote(document['releaseId'], safe='-')}"
+        f"https://api.github.com/repos/{owner}/{repository_name}/releases/tags/"
+        f"{quote(document['releaseId'], safe='-')}"
     )
     release = _github_json(api_url)
     expected_prerelease = document["channel"] == "preview"
@@ -735,30 +854,47 @@ def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], 
             raise ComponentArtifactError("immutable GitHub Release is missing the component payload asset")
 
 
-def _verify_index_metadata(document: dict[str, Any], catalog: dict[str, Any]) -> None:
+def _verify_index_catalog_metadata(
+    document: dict[str, Any], catalog: dict[str, Any]
+) -> tuple[str, str, dict[str, Any]]:
+    """Verify publisher-local index entries against trusted catalog pins.
+
+    A publisher index may contain only releases that publisher produced. Global
+    adoption completeness is enforced by the update/apply layer across publishers.
+    校验当前publisher实际发布的行；跨publisher整组采纳由更新层统一门禁。
+    """
     source = document["source"]
     attestation = document["provenance"]["attestation"]
     owner, repository_name = _source_repository_parts(source["repository"])
     repository = f"{owner}/{repository_name}"
+    if document.get("repository") != repository:
+        raise ComponentArtifactError("index repository does not match the trusted source repository")
     publisher = _publisher_for(catalog, repository, attestation["workflow"])
     _verify_channel_pin(catalog, document["channel"], source["ref"])
-    release_ids = {f"{document['channel']}-{source['commit']}"}
-    release = _github_json(
-        f"https://api.github.com/repos/{owner}/{repository_name}/releases/tags/{quote(next(iter(release_ids)), safe='-')}"
-    )
-    expected_prerelease = document["channel"] == "preview"
-    if release.get("tag_name") != next(iter(release_ids)) or release.get("prerelease") is not expected_prerelease:
-        raise ComponentArtifactError("GitHub Release tag/prerelease state does not match trusted channel")
-    if release.get("draft") is not False or release.get("immutable") is not True:
-        raise ComponentArtifactError("release must be published and immutable")
-    discovery = publisher.get("releaseDiscovery", {})
-    index_asset_name = discovery.get("indexAssetName") if isinstance(discovery, dict) else None
-    asset_names = {row.get("name") for row in release.get("assets", []) if isinstance(row, dict)}
-    if index_asset_name != "component-release-index-v1.json" or index_asset_name not in asset_names:
-        raise ComponentArtifactError("immutable GitHub Release lacks the trusted index asset")
+    expected_release_id = f"{document['channel']}-{source['commit']}"
     for row in document["releases"]:
+        component_rows = [
+            component
+            for component in catalog.get("components", [])
+            if isinstance(component, dict) and component.get("componentId") == row["componentId"]
+        ]
+        if len(component_rows) != 1 or component_rows[0].get("publisher") != repository:
+            raise ComponentArtifactError(
+                f"index component publisher does not match the index repository: {row['componentId']}"
+            )
         if not _component_has_supported_target(catalog, row["componentId"], row["target"]):
             raise ComponentArtifactError(f"index contains unsupported component target: {row['componentId']}")
+        expected_uri = _release_asset_uri(
+            {
+                "source": {"repository": source["repository"]},
+                "releaseId": expected_release_id,
+            },
+            row["manifestUri"].rsplit("/", 1)[-1],
+        )
+        if row["manifestUri"] != expected_uri:
+            raise ComponentArtifactError(
+                "index manifestUri does not identify this publisher's exact immutable release asset"
+            )
     catalog_groups = {
         group.get("groupId"): group for group in catalog.get("compatibilityGroups", []) if isinstance(group, dict)
     }
@@ -770,14 +906,43 @@ def _verify_index_metadata(document: dict[str, Any], catalog: dict[str, Any]) ->
             "wireApiVersion"
         ] != definition.get("wireApiVersion"):
             raise ComponentArtifactError("index compatibility versions do not match the catalog")
-        required_members = {
-            member["componentId"]
+        if group.get("groupVersion") != definition.get("groupVersion"):
+            raise ComponentArtifactError("index compatibility groupVersion does not match the catalog")
+        if group.get("contractLock") != definition.get("contractLock"):
+            raise ComponentArtifactError("index compatibility lock does not match the trusted catalog")
+        _verify_contract_lock({"contractLock": definition.get("contractLock")})
+        declared_members = {
+            member.get("componentId")
             for member in definition.get("members", [])
-            if isinstance(member, dict) and member.get("requiredForAdoption") is True
+            if isinstance(member, dict)
         }
-        included_members = {member["componentId"] for member in group["members"]}
-        if not required_members.issubset(included_members):
-            raise ComponentArtifactError("index omits required members of a compatibility group")
+        if any(member.get("componentId") not in declared_members for member in group["members"]):
+            raise ComponentArtifactError("index compatibility group contains a component absent from the catalog")
+    return owner, repository_name, publisher
+
+
+def _verify_index_metadata(document: dict[str, Any], catalog: dict[str, Any]) -> None:
+    owner, repository_name, publisher = _verify_index_catalog_metadata(document, catalog)
+    release_id = f"{document['channel']}-{document['source']['commit']}"
+    release = _github_json(
+        "https://api.github.com/repos/"
+        f"{owner}/{repository_name}/releases/tags/{quote(release_id, safe='-')}"
+    )
+    expected_prerelease = document["channel"] == "preview"
+    if release.get("tag_name") != release_id or release.get("prerelease") is not expected_prerelease:
+        raise ComponentArtifactError("GitHub Release tag/prerelease state does not match trusted channel")
+    if release.get("draft") is not False or release.get("immutable") is not True:
+        raise ComponentArtifactError("release must be published and immutable")
+    discovery = publisher.get("releaseDiscovery", {})
+    index_asset_name = discovery.get("indexAssetName") if isinstance(discovery, dict) else None
+    asset_names = {row.get("name") for row in release.get("assets", []) if isinstance(row, dict)}
+    if index_asset_name != "component-release-index-v1.json" or index_asset_name not in asset_names:
+        raise ComponentArtifactError("immutable GitHub Release lacks the trusted index asset")
+    manifest_asset_names = {
+        Path(urlparse(row["manifestUri"]).path).name for row in document["releases"]
+    }
+    if not manifest_asset_names.issubset(asset_names):
+        raise ComponentArtifactError("immutable GitHub Release is missing an indexed component manifest asset")
 
 
 def _verify_attestation(
@@ -839,6 +1004,8 @@ def verify_manifest(
     *,
     verify_run: bool,
     verify_attestation: bool,
+    verify_release: bool = False,
+    verify_attestation_only: bool = False,
     catalog_path: Path | None = None,
     manifest_uri: str | None = None,
 ) -> dict[str, Any]:
@@ -863,12 +1030,22 @@ def verify_manifest(
             raise ComponentArtifactError("artifact digest does not match manifest")
         if _archive_files(path) != artifact["files"]:
             raise ComponentArtifactError("artifact file map does not match manifest")
-    if verify_run or verify_attestation:
+    if verify_attestation and verify_attestation_only:
+        raise ComponentArtifactError("full and prepublication attestation verification are mutually exclusive")
+    catalog: dict[str, Any] | None = None
+    if catalog_path is not None or verify_release or verify_attestation_only or verify_run or verify_attestation:
         if catalog_path is None:
-            raise ComponentArtifactError("remote provenance verification requires --catalog")
-        _verify_release_metadata(document, _read_object(catalog_path), Path(manifest_path))
+            raise ComponentArtifactError("catalog or provenance verification requires --catalog")
+        catalog = _read_object(catalog_path)
+    if catalog is not None:
+        _verify_manifest_catalog_metadata(document, catalog)
+    if verify_release or verify_run or verify_attestation:
+        if catalog is None:
+            raise ComponentArtifactError("release verification requires --catalog")
+        _verify_release_metadata(document, catalog, Path(manifest_path))
+    if verify_run or verify_attestation:
         _verify_run(document["source"], document["provenance"]["attestation"])
-    if verify_attestation:
+    if verify_attestation or verify_attestation_only:
         if artifact["kind"] == "oci-image":
             subject = f"oci://{artifact['repository']}@{artifact['digest']}"
             subject_name = artifact["repository"]
@@ -992,6 +1169,7 @@ def _validate_index(document: dict[str, Any]) -> list[str]:
                 _validate_compatibility(
                     {
                         "groupId": group.get("groupId"),
+                        "groupVersion": group.get("groupVersion"),
                         "contractApiVersion": group.get("contractApiVersion"),
                         "wireApiVersion": group.get("wireApiVersion"),
                         "contractLock": group.get("contractLock"),
@@ -1087,6 +1265,7 @@ def create_index(
             group_id = compatibility["groupId"]
             metadata = {
                 "groupId": group_id,
+                "groupVersion": compatibility["groupVersion"],
                 "contractApiVersion": compatibility["contractApiVersion"],
                 "wireApiVersion": compatibility["wireApiVersion"],
                 "contractLock": compatibility["contractLock"],
@@ -1156,6 +1335,8 @@ def verify_index(
     *,
     verify_run: bool,
     verify_attestation: bool,
+    verify_release: bool = False,
+    verify_attestation_only: bool = False,
     catalog_path: Path | None = None,
 ) -> dict[str, Any]:
     """Verify index digest and optional GHA run/attestation against exact bytes."""
@@ -1163,12 +1344,22 @@ def verify_index(
     errors = _validate_index(document)
     if errors:
         raise ComponentArtifactError("invalid index: " + "; ".join(errors))
-    if verify_run or verify_attestation:
+    if verify_attestation and verify_attestation_only:
+        raise ComponentArtifactError("full and prepublication attestation verification are mutually exclusive")
+    catalog: dict[str, Any] | None = None
+    if catalog_path is not None or verify_release or verify_attestation_only or verify_run or verify_attestation:
         if catalog_path is None:
-            raise ComponentArtifactError("remote provenance verification requires --catalog")
-        _verify_index_metadata(document, _read_object(catalog_path))
+            raise ComponentArtifactError("catalog or provenance verification requires --catalog")
+        catalog = _read_object(catalog_path)
+    if catalog is not None:
+        _verify_index_catalog_metadata(document, catalog)
+    if verify_release or verify_run or verify_attestation:
+        if catalog is None:
+            raise ComponentArtifactError("release verification requires --catalog")
+        _verify_index_metadata(document, catalog)
+    if verify_run or verify_attestation:
         _verify_run(document["source"], document["provenance"]["attestation"])
-    if verify_attestation:
+    if verify_attestation or verify_attestation_only:
         attestation = document["provenance"]["attestation"]
         _verify_attestation(
             str(index_path),
@@ -1197,6 +1388,8 @@ def _verify_command(arguments: argparse.Namespace) -> int:
         arguments.artifact,
         verify_run=arguments.verify_run,
         verify_attestation=arguments.verify_attestation,
+        verify_release=arguments.verify_release,
+        verify_attestation_only=arguments.verify_attestation_only,
         catalog_path=arguments.catalog,
         manifest_uri=arguments.manifest_uri,
     )
@@ -1240,13 +1433,15 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--output", type=Path, required=True)
     create.set_defaults(handler=_create_command)
 
-    verify = commands.add_parser("verify", help="verify manifest, payload, run, and attestation pins")
+    verify = commands.add_parser("verify", help="verify manifest, payload, catalog, release, run, and attestation pins")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--artifact", type=Path)
     verify.add_argument("--catalog", type=Path)
     verify.add_argument("--manifest-uri")
+    verify.add_argument("--verify-release", action="store_true")
     verify.add_argument("--verify-run", action="store_true")
     verify.add_argument("--verify-attestation", action="store_true")
+    verify.add_argument("--verify-attestation-only", action="store_true")
     verify.set_defaults(handler=_verify_command)
 
     index = commands.add_parser("index", help="create an immutable repository release index")
@@ -1262,11 +1457,13 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--output", type=Path, required=True)
     index.set_defaults(handler=_index_command)
 
-    verify_index_parser = commands.add_parser("verify-index", help="verify a release index and provenance")
+    verify_index_parser = commands.add_parser("verify-index", help="verify an index, catalog, release, run, and attestation pin")
     verify_index_parser.add_argument("--index", type=Path, required=True)
     verify_index_parser.add_argument("--catalog", type=Path)
+    verify_index_parser.add_argument("--verify-release", action="store_true")
     verify_index_parser.add_argument("--verify-run", action="store_true")
     verify_index_parser.add_argument("--verify-attestation", action="store_true")
+    verify_index_parser.add_argument("--verify-attestation-only", action="store_true")
     verify_index_parser.set_defaults(handler=lambda args: _verify_index_command(args))
 
     arguments = parser.parse_args(argv)
@@ -1283,6 +1480,8 @@ def _verify_index_command(arguments: argparse.Namespace) -> int:
         arguments.index,
         verify_run=arguments.verify_run,
         verify_attestation=arguments.verify_attestation,
+        verify_release=arguments.verify_release,
+        verify_attestation_only=arguments.verify_attestation_only,
         catalog_path=arguments.catalog,
     )
     print(f"verified index {document['repository']} {document['channel']} {document['indexDigest']}")

@@ -26,7 +26,11 @@ use x509_parser::certificate::X509Certificate;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::parse_x509_certificate;
 
-use crate::device_registry::{WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey};
+pub use crate::device_registry::{
+    AuthenticatedRelayWorkspaceDevice, CurrentRelayPeerRevocationEvidence,
+    RelayPeerCertificateRevocationChecker, RelayPeerRevocationCheckError, RelayPeerRevocationQuery,
+    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey,
+};
 
 const MAX_TRUST_ROOTS: usize = 32;
 const MAX_TRUST_ROOT_BUNDLE_BYTES: usize = 1024 * 1024;
@@ -59,86 +63,6 @@ pub enum RelayPeerCertificateError {
     RevocationStatusUnknown,
     #[error("WORKSPACE_RELAY_PEER_CERTIFICATE_IDENTITY_MISMATCH")]
     IdentityMismatch,
-}
-
-/// Revocation adapter outcomes; unknown, stale, or unavailable status denies.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum RelayPeerRevocationCheckError {
-    #[error("certificate is revoked")]
-    Revoked,
-    #[error("current certificate revocation status is unknown")]
-    Unknown,
-}
-
-/// Exact authenticated certificate material passed to the revocation adapter.
-pub struct RelayPeerRevocationQuery<'a> {
-    certificate_der: &'a [u8],
-    intermediate_chain_der: &'a [Vec<u8>],
-    trusted_roots_der: &'a [Vec<u8>],
-    serial_number: &'a [u8],
-    certificate_sha256: [u8; 32],
-    checked_at_unix_ms: u64,
-}
-
-impl RelayPeerRevocationQuery<'_> {
-    pub fn certificate_der(&self) -> &[u8] {
-        self.certificate_der
-    }
-
-    pub fn intermediate_chain_der(&self) -> &[Vec<u8>] {
-        self.intermediate_chain_der
-    }
-
-    pub fn trusted_roots_der(&self) -> &[Vec<u8>] {
-        self.trusted_roots_der
-    }
-
-    pub fn serial_number(&self) -> &[u8] {
-        self.serial_number
-    }
-
-    pub fn certificate_sha256(&self) -> &[u8; 32] {
-        &self.certificate_sha256
-    }
-
-    pub fn checked_at_unix_ms(&self) -> u64 {
-        self.checked_at_unix_ms
-    }
-}
-
-/// Freshness metadata returned only after a trusted checker verifies signed good-status evidence.
-pub struct CurrentRelayPeerRevocationEvidence {
-    certificate_sha256: [u8; 32],
-    this_update_unix_ms: u64,
-    next_update_unix_ms: u64,
-}
-
-impl CurrentRelayPeerRevocationEvidence {
-    /// Build evidence after the adapter authenticates a current CRL/OCSP response.
-    ///
-    /// This constructor does not validate signatures. Its caller is part of the
-    /// trusted revocation adapter and must bind the response to the query's exact
-    /// certificate and issuer path before returning it.
-    pub fn from_verified_good_status(
-        certificate_sha256: [u8; 32],
-        this_update_unix_ms: u64,
-        next_update_unix_ms: u64,
-    ) -> Self {
-        Self {
-            certificate_sha256,
-            this_update_unix_ms,
-            next_update_unix_ms,
-        }
-    }
-}
-
-/// Trusted CRL/OCSP status boundary. There is no default or soft-fail implementation.
-pub trait RelayPeerCertificateRevocationChecker: Send + Sync {
-    /// Return evidence only after proving current good status for this exact certificate.
-    fn require_current_good_status(
-        &self,
-        query: &RelayPeerRevocationQuery<'_>,
-    ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError>;
 }
 
 /// Identity facts signed by the leaf's project-private `cyrene-device:v1` URI SAN.
@@ -195,6 +119,7 @@ impl ValidatedRelayPeerCertificate {
         Ok(AuthenticatedRelayWorkspaceDevice {
             registration_binding_id: record.registration_binding_id,
             key: self.identity.key.clone(),
+            authorization_id: record.authorization_id,
             authorization_generation: self.identity.authorization_generation,
             csr_sha256: self.identity.csr_sha256,
             spki_sha256: self.identity.spki_sha256,
@@ -202,57 +127,6 @@ impl ValidatedRelayPeerCertificate {
             serial_number: self.serial_number.clone(),
             not_after_unix_ms: self.not_after_unix_ms,
         })
-    }
-}
-
-/// Certificate facts plus the matched Directory binding needed to fence rotations.
-///
-/// Never construct this from RelayHello or request data. A store must compare
-/// this binding ID and generation with its locked current identity row before
-/// reusing a device ID for certificate rotation.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AuthenticatedRelayWorkspaceDevice {
-    registration_binding_id: [u8; 16],
-    key: WorkspaceDeviceKey,
-    authorization_generation: u64,
-    csr_sha256: [u8; 32],
-    spki_sha256: [u8; 32],
-    certificate_sha256: [u8; 32],
-    serial_number: Vec<u8>,
-    not_after_unix_ms: u64,
-}
-
-impl AuthenticatedRelayWorkspaceDevice {
-    pub fn registration_binding_id(&self) -> &[u8; 16] {
-        &self.registration_binding_id
-    }
-
-    pub fn key(&self) -> &WorkspaceDeviceKey {
-        &self.key
-    }
-
-    pub fn authorization_generation(&self) -> u64 {
-        self.authorization_generation
-    }
-
-    pub fn csr_sha256(&self) -> &[u8; 32] {
-        &self.csr_sha256
-    }
-
-    pub fn spki_sha256(&self) -> &[u8; 32] {
-        &self.spki_sha256
-    }
-
-    pub fn certificate_sha256(&self) -> &[u8; 32] {
-        &self.certificate_sha256
-    }
-
-    pub fn serial_number(&self) -> &[u8] {
-        &self.serial_number
-    }
-
-    pub fn not_after_unix_ms(&self) -> u64 {
-        self.not_after_unix_ms
     }
 }
 
@@ -758,4 +632,53 @@ fn timestamp_millis(unix_seconds: i64) -> Option<u64> {
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        lowercase_hex, RelayPeerCertificateIdentity, ValidatedRelayPeerCertificate,
+        WorkspaceDeviceCertificateIdentity, WorkspaceDeviceKey,
+    };
+
+    #[test]
+    fn matched_registry_identity_preserves_authorization_id() {
+        let key = WorkspaceDeviceKey {
+            organization_id: "org-1".into(),
+            workspace_id: "workspace-1".into(),
+            device_id: "device-1".into(),
+        };
+        let certificate_sha256 = [0x42; 32];
+        let authorization_id = "01234567-89ab-cdef-0123-456789abcdef"
+            .parse()
+            .expect("authorization UUID is valid");
+        let record = WorkspaceDeviceCertificateIdentity {
+            key: key.clone(),
+            certificate_fingerprint_sha256: lowercase_hex(&certificate_sha256),
+            authorization_id,
+            registration_binding_id: [0x24; 16],
+            authorization_generation: 7,
+            csr_sha256: [0x31; 32],
+            spki_sha256: [0x53; 32],
+            serial_number: vec![0x11, 0x22],
+            not_after_unix_ms: 1_800_000_000_000,
+        };
+        let certificate = ValidatedRelayPeerCertificate {
+            identity: RelayPeerCertificateIdentity {
+                key,
+                authorization_generation: 7,
+                csr_sha256: [0x31; 32],
+                spki_sha256: [0x53; 32],
+            },
+            certificate_sha256,
+            serial_number: vec![0x11, 0x22],
+            not_after_unix_ms: 1_800_000_000_000,
+        };
+
+        let authenticated = certificate
+            .match_registry_identity(&record)
+            .expect("matching current Registry facts authenticate the certificate");
+
+        assert_eq!(authenticated.authorization_id(), authorization_id);
+    }
 }

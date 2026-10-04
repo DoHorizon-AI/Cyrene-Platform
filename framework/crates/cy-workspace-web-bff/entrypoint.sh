@@ -13,6 +13,7 @@ readonly SOURCE_DIR=/mnt/cyrene-secret-input
 readonly RUNTIME_DIR=/run/cyrene/workspace-web-bff-secrets
 readonly APP_UID=10001
 readonly APP_GID=10001
+readonly BUNDLE_READER_GID=${CYRENE_PRODUCT_BUNDLE_READER_GID:-}
 
 # Exit with a fixed message so secret contents and source paths never reach logs.
 fail_closed() {
@@ -50,6 +51,10 @@ stage_secret() {
 }
 
 [ "$(id -u)" -eq 0 ] || fail_closed
+[ -n "$BUNDLE_READER_GID" ] || fail_closed
+case "$BUNDLE_READER_GID" in
+    *[!0-9]*) fail_closed ;;
+esac
 [ -d "$SOURCE_DIR" ] && [ ! -L "$SOURCE_DIR" ] || fail_closed
 RESOLVED_SOURCE_DIR=$(realpath -e -- "$SOURCE_DIR") || fail_closed
 [ -d "$RESOLVED_SOURCE_DIR" ] || fail_closed
@@ -89,7 +94,7 @@ export CYRENE_WORKSPACE_WEB_BFF_BIND="${CYRENE_WORKSPACE_WEB_BFF_BIND:-0.0.0.0:8
 exec /usr/bin/setpriv \
     --reuid="$APP_UID" \
     --regid="$APP_GID" \
-    --clear-groups \
+    --groups="$BUNDLE_READER_GID" \
     --no-new-privs \
     --bounding-set=-all \
     /usr/local/bin/cy-workspace-web-bff

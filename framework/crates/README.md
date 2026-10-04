@@ -22,15 +22,12 @@ Read this guide first, then the direct files above in dependency order, and fina
 | `cy-installation-resolver/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-package-runtime/` | Generic package install, activation, supervision, and opaque connection facts; no capability payload routing. | 通用包安装、激活、监督与不透明连接事实；不路由能力业务载荷。 |
 | `cy-platform-api/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `cy-workspace-fabric/` | Workspace discovery, stable frontend API, and outbound relay connectivity. | Workspace 发现、稳定 frontend API 与出站 Relay 连接。 |
+| `cy-workspace-fabric/` | Legacy V1 transport and acceptance fixtures; not a production connection host. | 旧 V1 transport 与验收 fixture；不是生产连接宿主。 |
 | `cy-workspace-client-sdk/` | Lightweight outbound Workspace discovery and Relay client transport. | 轻量级 Workspace 发现与 Relay 出站 client transport。 |
 | `cy-workspace-control-plane/` | Workspace identity, authorization, and product-neutral authority services. | Workspace 身份、授权与产品中立 authority 服务。 |
 | `cy-workspace-postgres-storage/` | PostgreSQL-backed Workspace directory and credential storage adapters. | 基于 PostgreSQL 的 Workspace directory 与凭据存储适配器。 |
 | `cy-workspace-product-contracts/` | Pinned owner catalogs and trusted Platform product authorization contracts. | 固定来源 owner catalog 与可信 Platform Product 授权契约。 |
-| `cy-workspace-relay-runtime/` | Inbound authenticated Relay stream runtime and transport composition. | 入站认证 Relay stream runtime 与 transport 组合。 |
-| `cy-workspace-relay-host/` | Independently versioned Relay process and image. | 独立版本化的 Relay 进程与镜像。 |
-| `cy-workspace-connector-host/` | Independently versioned outbound Connector process and image. | 独立版本化的出站 Connector 进程与镜像。 |
-| `cy-workspace-sidecar/` | Independently versioned loopback client bridge process. | 独立版本化的 loopback client bridge 进程。 |
+| `cy-workspace-relay-runtime/` | Legacy V1 Relay runtime retained for Fabric compatibility fixtures. | 为 Fabric 兼容 fixture 保留的旧 V1 Relay runtime。 |
 | `cy-workspace-web-bff/` | Independently packaged authenticated Workspace Web BFF. | 独立打包的 Workspace Web BFF 认证服务。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
@@ -61,15 +58,12 @@ This snapshot is intentionally limited to direct entries; nested directories own
 | `cy-installation-resolver/` | 嵌套源码或契约边界，下一步阅读其 README。 |
 | `cy-package-runtime/` | 通用包安装、激活、监督与不透明连接事实；不路由能力业务载荷。 |
 | `cy-platform-api/` | 嵌套源码或契约边界，下一步阅读其 README。 |
-| `cy-workspace-fabric/` | Workspace 发现、稳定 frontend API 与出站 Relay 连接。 |
+| `cy-workspace-fabric/` | 旧 V1 transport 与验收 fixture；不是生产连接宿主。 |
 | `cy-workspace-client-sdk/` | 轻量级 Workspace 发现与 Relay 出站 client transport。 |
 | `cy-workspace-control-plane/` | Workspace 身份、授权与产品中立 authority 服务。 |
 | `cy-workspace-postgres-storage/` | 基于 PostgreSQL 的 Workspace directory 与凭据存储适配器。 |
 | `cy-workspace-product-contracts/` | 固定来源 owner catalog 与可信 Platform Product 授权契约。 |
-| `cy-workspace-relay-runtime/` | 入站认证 Relay stream runtime 与 transport 组合。 |
-| `cy-workspace-relay-host/` | 独立版本化的 Relay 进程与镜像。 |
-| `cy-workspace-connector-host/` | 独立版本化的出站 Connector 进程与镜像。 |
-| `cy-workspace-sidecar/` | 独立版本化的 loopback client bridge 进程。 |
+| `cy-workspace-relay-runtime/` | 为 Fabric 兼容 fixture 保留的旧 V1 Relay runtime。 |
 | `cy-workspace-web-bff/` | 独立打包的 Workspace Web BFF 认证服务。 |
 
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

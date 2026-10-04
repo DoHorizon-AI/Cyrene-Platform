@@ -11,6 +11,7 @@ default = []
 test-support = []
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 cy-observability = { version = "0.1.0", path = "../cy-observability" }
 cy-mtls-channel-client = { version = "0.1.0", path = "../cy-mtls-channel-client" }
@@ -28,13 +29,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 subtle = "2.6"
+tar = "0.4"
 thiserror = "1.0"
 tokio = { version = "1.35", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = "0.12"
 tracing = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
+zstd = "0.13"
 zeroize = "1.8"
 
 [dev-dependencies]
+cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts", features = ["test-support"] }
 tempfile = "3.8"

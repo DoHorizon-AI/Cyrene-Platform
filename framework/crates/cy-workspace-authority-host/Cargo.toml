@@ -1,0 +1,40 @@
+[package]
+name = "cy-workspace-authority-host"
+version = "0.1.0"
+edition = "2021"
+description = "Independent production host for Cyrene Workspace Authority."
+license = "Apache-2.0"
+repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.7"
+cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }
+cy-workspace-control-plane = { version = "0.1.0", path = "../cy-workspace-control-plane" }
+cy-workspace-postgres-storage = { version = "0.1.0", path = "../cy-workspace-postgres-storage" }
+ed25519-dalek = "2.2"
+http = "1"
+libc = "0.2"
+nix = { version = "0.30", features = ["user"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.2"
+sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+thiserror = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = "1.0"
+zeroize = "1.8"
+
+[[bin]]
+name = "cy-workspace-authority-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "cy-workspace-authority-admin"
+path = "src/admin.rs"

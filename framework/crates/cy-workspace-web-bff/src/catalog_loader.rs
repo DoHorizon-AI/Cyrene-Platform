@@ -1,52 +1,120 @@
-// ╔══════════════════════════════════════════════════════════════════════╗
-// ║ File: framework/crates/cy-workspace-web-bff/src/catalog_loader.rs   ║
-// ║ Module: cy_workspace_web_bff::catalog_loader                       ║
-// ║ Role: Load the build-pinned Product v2 catalog and policy bundle.   ║
-// ║                                                                    ║
-// ║ 模块职责：加载构建时固定 pin 的 Product v2 catalog 与 policy bundle。║
-// ╚══════════════════════════════════════════════════════════════════════╝
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │  Authority-backed Product catalog view loader                      │
+//! │  Module: cy_workspace_web_bff::catalog_loader                       │
+//! │  Role: Verify local schemas against an authenticated Authority view. │
+//! │                                                                     │
+//! │  模块职责：按Authority认证版本加载本地合同，用于BFF保留schema检查。  │
+//! └─────────────────────────────────────────────────────────────────────┘
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
+use cy_proto::cyrene::workspace::authority::v2::CatalogSnapshotResponse;
 use cy_workspace_product_contracts::{
-    ProductBundlePins, ProductContractBundle, TrustedProductPolicy,
+    ProductBundlePins, ProductContractBundle, TrustedProductPolicy, CONTRACT_API_VERSION,
 };
+use serde::Deserialize;
 
 use crate::product::{ProductCatalogError, ProductOperationCatalog};
 
-/// Name of the versioned release bundle manifest.
-///
-/// 版本化 release bundle manifest 文件名。
+/// Product contract manifest stored in an immutable version directory.
 pub const CONTRACT_BUNDLE_MANIFEST_FILENAME: &str = "product-contract-bundle.json";
 
-/// Name of the separately pinned Platform authorization policy artifact.
-///
-/// 独立 pin 的 Platform authorization policy artifact 文件名。
+/// Separately approved Platform authorization policy filename.
 pub const PRODUCT_POLICY_BUNDLE_FILENAME: &str = "workspace-product-policy-v2.json";
 
-/// Environment variable naming the immutable Product v2 bundle mount.
-///
-/// 指向不可变 Product v2 bundle 挂载目录的环境变量名称。
-pub const PRODUCT_CONTRACT_ROOT_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT_V2";
+/// Environment variable naming the shared immutable Product bundle versions root.
+pub const PRODUCT_BUNDLE_VERSIONS_ROOT_ENV: &str = "CYRENE_WORKSPACE_PRODUCT_BUNDLE_VERSIONS_ROOT";
 
-include!(concat!(env!("OUT_DIR"), "/product_bundle_pins.rs"));
+/// Compatibility constant; its value now names the versions root, not one active bundle.
+pub const PRODUCT_CONTRACT_ROOT_ENV: &str = PRODUCT_BUNDLE_VERSIONS_ROOT_ENV;
 
-/// Load and compile the pinned Product v2 catalog and trusted Platform policy.
+const PRODUCT_WIRE_API_VERSION: &str = "cyrene.workspace.product.v2";
+const PRODUCT_POLICY_SCHEMA_VERSION: &str = "cyrene.workspace.product.authorization-policy.v2";
+const MAX_BUNDLE_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+/// Load one immutable local contract pair after matching it to Authority's authenticated view.
 ///
-/// 加载并编译固定 pin 的 Product v2 catalog 与受信 Platform policy。
-pub fn load_product_operation_catalog(
+/// The response is expected to come from `GetCatalogSnapshot` over the authenticated Authority
+/// channel. This function never treats request-supplied digests or the local bundle itself as a
+/// trust source. Its authenticated archive ID selects `versions/<raw archive SHA>` under the
+/// configured versions root, so product and policy files always come from the same immutable
+/// artifact that Authority activated. It reuses the full Product contract loader for file digests, references,
+/// request/response schemas, resource rules, and scope bindings.
+pub fn load_product_operation_catalog_from_authority_snapshot(
     contract_root: impl AsRef<Path>,
+    view: &CatalogSnapshotResponse,
 ) -> Result<ProductOperationCatalog, ProductCatalogError> {
-    let pins = expected_product_bundle_pins()?;
-    let root = contract_root
-        .as_ref()
-        .canonicalize()
-        .map_err(|_| ProductCatalogError::ContractBundle)?;
-    if !root.is_dir() {
+    if view.workspace_id.trim().is_empty()
+        || view.organization_id.trim().is_empty()
+        || view.catalog_generation == 0
+        || view.contract_activation_generation == 0
+        || view.catalog_generation != view.contract_activation_generation
+        || view.wire_api_version != PRODUCT_WIRE_API_VERSION
+        || view.contract_api_version != CONTRACT_API_VERSION
+        || view.policy_schema_version != PRODUCT_POLICY_SCHEMA_VERSION
+        || !is_sha256_hex(&view.bundle_manifest_sha256)
+        || !is_sha256_hex(&view.policy_digest_sha256)
+        || view.owners.is_empty()
+    {
         return Err(ProductCatalogError::ContractBundle);
     }
 
+    let mut source_commits = BTreeMap::new();
+    let mut authority_grants = BTreeSet::new();
+    for owner in &view.owners {
+        if owner.owner_id.trim().is_empty()
+            || owner.component_id.trim().is_empty()
+            || !is_git_commit(&owner.source_commit)
+        {
+            return Err(ProductCatalogError::ContractBundle);
+        }
+        if source_commits
+            .insert(owner.owner_id.clone(), owner.source_commit.clone())
+            .is_some()
+        {
+            return Err(ProductCatalogError::ContractBundle);
+        }
+        for operation_id in &owner.granted_operation_ids {
+            if operation_id.trim().is_empty()
+                || !authority_grants.insert((owner.owner_id.clone(), operation_id.clone()))
+            {
+                return Err(ProductCatalogError::TrustedPolicy);
+            }
+        }
+    }
+
+    let versions_root = contract_root
+        .as_ref()
+        .canonicalize()
+        .map_err(|_| ProductCatalogError::ContractBundle)?;
+    if !versions_root.is_dir() || !is_sha256_prefixed(&view.artifact_id) {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+    let artifact_sha = view
+        .artifact_id
+        .strip_prefix("sha256:")
+        .ok_or(ProductCatalogError::ContractBundle)?;
+    let artifact_dir = versions_root.join(artifact_sha);
+    let artifact_metadata = std::fs::symlink_metadata(&artifact_dir)
+        .map_err(|_| ProductCatalogError::ContractBundle)?;
+    if artifact_metadata.file_type().is_symlink() || !artifact_metadata.is_dir() {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+    let root = artifact_dir
+        .canonicalize()
+        .map_err(|_| ProductCatalogError::ContractBundle)?;
+    if !root.starts_with(&versions_root) || root == versions_root {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+    validate_owner_projection(&root, view)?;
+    let pins = ProductBundlePins::new(
+        view.wire_api_version.clone(),
+        view.bundle_manifest_sha256.clone(),
+        source_commits,
+        view.policy_schema_version.clone(),
+        view.policy_digest_sha256.clone(),
+    );
     let bundle = ProductContractBundle::load(&root, &pins)
         .map_err(|_| ProductCatalogError::ContractBundle)?;
     let policy = TrustedProductPolicy::load(root.join(PRODUCT_POLICY_BUNDLE_FILENAME), &pins)
@@ -54,70 +122,143 @@ pub fn load_product_operation_catalog(
     policy
         .validate_bundle(&bundle)
         .map_err(|_| ProductCatalogError::TrustedPolicy)?;
+
+    // Ensure the authenticated grant view and the separately pinned policy describe the same
+    // active authorization set. This prevents a stale BFF cache from widening its preflight.
+    let mut local_grants = BTreeSet::new();
+    for operation in bundle.operations() {
+        if policy.has_grant(operation.owner_id(), operation.operation_id()) {
+            local_grants.insert((
+                operation.owner_id().to_owned(),
+                operation.operation_id().to_owned(),
+            ));
+        }
+    }
+    if local_grants != authority_grants {
+        return Err(ProductCatalogError::TrustedPolicy);
+    }
+
     Ok(ProductOperationCatalog::from_verified_bundle(
         bundle, policy,
     ))
 }
 
-/// Load the fixed-version Product v2 bundle path from process configuration.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BundleManifestProjection {
+    format_version: u32,
+    wire_api_version: String,
+    owners: Vec<BundleOwnerProjection>,
+    files: Vec<BundleFileProjection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BundleOwnerProjection {
+    owner_id: String,
+    repository: String,
+    source_sha: String,
+    catalog_path: String,
+    catalog_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BundleFileProjection {
+    path: String,
+    sha256: String,
+}
+
+fn validate_owner_projection(
+    root: &Path,
+    view: &CatalogSnapshotResponse,
+) -> Result<(), ProductCatalogError> {
+    let manifest_path = root.join(CONTRACT_BUNDLE_MANIFEST_FILENAME);
+    let metadata = std::fs::symlink_metadata(&manifest_path)
+        .map_err(|_| ProductCatalogError::ContractBundle)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_BUNDLE_MANIFEST_BYTES
+    {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+    let manifest_bytes =
+        std::fs::read(&manifest_path).map_err(|_| ProductCatalogError::ContractBundle)?;
+    let manifest: BundleManifestProjection =
+        serde_json::from_slice(&manifest_bytes).map_err(|_| ProductCatalogError::ContractBundle)?;
+    if manifest.format_version != 2
+        || manifest.wire_api_version != view.wire_api_version
+        || manifest.owners.len() != view.owners.len()
+        || manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != manifest.files.len()
+    {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+    let authority_owners = view
+        .owners
+        .iter()
+        .map(|owner| (owner.owner_id.as_str(), owner))
+        .collect::<BTreeMap<_, _>>();
+    let file_digests = manifest
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for owner in &manifest.owners {
+        let Some(authority_owner) = authority_owners.get(owner.owner_id.as_str()) else {
+            return Err(ProductCatalogError::ContractBundle);
+        };
+        if owner.source_sha != authority_owner.source_commit
+            || owner.catalog_sha256 != authority_owner.catalog_digest_sha256
+            || !is_sha256_hex(&owner.catalog_sha256)
+            || owner.catalog_path
+                != format!("{}/contracts/product/v2/catalog.json", owner.repository)
+            || file_digests.get(owner.catalog_path.as_str()) != Some(&owner.catalog_sha256.as_str())
+            || !seen.insert(owner.owner_id.as_str())
+        {
+            return Err(ProductCatalogError::ContractBundle);
+        }
+    }
+    if seen.len() != authority_owners.len() {
+        return Err(ProductCatalogError::ContractBundle);
+    }
+    Ok(())
+}
+
+/// Load the current Authority view through a caller-supplied authenticated RPC operation.
 ///
-/// 从进程配置读取固定版本 Product v2 bundle 路径。
+/// The RPC adapter owns transport credentials and caller/workspace binding; this helper keeps
+/// disk loading and integrity checks scoped to the returned immutable view.
 pub fn load_product_operation_catalog_from_environment(
+    view: &CatalogSnapshotResponse,
 ) -> Result<ProductOperationCatalog, ProductCatalogError> {
-    let root = std::env::var_os(PRODUCT_CONTRACT_ROOT_ENV)
-        .map(PathBuf::from)
+    let root = std::env::var_os(PRODUCT_BUNDLE_VERSIONS_ROOT_ENV)
+        .map(std::path::PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
         .ok_or(ProductCatalogError::ContractBundle)?;
-    load_product_operation_catalog(root)
+    load_product_operation_catalog_from_authority_snapshot(root, view)
 }
 
-fn expected_product_bundle_pins() -> Result<ProductBundlePins, ProductCatalogError> {
-    if !PRODUCT_BUNDLE_PINS_AVAILABLE {
-        return Err(ProductCatalogError::ReleasePinUnavailable);
-    }
-    let owner_source_shas = PRODUCT_BUNDLE_OWNER_SOURCE_SHAS
-        .iter()
-        .map(|(owner_id, source_sha)| ((*owner_id).to_owned(), (*source_sha).to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    Ok(ProductBundlePins::new(
-        PRODUCT_BUNDLE_WIRE_API_VERSION.to_owned(),
-        PRODUCT_BUNDLE_MANIFEST_SHA256.to_owned(),
-        owner_source_shas,
-        PRODUCT_BUNDLE_POLICY_SCHEMA_VERSION.to_owned(),
-        PRODUCT_BUNDLE_POLICY_SHA256.to_owned(),
-    ))
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn is_sha256_prefixed(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(is_sha256_hex)
+}
 
-    const TEST_BUNDLE_ROOT_ENV: &str = "CYRENE_WORKSPACE_WEB_BFF_TEST_PRODUCT_CONTRACT_ROOT_V2";
-
-    /// Exercise runtime loading against the same separately verified bundle used for packaging.
-    ///
-    /// This smoke test is ignored by default because normal source checkouts do not contain the
-    /// external release bundle. Run it with TEST_BUNDLE_ROOT_ENV pointing at a verified bundle.
-    #[test]
-    #[ignore = "requires a separately verified Product v2 release bundle"]
-    fn loads_pinned_catalog_and_keeps_navigator_append_denied() {
-        let root = std::env::var_os(TEST_BUNDLE_ROOT_ENV)
-            .map(PathBuf::from)
-            .expect("set the separately verified Product v2 bundle root");
-        let catalog = load_product_operation_catalog(root)
-            .expect("the immutable lock and release bundle match");
-
-        assert!(catalog.get("catalyst", "workspaceListDatasets").is_some());
-        assert!(catalog.has_grant("catalyst", "workspaceListDatasets"));
-        assert!(catalog
-            .get(
-                "navigator",
-                "append_events_api_v1_harness_workspaces__workspace_id__sessions__session_id__append_post"
-            )
-            .is_some());
-        assert!(!catalog.has_grant(
-            "navigator",
-            "append_events_api_v1_harness_workspaces__workspace_id__sessions__session_id__append_post"
-        ));
-    }
+fn is_git_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }

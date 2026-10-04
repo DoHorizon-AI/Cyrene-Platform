@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cy_proto::cyrene::workspace::authority::v2 as authority_v2;
+use cy_proto::cyrene::workspace::authority::v2::workspace_authority_service_client::WorkspaceAuthorityServiceClient;
 use cy_workspace_control_plane::workspace_v1::{
     workspace_api_request, WorkspaceApiRequest, WorkspaceApiResponse, WorkspaceConnectionCandidate,
     WorkspaceConnectionDescriptor,
@@ -19,8 +21,204 @@ use cy_workspace_control_plane::{
     validate_descriptor, VerifiedWebPrincipal, WorkspaceApi, WorkspaceCallerContext,
     WorkspaceDirectory, WorkspaceDirectoryError,
 };
+use tonic::metadata::MetadataValue;
+use tonic::transport::{Channel, Endpoint};
+use tonic::Request as TonicRequest;
 
 use crate::WorkspaceGatewayError;
+
+/// BFF gateway which obtains catalog truth and invocation results only from the separate local
+/// Platform Authority process. It never calls Plugins Bridge or the outbox directly.
+pub struct AuthorityWorkspaceProductGateway {
+    directory: Arc<dyn WorkspaceDirectory>,
+    authority_uds: std::path::PathBuf,
+}
+
+impl AuthorityWorkspaceProductGateway {
+    /// Create a gateway bound to the fixed local Authority UDS.
+    pub fn new(
+        directory: Arc<dyn WorkspaceDirectory>,
+        authority_uds: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            directory,
+            authority_uds: authority_uds.into(),
+        }
+    }
+
+    async fn connect(
+        &self,
+    ) -> Result<WorkspaceAuthorityServiceClient<Channel>, WorkspaceGatewayError> {
+        #[cfg(unix)]
+        {
+            let path = self.authority_uds.clone();
+            let channel = Endpoint::try_from("http://[::]:50051")
+                .map_err(|_| WorkspaceGatewayError::Unavailable)?
+                .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                    let path = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(path).await?;
+                        Ok::<_, std::io::Error>(hyper_util::rt::tokio::TokioIo::new(stream))
+                    }
+                }))
+                .await
+                .map_err(|_| WorkspaceGatewayError::Unavailable)?;
+            Ok(WorkspaceAuthorityServiceClient::new(channel))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &self.authority_uds;
+            Err(WorkspaceGatewayError::Unavailable)
+        }
+    }
+}
+
+#[async_trait]
+impl crate::WorkspaceProductGateway for AuthorityWorkspaceProductGateway {
+    async fn catalog_for_request(
+        &self,
+        principal: &VerifiedWebPrincipal,
+        access_token: &str,
+        workspace_id: &str,
+    ) -> Result<crate::ProductOperationCatalog, WorkspaceGatewayError> {
+        let now = now_unix_ms().ok_or(WorkspaceGatewayError::Unavailable)?;
+        if principal.expires_at_unix_ms() <= now {
+            return Err(WorkspaceGatewayError::Forbidden);
+        }
+        WorkspaceCallerContext::from_verified_web_member(
+            principal,
+            workspace_id,
+            self.directory.as_ref(),
+        )
+        .await
+        .map_err(|_| WorkspaceGatewayError::Forbidden)?;
+        let mut client = self.connect().await?;
+        let mut request = TonicRequest::new(authority_v2::CatalogSnapshotRequest {
+            workspace_id: workspace_id.to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", bearer_metadata(access_token)?);
+        let view = client
+            .get_catalog_snapshot(request)
+            .await
+            .map_err(map_authority_status)?
+            .into_inner();
+        if view.organization_id != principal.organization_id() || view.workspace_id != workspace_id
+        {
+            return Err(WorkspaceGatewayError::InvalidResponse);
+        }
+        crate::load_product_operation_catalog_from_environment(&view)
+            .map_err(|_| WorkspaceGatewayError::Unavailable)
+    }
+
+    async fn invoke(
+        &self,
+        principal: &VerifiedWebPrincipal,
+        access_token: &str,
+        request: WorkspaceApiRequest,
+    ) -> Result<WorkspaceApiResponse, WorkspaceGatewayError> {
+        validate_gateway_request(&request)?;
+        let now = now_unix_ms().ok_or(WorkspaceGatewayError::Unavailable)?;
+        if principal.expires_at_unix_ms() <= now {
+            return Err(WorkspaceGatewayError::Forbidden);
+        }
+        WorkspaceCallerContext::from_verified_web_member(
+            principal,
+            request.workspace_id.clone(),
+            self.directory.as_ref(),
+        )
+        .await
+        .map_err(|_| WorkspaceGatewayError::Forbidden)?;
+        let Some(workspace_api_request::Request::ProductApiV2(invocation)) = request.request else {
+            return Err(WorkspaceGatewayError::InvalidResponse);
+        };
+        let mut client = self.connect().await?;
+        let mut approve = TonicRequest::new(authority_v2::ApproveAndEnqueueInvocationRequest {
+            workspace_id: request.workspace_id.clone(),
+            invocation: Some(invocation),
+        });
+        approve
+            .metadata_mut()
+            .insert("authorization", bearer_metadata(access_token)?);
+        let approved = client
+            .approve_and_enqueue_invocation(approve)
+            .await
+            .map_err(map_authority_status)?
+            .into_inner();
+        if approved.invocation_id.is_empty()
+            || !matches!(
+                authority_v2::InvocationState::try_from(approved.state),
+                Ok(authority_v2::InvocationState::Pending
+                    | authority_v2::InvocationState::Claimed
+                    | authority_v2::InvocationState::Acknowledged
+                    | authority_v2::InvocationState::Succeeded)
+            )
+        {
+            return Err(WorkspaceGatewayError::InvalidResponse);
+        }
+        let mut wait = TonicRequest::new(authority_v2::WaitInvocationResultRequest {
+            invocation_id: approved.invocation_id,
+            timeout_ms: 30_000,
+            workspace_id: request.workspace_id.clone(),
+        });
+        wait.metadata_mut()
+            .insert("authorization", bearer_metadata(access_token)?);
+        let result = client
+            .wait_invocation_result(wait)
+            .await
+            .map_err(map_authority_status)?
+            .into_inner();
+        if authority_v2::InvocationState::try_from(result.state).ok()
+            != Some(authority_v2::InvocationState::Succeeded)
+            || result.product_response.is_none()
+            || result.result_receipt.is_empty()
+        {
+            return Err(
+                match authority_v2::InvocationState::try_from(result.state).ok() {
+                    Some(authority_v2::InvocationState::Failed) => {
+                        WorkspaceGatewayError::InvalidResponse
+                    }
+                    Some(
+                        authority_v2::InvocationState::Pending
+                        | authority_v2::InvocationState::Claimed
+                        | authority_v2::InvocationState::Acknowledged,
+                    ) => WorkspaceGatewayError::Timeout,
+                    _ => WorkspaceGatewayError::Unavailable,
+                },
+            );
+        }
+        Ok(WorkspaceApiResponse {
+            request_id: request.request_id,
+            outcome: Some(cy_workspace_control_plane::workspace_v1::workspace_api_response::Outcome::ProductApiV2(
+                result.product_response.expect("checked present"),
+            )),
+        })
+    }
+}
+
+fn bearer_metadata(
+    token: &str,
+) -> Result<MetadataValue<tonic::metadata::Ascii>, WorkspaceGatewayError> {
+    if token.is_empty() || token.len() > 16 * 1024 || token.trim() != token {
+        return Err(WorkspaceGatewayError::Forbidden);
+    }
+    MetadataValue::try_from(format!("Bearer {token}")).map_err(|_| WorkspaceGatewayError::Forbidden)
+}
+
+fn map_authority_status(status: tonic::Status) -> WorkspaceGatewayError {
+    match status.code() {
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+            WorkspaceGatewayError::Forbidden
+        }
+        tonic::Code::NotFound => WorkspaceGatewayError::NotFound,
+        tonic::Code::DeadlineExceeded => WorkspaceGatewayError::Timeout,
+        tonic::Code::InvalidArgument | tonic::Code::FailedPrecondition | tonic::Code::Aborted => {
+            WorkspaceGatewayError::InvalidResponse
+        }
+        _ => WorkspaceGatewayError::Unavailable,
+    }
+}
 
 /// Resolve one Directory-owned Workspace descriptor to its authenticated API transport.
 ///
@@ -42,6 +240,7 @@ pub trait WorkspaceApiResolver: Send + Sync + 'static {
     async fn resolve(
         &self,
         principal: &VerifiedWebPrincipal,
+        access_token: &str,
         descriptor: &WorkspaceConnectionDescriptor,
     ) -> Result<WorkspaceApiBinding, WorkspaceApiResolutionError>;
 }
@@ -209,9 +408,19 @@ impl FabricWorkspaceProductGateway {
 
 #[async_trait]
 impl crate::WorkspaceProductGateway for FabricWorkspaceProductGateway {
+    async fn catalog_for_request(
+        &self,
+        _principal: &VerifiedWebPrincipal,
+        _access_token: &str,
+        _workspace_id: &str,
+    ) -> Result<crate::ProductOperationCatalog, WorkspaceGatewayError> {
+        Err(WorkspaceGatewayError::Unavailable)
+    }
+
     async fn invoke(
         &self,
         principal: &VerifiedWebPrincipal,
+        access_token: &str,
         request: WorkspaceApiRequest,
     ) -> Result<WorkspaceApiResponse, WorkspaceGatewayError> {
         validate_gateway_request(&request)?;
@@ -237,7 +446,7 @@ impl crate::WorkspaceProductGateway for FabricWorkspaceProductGateway {
         .map_err(|error| map_caller_context_status(error.http_status()))?;
         let binding = self
             .resolver
-            .resolve(principal, &descriptor)
+            .resolve(principal, access_token, &descriptor)
             .await
             .map_err(map_resolution_error)?;
         if !binding.belongs_to(principal, &descriptor) {

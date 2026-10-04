@@ -5,6 +5,13 @@ on:
     branches: [main, release, develop]
   pull_request:
     branches: [main, release, develop]
+  workflow_dispatch:
+    inputs:
+      catalog_release_id:
+        description: Exact immutable Workspace component catalog release ID (optional)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -13,9 +20,185 @@ concurrency:
   group: component-release-${{ github.repository }}-${{ github.sha }}
   cancel-in-progress: false
 
+env:
+  CATALOG_HELPER_SOURCE_COMMIT: "69481d10f4a89f4679bc00195bc9caa5db5fb16a"
+  CATALOG_RELEASE_ID: ${{ inputs.catalog_release_id || (github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID) || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) || '' }}
+
 jobs:
+  catalog-input:
+    if: github.event_name != 'pull_request'
+    name: fetch and verify immutable Workspace component catalog
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      catalog_sha256: ${{ steps.fetch.outputs.catalog_sha256 }}
+      catalog_release_id: ${{ steps.fetch.outputs.catalog_release_id }}
+    env:
+      CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the fixed catalog verifier and schemas
+        uses: actions/checkout@v5
+        with:
+          repository: DoHorizon-AI/Cyrene-Workspace
+          ref: ${{ env.CATALOG_HELPER_SOURCE_COMMIT }}
+          path: catalog-helper
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: |
+            packaging/fetch_component_catalog.py
+            packaging/catalog_metadata.py
+            packaging/component_updates.py
+            governance/component-catalog-v1.json
+            governance/component-catalog-v1.schema.json
+            governance/component-release-manifest-v1.schema.json
+            governance/component-release-manifest-v2.schema.json
+            governance/component-release-index-v1.schema.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned catalog verifier dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Fetch and verify an exact immutable catalog release
+        id: fetch
+        env:
+          CATALOG_RELEASE_ID: ${{ env.CATALOG_RELEASE_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p workspace-catalog/governance
+          for schema in \
+            component-catalog-v1.schema.json \
+            component-release-manifest-v1.schema.json \
+            component-release-manifest-v2.schema.json \
+            component-release-index-v1.schema.json; do
+            cp "catalog-helper/governance/$schema" workspace-catalog/governance/
+          done
+          args=(--output workspace-catalog/governance/component-catalog-v1.json \
+            --metadata-output workspace-catalog/component-catalog-release.json \
+            --schema-root catalog-helper/governance)
+          if [[ -n "$CATALOG_RELEASE_ID" ]]; then
+            args+=(--release-id "$CATALOG_RELEASE_ID")
+          else
+            args+=(--latest-channel "$CHANNEL")
+          fi
+          python catalog-helper/packaging/fetch_component_catalog.py "${args[@]}"
+          catalog_sha256="$(python - workspace-catalog/component-catalog-release.json <<'PY'
+          import json, os, re, sys
+          metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+          digest = metadata.get("catalogSha256")
+          channel = os.environ["CHANNEL"]
+          commit = metadata.get("sourceCommit")
+          allowed_refs = {"preview": {"refs/heads/develop"}, "stable": {"refs/heads/main", "refs/heads/release"}}
+          if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              raise SystemExit("verified catalog metadata has an invalid digest")
+          if metadata.get("repository") != "DoHorizon-AI/Cyrene-Workspace" or metadata.get("workflow") != "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml":
+              raise SystemExit("verified metadata does not identify the trusted catalog publisher")
+          if metadata.get("channel") != channel or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("verified catalog release channel or source commit differs from Platform")
+          if metadata.get("releaseId") != f"catalog-{channel}-{commit}" or metadata.get("sourceRef") not in allowed_refs[channel]:
+              raise SystemExit("verified catalog release tag or source ref does not match its channel")
+          if not isinstance(metadata.get("generation"), int) or isinstance(metadata.get("generation"), bool):
+              raise SystemExit("verified catalog generation is not an integer")
+          print(digest.removeprefix("sha256:"))
+          PY
+          )"
+          actual="$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)"
+          test "$actual" = "$catalog_sha256"
+          catalog_release_id="$(python - workspace-catalog/component-catalog-release.json <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["releaseId"])
+          PY
+          )"
+          echo "catalog_sha256=$catalog_sha256" >> "$GITHUB_OUTPUT"
+          echo "catalog_release_id=$catalog_release_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-workspace-component-catalog
+          path: workspace-catalog
+          if-no-files-found: error
+          retention-days: 30
+
+  native-components:
+    if: github.event_name != 'pull_request'
+    needs: [catalog-input]
+    name: native components / ${{ matrix.target_id }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target_id: linux-ubuntu-22.04-x86_64-systemd
+          - runner: ubuntu-24.04
+            target_id: linux-ubuntu-24.04-x86_64-systemd
+    permissions:
+      contents: read
+    env:
+      SOURCE_COMMIT: ${{ github.sha }}
+      SOURCE_REF: ${{ github.ref }}
+      CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+      CATALOG_SHA256: ${{ needs.catalog-input.outputs.catalog_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-workspace-component-catalog
+          path: workspace-catalog
+      - uses: dtolnay/rust-toolchain@1.96.1
+        with:
+          components: rustfmt, clippy
+          target: x86_64-unknown-linux-gnu
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install release dependencies and verify immutable source inputs
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check build pyyaml pytest -r tooling/release/requirements.txt
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          case "$CHANNEL:$SOURCE_REF" in
+            stable:refs/heads/main|stable:refs/heads/release|preview:refs/heads/develop) ;;
+            *) echo "release channel does not match exact source ref" >&2; exit 2 ;;
+          esac
+          python - "$CATALOG_SHA256" workspace-catalog/component-catalog-release.json workspace-catalog/governance/component-catalog-v1.json <<'PY'
+          import hashlib, json, sys
+          expected = sys.argv[1]
+          metadata = json.load(open(sys.argv[2], encoding="utf-8"))
+          raw = open(sys.argv[3], "rb").read()
+          actual = hashlib.sha256(raw).hexdigest()
+          if actual != expected or metadata.get("catalogSha256") != f"sha256:{actual}":
+              raise SystemExit("verified Workspace catalog artifact digest changed")
+          PY
+      - name: Build supported native target artifacts
+        run: |
+          set -euo pipefail
+          python tooling/release/build_native_components.py \
+            --repository . \
+            --output "$RUNNER_TEMP/native-components" \
+            --channel "$CHANNEL" --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+            --catalog workspace-catalog/governance/component-catalog-v1.json \
+            --catalog-sha256 "$CATALOG_SHA256" \
+            --target-id "${{ matrix.target_id }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-native-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/native-components
+          if-no-files-found: error
+          retention-days: 30
+
   component-release:
     if: github.event_name != 'pull_request'
+    needs: [native-components, catalog-input]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -33,8 +216,7 @@ jobs:
       CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
       RELEASE_ID: ${{ (github.ref == 'refs/heads/develop' && 'preview-' || 'stable-') }}${{ github.sha }}
       IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      CATALOG_COMMIT: 522524b86a8f79c70e948fed8cb27c4cc70f29c4
-      CATALOG_SHA256: 248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35
+      CATALOG_SHA256: ${{ needs.catalog-input.outputs.catalog_sha256 }}
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@v5
@@ -43,13 +225,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the trusted component catalog
-        uses: actions/checkout@v5
+      - name: Download the verified immutable component catalog
+        uses: actions/download-artifact@v4
         with:
-          repository: DoHorizon-AI/Cyrene-Workspace
-          ref: ${{ env.CATALOG_COMMIT }}
+          name: verified-workspace-component-catalog
           path: workspace-catalog
-          persist-credentials: false
 
       - name: Verify source, channel, and catalog pins
         run: |
@@ -62,8 +242,15 @@ jobs:
             *) echo "release channel does not match the exact source ref" >&2; exit 2 ;;
           esac
           test "$RELEASE_ID" = "$CHANNEL-$SOURCE_COMMIT"
-          actual_catalog_sha="$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)"
-          test "$actual_catalog_sha" = "$CATALOG_SHA256"
+          python - "$CATALOG_SHA256" workspace-catalog/component-catalog-release.json workspace-catalog/governance/component-catalog-v1.json <<'PY'
+          import hashlib, json, sys
+          expected = sys.argv[1]
+          metadata = json.load(open(sys.argv[2], encoding="utf-8"))
+          raw = open(sys.argv[3], "rb").read()
+          actual = hashlib.sha256(raw).hexdigest()
+          if actual != expected or metadata.get("catalogSha256") != f"sha256:{actual}":
+              raise SystemExit("verified Workspace catalog artifact digest changed")
+          PY
           mkdir -p "$OUTPUT_ROOT"
 
       - name: Set up Rust toolchain
@@ -79,11 +266,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install release tooling dependencies
-        run: python -m pip install --disable-pip-version-check build pyyaml pytest -r tooling/release/requirements.txt
+        run: python -m pip install --disable-pip-version-check build 'setuptools>=68' pyyaml pytest -r tooling/release/requirements.txt
 
       - name: Prove immutable release is enabled and unused
         env:
-          CYRENE_IMMUTABLE_RELEASE_SETTINGS_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASE_SETTINGS_READ_TOKEN }}
+          CYRENE_IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASES_READ_TOKEN }}
         run: |
           set -euo pipefail
           python tooling/release/preflight_component_release.py \
@@ -102,36 +289,12 @@ jobs:
       - name: Run release test gates
         run: unshare --user --map-root-user cargo test --locked --workspace --all-targets
 
-      - name: Build V2 Product contracts from the tracked owner SHAs
-        id: product-contracts
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check \
-            -r tooling/workspace-product-contract-bundle/requirements.txt
-          output="$RUNNER_TEMP/workspace-product-contracts"
-          checkout_root="$RUNNER_TEMP/pinned-product-sources"
-          python tooling/release/prepare_workspace_product_contracts.py \
-            --repository . \
-            --output "$output" \
-            --checkout-root "$checkout_root"
-          test -f "$output/product-contract-bundle.json"
-          test -f "$output/workspace-product-policy-v2.json"
-          echo "root=$output" >> "$GITHUB_OUTPUT"
-
-      - name: Build and attest native binaries
-        run: |
-          set -euo pipefail
-          python tooling/release/build_native_components.py \
-            --repository . \
-            --output "$OUTPUT_ROOT/native" \
-            --channel "$CHANNEL" \
-            --source-ref "$SOURCE_REF" \
-            --source-commit "$SOURCE_COMMIT" \
-            --run-id "$RUN_ID" \
-            --run-attempt "$RUN_ATTEMPT" \
-            --catalog workspace-catalog/governance/component-catalog-v1.json \
-            --catalog-sha256 "$CATALOG_SHA256" \
-            --product-contracts-root "${{ steps.product-contracts.outputs.root }}"
+      - name: Download Ubuntu 22.04 and 24.04 native component builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: platform-native-*
+          path: ${{ runner.temp }}/component-release/native
+          merge-multiple: true
 
       - name: Build and attest the Runtime Maintenance SDK bundle
         id: runtime-sdk
@@ -186,8 +349,7 @@ jobs:
         run: |
           set -euo pipefail
           for image in \
-            ghcr.io/dohorizon-ai/cyrene-workspace-relay \
-            ghcr.io/dohorizon-ai/cyrene-workspace-connector \
+            ghcr.io/dohorizon-ai/cyrene-workspace-authority \
             ghcr.io/dohorizon-ai/cyrene-workspace-web-bff \
             ghcr.io/dohorizon-ai/cyrene-runtime-maintenance; do
             if docker buildx imagetools inspect "$image:$RELEASE_ID-$IMAGE_TAG" >/dev/null 2>&1; then
@@ -196,51 +358,32 @@ jobs:
             fi
           done
 
-      - name: Build and push immutable Relay OCI image
-        id: relay-image
+      - name: Build and push immutable Workspace Authority OCI image
+        id: authority-image-build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: framework/crates/cy-workspace-relay-host/Dockerfile
+          file: framework/crates/cy-workspace-authority-host/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/dohorizon-ai/cyrene-workspace-relay:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
+          tags: ghcr.io/dohorizon-ai/cyrene-workspace-authority:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
           labels: |
+            io.cyrene.component.id=cy-workspace-authority-host
+            io.cyrene.component.target-id=windows-10.0-x86_64-docker-linux
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.RELEASE_ID }}
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+            COMPONENT_VERSION=0.1.0
           provenance: mode=max
           sbom: true
 
-      - name: Attest Relay OCI image
+      - name: Attest Workspace Authority OCI image
         uses: actions/attest@v4
         with:
-          subject-name: ghcr.io/dohorizon-ai/cyrene-workspace-relay
-          subject-digest: ${{ steps.relay-image.outputs.digest }}
-          push-to-registry: true
-          github-token: ${{ github.token }}
-
-      - name: Build and push immutable Connector OCI image
-        id: connector-image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: framework/crates/cy-workspace-connector-host/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/dohorizon-ai/cyrene-workspace-connector:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ env.RELEASE_ID }}
-          provenance: mode=max
-          sbom: true
-
-      - name: Attest Connector OCI image
-        uses: actions/attest@v4
-        with:
-          subject-name: ghcr.io/dohorizon-ai/cyrene-workspace-connector
-          subject-digest: ${{ steps.connector-image.outputs.digest }}
+          subject-name: ghcr.io/dohorizon-ai/cyrene-workspace-authority
+          subject-digest: ${{ steps.authority-image-build.outputs.digest }}
           push-to-registry: true
           github-token: ${{ github.token }}
 
@@ -250,12 +393,12 @@ jobs:
         with:
           context: .
           file: framework/crates/cy-workspace-web-bff/Dockerfile
-          build-contexts: |
-            product-contracts=${{ steps.product-contracts.outputs.root }}
           platforms: linux/amd64
           push: true
           tags: ghcr.io/dohorizon-ai/cyrene-workspace-web-bff:${{ env.RELEASE_ID }}-${{ env.IMAGE_TAG }}
           labels: |
+            io.cyrene.component.id=cy-workspace-web-bff
+            io.cyrene.component.target-id=windows-10.0-x86_64-docker-linux
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.RELEASE_ID }}
@@ -279,9 +422,10 @@ jobs:
           from pathlib import Path
           rows = [json.loads(path.read_text(encoding="utf-8")) for path in Path(sys.argv[1]).glob("*.manifest.json")]
           matches = [row for row in rows if row.get("componentId") == "cyrene-runtime-maintenance" and row.get("artifact", {}).get("kind") == "native-binary"]
-          if len(matches) != 1:
-              raise SystemExit("expected one native Runtime Maintenance manifest")
-          print(matches[0]["version"])
+          versions = {row["version"] for row in matches}
+          if len(matches) != 2 or len(versions) != 1:
+              raise SystemExit("expected matching Ubuntu 22.04/24.04 Runtime Maintenance manifests")
+          print(next(iter(versions)))
           PY
           )"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -325,47 +469,78 @@ jobs:
 
       - name: Create attestable OCI manifests
         env:
-          RELAY_DIGEST: ${{ steps.relay-image.outputs.digest }}
-          CONNECTOR_DIGEST: ${{ steps.connector-image.outputs.digest }}
+          AUTHORITY_DIGEST: ${{ steps.authority-image-build.outputs.digest }}
           BFF_DIGEST: ${{ steps.bff-image.outputs.digest }}
           RUNTIME_DIGEST: ${{ steps.runtime-image.outputs.digest }}
         run: |
           set -euo pipefail
-          lock="tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
-          compatibility="$(python - "$lock" "$SOURCE_COMMIT" <<'PY'
-          import hashlib, json, sys
-          from pathlib import Path
-          lock_path = Path(sys.argv[1])
-          lock = json.loads(lock_path.read_text(encoding="utf-8"))
-          print(json.dumps({
-              "groupId": "workspace-product-v2",
-              "contractApiVersion": lock["contractApiVersion"],
-              "wireApiVersion": lock["wireApiVersion"],
-              "contractLock": {
-                  "repository": "DoHorizon-AI/Cyrene-Platform",
-                  "commit": sys.argv[2],
-                  "path": lock_path.as_posix(),
-                  "sha256": "sha256:" + hashlib.sha256(lock_path.read_bytes()).hexdigest(),
-              },
-          }, sort_keys=True))
-          PY
-          )"
           make_oci_manifest() {
-            component_id="$1" image_repository="$2" digest="$3" target="$4" needs_group="$5"
-            version="$(python - "$OUTPUT_ROOT/native/manifests" "$component_id" <<'PY'
+            component_id="$1" image_repository="$2" digest="$3" native_target_id="$4" oci_target="$5"
+            version="$(python - \
+              "$OUTPUT_ROOT/native/manifests" \
+              workspace-catalog/governance/component-catalog-v1.json \
+              "$component_id" "$native_target_id" \
+              "https://github.com/$SOURCE_REPOSITORY" "$SOURCE_REF" "$SOURCE_COMMIT" \
+              "$RUN_ID" "$RUN_ATTEMPT" <<'PY'
           import json, sys
           from pathlib import Path
-          root = Path(sys.argv[1])
-          component = sys.argv[2]
-          matches = [
-              json.loads(path.read_text(encoding="utf-8"))
-              for path in root.glob("*.manifest.json")
-              if json.loads(path.read_text(encoding="utf-8")).get("componentId") == component
-              and json.loads(path.read_text(encoding="utf-8")).get("artifact", {}).get("kind") == "native-binary"
+          manifest_root = Path(sys.argv[1])
+          catalog = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          component_id, native_target_id = sys.argv[3:5]
+          expected_source = {
+              "repository": sys.argv[5],
+              "ref": sys.argv[6],
+              "commit": sys.argv[7],
+          }
+          expected_run = {"id": sys.argv[8], "attempt": int(sys.argv[9])}
+          component_rows = [
+              row for row in catalog.get("components", [])
+              if isinstance(row, dict) and row.get("componentId") == component_id
           ]
-          if len(matches) != 1:
-              raise SystemExit(f"expected one native release manifest for {component}, got {len(matches)}")
-          print(matches[0]["version"])
+          if len(component_rows) != 1:
+              raise SystemExit(f"expected one trusted component declaration for {component_id}, got {len(component_rows)}")
+          component = component_rows[0]
+          if component.get("kind") != "native-binary" or "oci-image" not in component.get("artifactKinds", []):
+              raise SystemExit(f"catalog does not authorize native and OCI artifacts for {component_id}")
+          native_declarations = [
+              row for row in component.get("targets", [])
+              if isinstance(row, dict)
+              and row.get("targetId") == native_target_id
+              and row.get("artifactKind") == "native-binary"
+          ]
+          if len(native_declarations) != 1 or native_declarations[0].get("support") != "supported":
+              raise SystemExit(f"catalog does not uniquely support {component_id}/{native_target_id} as native-binary")
+          global_targets = [
+              row for row in catalog.get("targets", [])
+              if isinstance(row, dict) and row.get("id") == native_target_id
+          ]
+          if len(global_targets) != 1 or global_targets[0].get("hostSupport") != "supported":
+              raise SystemExit(f"catalog does not uniquely support native target {native_target_id}")
+          native_target = global_targets[0].get("target")
+          if not isinstance(native_target, dict):
+              raise SystemExit(f"catalog native target tuple is malformed: {native_target_id}")
+          candidates = []
+          for path in sorted(manifest_root.glob("*.manifest.json")):
+              manifest = json.loads(path.read_text(encoding="utf-8"))
+              artifact = manifest.get("artifact")
+              if manifest.get("componentId") != component_id or not isinstance(artifact, dict):
+                  continue
+              if artifact.get("kind") != "native-binary" or manifest.get("target") != native_target:
+                  continue
+              attestation = manifest.get("provenance", {}).get("attestation", {})
+              run = attestation.get("run", {})
+              if (
+                  manifest.get("source") == expected_source
+                  and attestation.get("repository") == "DoHorizon-AI/Cyrene-Platform"
+                  and attestation.get("workflow") == "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml"
+                  and {"id": str(run.get("id")), "attempt": run.get("attempt")} == expected_run
+              ):
+                  candidates.append(manifest)
+          if len(candidates) != 1:
+              raise SystemExit(
+                  f"expected one current-source native manifest for {component_id}/{native_target_id}, got {len(candidates)}"
+              )
+          print(candidates[0]["version"])
           PY
           )"
             args=(
@@ -375,24 +550,22 @@ jobs:
               --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
               --catalog workspace-catalog/governance/component-catalog-v1.json
               --catalog-sha256 "$CATALOG_SHA256"
-              --target-json "$target"
+              --target-json "$oci_target"
               --artifact-kind oci-image --subject-name "$image_repository"
               --oci-repository "$image_repository" --oci-digest "$digest"
               --oci-platform-json '{"os":"linux","architecture":"amd64"}'
               --output "$OUTPUT_ROOT/descriptor-$component_id.json"
             )
-            if [ "$needs_group" = true ]; then args+=(--compatibility-json "$compatibility"); fi
             python tooling/release/component_descriptor.py "${args[@]}"
             python tooling/release/create_component_manifest.py \
               --descriptor "$OUTPUT_ROOT/descriptor-$component_id.json" \
               --output-dir "$OUTPUT_ROOT/native/manifests"
           }
-          linux_docker_target='{"os":"linux","osVersion":"24.04","distribution":"ubuntu","distributionVersion":"24.04","architecture":"x86_64","abi":"glibc-2.39","runtime":"docker:linux"}'
           windows_docker_target='{"os":"windows","osVersion":"10.0","architecture":"x86_64","runtime":"docker-desktop:linux"}'
-          make_oci_manifest cy-workspace-relay ghcr.io/dohorizon-ai/cyrene-workspace-relay "$RELAY_DIGEST" "$linux_docker_target" true
-          make_oci_manifest cy-workspace-connector ghcr.io/dohorizon-ai/cyrene-workspace-connector "$CONNECTOR_DIGEST" "$linux_docker_target" true
-          make_oci_manifest cy-workspace-web-bff ghcr.io/dohorizon-ai/cyrene-workspace-web-bff "$BFF_DIGEST" "$linux_docker_target" true
-          make_oci_manifest cyrene-runtime-maintenance ghcr.io/dohorizon-ai/cyrene-runtime-maintenance "$RUNTIME_DIGEST" "$windows_docker_target" false
+          ubuntu_24_04_native_target_id='linux-ubuntu-24.04-x86_64-systemd'
+          make_oci_manifest cy-workspace-authority-host ghcr.io/dohorizon-ai/cyrene-workspace-authority "$AUTHORITY_DIGEST" "$ubuntu_24_04_native_target_id" "$windows_docker_target"
+          make_oci_manifest cy-workspace-web-bff ghcr.io/dohorizon-ai/cyrene-workspace-web-bff "$BFF_DIGEST" "$ubuntu_24_04_native_target_id" "$windows_docker_target"
+          make_oci_manifest cyrene-runtime-maintenance ghcr.io/dohorizon-ai/cyrene-runtime-maintenance "$RUNTIME_DIGEST" "$ubuntu_24_04_native_target_id" "$windows_docker_target"
 
       - name: Create and attest the immutable component index
         run: |
@@ -433,15 +606,49 @@ jobs:
           subject-checksums: ${{ runner.temp }}/component-index-checksum.txt
           github-token: ${{ github.token }}
 
+      - name: Verify component catalog metadata and release attestations before publication
+        run: |
+          set -euo pipefail
+          for manifest in "$OUTPUT_ROOT/native/manifests"/*.manifest.json; do
+            verify_args=(
+              verify --manifest "$manifest"
+              --catalog workspace-catalog/governance/component-catalog-v1.json
+              --verify-attestation-only
+            )
+            artifact_kind="$(python - "$manifest" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["artifact"]["kind"])
+          PY
+          )"
+            if [ "$artifact_kind" != oci-image ]; then
+              artifact_name="$(python - "$manifest" <<'PY'
+          import json, sys
+          from urllib.parse import urlparse
+          document = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(urlparse(document["artifact"]["uri"]).path.rsplit("/", 1)[-1])
+          PY
+          )"
+              verify_args+=(--artifact "$OUTPUT_ROOT/native/artifacts/$artifact_name")
+            fi
+            python tooling/release/component_artifacts.py "${verify_args[@]}"
+          done
+          python tooling/release/component_artifacts.py verify-index \
+            --index "$OUTPUT_ROOT/component-release-index-v1.json" \
+            --catalog workspace-catalog/governance/component-catalog-v1.json \
+            --verify-attestation-only
+
       - name: Create the draft release with all durable assets
         id: release
         run: |
           set -euo pipefail
+          asset_paths=(
+            "$OUTPUT_ROOT/native/artifacts"/*.tar.gz
+            "$OUTPUT_ROOT/native/manifests"/*.manifest.json
+            "$OUTPUT_ROOT/component-release-index-v1.json"
+          )
           release_args=(
             "$RELEASE_ID"
-            "$OUTPUT_ROOT/native/artifacts"/*.tar.gz \
-            "$OUTPUT_ROOT/native/manifests"/*.manifest.json \
-            "$OUTPUT_ROOT/component-release-index-v1.json" \
+            "${asset_paths[@]}"
             --draft \
             --target "$SOURCE_COMMIT" \
             --title "Cyrene component release $RELEASE_ID" \
@@ -449,7 +656,34 @@ jobs:
           )
           if [ "$CHANNEL" = preview ]; then release_args+=(--prerelease); fi
           gh release create "${release_args[@]}"
-          release_id="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .id)"
+          release_id="$(gh release view "$RELEASE_ID" --repo "$SOURCE_REPOSITORY" --json databaseId --jq .databaseId)"
+          gh api "repos/$SOURCE_REPOSITORY/releases/$release_id" > "$RUNNER_TEMP/draft-release.json"
+          python - "$RUNNER_TEMP/draft-release.json" "$SOURCE_COMMIT" "$RELEASE_ID" "$CHANNEL" "${asset_paths[@]}" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          release = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          source_commit, release_id, channel = sys.argv[2:5]
+          expected = {}
+          for name in sys.argv[5:]:
+              path = Path(name)
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              expected[path.name] = {"size": path.stat().st_size, "digest": f"sha256:{digest}"}
+          if (
+              release.get("tag_name") != release_id
+              or release.get("target_commitish") != source_commit
+              or release.get("draft") is not True
+              or release.get("prerelease") is not (channel == "preview")
+          ):
+              raise SystemExit("uploaded draft release identity does not match source pins")
+          assets = release.get("assets", [])
+          actual = {row.get("name"): row for row in assets if isinstance(row, dict)}
+          if len(actual) != len(assets) or set(actual) != set(expected):
+              raise SystemExit("uploaded draft release assets do not match the exact local asset set")
+          for name, wanted in expected.items():
+              row = actual[name]
+              if row.get("size") != wanted["size"] or row.get("digest") != wanted["digest"]:
+                  raise SystemExit(f"uploaded draft release asset bytes do not match local input: {name}")
+          PY
           gh api --method PATCH "repos/$SOURCE_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           immutable="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)"
           if [ "$immutable" != true ]; then
@@ -458,27 +692,13 @@ jobs:
           fi
           echo "id=$release_id" >> "$GITHUB_OUTPUT"
 
-      - name: Reverify the published index and every release manifest
+      - name: Verify the published immutable index and its release assets
         run: |
           set -euo pipefail
           python tooling/release/component_artifacts.py verify-index \
             --index "$OUTPUT_ROOT/component-release-index-v1.json" \
             --catalog workspace-catalog/governance/component-catalog-v1.json \
-            --verify-run \
-            --verify-attestation
-          for manifest in "$OUTPUT_ROOT/native/manifests"/*.manifest.json; do
-            artifact_name="$(python - "$manifest" <<'PY'
-          import json, sys
-          from urllib.parse import urlparse
-          doc = json.load(open(sys.argv[1], encoding="utf-8"))
-          artifact = doc["artifact"]
-          print(urlparse(artifact["uri"]).path.rsplit("/", 1)[-1] if artifact["kind"] != "oci-image" else "")
-          PY
-          )"
-            verify_args=(--manifest "$manifest" --catalog workspace-catalog/governance/component-catalog-v1.json --verify-run --verify-attestation)
-            if [ -n "$artifact_name" ]; then verify_args+=(--artifact "$OUTPUT_ROOT/native/artifacts/$artifact_name"); fi
-            python tooling/release/component_artifacts.py verify "${verify_args[@]}"
-          done
+            --verify-release
 
       - name: Summarize immutable release identity
         run: |
@@ -503,13 +723,24 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Check out the pinned component schemas
+      - name: Check out the fixed catalog verifier and schemas
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Workspace
-          ref: 522524b86a8f79c70e948fed8cb27c4cc70f29c4
-          path: workspace-catalog
+          ref: ${{ env.CATALOG_HELPER_SOURCE_COMMIT }}
+          path: catalog-helper
+          fetch-depth: 0
           persist-credentials: false
+          sparse-checkout: |
+            packaging/fetch_component_catalog.py
+            packaging/catalog_metadata.py
+            packaging/component_updates.py
+            governance/component-catalog-v1.json
+            governance/component-catalog-v1.schema.json
+            governance/component-release-manifest-v1.schema.json
+            governance/component-release-manifest-v2.schema.json
+            governance/component-release-index-v1.schema.json
+          sparse-checkout-cone-mode: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.96.1
@@ -519,6 +750,21 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --disable-pip-version-check build pyyaml pytest -r tooling/release/requirements.txt
+      - name: Use pinned source catalog bytes for static pull request validation
+        id: catalog
+        run: |
+          set -euo pipefail
+          mkdir -p workspace-catalog/governance
+          for schema in \
+            component-catalog-v1.schema.json \
+            component-release-manifest-v1.schema.json \
+            component-release-manifest-v2.schema.json \
+            component-release-index-v1.schema.json; do
+            cp "catalog-helper/governance/$schema" workspace-catalog/governance/
+          done
+          cp catalog-helper/governance/component-catalog-v1.json workspace-catalog/governance/
+          catalog_sha256="$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)"
+          echo "catalog_sha256=$catalog_sha256" >> "$GITHUB_OUTPUT"
       - name: Enable user namespaces for authority acceptance
         run: |
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
@@ -529,7 +775,7 @@ jobs:
       - name: Validate component tooling and RFC 8785 fixtures
         env:
           CYRENE_COMPONENT_CATALOG: workspace-catalog/governance/component-catalog-v1.json
-          CYRENE_COMPONENT_CATALOG_SHA256: 248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35
+          CYRENE_COMPONENT_CATALOG_SHA256: ${{ steps.catalog.outputs.catalog_sha256 }}
         run: |
           set -euo pipefail
           python -m pytest tooling/release/tests -q

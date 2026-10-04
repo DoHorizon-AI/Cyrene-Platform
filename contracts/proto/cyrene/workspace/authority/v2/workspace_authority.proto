@@ -1,0 +1,267 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 workspace_authority.proto                                       │
+// │  Package: cyrene.workspace.authority.v2                             │
+// │  Role: Owns authenticated workspace authorization and durable calls.│
+// │                                                                     │
+// │  协议职责：Platform Authority 独占身份、授权、唯一持久 outbox 与结果。 │
+// │  · 客户端不提供角色、路由、目录版本；Connector 必须核验批准后执行。    │
+// └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.workspace.authority.v2;
+
+import "cyrene/workspace/product/v2/product_api.proto";
+import "google/protobuf/timestamp.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.workspace.authority.v2";
+
+enum InvocationState {
+  INVOCATION_STATE_UNSPECIFIED = 0;
+  INVOCATION_STATE_PENDING = 1;
+  INVOCATION_STATE_CLAIMED = 2;
+  INVOCATION_STATE_ACKNOWLEDGED = 3;
+  INVOCATION_STATE_SUCCEEDED = 4;
+  INVOCATION_STATE_FAILED = 5;
+  INVOCATION_STATE_UNKNOWN_RESULT = 6;
+}
+
+enum IdempotencySemantics {
+  IDEMPOTENCY_SEMANTICS_UNSPECIFIED = 0;
+  IDEMPOTENCY_SEMANTICS_NOT_SUPPORTED = 1;
+  IDEMPOTENCY_SEMANTICS_REQUIRED = 2;
+  IDEMPOTENCY_SEMANTICS_OPTIONAL = 3;
+}
+
+message NegotiateVersionRequest {
+  uint32 minimum_version = 1;
+  uint32 maximum_version = 2;
+}
+
+message NegotiateVersionResponse {
+  uint32 selected_version = 1;
+  repeated uint32 supported_versions = 2;
+}
+
+message VerifyIdentityRequest {
+  string workspace_id = 1;
+}
+
+message VerifyIdentityResponse {
+  string principal_id = 1;
+  string issuer = 2;
+  string subject = 3;
+  string organization_id = 4;
+  string workspace_id = 5;
+  string session_id = 6;
+  uint64 session_generation = 7;
+  repeated string permitted_workspaces = 8;
+  repeated string directory_roles = 9;
+}
+
+message CatalogSnapshotRequest {
+  string workspace_id = 1;
+}
+
+message OwnerSnapshot {
+  string owner_id = 1;
+  string component_id = 2;
+  string source_commit = 3;
+  // Exact SHA-256 of this owner's catalogPath bytes from the bundle manifest.
+  string catalog_digest_sha256 = 4;
+  repeated string granted_operation_ids = 5;
+}
+
+message CatalogSnapshotResponse {
+  string organization_id = 1;
+  string workspace_id = 2;
+  string wire_api_version = 3;
+  string contract_api_version = 4;
+  uint64 catalog_generation = 5;
+  uint64 contract_activation_generation = 6;
+  string bundle_manifest_sha256 = 8;
+  string policy_digest_sha256 = 10;
+  string policy_schema_version = 11;
+  repeated OwnerSnapshot owners = 12;
+  // `sha256:<lowercase hex>` of the exact verified archive; selects the
+  // immutable versions/<archive-sha> directory without relying on a pointer.
+  string artifact_id = 13;
+  reserved 7, 9;
+}
+
+message ApproveAndEnqueueInvocationRequest {
+  string workspace_id = 1;
+  cyrene.workspace.product.v2.ProductApiInvocationV2 invocation = 2;
+}
+
+message ApproveAndEnqueueInvocationResponse {
+  string invocation_id = 1;
+  InvocationState state = 2;
+}
+
+message ExecutionTarget {
+  string target_component = 1;
+  string http_method = 2;
+  string endpoint = 3;
+  string resource_id = 4;
+  // Canonical organization/workspace/resource scope from the trusted grant.
+  string scope = 5;
+  string idempotency_key = 6;
+  IdempotencySemantics idempotency_semantics = 7;
+  // Device fields identify the resolved Connector target, never the browser.
+  string execution_device_id = 8;
+  uint64 execution_device_generation = 9;
+  bytes execution_authorization_id = 10;
+  bytes execution_device_certificate_sha256 = 11;
+}
+
+// Digest input for approvals. It excludes the credential and its signature,
+// avoiding a circular hash while binding the complete authorized operation.
+message CanonicalInvocationEnvelope {
+  string invocation_id = 1;
+  cyrene.workspace.product.v2.ProductApiInvocationV2 invocation = 2;
+  ExecutionTarget target = 3;
+  string organization_id = 4;
+  string workspace_id = 5;
+  string principal_issuer = 6;
+  string principal_subject = 7;
+  string execution_device_id = 8;
+  uint64 execution_device_generation = 9;
+  bytes execution_authorization_id = 10;
+  bytes execution_device_certificate_sha256 = 11;
+  string session_id = 12;
+  uint64 session_generation = 13;
+  uint64 contract_activation_generation = 14;
+  google.protobuf.Timestamp issued_at = 15;
+  google.protobuf.Timestamp expires_at = 16;
+}
+
+// Signed binding over the complete canonical approved invocation envelope.
+// request_digest_sha256 is SHA-256 of deterministic protobuf serialization
+// of CanonicalInvocationEnvelope. authority_signature signs the byte sequence
+// `cyrene.workspace.authority.v2/execution-credential\0`, a 4-byte big-endian
+// UTF-8 key-id length, the key-id bytes, and the 32 digest bytes, in that order.
+// All duplicated scope, target, generation, and expiry fields must equal the
+// envelope before signature verification succeeds.
+message ExecutionCredential {
+  string invocation_id = 1;
+  bytes invocation_digest_sha256 = 2;
+  bytes request_digest_sha256 = 3;
+  string organization_id = 4;
+  string workspace_id = 5;
+  string principal_issuer = 6;
+  string principal_subject = 7;
+  string operation_owner_id = 8;
+  string operation_id = 9;
+  string scope = 10;
+  string resource_id = 11;
+  string target_component = 12;
+  string http_method = 13;
+  string endpoint = 14;
+  string execution_device_id = 15;
+  uint64 execution_device_generation = 16;
+  bytes execution_authorization_id = 17;
+  bytes execution_device_certificate_sha256 = 18;
+  string session_id = 19;
+  uint64 session_generation = 20;
+  uint64 contract_activation_generation = 21;
+  string idempotency_key = 22;
+  IdempotencySemantics idempotency_semantics = 23;
+  string signing_key_id = 24;
+  google.protobuf.Timestamp issued_at = 25;
+  google.protobuf.Timestamp expires_at = 26;
+  bytes authority_signature = 27;
+}
+
+message ApprovedInvocation {
+  string invocation_id = 1;
+  CanonicalInvocationEnvelope canonical_envelope = 2;
+  ExecutionCredential credential = 3;
+}
+
+message ClaimInvocationsRequest {
+  uint32 max_batch_size = 1;
+}
+
+message ClaimInvocationsResponse {
+  repeated ApprovedInvocation invocations = 1;
+}
+
+message ValidateExecutionAuthorizationRequest {
+  ExecutionCredential credential = 1;
+}
+
+message ValidateExecutionAuthorizationResponse {
+  ApprovedInvocation approved_invocation = 1;
+}
+
+message AcknowledgeDeliveryRequest {
+  string invocation_id = 1;
+  ExecutionCredential credential = 2;
+  bytes delivery_receipt = 3;
+}
+
+message AcknowledgeDeliveryResponse {
+  bool acknowledged = 1;
+  InvocationState state = 2;
+}
+
+enum ExecutionOutcomeStatus {
+  EXECUTION_OUTCOME_STATUS_UNSPECIFIED = 0;
+  EXECUTION_OUTCOME_STATUS_SUCCESS = 1;
+  EXECUTION_OUTCOME_STATUS_FAILED = 2;
+  EXECUTION_OUTCOME_STATUS_UNKNOWN_RESULT = 3;
+}
+
+// Canonical result bytes are deterministic protobuf serialization of this
+// envelope. result_digest_sha256 hashes these bytes, excluding the digest and
+// the credential; request_digest_sha256 binds the result to the approval.
+message CanonicalInvocationResultEnvelope {
+  string invocation_id = 1;
+  bytes request_digest_sha256 = 2;
+  ExecutionOutcomeStatus outcome_status = 3;
+  cyrene.workspace.product.v2.ProductApiResponseV2 product_response = 4;
+  string error_code = 5;
+  string error_message = 6;
+  bytes delivery_receipt = 7;
+}
+
+message SubmitInvocationResultRequest {
+  string invocation_id = 1;
+  ExecutionCredential credential = 2;
+  CanonicalInvocationResultEnvelope result = 3;
+  bytes result_digest_sha256 = 4;
+}
+
+message SubmitInvocationResultResponse {
+  bool accepted = 1;
+  InvocationState state = 2;
+  bytes result_receipt = 3;
+}
+
+message WaitInvocationResultRequest {
+  string invocation_id = 1;
+  uint32 timeout_ms = 2;
+  string workspace_id = 3;
+}
+
+message WaitInvocationResultResponse {
+  InvocationState state = 1;
+  cyrene.workspace.product.v2.ProductApiResponseV2 product_response = 2;
+  string error_code = 3;
+  string error_message = 4;
+  bytes result_receipt = 5;
+}
+
+service WorkspaceAuthorityService {
+  rpc NegotiateVersion(NegotiateVersionRequest) returns (NegotiateVersionResponse);
+  rpc VerifyIdentity(VerifyIdentityRequest) returns (VerifyIdentityResponse);
+  rpc GetCatalogSnapshot(CatalogSnapshotRequest) returns (CatalogSnapshotResponse);
+  rpc ApproveAndEnqueueInvocation(ApproveAndEnqueueInvocationRequest) returns (ApproveAndEnqueueInvocationResponse);
+  rpc ClaimInvocations(ClaimInvocationsRequest) returns (ClaimInvocationsResponse);
+  rpc ValidateExecutionAuthorization(ValidateExecutionAuthorizationRequest) returns (ValidateExecutionAuthorizationResponse);
+  rpc AcknowledgeDelivery(AcknowledgeDeliveryRequest) returns (AcknowledgeDeliveryResponse);
+  rpc SubmitInvocationResult(SubmitInvocationResultRequest) returns (SubmitInvocationResultResponse);
+  rpc WaitInvocationResult(WaitInvocationResultRequest) returns (WaitInvocationResultResponse);
+}

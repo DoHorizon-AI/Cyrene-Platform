@@ -54,10 +54,9 @@ use crate::device_certificate_validation::{
 use crate::device_enrollment_authorization_service::{
     DeviceCertificatePublicMetadata, DeviceCertificatePublicMetadataPort,
 };
-use cy_workspace_control_plane::device_registry::WorkspaceDeviceKey;
-use cy_workspace_relay_runtime::{
+use cy_workspace_control_plane::device_registry::{
     CurrentRelayPeerRevocationEvidence, RelayPeerCertificateRevocationChecker,
-    RelayPeerRevocationCheckError, RelayPeerRevocationQuery,
+    RelayPeerRevocationCheckError, RelayPeerRevocationQuery, WorkspaceDeviceKey,
 };
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DEVICE_CA_DATABASE_URL";

@@ -34,7 +34,7 @@ use crate::device_authorization::{
     DEVICE_CERTIFICATE_VALIDATION_PROVENANCE_VERSION, MIN_CERTIFICATE_RETIREMENT_CLAIM_LEASE_MS,
 };
 use crate::VersionedUserCodeDigest;
-use cy_workspace_relay_runtime::AuthenticatedRelayWorkspaceDevice;
+use cy_workspace_control_plane::device_registry::AuthenticatedRelayWorkspaceDevice;
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_DATABASE_URL";
 const MIGRATION_DATABASE_URL_ENV: &str =

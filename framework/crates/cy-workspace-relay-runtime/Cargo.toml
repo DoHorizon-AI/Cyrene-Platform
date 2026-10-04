@@ -2,7 +2,7 @@
 name = "cy-workspace-relay-runtime"
 version = "0.1.0"
 edition = "2021"
-description = "Inbound authenticated Workspace Relay streams and transport composition for Platform hosts."
+description = "Legacy V1 authenticated Workspace Relay runtime retained for Fabric compatibility fixtures."
 license = "Apache-2.0"
 repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 

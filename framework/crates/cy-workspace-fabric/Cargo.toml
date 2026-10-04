@@ -2,7 +2,7 @@
 name = "cy-workspace-fabric"
 version = "0.1.0"
 edition = "2021"
-description = "Workspace discovery, authenticated transport, and loopback client proxy."
+description = "Legacy V1 Workspace Fabric API and compatibility fixtures."
 license = "Apache-2.0"
 repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 

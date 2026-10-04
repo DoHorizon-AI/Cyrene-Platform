@@ -6,6 +6,10 @@ description = "Pinned owner Product catalogs, Platform authorization policy, and
 license = "Apache-2.0"
 repository = "https://github.com/DoHorizon-AI/Cyrene-Platform"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 cy-proto = { version = "0.1.0", path = "../../../contracts/rust/cy-proto" }

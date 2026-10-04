@@ -1,5 +1,10 @@
 # cy-workspace-fabric source map | 源码导航
 
+This is the legacy V1 Fabric source map retained for compatibility fixtures.
+Production Connector, Relay, and Sidecar runtimes are owned by
+`Cyrene-Plugins-Official`; Platform continues to own Authority and identity
+services.
+
 | File | Responsibility | 职责 |
 | --- | --- | --- |
 | `lib.rs` | Public product-neutral surface. | 产品无关公共接口。 |
@@ -17,10 +22,9 @@
 | `product_projection.rs` | Closed Product API operation map, bounded JSON projection, and invocation port. | 封闭 Product API 操作映射、有界 JSON 投影及 invocation port。 |
 | `direct.rs` | Session- and membership-checked private API endpoint. | 校验会话与成员关系的私网 API 端点。 |
 | `frontend_relay_client.rs` | Verified-principal Web Frontend client for the outbound mTLS Relay session. | 基于已验证主体的 Web Frontend 出站 mTLS Relay 客户端。 |
-| `relay.rs` | Ephemeral authenticated routing. | 临时认证路由。 |
-| `transport.rs` | Connector-facing Relay session service path; outbound client transport is in the SDK. | Connector 侧 Relay session service path；出站 client transport 位于 SDK。 |
+| `relay.rs` | Legacy V1 compatibility routing retained for fixtures. | 为 fixture 保留的旧 V1 兼容路由。 |
+| `transport.rs` | Legacy V1 Relay service path; outbound client transport remains in the SDK. | 旧 V1 Relay service path；出站 client transport 仍位于 SDK。 |
 | `../../cy-workspace-client-sdk/` | Lightweight outbound Workspace discovery and Relay client. | 轻量级 Workspace 发现与 Relay 出站 client。 |
-| `../../cy-workspace-sidecar/src/sidecar.rs` | Local gRPC bridge implementation with no Fabric dependency. | 不依赖 Fabric 的本地 gRPC bridge 实现。 |
 | `user_code_secret.rs` | Versioned HMAC key ring for user-code storage and verification. | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixtures and restricted Directory provisioning CLI. | Acceptance fixture 与受限 Directory 配置 CLI。 |
 
@@ -55,6 +59,9 @@ identity 权威。
 
 # cy-workspace-fabric 源码导航
 
+本目录是为兼容 fixture 保留的旧 V1 Fabric 源码导航。生产 Connector、Relay 与 Sidecar
+runtime 由 `Cyrene-Plugins-Official` 持有；Platform 继续持有 Authority 与身份服务。
+
 | 文件 | 职责 |
 |---|---|
 | `lib.rs` | 与 Product 无关的公共接口。 |
@@ -72,10 +79,9 @@ identity 权威。
 | `product_projection.rs` | 封闭 Product API 操作映射、有界 JSON 投影及 invocation port。 |
 | `direct.rs` | 校验会话与成员关系的私网 API 端点。 |
 | `frontend_relay_client.rs` | 基于已验证主体的 Web Frontend 出站 mTLS Relay 客户端。 |
-| `relay.rs` | 临时认证路由。 |
-| `transport.rs` | Connector 侧 Relay session service path；出站 client transport 位于 SDK。 |
+| `relay.rs` | 为 fixture 保留的旧 V1 兼容路由。 |
+| `transport.rs` | 旧 V1 Relay service path；出站 client transport 仍位于 SDK。 |
 | `../../cy-workspace-client-sdk/` | 轻量级 Workspace 发现与 Relay 出站 client。 |
-| `../../cy-workspace-sidecar/src/sidecar.rs` | 不依赖 Fabric 的本地 gRPC bridge 实现。 |
 | `user_code_secret.rs` | user code 存储与校验使用的带版本 HMAC key ring。 |
 | `bin/` | Acceptance fixture 与受限 Directory 配置 CLI。 |
 

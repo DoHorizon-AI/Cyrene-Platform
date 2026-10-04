@@ -69,7 +69,9 @@ def _api_json(url: str) -> Any:
     return result
 
 
-def _catalog_component(catalog: dict[str, Any], component_id: str, target: dict[str, Any]) -> dict[str, Any]:
+def _catalog_component(
+    catalog: dict[str, Any], component_id: str, target_id: str, target: dict[str, Any]
+) -> dict[str, Any]:
     components = catalog.get("components")
     component = next(
         (row for row in components or [] if isinstance(row, dict) and row.get("componentId") == component_id),
@@ -78,26 +80,36 @@ def _catalog_component(catalog: dict[str, Any], component_id: str, target: dict[
     if not isinstance(component, dict):
         raise ComponentArtifactError(f"component is not declared in the trusted catalog: {component_id}")
     target_row = next(
-        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("target") == target),
+        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("id") == target_id),
         None,
     )
-    if not isinstance(target_row, dict):
-        raise ComponentArtifactError("requested target is not declared in the trusted catalog")
+    if not isinstance(target_row, dict) or target_row.get("target") != target:
+        raise ComponentArtifactError("requested target ID and complete target do not match the trusted catalog")
     build_dependency = component.get("role") == "build-dependency"
-    support = {"supported", "contract-only"} if build_dependency else {"supported"}
     declarations = [
         row
         for row in component.get("targets", [])
         if isinstance(row, dict)
-        and row.get("targetId") == target_row.get("id")
+        and row.get("targetId") == target_id
         and row.get("artifactKind") in component.get("artifactKinds", [])
     ]
-    if any(row.get("artifactKind") == "oci-image" for row in declarations):
-        support.add("contract-only")
-    if not any(row.get("support") in support for row in declarations):
+    permitted = [
+        row
+        for row in declarations
+        if row.get("support") in (
+            {"supported", "contract-only"}
+            if build_dependency or row.get("artifactKind") == "oci-image"
+            else {"supported"}
+        )
+        and target_row.get("hostSupport")
+        in (
+            {"supported", "contract-only"}
+            if build_dependency or row.get("artifactKind") == "oci-image"
+            else {"supported"}
+        )
+    ]
+    if not permitted:
         raise ComponentArtifactError("requested component target is not authorized by the trusted catalog")
-    if target_row.get("hostSupport") not in support:
-        raise ComponentArtifactError("requested target host is not authorized by the trusted catalog")
     return component
 
 
@@ -245,7 +257,7 @@ def fetch_component(
     )
     if not isinstance(target_row, dict) or not isinstance(target_row.get("target"), dict):
         raise ComponentArtifactError(f"target ID is absent from the trusted catalog: {target_id}")
-    component = _catalog_component(catalog, component_id, target_row["target"])
+    component = _catalog_component(catalog, component_id, target_id, target_row["target"])
     publisher = component.get("publisher")
     if not isinstance(publisher, str):
         raise ComponentArtifactError("trusted component has no canonical publisher")

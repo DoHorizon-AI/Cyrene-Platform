@@ -1,0 +1,176 @@
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │  📄 workspace_authority.proto                                       │
+// │  Package: cyrene.workspace.authority.v1                             │
+// │  Role: Decoupled Authority and invocation lifecycle RPC contract.   │
+// │                                                                     │
+// │  协议职责：解耦的 Workspace 控制面 Authority 与调用生命周期 RPC 契约。  │
+// │  · Platform 独占策略/目录快照与授权，连接进程只执行经批准调用。       │
+// └─────────────────────────────────────────────────────────────────────┘
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package cyrene.workspace.authority.v1;
+
+import "cyrene/workspace/product/v2/product_api.proto";
+import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
+
+option java_multiple_files = true;
+option java_package = "io.cyrene.proto.workspace.authority.v1";
+
+// ════════════════════════════════════════════════════════════════════════
+// 1. Identity Verification & Workspace Discovery / 身份核验与发现
+// ════════════════════════════════════════════════════════════════════════
+
+message VerifyIdentityRequest {
+  string bearer_token = 1;
+  string workspace_id = 2;
+  bytes client_cert_der = 3;
+}
+
+message VerifyIdentityResponse {
+  bool valid = 1;
+  string principal_id = 2;
+  uint64 session_generation = 3;
+  uint64 device_generation = 4;
+  repeated string permitted_workspaces = 5;
+  repeated string roles = 6;
+  string error_reason = 7;
+}
+
+message DiscoverWorkspacesRequest {
+  string principal_id = 1;
+}
+
+message WorkspaceDescriptor {
+  string workspace_id = 1;
+  string display_name = 2;
+  repeated string connection_endpoints = 3;
+}
+
+message DiscoverWorkspacesResponse {
+  repeated WorkspaceDescriptor workspaces = 1;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 2. Invocation Approval & Outbox Enqueue / 调用批准与入队
+// ════════════════════════════════════════════════════════════════════════
+
+// Internal delivery credential binding all critical dimensions of the invocation.
+// 内部投递凭据：严密绑定调用 ID、请求摘要、目标组件、代次与有效期的不可篡改凭据。
+message DeliveryCredential {
+  string invocation_id = 1;
+  string request_digest_sha256 = 2;
+  string target_component = 3;
+  string workspace_id = 4;
+  uint64 device_generation = 5;
+  uint64 session_generation = 6;
+  uint64 contract_activation_generation = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  bytes authority_signature = 9;
+}
+
+// An opaque approved invocation returned to the caller and dispatched to connector.
+// 返回给调用方并派发给连接器的不透明批准调用。
+message ApprovedInvocation {
+  string invocation_id = 1;
+  DeliveryCredential credential = 2;
+  cyrene.workspace.product.v2.ProductApiInvocationV2 raw_invocation = 3;
+  string resolved_target_url = 4;
+  uint32 timeout_seconds = 5;
+}
+
+message ApproveAndEnqueueInvocationRequest {
+  string workspace_id = 1;
+  string caller_token = 2;
+  cyrene.workspace.product.v2.ProductApiInvocationV2 invocation = 3;
+}
+
+message ApproveAndEnqueueInvocationResponse {
+  ApprovedInvocation approved_invocation = 1;
+  google.rpc.Status error = 2;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 3. Claiming & Delivery Acknowledgment / 投递领取与确认
+// ════════════════════════════════════════════════════════════════════════
+
+message ClaimInvocationsRequest {
+  string connector_id = 1;
+  string workspace_id = 2;
+  repeated string supported_components = 3;
+  uint32 max_batch_size = 4;
+}
+
+message ClaimInvocationsResponse {
+  repeated ApprovedInvocation invocations = 1;
+}
+
+message AcknowledgeDeliveryRequest {
+  string invocation_id = 1;
+  string connector_id = 2;
+  bytes delivery_receipt = 3;
+}
+
+message AcknowledgeDeliveryResponse {
+  bool acknowledged = 1;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 4. Result Submission / 结果提交与校验
+// ════════════════════════════════════════════════════════════════════════
+
+enum ExecutionOutcomeStatus {
+  EXECUTION_OUTCOME_STATUS_UNSPECIFIED = 0;
+  EXECUTION_OUTCOME_STATUS_SUCCESS = 1;
+  EXECUTION_OUTCOME_STATUS_FAILED = 2;
+  EXECUTION_OUTCOME_STATUS_UNKNOWN_RESULT = 3;
+}
+
+message SubmitInvocationResultRequest {
+  string invocation_id = 1;
+  DeliveryCredential credential = 2;
+  ExecutionOutcomeStatus outcome_status = 3;
+  cyrene.workspace.product.v2.ProductApiResponseV2 product_response = 4;
+  string error_message = 5;
+}
+
+message SubmitInvocationResultResponse {
+  bool accepted = 1;
+  google.rpc.Status validation_error = 2;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 5. Catalog View Projection / 目录视图投影
+// ════════════════════════════════════════════════════════════════════════
+
+message GetCatalogViewRequest {
+  string workspace_id = 1;
+  string caller_token = 2;
+}
+
+message OperationView {
+  string owner_id = 1;
+  string operation_id = 2;
+  string description = 3;
+  bool requires_idempotency_key = 4;
+  bool is_read_only = 5;
+}
+
+message GetCatalogViewResponse {
+  uint64 catalog_generation = 1;
+  repeated OperationView operations = 2;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// SERVICE: WorkspaceAuthorityService
+// ════════════════════════════════════════════════════════════════════════
+service WorkspaceAuthorityService {
+  rpc VerifyIdentity(VerifyIdentityRequest) returns (VerifyIdentityResponse);
+  rpc DiscoverWorkspaces(DiscoverWorkspacesRequest) returns (DiscoverWorkspacesResponse);
+  rpc ApproveAndEnqueueInvocation(ApproveAndEnqueueInvocationRequest) returns (ApproveAndEnqueueInvocationResponse);
+  rpc ClaimInvocations(ClaimInvocationsRequest) returns (ClaimInvocationsResponse);
+  rpc AcknowledgeDelivery(AcknowledgeDeliveryRequest) returns (AcknowledgeDeliveryResponse);
+  rpc SubmitInvocationResult(SubmitInvocationResultRequest) returns (SubmitInvocationResultResponse);
+  rpc GetCatalogView(GetCatalogViewRequest) returns (GetCatalogViewResponse);
+}

@@ -8,7 +8,10 @@ Requires=cyrene-runtime-maintenance.service
 Type=simple
 User=cyrene
 Group=cyrene
+SupplementaryGroups=cyrene-product-bundle-reader
 EnvironmentFile=-/etc/cyrene/workspace-web-bff.env
+Environment=CYRENE_WORKSPACE_PRODUCT_BUNDLE_VERSIONS_ROOT=/var/lib/cyrene-product-bundles/versions
+Environment=CYRENE_WORKSPACE_WEB_BFF_AUTHORITY_UDS=/run/cyrene-workspace-authority/bff/bff.sock
 ExecStart=/usr/bin/cyrene component-run cy-workspace-web-bff --
 Restart=on-failure
 RestartSec=2s
@@ -17,6 +20,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
+ReadOnlyPaths=/var/lib/cyrene-product-bundles/versions
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 
