@@ -107,7 +107,9 @@ pub(crate) fn attach_device_bpf_filter(
             .to_string();
         let detail = if !verifier_log.is_empty() {
             verifier_log
-        } else if err.raw_os_error() == Some(libc::EPERM) || err.raw_os_error() == Some(libc::EACCES) {
+        } else if err.raw_os_error() == Some(libc::EPERM)
+            || err.raw_os_error() == Some(libc::EACCES)
+        {
             format!("{err}: cgroup device BPF requires root or CAP_BPF / CAP_SYS_ADMIN capabilities; grant capabilities or run with --dev-mode / --disable-device-bpf for unprivileged local dev")
         } else {
             err.to_string()
@@ -362,4 +364,3 @@ pub(crate) fn probe_device_bpf_capable() -> bool {
 pub(crate) fn probe_device_bpf_capable() -> bool {
     false
 }
-

@@ -208,7 +208,10 @@ fn preflight_reports_device_bpf_capable_fact() {
     let runtime = CgroupV2Runtime::new(dev_cfg);
     let caps = runtime.preflight_report();
     let bpf_fact = caps.facts.iter().find(|f| f.name == "device-bpf-capable");
-    assert!(bpf_fact.is_some(), "preflight must report device-bpf-capable fact");
+    assert!(
+        bpf_fact.is_some(),
+        "preflight must report device-bpf-capable fact"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
