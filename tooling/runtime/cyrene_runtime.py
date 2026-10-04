@@ -308,7 +308,15 @@ def _load_processes(layout: Layout) -> dict[str, dict[str, Any]]:
         value = json.loads(layout.processes.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BootstrapFailure("RUNTIME_STATE_INVALID", "Runtime process state is unreadable") from exc
-    if not isinstance(value, dict) or any(not isinstance(record, dict) for record in value.values()):
+    if not isinstance(value, dict) or any(
+        name not in COMPONENT_ORDER
+        or not isinstance(record, dict)
+        or type(record.get("pid")) is not int
+        or record["pid"] <= 0
+        or type(record.get("startTime")) is not int
+        or record["startTime"] <= 0
+        for name, record in value.items()
+    ):
         raise BootstrapFailure("RUNTIME_STATE_INVALID", "Runtime process state is invalid")
     return value
 
