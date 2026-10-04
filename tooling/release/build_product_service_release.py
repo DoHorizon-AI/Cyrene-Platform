@@ -75,6 +75,15 @@ def _run(arguments: list[str], *, cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
+def _uv_version_matches_locked_profile(output: str, expected_version: str, expected_target: str) -> bool:
+    """Accept only the locked uv version and, when present, its exact target annotation."""
+
+    return output in {
+        f"uv {expected_version}",
+        f"uv {expected_version} ({expected_target})",
+    }
+
+
 def _git_head(root: Path, expected_repository: str, label: str) -> str:
     if root.is_symlink() or not root.is_dir():
         raise ProductReleaseError(f"{label} checkout root is missing or unsafe: {root}")
@@ -278,7 +287,8 @@ def _native_python_profile(
     if not isinstance(uv_version, str) or not uv_version:
         raise ProductReleaseError("Workspace native Python profile has no pinned uv version")
     actual_uv_version = _run([str(resolved_uv), "--version"])
-    if actual_uv_version != f"uv {uv_version}":
+    expected_uv_target = f"{profile['architecture']}-unknown-linux-gnu"
+    if not _uv_version_matches_locked_profile(actual_uv_version, uv_version, expected_uv_target):
         raise ProductReleaseError(
             f"uv executable differs from the locked profile: expected uv {uv_version}, got {actual_uv_version}"
         )

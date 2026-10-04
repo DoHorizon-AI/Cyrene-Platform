@@ -20,6 +20,7 @@ from build_product_service_release import (
     NATIVE_PYTHON_TARGETS,
     SERVICE_COMPONENTS,
     _native_python_profile,
+    _uv_version_matches_locked_profile,
 )
 from component_artifacts import ComponentArtifactError, _component_target
 from prepare_product_component import IMAGE_PRODUCTS, PRODUCTS
@@ -102,6 +103,31 @@ class ProductPublicationMatrixTests(unittest.TestCase):
                 self.assertEqual(target.get("runtime"), "python:3.12")
                 self.assertEqual({key: target.get(key) for key in identity}, identity)
 
+    def test_locked_uv_version_accepts_only_the_exact_target_annotation(self) -> None:
+        self.assertTrue(_uv_version_matches_locked_profile("uv 0.12.21", "0.12.21", "x86_64-unknown-linux-gnu"))
+        self.assertTrue(
+            _uv_version_matches_locked_profile(
+                "uv 0.12.21 (x86_64-unknown-linux-gnu)",
+                "0.12.21",
+                "x86_64-unknown-linux-gnu",
+            )
+        )
+        for output in (
+            "uv 0.12.20",
+            "uv 0.12.21 (aarch64-unknown-linux-gnu)",
+            "uv 0.12.21 (x86_64-unknown-linux-musl)",
+            "uv 0.12.21 extra",
+            "uv 0.12.21\nwarning",
+        ):
+            with self.subTest(output=output):
+                self.assertFalse(
+                    _uv_version_matches_locked_profile(
+                        output,
+                        "0.12.21",
+                        "x86_64-unknown-linux-gnu",
+                    )
+                )
+
     def test_native_python_build_requires_matching_locked_host_and_interpreter(self) -> None:
         version = "3.12.14"
         for target_id, identity in NATIVE_PYTHON_TARGETS.items():
@@ -141,7 +167,7 @@ class ProductPublicationMatrixTests(unittest.TestCase):
                 ):
                     with patch(
                         "build_product_service_release._run",
-                        side_effect=[version, "uv 0.12.21"],
+                        side_effect=[version, "uv 0.12.21 (x86_64-unknown-linux-gnu)"],
                     ):
                         selected_target, selected_python, selected_uv = _native_python_profile(
                             workspace_root,
