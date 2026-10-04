@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
 import re
 import shutil
 import subprocess
@@ -43,6 +45,21 @@ SERVICE_COMPONENTS = {
     "exchange": "cyrene-exchange",
     "navigator": "cyrene-navigator",
 }
+NATIVE_PYTHON_TARGETS = {
+    "linux-ubuntu-22.04-x86_64-python-3.12": {
+        "osVersion": "22.04",
+        "distributionVersion": "22.04",
+        "abi": "glibc-2.35",
+    },
+    "linux-ubuntu-24.04-x86_64-python-3.12": {
+        "osVersion": "24.04",
+        "distributionVersion": "24.04",
+        "abi": "glibc-2.39",
+    },
+}
+NATIVE_PYTHON_VERSION = "3.12.14"
+NATIVE_PYTHON_EXECUTABLE = "/opt/cyrene/python/3.12.14/bin/python3.12"
+NATIVE_PYTHON_INPUT = "packaging/python-runtime.lock.json"
 SDK_COMPONENT = "cyrene-runtime-maintenance-sdk"
 SDK_WHEEL = "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -178,6 +195,112 @@ def _extract_sdk_bundle(fetch_result_path: Path, destination: Path, channel: str
     }
 
 
+def _native_python_profile(
+    workspace_root: Path,
+    catalog: dict[str, Any],
+    component_id: str,
+    target_profile: str,
+    python_executable: Path,
+    uv_executable: Path,
+) -> tuple[dict[str, Any], Path, Path]:
+    """Bind a native build host and interpreter to one catalog/lock profile."""
+    expected = NATIVE_PYTHON_TARGETS.get(target_profile)
+    if expected is None:
+        raise ProductReleaseError(f"unsupported Product native Python profile: {target_profile}")
+    target_row = next(
+        (row for row in catalog.get("targets", []) if isinstance(row, dict) and row.get("id") == target_profile),
+        None,
+    )
+    target = target_row.get("target") if isinstance(target_row, dict) else None
+    if not isinstance(target, dict):
+        raise ProductReleaseError(f"trusted catalog has no target profile: {target_profile}")
+    if (
+        target.get("os") != "linux"
+        or target.get("distribution") != "ubuntu"
+        or target.get("architecture") != "x86_64"
+        or target.get("runtime") != "python:3.12"
+        or any(target.get(key) != value for key, value in expected.items())
+    ):
+        raise ProductReleaseError(f"trusted catalog target does not match the native profile ID: {target_profile}")
+    _component_target(catalog, component_id, {"kind": "python-bundle"}, target)
+
+    release_lock = _read_json(workspace_root / "release-lock.json", "Workspace release lock")
+    profiles = release_lock.get("nativePythonProfiles")
+    profile = profiles.get(target_profile) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict):
+        raise ProductReleaseError(f"Workspace release lock has no native Python profile: {target_profile}")
+    target_keys = (
+        "os",
+        "osVersion",
+        "distribution",
+        "distributionVersion",
+        "architecture",
+        "abi",
+        "runtime",
+    )
+    if any(profile.get(key) != target.get(key) for key in target_keys):
+        raise ProductReleaseError("Workspace native Python profile differs from the trusted catalog target")
+    python_version = profile.get("pythonVersion")
+    python_path = Path(python_executable)
+    if (
+        python_version != NATIVE_PYTHON_VERSION
+        or profile.get("pythonExecutable") != NATIVE_PYTHON_EXECUTABLE
+        or profile.get("pythonInput") != NATIVE_PYTHON_INPUT
+        or not python_path.is_absolute()
+    ):
+        raise ProductReleaseError("native Python profile or staged interpreter path is invalid")
+    try:
+        resolved_python = python_path.resolve(strict=True)
+    except OSError as error:
+        raise ProductReleaseError(f"staged Python interpreter is missing: {python_path}") from error
+    if not resolved_python.is_file() or not os.access(resolved_python, os.X_OK):
+        raise ProductReleaseError(f"staged Python interpreter is not executable: {python_path}")
+    actual_python_version = _run(
+        [
+            str(resolved_python),
+            "-c",
+            "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+        ]
+    )
+    if actual_python_version != python_version:
+        raise ProductReleaseError(
+            f"staged Python interpreter differs from the locked profile: expected {python_version}, got {actual_python_version}"
+        )
+    uv_path = Path(uv_executable)
+    try:
+        resolved_uv = uv_path.resolve(strict=True)
+    except OSError as error:
+        raise ProductReleaseError(f"pinned uv executable is missing: {uv_path}") from error
+    if not resolved_uv.is_file() or not os.access(resolved_uv, os.X_OK):
+        raise ProductReleaseError(f"pinned uv executable is not executable: {uv_path}")
+    resolver = profile.get("wheelResolver")
+    uv_version = resolver.get("version") if isinstance(resolver, dict) else None
+    if not isinstance(uv_version, str) or not uv_version:
+        raise ProductReleaseError("Workspace native Python profile has no pinned uv version")
+    actual_uv_version = _run([str(resolved_uv), "--version"])
+    if actual_uv_version != f"uv {uv_version}":
+        raise ProductReleaseError(
+            f"uv executable differs from the locked profile: expected uv {uv_version}, got {actual_uv_version}"
+        )
+
+    actual_target = NATIVE_PYTHON_TARGETS[target_profile]
+    os_release = platform.freedesktop_os_release()
+    if os_release.get("ID") != "ubuntu" or os_release.get("VERSION_ID") != actual_target["osVersion"]:
+        raise ProductReleaseError(
+            f"native Product target {target_profile} requires Ubuntu {actual_target['osVersion']}"
+        )
+    if platform.machine().lower() not in {"x86_64", "amd64"}:
+        raise ProductReleaseError(f"native Product target {target_profile} requires x86_64")
+    libc_name, libc_version = platform.libc_ver()
+    if libc_name != "glibc" and hasattr(os, "confstr"):
+        libc_version = (os.confstr("CS_GNU_LIBC_VERSION") or "").removeprefix("glibc ")
+    if f"glibc-{libc_version}" != actual_target["abi"]:
+        raise ProductReleaseError(
+            f"native Product target {target_profile} requires {actual_target['abi']}, got {libc_name}-{libc_version}"
+        )
+    return target, resolved_python, resolved_uv
+
+
 def build_product_service_release(
     *,
     service: str,
@@ -193,6 +316,9 @@ def build_product_service_release(
     catalog_path: Path,
     catalog_sha256: str,
     sdk_fetch_result: Path,
+    target_profile: str,
+    python_executable: Path,
+    uv_executable: Path,
     output: Path,
     run_id: str,
     run_attempt: int,
@@ -205,8 +331,6 @@ def build_product_service_release(
         raise ProductReleaseError("release tooling commit must be a full lowercase 40-character SHA")
     if not SHA256.fullmatch(catalog_sha256):
         raise ProductReleaseError("catalog SHA-256 must be 64 lowercase hexadecimal characters")
-    if sys.version_info[:2] != (3, 12):
-        raise ProductReleaseError("Product bundle releases require Python 3.12")
     if (channel == "preview" and source_ref != "refs/heads/develop") or (
         channel == "stable" and source_ref not in {"refs/heads/main", "refs/heads/release"}
     ):
@@ -238,6 +362,14 @@ def build_product_service_release(
     )
     if component.get("pythonBundleService") != service:
         raise ProductReleaseError("trusted catalog service mapping does not match this Product")
+    target, python, uv = _native_python_profile(
+        workspace_root,
+        catalog,
+        component_id,
+        target_profile,
+        python_executable,
+        uv_executable,
+    )
 
     output.mkdir(parents=True)
     sdk = _extract_sdk_bundle(sdk_fetch_result, output / "sdk-unpacked", channel)
@@ -251,7 +383,7 @@ def build_product_service_release(
             raise ProductReleaseError(f"pinned Workspace builder input is missing or unsafe: {path}")
     _run(
         [
-            sys.executable,
+            str(python),
             str(package_builder),
             "--workspace-root",
             str(workspace_root),
@@ -259,6 +391,12 @@ def build_product_service_release(
             service,
             "--service-commit",
             product_commit,
+            "--target-profile",
+            target_profile,
+            "--python-executable",
+            str(python),
+            "--uv",
+            str(uv),
             "--output",
             str(wheelhouse_root),
             "--runtime-sdk-wheel",
@@ -276,7 +414,7 @@ def build_product_service_release(
     )
     _run(
         [
-            sys.executable,
+            str(python),
             str(service_builder),
             "build",
             "--wheelhouse",
@@ -287,8 +425,10 @@ def build_product_service_release(
             str(bundle_root),
             "--arch",
             "amd64",
-            "--python",
-            sys.executable,
+            "--target-profile",
+            target_profile,
+            "--python-executable",
+            str(python),
             "--service",
             service,
             "--service-commit",
@@ -328,18 +468,9 @@ def build_product_service_release(
     manifest_dir = output / "manifests"
     artifact_dir.mkdir()
     manifest_dir.mkdir()
-    artifact_name = f"{component_id}-linux-ubuntu-24.04-x86_64-python-3.12.tar.gz"
+    artifact_name = f"{component_id}-{target_profile}.tar.gz"
     artifact_path = artifact_dir / artifact_name
     _write_deterministic_tar_gz(payload_root, artifact_path)
-    target = {
-        "os": "linux",
-        "osVersion": "24.04",
-        "distribution": "ubuntu",
-        "distributionVersion": "24.04",
-        "architecture": "x86_64",
-        "abi": "glibc-2.39",
-        "runtime": "python:3.12",
-    }
     artifact = {"kind": "python-bundle", "format": "tar.gz"}
     _component_target(catalog, component_id, artifact, target)
     source_url = f"https://github.com/{product_repository_id}"
@@ -413,6 +544,9 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--catalog-sha256", required=True)
     parser.add_argument("--sdk-fetch-result", type=Path, required=True)
+    parser.add_argument("--target-profile", required=True, choices=tuple(NATIVE_PYTHON_TARGETS))
+    parser.add_argument("--python-executable", type=Path, required=True)
+    parser.add_argument("--uv-executable", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -432,6 +566,9 @@ def main() -> int:
             catalog_path=arguments.catalog.resolve(),
             catalog_sha256=arguments.catalog_sha256,
             sdk_fetch_result=arguments.sdk_fetch_result.resolve(),
+            target_profile=arguments.target_profile,
+            python_executable=arguments.python_executable,
+            uv_executable=arguments.uv_executable,
             output=arguments.output.resolve(),
             run_id=arguments.run_id,
             run_attempt=arguments.run_attempt,

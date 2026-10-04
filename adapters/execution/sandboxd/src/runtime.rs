@@ -20,6 +20,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
+
 #[cfg(any(not(target_os = "linux"), test))]
 use std::process::Child;
 
@@ -44,7 +47,7 @@ use cy_kernel_api::{
 #[cfg(target_os = "linux")]
 use crate::sys::{open_pidfd, spawn_gated_process, try_wait_pid, wait_pid};
 use crate::{
-    bpf::{attach_device_bpf_filter, probe_device_bpf_capable},
+    bpf::{attach_device_bpf_filter, probe_device_bpf_attach},
     config::{fact, is_owned_instance_name, CgroupV2Config, OwnedCgroupCleanupReport},
     sys::{
         pidfd_available, proc_start_time, read_key_values, read_oom_kill_count, read_trimmed,
@@ -53,6 +56,8 @@ use crate::{
 };
 
 const CPU_PERIOD_USEC: u64 = 100_000;
+#[cfg(target_os = "linux")]
+static BPF_PROBE_CGROUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Linux cgroup v2 execution backend. The `children` map exists solely for
 /// bounded reaping; cgroup.kill remains the authority for the whole tree.
@@ -482,7 +487,24 @@ impl CgroupV2Runtime {
         }
     }
 
+    /// Reports node-level readiness. `ready` applies only facts marked
+    /// `required`; device BPF remains diagnostic here so CPU-only work is not
+    /// blocked by missing GPU isolation support.
+    /// 中文：报告节点级 readiness；`ready` 只由 `required` 事实决定。此处设备 BPF 是诊断项，避免因 GPU 隔离能力缺失而阻断 CPU-only 工作。
     pub fn preflight_report(&self) -> NodeCapabilities {
+        self.preflight_report_with_binding(None)
+    }
+
+    /// Reports readiness for one binding. A HARD binding makes
+    /// `device-bpf-capable` required and true only after a binding-specific
+    /// program load, attach, detach, and temporary-cgroup cleanup succeeds.
+    /// Other bindings keep the fact optional, so CPU-only work is not blocked.
+    /// 中文：报告指定 binding 的 readiness。HARD binding 将 `device-bpf-capable` 设为必需，且只有绑定专属程序加载、附加、卸载和临时 cgroup 清理全部成功时才为 true；其他 binding 保持可选，不阻断 CPU-only 工作。
+    pub fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+        self.preflight_report_with_binding(Some(binding))
+    }
+
+    fn preflight_report_with_binding(&self, binding: Option<&DeviceBinding>) -> NodeCapabilities {
         let controllers = read_trimmed(self.config.root.join("cgroup.controllers"));
         let cgroup_v2 = controllers.is_some();
         let has_controller = |name: &str| {
@@ -494,6 +516,21 @@ impl CgroupV2Runtime {
         };
         let cgroup_kill = self.config.root.join("cgroup.kill").is_file();
         let required = !self.config.dev_mode;
+        let hard_binding =
+            binding.is_some_and(|binding| binding.enforcement == EnforcementMode::Hard);
+        let probe_binding = if hard_binding { binding } else { None };
+        let device_bpf_result = self.probe_device_bpf(probe_binding);
+        let device_bpf_capable = device_bpf_result.is_ok();
+        let device_bpf_detail = match &device_bpf_result {
+            Ok(()) => {
+                if hard_binding {
+                    "binding-specific device BPF load, attach, detach, node identity, and probe cleanup succeeded; launch still attaches to its target cgroup".to_string()
+                } else {
+                    "host device BPF load, attach, detach, and probe cleanup succeeded; binding-specific device nodes and launch attach are checked separately".to_string()
+                }
+            }
+            Err(error) => format!("{}: {}", error.reason_code, error.message),
+        };
         let facts = vec![
             fact(
                 "platform-linux",
@@ -521,30 +558,29 @@ impl CgroupV2Runtime {
                 "device-bpf-enabled",
                 self.config.device_bpf_enabled,
                 false,
-                "HARD binding performs a real load and attach at launch",
+                "configuration toggle only; this is not a capability or isolation proof",
             ),
             fact(
                 "device-bpf-capable",
-                if self.config.device_bpf_enabled {
-                    probe_device_bpf_capable()
-                } else {
-                    false
-                },
-                false,
-                "host kernel and process permissions permit cgroup device BPF loading",
+                device_bpf_capable,
+                hard_binding,
+                &device_bpf_detail,
             ),
             fact(
                 "dev-mode",
                 self.config.dev_mode,
                 false,
-                "development mode bypassing hardware cgroup enforcement",
+                "development mode disables hard device isolation; HARD bindings are rejected",
             ),
         ];
-        let ready = self.config.dev_mode
-            || facts
-                .iter()
-                .filter(|fact| fact.required)
-                .all(|fact| fact.available);
+        let ready = facts
+            .iter()
+            .filter(|fact| fact.required)
+            .all(|fact| fact.available);
+        let cgroup_ready = facts
+            .iter()
+            .filter(|fact| fact.required && fact.name != "device-bpf-capable")
+            .all(|fact| fact.available);
         NodeCapabilities {
             ready,
             facts,
@@ -552,7 +588,7 @@ impl CgroupV2Runtime {
                 resource_kind: "process-tree".to_string(),
                 mode: if self.config.dev_mode {
                     EnforcementMode::Unenforced
-                } else if ready {
+                } else if cgroup_ready {
                     EnforcementMode::Hard
                 } else {
                     EnforcementMode::Unenforced
@@ -560,13 +596,122 @@ impl CgroupV2Runtime {
                 adapter_id: "linux-cgroup-v2".to_string(),
                 reason_code: if self.config.dev_mode {
                     "DEV_MODE_UNENFORCED".to_string()
-                } else if ready {
+                } else if cgroup_ready {
                     "CGROUP_V2_READY".to_string()
                 } else {
                     "CGROUP_V2_PREREQUISITES_MISSING".to_string()
                 },
             }],
         }
+    }
+
+    fn probe_device_bpf(&self, binding: Option<&DeviceBinding>) -> Result<(), ProviderError> {
+        if self.config.dev_mode {
+            return Err(ProviderError::new(
+                "linux-device-bpf",
+                "DEVICE_BPF_DEV_MODE_FORBIDDEN",
+                "dev mode disables hard device isolation; HARD GPU bindings cannot launch",
+            ));
+        }
+        if !self.config.device_bpf_enabled {
+            return Err(ProviderError::new(
+                "linux-device-bpf",
+                "HARD_ENFORCEMENT_UNAVAILABLE",
+                "device BPF is disabled; HARD GPU bindings cannot launch",
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let probe_path = self.create_bpf_probe_cgroup()?;
+            let probe_result = probe_device_bpf_attach(&probe_path, binding);
+            let cleanup_result = fs::remove_dir(&probe_path);
+            match (probe_result, cleanup_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) => Err(error),
+                (probe_result, Err(cleanup_error)) => Err(ProviderError::new(
+                    "linux-device-bpf",
+                    "DEVICE_BPF_PROBE_CLEANUP_FAILED",
+                    &match probe_result {
+                        Ok(()) => format!(
+                            "device BPF attach probe succeeded but temporary cgroup cleanup failed: {cleanup_error}"
+                        ),
+                        Err(probe_error) => format!(
+                            "{}: {}; temporary cgroup cleanup failed: {cleanup_error}",
+                            probe_error.reason_code, probe_error.message
+                        ),
+                    },
+                )),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = binding;
+            Err(ProviderError::new(
+                "linux-device-bpf",
+                "DEVICE_BPF_UNSUPPORTED",
+                "cgroup device BPF requires Linux; HARD GPU isolation is unavailable",
+            ))
+        }
+    }
+
+    fn preflight_blocker(report: &NodeCapabilities) -> ProviderError {
+        if let Some(fact) = report
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable" && fact.required && !fact.available)
+        {
+            if let Some((reason_code, message)) = fact.detail.split_once(": ") {
+                return ProviderError::new("linux-device-bpf", reason_code, message);
+            }
+        }
+        let missing = report
+            .facts
+            .iter()
+            .filter(|fact| fact.required && !fact.available)
+            .map(|fact| fact.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        ProviderError::new(
+            "linux-cgroup-v2",
+            "NODE_NOT_READY",
+            &format!("required sandbox capability facts unavailable: {missing}"),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_bpf_probe_cgroup(&self) -> Result<PathBuf, ProviderError> {
+        for _ in 0..8 {
+            let sequence = BPF_PROBE_CGROUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = self.config.root.join(format!(
+                "cyrene-bpf-probe-{}-{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    let reason_code =
+                        if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+                            "DEVICE_BPF_PERMISSION_DENIED"
+                        } else {
+                            "DEVICE_BPF_PROBE_CGROUP_CREATE_FAILED"
+                        };
+                    return Err(ProviderError::new(
+                        "linux-device-bpf",
+                        reason_code,
+                        &format!(
+                            "cannot create isolated temporary cgroup under {}: {error}; check write access to the delegated cgroup subtree",
+                            self.config.root.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(ProviderError::new(
+            "linux-device-bpf",
+            "DEVICE_BPF_PROBE_CGROUP_CREATE_FAILED",
+            "cannot allocate a unique isolated temporary cgroup for device BPF preflight",
+        ))
     }
 
     fn validate_owned_root(&self) -> Result<(), ProviderError> {
@@ -907,20 +1052,17 @@ impl CgroupV2Runtime {
             return Ok(());
         }
         if self.config.dev_mode {
-            return Ok(());
+            return Err(ProviderError::new(
+                "linux-device-bpf",
+                "DEVICE_BPF_DEV_MODE_FORBIDDEN",
+                "dev mode disables hard device isolation; HARD GPU bindings cannot launch",
+            ));
         }
         if !self.config.device_bpf_enabled {
             return Err(ProviderError::new(
                 "linux-device-bpf",
                 "HARD_ENFORCEMENT_UNAVAILABLE",
-                "device BPF is disabled; a HARD accelerator allocation cannot launch",
-            ));
-        }
-        if !probe_device_bpf_capable() {
-            return Err(ProviderError::new(
-                "linux-device-bpf",
-                "DEVICE_BPF_PERMISSION_DENIED",
-                "cgroup device BPF requires root or CAP_BPF / CAP_SYS_ADMIN capabilities; grant capabilities or run with --dev-mode / --disable-device-bpf for unprivileged local dev",
+                "device BPF is disabled; HARD GPU bindings cannot launch",
             ));
         }
         attach_device_bpf_filter(cgroup_path, binding)
@@ -932,17 +1074,18 @@ impl ProcessRuntime for CgroupV2Runtime {
         self.preflight_report()
     }
 
+    fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+        CgroupV2Runtime::preflight_for_binding(self, binding)
+    }
+
     fn launch(
         &self,
         plan: &LaunchPlan,
         binding: &DeviceBinding,
     ) -> Result<ProcessHandle, ProviderError> {
-        if !self.preflight_report().ready {
-            return Err(ProviderError::new(
-                "linux-cgroup-v2",
-                "NODE_NOT_READY",
-                "required cgroup v2 capabilities are unavailable",
-            ));
+        let capabilities = self.preflight_for_binding(binding);
+        if !capabilities.ready {
+            return Err(Self::preflight_blocker(&capabilities));
         }
         let cgroup_path = self.create_instance_cgroup(&plan.cgroup_name)?;
         if let Err(error) = self
@@ -1276,6 +1419,148 @@ impl SandboxBackend for CgroupV2Runtime {
         evidence: &RuntimeProcessEvidence,
     ) -> Result<CleanupReport, ProviderError> {
         self.recover_stale_process_inner(evidence)
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn runtime(root: &Path, device_bpf_enabled: bool, dev_mode: bool) -> CgroupV2Runtime {
+        CgroupV2Runtime::new(CgroupV2Config {
+            root: root.to_path_buf(),
+            transport_root: root.join("transport"),
+            device_bpf_enabled,
+            dev_mode,
+        })
+    }
+
+    fn setup_cgroup_root(root: &Path) {
+        fs::write(root.join("cgroup.controllers"), "cpu memory pids").unwrap();
+        fs::File::create(root.join("cgroup.kill")).unwrap();
+    }
+
+    fn hard_binding() -> DeviceBinding {
+        DeviceBinding {
+            resource_id: "GPU-0".to_string(),
+            nodes: Vec::new(),
+            environment: BTreeMap::new(),
+            joinable_environment_keys: Default::default(),
+            required_gids: Vec::new(),
+            enforcement: EnforcementMode::Hard,
+            adapter_id: "test".to_string(),
+            reason_code: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn global_and_cpu_readiness_do_not_require_device_bpf() {
+        let root = tempfile::tempdir().unwrap();
+        setup_cgroup_root(root.path());
+        let runtime = runtime(root.path(), false, false);
+
+        let global = runtime.preflight_report();
+        assert!(global.ready);
+        let global_bpf = global
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable")
+            .unwrap();
+        assert!(!global_bpf.available);
+        assert!(!global_bpf.required);
+
+        let cpu_binding = DeviceBinding {
+            enforcement: EnforcementMode::Unenforced,
+            ..hard_binding()
+        };
+        let cpu = runtime.preflight_for_binding(&cpu_binding);
+        assert!(cpu.ready);
+        let cpu_bpf = cpu
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable")
+            .unwrap();
+        assert!(!cpu_bpf.required);
+    }
+
+    #[test]
+    fn hard_binding_requires_enabled_bpf_as_a_required_fact() {
+        let root = tempfile::tempdir().unwrap();
+        setup_cgroup_root(root.path());
+        let runtime = runtime(root.path(), false, false);
+        let backend: &dyn ProcessRuntime = &runtime;
+        let report = backend.preflight_for_binding(&hard_binding());
+        let bpf = report
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable")
+            .unwrap();
+
+        assert!(bpf.required);
+        assert!(!bpf.available);
+        assert!(!report.ready);
+        let blocker = CgroupV2Runtime::preflight_blocker(&report);
+        assert_eq!(blocker.reason_code, "HARD_ENFORCEMENT_UNAVAILABLE");
+    }
+
+    #[test]
+    fn dev_mode_never_satisfies_hard_binding_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = runtime(root.path(), true, true);
+        let global = runtime.preflight_report();
+        let hard = runtime.preflight_for_binding(&hard_binding());
+
+        assert!(
+            global.ready,
+            "dev mode keeps generic local readiness available"
+        );
+        assert!(!hard.ready, "dev mode must reject HARD device isolation");
+        let blocker = CgroupV2Runtime::preflight_blocker(&hard);
+        assert_eq!(blocker.reason_code, "DEVICE_BPF_DEV_MODE_FORBIDDEN");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hard_binding_without_device_nodes_is_blocked_and_probe_cgroup_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        setup_cgroup_root(root.path());
+        let runtime = runtime(root.path(), true, false);
+        let report = runtime.preflight_for_binding(&hard_binding());
+        let bpf = report
+            .facts
+            .iter()
+            .find(|fact| fact.name == "device-bpf-capable")
+            .unwrap();
+
+        assert!(bpf.required);
+        assert!(!bpf.available);
+        assert!(bpf.detail.starts_with("DEVICE_RULES_EMPTY: "));
+        assert!(fs::read_dir(root.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("cyrene-bpf-probe-")));
+    }
+
+    #[test]
+    fn hard_launch_in_dev_mode_fails_before_creating_a_cgroup_or_process() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = runtime(root.path(), false, true);
+        let plan = LaunchPlan {
+            instance_name: "hard-dev-mode".to_string(),
+            executable: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cgroup_name: "instance-hard-dev-mode".to_string(),
+            limits: CgroupLimits::default(),
+            working_dir: None,
+            transport_socket: None,
+        };
+
+        let error = runtime.launch(&plan, &hard_binding()).unwrap_err();
+        assert_eq!(error.reason_code, "DEVICE_BPF_DEV_MODE_FORBIDDEN");
+        assert!(!root.path().join("instance-hard-dev-mode").exists());
     }
 }
 

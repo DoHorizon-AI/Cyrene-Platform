@@ -405,7 +405,7 @@ mod tests {
         let request = sandbox_v1::SandboxRequest {
             protocol_version: 1,
             body: Some(sandbox_v1::sandbox_request::Body::Preflight(
-                sandbox_v1::SandboxPreflightRequest {},
+                sandbox_v1::SandboxPreflightRequest { binding: None },
             )),
         };
         let bytes = request.encode_to_vec();

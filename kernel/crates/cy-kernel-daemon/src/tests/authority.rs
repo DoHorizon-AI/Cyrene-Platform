@@ -19,6 +19,9 @@ fn canonical_start_worker_preserves_limits_and_runtime_owned_device_injection() 
         fn preflight(&self) -> NodeCapabilities {
             FakeSandbox.preflight()
         }
+        fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+            FakeSandbox.preflight_for_binding(binding)
+        }
         fn launch(
             &self,
             plan: &LaunchPlan,
@@ -297,6 +300,9 @@ fn semantic_lease_rpc_is_vendor_neutral_fenced_and_ttl_bounded() {
     assert!(capabilities.accelerators.is_empty());
     assert_eq!(capabilities.resources.len(), 1);
     assert_eq!(capabilities.resources[0].resource_class, "accelerator");
+    assert!(capabilities
+        .feature_flags
+        .contains(&"sandbox.test".to_string()));
 }
 
 #[test]

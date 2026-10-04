@@ -94,6 +94,9 @@ def prepare_product_component(
     catalog_path: Path,
     catalog_sha256: str,
     sdk_fetch_result: Path,
+    target_profile: str | None,
+    python_executable: Path | None,
+    uv_executable: Path | None,
     output: Path,
     run_id: str,
     run_attempt: int,
@@ -124,6 +127,10 @@ def prepare_product_component(
     python_manifest: Path | None = None
     python_artifact: Path | None = None
     if product in SERVICE_COMPONENTS:
+        if target_profile is None or python_executable is None or uv_executable is None:
+            raise ProductComponentError(
+                "Python Product bundle builds require --target-profile, --python-executable, and --uv-executable"
+            )
         python_result = build_product_service_release(
             service=product,
             product_repository=product_root,
@@ -138,6 +145,9 @@ def prepare_product_component(
             catalog_path=catalog_path,
             catalog_sha256=catalog_sha256,
             sdk_fetch_result=sdk_fetch_result,
+            target_profile=target_profile,
+            python_executable=python_executable,
+            uv_executable=uv_executable,
             output=output / "python-build",
             run_id=run_id,
             run_attempt=run_attempt,
@@ -153,6 +163,8 @@ def prepare_product_component(
         if manifest.get("componentId") != component_id:
             raise ProductComponentError("Python bundle manifest component identity is incorrect")
     else:
+        if target_profile is not None or python_executable is not None or uv_executable is not None:
+            raise ProductComponentError("only Python bundle Products accept native build profile inputs")
         sdk = prepare_sdk_context(
             sdk_fetch_result,
             channel,
@@ -180,6 +192,7 @@ def prepare_product_component(
         "componentId": component_id,
         "version": version,
         "pythonBundle": python_artifact is not None,
+        "targetProfile": target_profile or "",
         "pythonManifest": str(python_manifest) if python_manifest else "",
         "pythonArtifact": str(python_artifact) if python_artifact else "",
         "ociImage": product in IMAGE_PRODUCTS,
@@ -214,6 +227,9 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--catalog-sha256", required=True)
     parser.add_argument("--sdk-fetch-result", type=Path, required=True)
+    parser.add_argument("--target-profile")
+    parser.add_argument("--python-executable", type=Path)
+    parser.add_argument("--uv-executable", type=Path)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -233,6 +249,9 @@ def main() -> int:
             catalog_path=arguments.catalog.resolve(),
             catalog_sha256=arguments.catalog_sha256,
             sdk_fetch_result=arguments.sdk_fetch_result.resolve(),
+            target_profile=arguments.target_profile,
+            python_executable=arguments.python_executable.resolve() if arguments.python_executable else None,
+            uv_executable=arguments.uv_executable.resolve() if arguments.uv_executable else None,
             output=arguments.output.resolve(),
             run_id=arguments.run_id,
             run_attempt=arguments.run_attempt,

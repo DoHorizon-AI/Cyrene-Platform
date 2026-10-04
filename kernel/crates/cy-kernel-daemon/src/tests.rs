@@ -11,6 +11,7 @@
 #![allow(deprecated)]
 
 mod authority;
+mod binding_preflight;
 mod endpoint;
 mod golden;
 mod lifecycle;
@@ -467,6 +468,21 @@ impl ProcessRuntime for FakeSandbox {
             }],
             enforcement: Vec::new(),
         }
+    }
+
+    fn preflight_for_binding(&self, binding: &DeviceBinding) -> NodeCapabilities {
+        let mut capabilities = self.preflight();
+        if binding.enforcement == EnforcementMode::Hard {
+            // Kernel launch tests using this mock model a runtime that can
+            // prove device isolation for HARD bindings.
+            capabilities.facts.push(CapabilityFact {
+                name: "device-bpf-capable".to_string(),
+                available: true,
+                required: true,
+                detail: "test-only HARD binding isolation proof".to_string(),
+            });
+        }
+        capabilities
     }
 
     fn launch(

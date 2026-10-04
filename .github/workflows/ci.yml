@@ -94,6 +94,7 @@ jobs:
           python -m pytest sdk/python/cyrene_preflight/tests
           python -m pytest tooling/docs/tests
           python -m pytest tooling/ci/tests
+          python -m pytest tooling/runtime/tests
 
   platform-core:
     name: ci / platform-core
