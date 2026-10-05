@@ -24,6 +24,7 @@ if __package__:
     from .component_artifacts import (
         ComponentArtifactError,
         _component_target,
+        _verify_contract_lock,
         _write_deterministic_tar_gz,
         create_manifest,
         manifest_asset_name,
@@ -33,6 +34,7 @@ else:
     from component_artifacts import (
         ComponentArtifactError,
         _component_target,
+        _verify_contract_lock,
         _write_deterministic_tar_gz,
         create_manifest,
         manifest_asset_name,
@@ -96,6 +98,19 @@ SYSTEMD_UNIT_COMPONENTS = {
 }
 WORKER_SCOPED_COMPONENT_UNITS = {"cy-runtime-agent": "cy-runtime-agent.service"}
 PACKAGE_RUNTIME_ID = "cy-package-runtime"
+PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID = "package-runtime-native-v1"
+PACKAGE_RUNTIME_COMPATIBILITY = {
+    "groupId": PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
+    "groupVersion": "2",
+    "contractApiVersion": "0.1.0",
+    "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+    "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "path": "governance/package-runtime-protocols-v1.lock.json",
+        "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
+        "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267",
+    },
+}
 ATTACHED_NATIVE_BINARIES = {
     "cy-workspace-authority-host": (
         ("cy-workspace-authority-host", "cy-workspace-authority-admin"),
@@ -186,6 +201,75 @@ def _require_package_runtime_catalog_target(catalog: dict[str, Any], target_id: 
     if not declared_units or any(value != expected_unit for value in declared_units):
         raise ComponentArtifactError(f"cy-package-runtime catalog must bind the exact unit {expected_unit}")
     return component
+
+
+def _trusted_package_runtime_compatibility(group: dict[str, Any]) -> dict[str, Any]:
+    """Accept only the frozen Workspace Package Runtime lock and API identity.
+
+    Args:
+        group: Compatibility group from the SHA-256-pinned Workspace catalog.
+    Returns:
+        The exact compatibility fields to bind into this component manifest.
+    Raises:
+        ComponentArtifactError: If the group or its immutable lock differs from the
+            producer's frozen Package Runtime contract.
+
+    中文：仅接受 Package Runtime 自己的固定 Workspace 协议锁，不借用连接协议锁。
+    """
+    for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion"):
+        if group.get(key) != PACKAGE_RUNTIME_COMPATIBILITY[key]:
+            raise ComponentArtifactError(f"trusted package-runtime compatibility {key} does not match the frozen protocol")
+
+    lock = group.get("contractLock")
+    expected_lock = PACKAGE_RUNTIME_COMPATIBILITY["contractLock"]
+    if not isinstance(lock, dict) or lock != expected_lock:
+        raise ComponentArtifactError("trusted package-runtime contractLock does not match the frozen protocol lock")
+
+    # Re-fetch the exact pinned lock bytes; the signed catalog's hash is not a substitute for the lock digest.
+    # 即使目录本身已固定，仍核对独立协议锁的实际字节摘要。
+    _verify_contract_lock({"contractLock": lock})
+    return {
+        "groupId": PACKAGE_RUNTIME_COMPATIBILITY["groupId"],
+        "groupVersion": PACKAGE_RUNTIME_COMPATIBILITY["groupVersion"],
+        "contractApiVersion": PACKAGE_RUNTIME_COMPATIBILITY["contractApiVersion"],
+        "wireApiVersion": PACKAGE_RUNTIME_COMPATIBILITY["wireApiVersion"],
+        "contractLock": dict(lock),
+    }
+
+
+def _trusted_catalog_compatibility_for_component(
+    catalog_path: Path,
+    catalog: dict[str, Any],
+    component: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Route each frozen compatibility category through its own pinned lock.
+
+    Args:
+        catalog_path: SHA-256-pinned catalog path used by the existing connection helper.
+        catalog: Parsed trusted component catalog.
+        component: Platform component row selected from that catalog.
+    Returns:
+        Trusted compatibility metadata, or ``None`` when the component has no group.
+    Raises:
+        ComponentArtifactError: If the Package Runtime group is duplicated or its
+            fixed identity/lock fails verification.
+
+    中文：保留 Workspace connection lock 的既有校验，只为固定 runtime 组增加独立分支。
+    """
+    if component.get("compatibilityGroup") != PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID:
+        return trusted_catalog_compatibility(catalog_path, catalog, component)
+
+    groups = catalog.get("compatibilityGroups")
+    if not isinstance(groups, list):
+        raise ComponentArtifactError("trusted catalog has no compatibilityGroups array")
+    matches = [
+        row
+        for row in groups
+        if isinstance(row, dict) and row.get("groupId") == PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID
+    ]
+    if len(matches) != 1:
+        raise ComponentArtifactError("trusted catalog must declare package-runtime-native-v1 exactly once")
+    return _trusted_package_runtime_compatibility(matches[0])
 
 
 def _validate_native_binary_abi(binary_path: Path, target_id: str, *, repository: Path) -> None:
@@ -636,7 +720,7 @@ def build(
         if is_v2:
             descriptor["protocolVersion"] = protocol_version
         if component_compatibility is not None:
-            descriptor["compatibility"] = trusted_catalog_compatibility(
+            descriptor["compatibility"] = _trusted_catalog_compatibility_for_component(
                 catalog_path,
                 catalog,
                 catalog_component,
