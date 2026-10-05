@@ -58,6 +58,7 @@ def verify_python() -> bool:
     tests = [
         PLATFORM_ROOT / "sdk/python/cyrene_preflight/tests",
         PLATFORM_ROOT / "sdk/python/cyrene_artifacts/tests",
+        PLATFORM_ROOT / "sdk/python/cyrene_runtime_maintenance/tests",
         PLATFORM_ROOT / "tooling/docs/tests",
         PLATFORM_ROOT / "tooling/governance/tests",
         PLATFORM_ROOT / "tooling/ci/tests",

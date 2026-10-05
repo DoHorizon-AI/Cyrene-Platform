@@ -15,17 +15,66 @@ import os
 import re
 import socket
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Literal, Mapping
+
+_BINDING_OPERATION_PROTOCOL_VERSION = "cyrene.runtime-maintenance.binding-operations.v1"
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)([\"']?(?:[a-z0-9_]*(?:token|password|secret|credential)|connection_ref)"
+    r"[\"']?\s*:\s*[\"'])(.*?)([\"'])"
+)
+_SENSITIVE_INLINE = re.compile(
+    r"(?i)(\b(?:[a-z0-9_]*token|password|secret|credential|connection_ref)\s*[=:]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
+)
+BindingOperation = Literal["activate", "recover", "deactivate"]
+
+
+@dataclass(frozen=True, slots=True)
+class BindingOperationScope:
+    """The Product-owned scope reserved for one package binding operation."""
+
+    binding_id: str
+    package_id: str
+    installation_id: str
+    operation: BindingOperation
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class BindingOperationReceipt:
+    """Opaque broker lease receipt; the operation token is never shown in repr."""
+
+    request_id: str
+    source_id: str
+    protocol_version: str
+    catalog_generation: int
+    scope: BindingOperationScope
+    operation_token: str = field(repr=False)
+    gate_generation: int
+    already_in_flight: bool
+    already_completed: bool
+
+    def __repr__(self) -> str:
+        """Hides the broker token and any receipt details from incidental logs."""
+        return "BindingOperationReceipt(<redacted>)"
 
 
 class MaintenanceError(RuntimeError):
     """A broker rejection or unavailable IPC endpoint with a stable code."""
 
-    def __init__(self, code: str, message: str, *, readiness_status: str = "UNKNOWN") -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        readiness_status: str = "UNKNOWN",
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.readiness_status = readiness_status
+        self.request_id = request_id
 
 
 class RuntimeMaintenanceClient:
@@ -289,9 +338,7 @@ class RuntimeMaintenanceClient:
         )
         return result.get("active_tasks", [])
 
-    def reconcile_activity_source(
-        self, active_tasks: Iterable[Mapping[str, str]]
-    ) -> dict[str, Any]:
+    def reconcile_activity_source(self, active_tasks: Iterable[Mapping[str, str]]) -> dict[str, Any]:
         """Replaces this source's gate records with its durable nonterminal task snapshot."""
         source_id, _source_token = self._require_source()
         tasks = [{"task_id": task["task_id"], "state": task["state"]} for task in active_tasks]
@@ -304,9 +351,110 @@ class RuntimeMaintenanceClient:
             },
         )
 
-    def _request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    def _complete_binding_operation_after_owner_commit(
+        self,
+        receipt: BindingOperationReceipt,
+        *,
+        allow_in_flight: bool,
+    ) -> dict[str, Any]:
+        """Sends one exact-scope Broker completion after a Package Runtime owner commit."""
+        source_id, source_token = self._require_source()
+        if not isinstance(receipt, BindingOperationReceipt):
+            raise TypeError("receipt must be a BindingOperationReceipt")
+        if receipt.source_id != source_id:
+            raise MaintenanceError("ACTIVITY_SOURCE_CALLER_MISMATCH", "receipt belongs to another source")
+        if receipt.protocol_version != _BINDING_OPERATION_PROTOCOL_VERSION:
+            raise MaintenanceError("PROTOCOL_VERSION_UNSUPPORTED", "binding operation protocol is unsupported")
+        if self.catalog_generation is not None and self.catalog_generation != receipt.catalog_generation:
+            raise MaintenanceError(
+                "CATALOG_GENERATION_CHANGED", "receipt catalog generation does not match this source client"
+            )
+        if type(receipt.catalog_generation) is not int or receipt.catalog_generation <= 0:
+            raise MaintenanceError("INVALID_ARGUMENT", "receipt catalog generation is invalid")
+        if (
+            not isinstance(receipt.scope, BindingOperationScope)
+            or not isinstance(receipt.request_id, str)
+            or not _is_safe_protocol_text(receipt.request_id, limit=256)
+            or not isinstance(receipt.source_id, str)
+            or not _is_safe_protocol_text(receipt.source_id, limit=256)
+            or not isinstance(receipt.scope.binding_id, str)
+            or not _is_safe_protocol_text(receipt.scope.binding_id)
+            or not isinstance(receipt.scope.package_id, str)
+            or not _is_safe_protocol_text(receipt.scope.package_id)
+            or not isinstance(receipt.scope.installation_id, str)
+            or not _is_safe_protocol_text(receipt.scope.installation_id)
+            or not isinstance(receipt.scope.operation, str)
+            or receipt.scope.operation not in {"activate", "recover", "deactivate"}
+            or not isinstance(receipt.operation_token, str)
+            or not _is_safe_protocol_text(receipt.operation_token, limit=4096)
+            or type(receipt.gate_generation) is not int
+            or receipt.gate_generation <= 0
+            or type(receipt.already_in_flight) is not bool
+            or type(receipt.already_completed) is not bool
+            or (receipt.already_in_flight and receipt.already_completed)
+        ):
+            raise MaintenanceError("INVALID_ARGUMENT", "binding operation receipt is incomplete")
+        if receipt.already_in_flight and not allow_in_flight:
+            raise MaintenanceError(
+                "BINDING_OPERATION_PENDING",
+                "binding operation is still in flight",
+                request_id=receipt.request_id,
+            )
+
+        try:
+            result = self._request(
+                "CompleteBindingOperation",
+                {
+                    "source_id": source_id,
+                    "expected_catalog_generation": receipt.catalog_generation,
+                    "binding_id": receipt.scope.binding_id,
+                    "package_id": receipt.scope.package_id,
+                    "installation_id": receipt.scope.installation_id,
+                    "operation": receipt.scope.operation,
+                    "operation_token": receipt.operation_token,
+                },
+                protocol_version=_BINDING_OPERATION_PROTOCOL_VERSION,
+                request_id=receipt.request_id,
+                redaction_secrets=(source_token, receipt.operation_token),
+                strict_response=True,
+            )
+        except MaintenanceError as error:
+            if error.request_id is None:
+                error.request_id = receipt.request_id
+            raise
+        if type(result.get("completed")) is not bool or not result["completed"]:
+            raise MaintenanceError(
+                "MAINTENANCE_PROTOCOL_INVALID",
+                "broker did not confirm binding completion",
+                request_id=receipt.request_id,
+            )
+        if set(result) != {"completed", "gate_generation"}:
+            raise MaintenanceError(
+                "MAINTENANCE_PROTOCOL_INVALID",
+                "broker completion result has an invalid shape",
+                request_id=receipt.request_id,
+            )
+        gate_generation = result.get("gate_generation")
+        if type(gate_generation) is not int or gate_generation <= 0:
+            raise MaintenanceError(
+                "MAINTENANCE_PROTOCOL_INVALID",
+                "broker returned an invalid gate generation",
+                request_id=receipt.request_id,
+            )
+        return result
+
+    def _request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        protocol_version: str | None = None,
+        request_id: str | None = None,
+        redaction_secrets: Iterable[str | None] = (),
+        strict_response: bool = False,
+    ) -> dict[str, Any]:
         """Sends one bounded JSON-line request and validates its matching response ID."""
-        request_id = str(uuid.uuid4())
+        request_id = request_id or str(uuid.uuid4())
         auth: dict[str, str] = {}
         if self.source_id and self.source_token:
             auth.update(source_id=self.source_id, source_token=self.source_token)
@@ -318,6 +466,8 @@ class RuntimeMaintenanceClient:
             "auth": auth,
             "params": dict(params),
         }
+        if protocol_version is not None:
+            request["protocol_version"] = protocol_version
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self.timeout_seconds)
@@ -326,30 +476,45 @@ class RuntimeMaintenanceClient:
                 with connection.makefile("rb") as stream:
                     raw = stream.readline(1_048_577)
             if len(raw) > 1_048_576 or not raw.endswith(b"\n"):
-                raise MaintenanceError(
-                    "MAINTENANCE_PROTOCOL_INVALID", "broker response exceeded protocol bounds"
-                )
-            response = json.loads(raw)
+                raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker response exceeded protocol bounds")
+            response = json.loads(raw, object_pairs_hook=_unique_json_object)
         except MaintenanceError:
             raise
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise MaintenanceError(
                 "UPDATE_READINESS_UNKNOWN",
                 f"runtime maintenance broker is unavailable: {error}",
                 readiness_status="UNKNOWN",
             ) from error
+        if strict_response and not isinstance(response, dict):
+            raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker response must be an object")
+        if strict_response and set(response) not in ({"request_id", "result"}, {"request_id", "error"}):
+            raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker response has an invalid shape")
         if response.get("request_id") != request_id:
-            raise MaintenanceError(
-                "MAINTENANCE_PROTOCOL_INVALID", "broker returned a mismatched request_id"
-            )
+            raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker returned a mismatched request_id")
         if "error" in response:
             error = response["error"]
-            raise MaintenanceError(error.get("code", "MAINTENANCE_REQUEST_FAILED"), error.get("message", ""))
+            if strict_response and not isinstance(error, dict):
+                raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker error must be an object")
+            if strict_response and not {"code", "message"}.issubset(error):
+                raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker error fields are missing")
+            code = error.get("code", "MAINTENANCE_REQUEST_FAILED")
+            message = error.get("message", "")
+            if strict_response and (
+                not isinstance(code, str) or not _is_safe_protocol_text(code, limit=128) or not isinstance(message, str)
+            ):
+                raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker error fields are invalid")
+            if not isinstance(code, str):
+                code = "MAINTENANCE_REQUEST_FAILED"
+            if not isinstance(message, str):
+                message = "broker returned an invalid error message"
+            raise MaintenanceError(
+                _redact_broker_message(code, redaction_secrets),
+                _redact_broker_message(message, redaction_secrets),
+            )
         result = response.get("result")
         if not isinstance(result, dict):
-            raise MaintenanceError(
-                "MAINTENANCE_PROTOCOL_INVALID", "broker result must be a JSON object"
-            )
+            raise MaintenanceError("MAINTENANCE_PROTOCOL_INVALID", "broker result must be a JSON object")
         catalog_generation = result.get("catalog_generation")
         if isinstance(catalog_generation, int) and catalog_generation > 0:
             # Root may add/remove another installed source while this Product
@@ -371,9 +536,7 @@ class RuntimeMaintenanceClient:
     def _catalog_generation(self, provided: int | None) -> int:
         generation = provided if provided is not None else self.catalog_generation
         if generation is None or generation <= 0:
-            raise MaintenanceError(
-                "UPDATE_READINESS_UNKNOWN", "installed catalog generation is required"
-            )
+            raise MaintenanceError("UPDATE_READINESS_UNKNOWN", "installed catalog generation is required")
         return generation
 
 
@@ -383,3 +546,29 @@ def _validate_plan_digest(value: str, field: str) -> None:
         raise ValueError(f"{field} must use sha256:<64 lowercase hexadecimal characters>")
     if any(character not in "0123456789abcdef" for character in value[7:]):
         raise ValueError(f"{field} must use sha256:<64 lowercase hexadecimal characters>")
+
+
+def _redact_broker_message(message: str, secrets: Iterable[str | None]) -> str:
+    """Redacts known tokens and sensitive field values before surfacing errors."""
+    safe = message
+    for secret in sorted((value for value in secrets if value), key=len, reverse=True):
+        safe = safe.replace(secret, "[REDACTED]")
+    safe = _SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]\3", safe)
+    safe = _SENSITIVE_INLINE.sub(r"\1[REDACTED]", safe)
+    safe = "".join(character for character in safe if character >= " " or character in "\t")
+    return safe[:4096] + ("…" if len(safe) > 4096 else "")
+
+
+def _is_safe_protocol_text(value: str, *, limit: int = 4096) -> bool:
+    """Checks bounded protocol text without exposing malformed values in errors."""
+    return bool(value.strip()) and len(value) <= limit and not any(ord(character) < 32 for character in value)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Rejects ambiguous response objects that repeat a protocol field."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("JSON object contains a duplicate key")
+        result[key] = value
+    return result

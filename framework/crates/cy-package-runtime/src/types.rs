@@ -156,6 +156,21 @@ pub struct VerifiedPackage {
     pub source: PackageSource,
 }
 
+/// Exact identity expected when a verified source is staged for an offline install.
+///
+/// External release-verification evidence remains owned by Workspace; these
+/// digests let Platform independently bind cached bytes to that verified candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineInstallCandidateIdentity {
+    pub package_id: PackageId,
+    pub package_version: PackageVersion,
+    pub artifact_digest: ArtifactDigest,
+    pub archive_digest: ArtifactDigest,
+    pub descriptor_digest: ArtifactDigest,
+    pub manifest_digest: ArtifactDigest,
+    pub dependency_lock_digest: ArtifactDigest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyPreparationEvidence {
     pub preparer: String,

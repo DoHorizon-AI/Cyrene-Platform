@@ -8,7 +8,23 @@
 └─────────────────────────────────────────────────────────────────────┘
 """
 
-from .client import MaintenanceError, RuntimeMaintenanceClient
+from .client import BindingOperationReceipt, BindingOperationScope, MaintenanceError, RuntimeMaintenanceClient
 from .lifecycle import ActivitySourceLifecycle
+from .package_runtime import (
+    PackageRuntimeClient,
+    PackageRuntimeError,
+    PackageRuntimeOperationResult,
+    PackageRuntimeReconciliationResult,
+)
 
-__all__ = ["ActivitySourceLifecycle", "MaintenanceError", "RuntimeMaintenanceClient"]
+__all__ = [
+    "ActivitySourceLifecycle",
+    "BindingOperationReceipt",
+    "BindingOperationScope",
+    "MaintenanceError",
+    "PackageRuntimeClient",
+    "PackageRuntimeError",
+    "PackageRuntimeOperationResult",
+    "PackageRuntimeReconciliationResult",
+    "RuntimeMaintenanceClient",
+]

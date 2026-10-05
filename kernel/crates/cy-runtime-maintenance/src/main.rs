@@ -28,9 +28,11 @@ use cy_proto::core_v2::{
     UpdateReadinessRequest, UpdateReadinessStatus, WorkspaceTaskActivityState,
 };
 use cy_runtime_maintenance::{
-    MaintenanceError, MaintenanceOutcome, MaintenancePlan, ReadinessRequest, RuntimeMaintenance,
-    RuntimeUsage, TaskActivityRecord, TaskActivityState, TrustedActivitySource,
-    TrustedActivitySourceCatalog, UpdateTargetKind,
+    migrate_state_schema1, rollback_state_schema1, BindingOperationCaller, BindingOperationKind,
+    BindingOperationScope, LegacyStateProfile, MaintenanceError, MaintenanceHoldProof,
+    MaintenanceOutcome, MaintenancePlan, ReadinessRequest, RuntimeMaintenance, RuntimeUsage,
+    StateMigrationProof, TaskActivityRecord, TaskActivityState, TrustedActivitySource,
+    TrustedActivitySourceCatalog, TrustedBindingScope, UpdateTargetKind, STATE_PROTOCOL_VERSION,
 };
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::{chown, getegid, Gid, Uid};
@@ -48,6 +50,9 @@ const DEFAULT_CATALOG: &str = "/etc/cyrene/runtime-activity-sources.json";
 const DEFAULT_TOKEN_DIR: &str = "/etc/cyrene/runtime-activity-source-tokens";
 const DEFAULT_SOCKET: &str = "/run/cyrene/runtime-maintenance.sock";
 const DEFAULT_KERNEL_SOCKET: &str = "/run/cyrene/kernel.sock";
+const BROKER_PROTOCOL_VERSION: &str = "cyrene.runtime-maintenance.broker.v1";
+const BINDING_OPERATIONS_PROTOCOL_VERSION: &str =
+    "cyrene.runtime-maintenance.binding-operations.v1";
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone)]
@@ -56,7 +61,7 @@ struct Broker {
     kernel_socket: PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestAuth {
     #[serde(default)]
@@ -67,11 +72,13 @@ struct RequestAuth {
     operator_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEnvelope {
     request_id: String,
     method: String,
+    #[serde(default)]
+    protocol_version: Option<String>,
     #[serde(default)]
     auth: RequestAuth,
     #[serde(default)]
@@ -84,6 +91,60 @@ struct CatalogInput {
     schema_version: u32,
     generation: u64,
     sources: Vec<TrustedActivitySource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MaintenanceProofInput {
+    request_id: String,
+    maintenance_token: String,
+    plan_id: String,
+    plan_digest: String,
+    component_artifact_digests: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateMigrationProofInput {
+    schema1_profile: LegacyStateProfile,
+    request_id: String,
+    maintenance_token: String,
+    target_kind: UpdateTargetKind,
+    plan_id: String,
+    plan_digest: String,
+    component_artifact_digests: BTreeMap<String, String>,
+    expected_gate_generation: u64,
+    expected_catalog_generation: u64,
+}
+
+impl From<StateMigrationProofInput> for StateMigrationProof {
+    fn from(proof: StateMigrationProofInput) -> Self {
+        Self {
+            schema1_profile: proof.schema1_profile,
+            request_id: proof.request_id,
+            maintenance_token: proof.maintenance_token,
+            target_kind: proof.target_kind,
+            plan_id: proof.plan_id,
+            plan_digest: proof.plan_digest,
+            component_artifact_digests: proof.component_artifact_digests,
+            expected_gate_generation: proof.expected_gate_generation,
+            expected_catalog_generation: proof.expected_catalog_generation,
+        }
+    }
+}
+
+impl From<MaintenanceProofInput> for MaintenanceHoldProof {
+    fn from(proof: MaintenanceProofInput) -> Self {
+        Self {
+            request_id: proof.request_id,
+            maintenance_token: proof.maintenance_token,
+            plan: MaintenancePlan {
+                plan_id: proof.plan_id,
+                plan_digest: proof.plan_digest,
+                component_artifact_digests: proof.component_artifact_digests,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,13 +190,15 @@ fn run() -> Result<(), String> {
         "request" => run_request(parse_options(args, false)?),
         "init-catalog" => run_init_catalog(parse_options(args, true)?),
         "health" => run_health(parse_options(args, false)?),
+        "migrate-state" => run_migrate_state(parse_options(args, false)?),
+        "rollback-state" => run_rollback_state(parse_options(args, false)?),
         command => Err(format!("unknown command: {command}")),
     }
 }
 
 fn print_usage() {
     println!(
-        "Usage:\n  cyrene-runtime-maintenance serve [--state-dir PATH] [--catalog PATH] [--socket PATH] [--private-token-file PATH] [--kernel-socket PATH]\n  cyrene-runtime-maintenance request --socket PATH [--operator] [--operator-token-file PATH]\n  cyrene-runtime-maintenance init-catalog --catalog PATH --token-dir PATH [--catalog-gid GID] --source ID=UID[:GID] [--source ...]"
+        "Usage:\n  cyrene-runtime-maintenance serve [--state-dir PATH] [--catalog PATH] [--socket PATH] [--private-token-file PATH] [--kernel-socket PATH]\n  cyrene-runtime-maintenance request --socket PATH [--operator] [--operator-token-file PATH]\n  cyrene-runtime-maintenance init-catalog [--state-dir PATH] --catalog PATH --token-dir PATH [--catalog-gid GID] [--binding-scopes-json PATH] [--maintenance-proof-file PATH] --source ID=UID[:GID] [--source ...]\n  cyrene-runtime-maintenance migrate-state --state-dir PATH --maintenance-proof-file PATH\n  cyrene-runtime-maintenance rollback-state --state-dir PATH --maintenance-proof-file PATH"
     );
 }
 
@@ -174,6 +237,82 @@ fn option(options: &BTreeMap<String, Vec<String>>, key: &str, default: &str) -> 
         .and_then(|values| values.first())
         .cloned()
         .unwrap_or_else(|| default.to_string())
+}
+
+/// Runs the offline schema conversion while no broker or Kernel writer is active.
+fn run_migrate_state(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
+    ensure_root_operator()?;
+    let (state_dir, proof) = migration_command_input(options)?;
+    let result = migrate_state_schema1(state_dir, &proof).map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string(&result).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+/// Restores the backed-up schema-1 layout after a failed first schema-2 boot.
+fn run_rollback_state(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
+    ensure_root_operator()?;
+    let (state_dir, proof) = migration_command_input(options)?;
+    let result = rollback_state_schema1(state_dir, &proof).map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string(&result).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn ensure_root_operator() -> Result<(), String> {
+    if Uid::effective().as_raw() != 0 {
+        return Err("state schema changes require the root operator".to_string());
+    }
+    Ok(())
+}
+
+fn migration_command_input(
+    options: BTreeMap<String, Vec<String>>,
+) -> Result<(PathBuf, StateMigrationProof), String> {
+    if options.len() != 2
+        || !options.contains_key("state-dir")
+        || !options.contains_key("maintenance-proof-file")
+    {
+        return Err(
+            "state schema commands require exactly --state-dir and --maintenance-proof-file"
+                .to_string(),
+        );
+    }
+    let state_dir = options
+        .get("state-dir")
+        .and_then(|values| values.first())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or("--state-dir must be non-empty")?;
+    let proof_path = options
+        .get("maintenance-proof-file")
+        .and_then(|values| values.first())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or("--maintenance-proof-file must be non-empty")?;
+    let proof = load_state_migration_proof(&proof_path)?;
+    Ok((state_dir, proof))
+}
+
+fn load_state_migration_proof(path: &Path) -> Result<StateMigrationProof, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("maintenance proof must be a regular non-symlink file".to_string());
+    }
+    if metadata.uid() != 0
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err("maintenance proof must be root-owned, mode 0600, and single-link".to_string());
+    }
+    let input: StateMigrationProofInput =
+        serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("maintenance proof is invalid: {error}"))?;
+    Ok(input.into())
 }
 
 fn run_serve(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
@@ -348,6 +487,8 @@ fn dispatch(
     match request.method.as_str() {
         "Health" => Ok(json!({
             "status": "SERVING",
+            "protocol_version": BROKER_PROTOCOL_VERSION,
+            "capabilities": [BINDING_OPERATIONS_PROTOCOL_VERSION, STATE_PROTOCOL_VERSION],
             "core_bootstrap_eligible": broker.gate.core_bootstrap_eligible().map_err(ApiError::from_maintenance)?,
             "catalog_generation": broker.gate.catalog_generation(),
             "gate_generation": broker.gate.current_gate_generation().map_err(ApiError::from_maintenance)?,
@@ -488,6 +629,40 @@ fn dispatch(
                 serde_json::to_value(result).map_err(serialization_error)
             }
         }
+        "ValidateMaintenanceHold" => {
+            require_broker_protocol(request.protocol_version.as_deref())?;
+            authorize_operator(&broker.gate, peer, &request.auth)?;
+            if request.auth.source_id.is_some() || request.auth.source_token.is_some() {
+                return Err(ApiError::new(
+                    "ACTIVITY_SOURCE_AUTH_NOT_ALLOWED",
+                    "ValidateMaintenanceHold accepts operator authentication only",
+                ));
+            }
+            let request_id = required_string(&request.params, "request_id")?;
+            if request_id != request.request_id {
+                return Err(ApiError::new(
+                    "INVALID_ARGUMENT",
+                    "envelope request_id must equal params.request_id",
+                ));
+            }
+            let proof = MaintenanceHoldProof {
+                request_id,
+                maintenance_token: required_string(&request.params, "maintenance_token")?,
+                plan: maintenance_plan(&request.params)?,
+            };
+            let result = broker
+                .gate
+                .validate_maintenance_hold(
+                    &proof,
+                    parse_target_kind(&required_string(&request.params, "target_kind")?)?,
+                    &required_string(&request.params, "component_id")?,
+                    &required_string(&request.params, "artifact_digest")?,
+                    required_u64(&request.params, "expected_gate_generation")?,
+                    required_u64(&request.params, "expected_catalog_generation")?,
+                )
+                .map_err(ApiError::from_maintenance)?;
+            serde_json::to_value(result).map_err(serialization_error)
+        }
         "HeartbeatActivitySource" => {
             let source_id = authorize_source(&broker.gate, peer, &request.auth)?;
             require_param_source_id(&request.params, &source_id)?;
@@ -579,11 +754,93 @@ fn dispatch(
                 json!({"reconciled": true, "catalog_generation": broker.gate.catalog_generation(), "gate_generation": broker.gate.current_gate_generation().map_err(ApiError::from_maintenance)?}),
             )
         }
+        "AdmitBindingOperation" => {
+            require_binding_operations_protocol(request.protocol_version.as_deref())?;
+            let caller = binding_operation_caller(&request.auth, peer, &request.params)?;
+            require_param_source_id(&request.params, &caller.source_id)?;
+            let scope = binding_operation_scope(&request.params)?;
+            let admission = broker
+                .gate
+                .admit_binding_operation(&request.request_id, &caller, &scope)
+                .map_err(ApiError::from_maintenance)?;
+            serde_json::to_value(admission).map_err(serialization_error)
+        }
+        "CompleteBindingOperation" => {
+            require_binding_operations_protocol(request.protocol_version.as_deref())?;
+            let caller = binding_operation_caller(&request.auth, peer, &request.params)?;
+            require_param_source_id(&request.params, &caller.source_id)?;
+            let scope = binding_operation_scope(&request.params)?;
+            let operation_token = required_string(&request.params, "operation_token")?;
+            let completion = broker
+                .gate
+                .complete_binding_operation(&request.request_id, &caller, &scope, &operation_token)
+                .map_err(ApiError::from_maintenance)?;
+            serde_json::to_value(completion).map_err(serialization_error)
+        }
         method => Err(ApiError::new(
             "METHOD_NOT_FOUND",
             format!("unsupported broker method: {method}"),
         )),
     }
+}
+
+fn binding_operation_caller(
+    auth: &RequestAuth,
+    peer: PeerIdentity,
+    params: &Value,
+) -> Result<BindingOperationCaller, ApiError> {
+    if auth.operator_token.is_some() {
+        return Err(ApiError::new(
+            "OPERATOR_AUTH_NOT_ALLOWED",
+            "binding operation methods require activity-source authentication only",
+        ));
+    }
+    let source_id = auth
+        .source_id
+        .as_deref()
+        .ok_or_else(|| ApiError::new("ACTIVITY_SOURCE_AUTH_REQUIRED", "source_id is required"))?;
+    let source_token = auth.source_token.as_deref().ok_or_else(|| {
+        ApiError::new("ACTIVITY_SOURCE_AUTH_REQUIRED", "source_token is required")
+    })?;
+    Ok(BindingOperationCaller {
+        source_id: source_id.to_string(),
+        source_token: source_token.to_string(),
+        peer_uid: peer.uid,
+        peer_gid: peer.gid,
+        expected_catalog_generation: required_u64(params, "expected_catalog_generation")?,
+    })
+}
+
+fn require_binding_operations_protocol(version: Option<&str>) -> Result<(), ApiError> {
+    if version == Some(BINDING_OPERATIONS_PROTOCOL_VERSION) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "PROTOCOL_VERSION_UNSUPPORTED",
+            "binding operation methods require the advertised protocol version",
+        ))
+    }
+}
+
+fn require_broker_protocol(version: Option<&str>) -> Result<(), ApiError> {
+    if version == Some(BROKER_PROTOCOL_VERSION) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "PROTOCOL_VERSION_UNSUPPORTED",
+            "maintenance hold validation requires the advertised broker protocol version",
+        ))
+    }
+}
+
+fn binding_operation_scope(params: &Value) -> Result<BindingOperationScope, ApiError> {
+    Ok(BindingOperationScope {
+        binding_id: required_string(params, "binding_id")?,
+        package_id: required_string(params, "package_id")?,
+        installation_id: required_string(params, "installation_id")?,
+        operation: BindingOperationKind::parse(&required_string(params, "operation")?)
+            .map_err(ApiError::from_maintenance)?,
+    })
 }
 
 fn authorize_operator(
@@ -1026,7 +1283,13 @@ fn run_request(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
 fn inject_operator_token(request: &mut Value, token: String) -> Result<(), String> {
     if !matches!(
         request.get("method").and_then(Value::as_str),
-        Some("GetUpdateReadiness" | "BeginMaintenance" | "BeginCoreBootstrap" | "EndMaintenance")
+        Some(
+            "GetUpdateReadiness"
+                | "BeginMaintenance"
+                | "BeginCoreBootstrap"
+                | "EndMaintenance"
+                | "ValidateMaintenanceHold"
+        )
     ) {
         return Err("--operator is valid only for readiness and maintenance calls".to_string());
     }
@@ -1100,6 +1363,7 @@ fn read_private_token(path: &Path) -> Result<String, String> {
 }
 
 fn run_init_catalog(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
+    let state_dir = PathBuf::from(option(&options, "state-dir", DEFAULT_STATE_DIR));
     let catalog_path = PathBuf::from(option(&options, "catalog", DEFAULT_CATALOG));
     let token_dir = PathBuf::from(option(&options, "token-dir", DEFAULT_TOKEN_DIR));
     let entries = options
@@ -1183,6 +1447,27 @@ fn run_init_catalog(options: BTreeMap<String, Vec<String>>) -> Result<(), String
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
+    let binding_scopes = options
+        .get("binding-scopes-json")
+        .and_then(|values| values.first())
+        .map(|path| load_binding_scopes(path))
+        .transpose()?;
+    let maintenance_proof = options
+        .get("maintenance-proof-file")
+        .and_then(|values| values.first())
+        .map(|path| load_maintenance_proof(path).map(Into::into))
+        .transpose()?;
+    if let Some(scopes_by_source) = &binding_scopes {
+        if scopes_by_source
+            .keys()
+            .any(|source_id| !identities.contains_key(source_id))
+        {
+            return Err(
+                "binding scope input contains a source that is not configured with --source"
+                    .to_string(),
+            );
+        }
+    }
     let old_sources = existing
         .as_ref()
         .map(|catalog| {
@@ -1261,14 +1546,25 @@ fn run_init_catalog(options: BTreeMap<String, Vec<String>>) -> Result<(), String
                 ));
             }
         }
+        let source_binding_scopes = match &binding_scopes {
+            Some(configured) => configured.get(source_id).cloned().unwrap_or_default(),
+            None => old_sources
+                .get(source_id)
+                .map(|source| source.binding_scopes.clone())
+                .unwrap_or_default(),
+        };
         sources.push(TrustedActivitySource {
             source_id: source_id.clone(),
             uid: *uid,
             gid: *gid,
             source_token_sha256: token_hash,
+            binding_scopes: source_binding_scopes,
         });
-        output
-            .push(json!({"source_id": source_id, "token_file": token_path.display().to_string()}));
+        output.push(json!({
+            "source_id": source_id,
+            "token_file": token_path.display().to_string(),
+            "binding_scope_count": sources.last().map_or(0, |source| source.binding_scopes.len()),
+        }));
     }
     let mut new_sources = sources.clone();
     new_sources.sort_by(|left, right| left.source_id.cmp(&right.source_id));
@@ -1278,7 +1574,8 @@ fn run_init_catalog(options: BTreeMap<String, Vec<String>>) -> Result<(), String
         .unwrap_or_default();
     old_sorted.sort_by(|left, right| left.source_id.cmp(&right.source_id));
     let changed = old_sorted != new_sources;
-    let generation = match existing {
+    let expected_generation = existing.as_ref().map_or(0, |catalog| catalog.generation);
+    let generation = match existing.as_ref() {
         Some(catalog) if changed => catalog
             .generation
             .checked_add(1)
@@ -1292,7 +1589,32 @@ fn run_init_catalog(options: BTreeMap<String, Vec<String>>) -> Result<(), String
         sources: new_sources,
     };
     catalog.validate().map_err(|error| error.to_string())?;
-    write_catalog_atomic(&catalog_path, &catalog, catalog_gid)?;
+    if changed {
+        let current_catalog = existing
+            .as_ref()
+            .map(|current| TrustedActivitySourceCatalog {
+                schema_version: current.schema_version,
+                generation: current.generation,
+                sources: current.sources.clone(),
+            })
+            .unwrap_or_else(|| TrustedActivitySourceCatalog {
+                schema_version: 1,
+                generation: 0,
+                sources: Vec::new(),
+            });
+        let gate = RuntimeMaintenance::open(state_dir, current_catalog)
+            .map_err(|error| error.to_string())?;
+        gate.commit_activity_source_catalog(
+            expected_generation,
+            catalog.clone(),
+            maintenance_proof.as_ref(),
+            || {
+                write_catalog_atomic(&catalog_path, &catalog, catalog_gid)
+                    .map_err(|error| MaintenanceError::Storage(io::Error::other(error)))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    }
     println!(
         "{}",
         json!({"schema_version": 1, "generation": generation, "sources": output})
@@ -1337,12 +1659,16 @@ fn write_catalog_atomic(
     file.write_all(&bytes).map_err(|error| error.to_string())?;
     file.write_all(b"\n").map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
-    fs::rename(&temp_path, path).map_err(|error| error.to_string())?;
-    chown(path, Some(Uid::from_raw(0)), catalog_gid.map(Gid::from_raw))
-        .map_err(|error| error.to_string())?;
-    File::open(path)
+    chown(
+        &temp_path,
+        Some(Uid::from_raw(0)),
+        catalog_gid.map(Gid::from_raw),
+    )
+    .map_err(|error| error.to_string())?;
+    File::open(&temp_path)
         .and_then(|catalog| catalog.sync_all())
         .map_err(|error| error.to_string())?;
+    fs::rename(&temp_path, path).map_err(|error| error.to_string())?;
     File::open(path.parent().unwrap_or_else(|| Path::new(".")))
         .and_then(|directory| directory.sync_all())
         .map_err(|error| error.to_string())?;
@@ -1360,6 +1686,40 @@ fn validate_source_id(source_id: &str) -> Result<(), String> {
     } else {
         Err(format!("invalid source_id: {source_id}"))
     }
+}
+
+fn load_binding_scopes(path: &str) -> Result<BTreeMap<String, Vec<TrustedBindingScope>>, String> {
+    let path = Path::new(path);
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err(
+            "binding scope input must be a root-owned, non-writable regular file".to_string(),
+        );
+    }
+    let scopes: BTreeMap<String, Vec<TrustedBindingScope>> =
+        serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("binding scope input is invalid: {error}"))?;
+    Ok(scopes)
+}
+
+fn load_maintenance_proof(path: &str) -> Result<MaintenanceProofInput, String> {
+    let path = Path::new(path);
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o777 != 0o600
+    {
+        return Err(
+            "maintenance proof must be a root-owned regular file with mode 0600".to_string(),
+        );
+    }
+    serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("maintenance proof is invalid: {error}"))
 }
 
 #[cfg(test)]
@@ -1397,5 +1757,170 @@ mod tests {
         });
         assert!(inject_operator_token(&mut source_request, "private-token".to_string()).is_err());
         assert!(source_request["auth"].get("operator_token").is_none());
+
+        let mut validate_request = json!({
+            "request_id": "install-proof",
+            "method": "ValidateMaintenanceHold",
+            "auth": {}
+        });
+        inject_operator_token(&mut validate_request, "private-token".to_string()).unwrap();
+        assert_eq!(validate_request["auth"]["operator_token"], "private-token");
+    }
+
+    #[test]
+    fn binding_operation_wire_requires_capability_version_and_catalog_generation() {
+        assert_eq!(
+            require_binding_operations_protocol(None).unwrap_err().code,
+            "PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        assert_eq!(
+            require_binding_operations_protocol(Some("cyrene.runtime-maintenance.broker.v0"))
+                .unwrap_err()
+                .code,
+            "PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        assert!(
+            require_binding_operations_protocol(Some(BINDING_OPERATIONS_PROTOCOL_VERSION)).is_ok()
+        );
+        assert_eq!(
+            BROKER_PROTOCOL_VERSION,
+            "cyrene.runtime-maintenance.broker.v1"
+        );
+
+        let auth = RequestAuth {
+            source_id: Some("cyrene-yield".to_string()),
+            source_token: Some("yield-source-token".to_string()),
+            operator_token: None,
+        };
+        let missing_generation = binding_operation_caller(
+            &auth,
+            PeerIdentity {
+                uid: 1001,
+                gid: 1000,
+            },
+            &json!({"source_id":"cyrene-yield"}),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(missing_generation.code, "INVALID_ARGUMENT");
+
+        let operator_only = binding_operation_caller(
+            &RequestAuth {
+                source_id: None,
+                source_token: None,
+                operator_token: Some("operator-capability".to_string()),
+            },
+            PeerIdentity { uid: 0, gid: 0 },
+            &json!({"expected_catalog_generation":12}),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(operator_only.code, "OPERATOR_AUTH_NOT_ALLOWED");
+
+        let mixed_credentials = binding_operation_caller(
+            &RequestAuth {
+                source_id: Some("cyrene-yield".to_string()),
+                source_token: Some("yield-source-token".to_string()),
+                operator_token: Some("operator-capability".to_string()),
+            },
+            PeerIdentity {
+                uid: 1001,
+                gid: 1000,
+            },
+            &json!({"source_id":"cyrene-yield", "expected_catalog_generation":12}),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(mixed_credentials.code, "OPERATOR_AUTH_NOT_ALLOWED");
+    }
+
+    #[test]
+    fn hold_validation_uses_existing_broker_protocol_and_exact_proof_shape() {
+        assert_eq!(
+            require_broker_protocol(None).unwrap_err().code,
+            "PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        assert_eq!(
+            require_broker_protocol(Some(BINDING_OPERATIONS_PROTOCOL_VERSION))
+                .unwrap_err()
+                .code,
+            "PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        assert!(require_broker_protocol(Some(BROKER_PROTOCOL_VERSION)).is_ok());
+
+        let proof: MaintenanceProofInput = serde_json::from_value(json!({
+            "request_id": "offline-install-1",
+            "maintenance_token": "private-token",
+            "plan_id": "plan-llf",
+            "plan_digest": format!("sha256:{}", "a".repeat(64)),
+            "component_artifact_digests": {
+                "cyrene-yield": format!("sha256:{}", "b".repeat(64))
+            }
+        }))
+        .unwrap();
+        let hold_proof: MaintenanceHoldProof = proof.into();
+        assert_eq!(hold_proof.request_id, "offline-install-1");
+        assert_eq!(hold_proof.plan.plan_id, "plan-llf");
+
+        assert!(serde_json::from_value::<MaintenanceProofInput>(json!({
+            "request_id": "offline-install-1",
+            "maintenance_token": "private-token",
+            "plan_id": "plan-llf",
+            "plan_digest": format!("sha256:{}", "a".repeat(64)),
+            "component_artifact_digests": {},
+            "allow_any_hold": true
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn binding_operation_wire_requires_exact_source_id_and_scope_fields() {
+        let auth = RequestAuth {
+            source_id: Some("cyrene-yield".to_string()),
+            source_token: Some("yield-source-token".to_string()),
+            operator_token: None,
+        };
+        let caller = binding_operation_caller(
+            &auth,
+            PeerIdentity {
+                uid: 1001,
+                gid: 1000,
+            },
+            &json!({
+            "source_id": "cyrene-yield",
+            "expected_catalog_generation": 12,
+            "binding_id": "binding-main",
+            "package_id": "llf.trainer",
+            "installation_id": "llf.install.2026",
+            "operation": "activate"
+            }),
+        )
+        .unwrap();
+        assert_eq!(caller.source_id, "cyrene-yield");
+        assert_eq!(caller.peer_uid, 1001);
+        assert_eq!(caller.peer_gid, 1000);
+        assert_eq!(caller.expected_catalog_generation, 12);
+
+        let scope = binding_operation_scope(&json!({
+            "binding_id": "binding-main",
+            "package_id": "llf.trainer",
+            "installation_id": "llf.install.2026",
+            "operation": "recover"
+        }))
+        .unwrap();
+        assert_eq!(scope.operation, BindingOperationKind::Recover);
+
+        let missing_installation = binding_operation_scope(&json!({
+            "binding_id": "binding-main",
+            "package_id": "llf.trainer",
+            "operation": "activate"
+        }))
+        .unwrap_err();
+        assert_eq!(missing_installation.code, "INVALID_ARGUMENT");
+
+        let source_mismatch =
+            require_param_source_id(&json!({"source_id":"cyrene-other"}), &caller.source_id)
+                .unwrap_err();
+        assert_eq!(source_mismatch.code, "ACTIVITY_SOURCE_CALLER_MISMATCH");
     }
 }

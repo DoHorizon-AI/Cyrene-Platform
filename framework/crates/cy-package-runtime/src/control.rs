@@ -90,6 +90,37 @@ pub enum ControlCommand {
     Shutdown,
 }
 
+impl ControlCommand {
+    /// Returns whether this operation can change a durable binding or its child.
+    pub(crate) fn is_binding_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::Activate { .. }
+                | Self::RecoverBinding { .. }
+                | Self::Deactivate { .. }
+                | Self::Upgrade { .. }
+                | Self::Rollback { .. }
+                | Self::RemoveBindingReference { .. }
+        )
+    }
+
+    /// Returns whether the command mutates any package or binding state.
+    ///
+    /// The UDS path requires scoped maintenance admission for binding changes
+    /// and rejects unscoped administrative changes. 中文：无精确 gate scope 的
+    /// root 管理 mutation 也不能绕过维护闸门。
+    pub(crate) fn is_state_mutation(&self) -> bool {
+        self.is_binding_mutation()
+            || matches!(
+                self,
+                Self::Install { .. }
+                    | Self::InstallOffline { .. }
+                    | Self::Uninstall { .. }
+                    | Self::Cleanup
+            )
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ControlResponse {
     pub request_id: String,
@@ -105,6 +136,9 @@ pub struct ControlError {
     pub code: String,
     pub message: String,
     pub remediation: String,
+    /// Exact reserved Product lease for explicit owner-side reconciliation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_operation: Option<Value>,
 }
 
 /// Long-lived owner of package lifecycle and supervised Plugin processes.
@@ -157,21 +191,54 @@ impl PackageRuntimeControlServer {
                 }
             };
             let shutdown = matches!(&request.command, ControlCommand::Shutdown);
-            let response = match self.dispatch(request.command) {
-                Ok(result) => ControlResponse {
-                    request_id: request.request_id,
-                    ok: true,
-                    result: Some(result),
-                    error: None,
-                },
-                Err(error) => failure_response(request.request_id, error),
-            };
+            let response = self.handle_command(request.request_id, request.command);
             self.write_response(&mut output, &response)?;
             if shutdown {
                 break;
             }
         }
         Ok(())
+    }
+
+    /// Dispatches one already parsed command through the single owned runtime.
+    ///
+    /// The local socket transport performs peer, source, scope, and generation
+    /// checks before calling this method. Mutation gating belongs at that
+    /// transport boundary; this method preserves the deterministic stdio API.
+    pub(crate) fn handle_command(
+        &self,
+        request_id: String,
+        command: ControlCommand,
+    ) -> ControlResponse {
+        match self.dispatch(command) {
+            Ok(result) => ControlResponse {
+                request_id,
+                ok: true,
+                result: Some(result),
+                error: None,
+            },
+            Err(error) => failure_response(request_id, error),
+        }
+    }
+
+    /// Returns the installed package identity behind one durable binding.
+    pub(crate) fn binding_package_scope(
+        &self,
+        binding_id: &str,
+    ) -> Result<(String, String), PackageRuntimeError> {
+        self.runtime
+            .binding_package_scope(&BindingId::new(binding_id)?)
+    }
+
+    /// Returns the package identity associated with one immutable installation.
+    pub(crate) fn installation_package_id(
+        &self,
+        installation_id: &str,
+    ) -> Result<String, PackageRuntimeError> {
+        let record = self
+            .runtime
+            .get_installation(&InstallationId::new(installation_id)?)?;
+        Ok(record.package_id.to_string())
     }
 
     fn dispatch(&self, command: ControlCommand) -> Result<Value, PackageRuntimeError> {
@@ -300,7 +367,7 @@ fn to_value(value: impl Serialize) -> Result<Value, PackageRuntimeError> {
     serde_json::to_value(value).map_err(json_error)
 }
 
-fn failure_response(request_id: String, error: PackageRuntimeError) -> ControlResponse {
+pub(crate) fn failure_response(request_id: String, error: PackageRuntimeError) -> ControlResponse {
     ControlResponse {
         request_id,
         ok: false,
@@ -309,6 +376,7 @@ fn failure_response(request_id: String, error: PackageRuntimeError) -> ControlRe
             remediation: remediation(&error.code).to_string(),
             code: error.code,
             message: error.message,
+            binding_operation: None,
         }),
     }
 }

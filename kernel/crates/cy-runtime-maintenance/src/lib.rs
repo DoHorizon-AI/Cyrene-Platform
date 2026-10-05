@@ -29,10 +29,16 @@ use uuid::Uuid;
 const STATE_FILE: &str = "maintenance-state.json";
 const JOURNAL_FILE: &str = "maintenance-journal.jsonl";
 const LOCK_FILE: &str = "maintenance.lock";
+const STATE_MIGRATION_MARKER_FILE: &str = "maintenance-schema-migration.json";
 const OPERATOR_TOKEN_HASH_FILE: &str = "operator-token.sha256";
-const STATE_SCHEMA_VERSION: u32 = 1;
+const STATE_SCHEMA_VERSION: u32 = 2;
+const LEGACY_STATE_SCHEMA_VERSION: u32 = 1;
+const ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_SOURCE_STALENESS: Duration = Duration::from_secs(30);
 const JOURNAL_COMPACTION_THRESHOLD: u64 = 4 * 1024 * 1024;
+
+/// Shared persistence cohort version advertised by Kernel and the broker.
+pub const STATE_PROTOCOL_VERSION: &str = "cyrene.runtime-maintenance.state.v2";
 
 /// Classifies which installed component set an update will modify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +58,8 @@ pub enum ReadinessStatus {
     Ready,
     /// At least one accepted task remains in a nonterminal state.
     ActiveTasks,
+    /// At least one authorized package binding operation is still in flight.
+    ActiveBindingOperations,
     /// A trusted source, catalog, state file, or runtime fact could not be verified.
     Unknown,
     /// Kernel/sandboxd would restart while a Worker, Lease, or allocation remains.
@@ -106,6 +114,122 @@ pub struct TrustedActivitySource {
     pub gid: Option<u32>,
     /// SHA-256 of the read-only token mounted into this source only.
     pub source_token_sha256: String,
+    /// Exact package binding operations this source may submit to the runtime.
+    /// Missing scopes are treated as an empty allowlist.
+    #[serde(default)]
+    pub binding_scopes: Vec<TrustedBindingScope>,
+}
+
+/// One exact binding/package/install scope granted by the root-owned catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedBindingScope {
+    /// Globally unique binding identity owned by this source.
+    pub binding_id: String,
+    /// Exact installed package authorized for this binding.
+    pub package_id: String,
+    /// Exact installation identities; an empty list grants no operation.
+    #[serde(default)]
+    pub installation_ids: Vec<String>,
+    /// Operations allowed for this exact binding/package/installation set.
+    #[serde(default)]
+    pub operations: Vec<BindingOperationKind>,
+}
+
+/// Package runtime mutation admitted through the shared maintenance gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingOperationKind {
+    Activate,
+    Recover,
+    Deactivate,
+}
+
+impl BindingOperationKind {
+    /// Parses the narrow package-runtime operation vocabulary accepted by the gate.
+    pub fn parse(value: &str) -> Result<Self, MaintenanceError> {
+        match value {
+            "activate" => Ok(Self::Activate),
+            "recover" => Ok(Self::Recover),
+            "deactivate" => Ok(Self::Deactivate),
+            _ => Err(MaintenanceError::InvalidRequest(format!(
+                "unsupported binding operation: {value}"
+            ))),
+        }
+    }
+}
+
+/// Authenticated peer identity supplied by the broker for one binding operation.
+/// The source token is checked against the currently loaded catalog under the gate lock.
+#[derive(Clone)]
+pub struct BindingOperationCaller {
+    /// Source identity presented by the Product caller.
+    pub source_id: String,
+    /// Raw per-source token; it is checked but never persisted in gate state.
+    pub source_token: String,
+    /// Unix peer credentials sampled by the broker with `SO_PEERCRED`.
+    pub peer_uid: u32,
+    /// Unix peer group sampled by the broker with `SO_PEERCRED`.
+    pub peer_gid: u32,
+    /// Catalog generation observed by the caller's authority handshake.
+    pub expected_catalog_generation: u64,
+}
+
+/// Exact binding scope attached to an admitted package runtime operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingOperationScope {
+    /// Product binding whose runtime state is changing.
+    pub binding_id: String,
+    /// Package recorded by the daemon for the binding.
+    pub package_id: String,
+    /// Exact package installation involved in this operation.
+    pub installation_id: String,
+    /// Narrow mutation kind admitted by the root catalog.
+    pub operation: BindingOperationKind,
+}
+
+/// Durable operation admission returned to the package runtime daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingOperationAdmission {
+    /// Caller-provided idempotency key shared with the Package Runtime request.
+    pub request_id: String,
+    /// Authenticated Product activity source that owns the binding.
+    pub source_id: String,
+    /// Exact binding/package/installation/operation admitted by the catalog.
+    pub scope: BindingOperationScope,
+    /// Opaque completion capability returned only to the authenticated caller.
+    pub operation_token: String,
+    /// Catalog generation the broker validated for this reservation.
+    pub catalog_generation: u64,
+    /// Gate generation after the durable reservation was recorded.
+    pub gate_generation: u64,
+    /// An identical request still has a pending reservation and must not run again.
+    pub already_in_flight: bool,
+    /// A completed replay must not execute the package mutation again.
+    pub already_completed: bool,
+}
+
+/// Non-secret active-operation detail included in update-readiness evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingOperationActivity {
+    /// Request id for the durable in-flight operation.
+    pub request_id: String,
+    /// Authenticated source that owns the operation.
+    pub source_id: String,
+    /// Non-secret scope reported to update-readiness callers.
+    pub scope: BindingOperationScope,
+    /// Unix timestamp recorded at reservation time; it is informational only.
+    pub started_at_unix_ms: u64,
+}
+
+/// Result returned after the exact admitted operation scope is completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingOperationCompletion {
+    /// Whether this call has durably completed the reservation.
+    pub completed: bool,
+    /// Gate generation after completion or idempotent replay.
+    pub gate_generation: u64,
 }
 
 /// Versioned complete catalog of installed task-admission sources.
@@ -135,12 +259,13 @@ impl TrustedActivitySourceCatalog {
 
     /// Validates schema, source identifiers, uniqueness, and generation.
     pub fn validate(&self) -> Result<(), MaintenanceError> {
-        if self.schema_version != STATE_SCHEMA_VERSION || self.generation == 0 {
+        if self.schema_version != ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION || self.generation == 0 {
             return Err(MaintenanceError::CatalogUnavailable(
                 "unsupported source catalog schema or zero generation".to_string(),
             ));
         }
         let mut ids = BTreeSet::new();
+        let mut binding_owners = BTreeMap::<&str, &str>::new();
         for source in &self.sources {
             validate_identifier(&source.source_id, "source_id")?;
             if source.source_token_sha256.len() != 64
@@ -159,6 +284,53 @@ impl TrustedActivitySourceCatalog {
                     "duplicate source_id: {}",
                     source.source_id
                 )));
+            }
+            let mut scope_keys = BTreeSet::new();
+            for scope in &source.binding_scopes {
+                if binding_owners
+                    .insert(&scope.binding_id, &source.source_id)
+                    .is_some_and(|owner| owner != source.source_id)
+                {
+                    return Err(MaintenanceError::CatalogUnavailable(format!(
+                        "binding {} is authorized by more than one source",
+                        scope.binding_id
+                    )));
+                }
+                validate_identifier(&scope.binding_id, "binding_id")?;
+                validate_identifier(&scope.package_id, "package_id")?;
+                if scope.installation_ids.is_empty() || scope.operations.is_empty() {
+                    return Err(MaintenanceError::CatalogUnavailable(format!(
+                        "source {} has an empty binding operation scope",
+                        source.source_id
+                    )));
+                }
+                if !scope_keys.insert((scope.binding_id.as_str(), scope.package_id.as_str())) {
+                    return Err(MaintenanceError::CatalogUnavailable(format!(
+                        "source {} has a duplicate binding/package scope",
+                        source.source_id
+                    )));
+                }
+                let mut installation_ids = BTreeSet::new();
+                for installation_id in &scope.installation_ids {
+                    validate_identifier(installation_id, "installation_id")?;
+                    if !installation_ids.insert(installation_id.as_str()) {
+                        return Err(MaintenanceError::CatalogUnavailable(format!(
+                            "source {} has a duplicate installation id in binding scope {}",
+                            source.source_id, scope.binding_id
+                        )));
+                    }
+                }
+                let mut operations = BTreeSet::new();
+                if scope
+                    .operations
+                    .iter()
+                    .any(|operation| !operations.insert(*operation))
+                {
+                    return Err(MaintenanceError::CatalogUnavailable(format!(
+                        "source {} has a duplicate operation in binding scope {}",
+                        source.source_id, scope.binding_id
+                    )));
+                }
             }
         }
         Ok(())
@@ -206,6 +378,8 @@ pub struct ReadinessSnapshot {
     pub active_task_count: u64,
     pub active_tasks: Vec<TaskActivityRecord>,
     pub inflight_runtime_admission_count: u64,
+    pub active_binding_operation_count: u64,
+    pub active_binding_operations: Vec<BindingOperationActivity>,
     pub unknown_activity_sources: Vec<String>,
     pub active_worker_count: u64,
     pub active_allocation_count: u64,
@@ -223,6 +397,7 @@ pub struct TaskActivityRecord {
 
 /// Result returned when a task source has acquired a durable admission record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskAdmission {
     pub token: String,
     pub source_id: String,
@@ -255,6 +430,66 @@ pub struct MaintenancePlan {
     pub plan_id: String,
     pub plan_digest: String,
     pub component_artifact_digests: BTreeMap<String, String>,
+}
+
+/// Private proof that a catalog update belongs to the current maintenance hold.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MaintenanceHoldProof {
+    pub request_id: String,
+    pub maintenance_token: String,
+    pub plan: MaintenancePlan,
+}
+
+/// Identifies one explicitly supported schema-1 state layout for offline migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LegacyStateProfile {
+    /// Released schema 1 had neither binding-operation map.
+    ReleasedV1NoBindingAdmissions,
+    /// The experimental schema-1 writer persisted both binding-operation maps.
+    ExperimentalV1BindingAdmissions,
+}
+
+/// Private root-generated proof used by the offline schema migration commands.
+///
+/// The CLI reads this value only from a root-owned mode-0600 file. Its token is
+/// never serialized into the migration marker or normal logs.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateMigrationProof {
+    pub schema1_profile: LegacyStateProfile,
+    pub request_id: String,
+    pub maintenance_token: String,
+    pub target_kind: UpdateTargetKind,
+    pub plan_id: String,
+    pub plan_digest: String,
+    pub component_artifact_digests: BTreeMap<String, String>,
+    pub expected_gate_generation: u64,
+    pub expected_catalog_generation: u64,
+}
+
+/// Result of completing or resuming the controlled schema migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMigrationResult {
+    pub migrated: bool,
+    pub schema_version: u32,
+    pub migration_id: String,
+    pub gate_generation: u64,
+    pub catalog_generation: u64,
+}
+
+/// Read-only confirmation of the exact active maintenance hold and generations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaintenanceHoldValidation {
+    pub valid: bool,
+    pub request_id: String,
+    pub target_kind: UpdateTargetKind,
+    #[serde(flatten)]
+    pub plan: MaintenancePlan,
+    pub component_id: String,
+    pub artifact_digest: String,
+    pub gate_generation: u64,
+    pub catalog_generation: u64,
 }
 
 /// Result returned by a maintenance completion attempt.
@@ -307,6 +542,7 @@ struct Inner {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PersistedState {
     schema_version: u32,
     journal_sequence: u64,
@@ -316,6 +552,10 @@ struct PersistedState {
     completed_maintenances: BTreeMap<String, CompletedMaintenanceRecord>,
     tasks: BTreeMap<String, TaskRecord>,
     runtime_admissions: BTreeMap<String, String>,
+    #[serde(default)]
+    binding_operations: BTreeMap<String, BindingOperationRecord>,
+    #[serde(default)]
+    completed_binding_operations: BTreeMap<String, BindingOperationRecord>,
     sources: BTreeMap<String, SourceRecord>,
     /// True only while the journal contains catalog setup and no prior runtime use.
     #[serde(default)]
@@ -333,6 +573,8 @@ impl Default for PersistedState {
             completed_maintenances: BTreeMap::new(),
             tasks: BTreeMap::new(),
             runtime_admissions: BTreeMap::new(),
+            binding_operations: BTreeMap::new(),
+            completed_binding_operations: BTreeMap::new(),
             sources: BTreeMap::new(),
             core_bootstrap_eligible: true,
         }
@@ -340,6 +582,7 @@ impl Default for PersistedState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MaintenanceRecord {
     request_id: String,
     token: String,
@@ -365,6 +608,7 @@ enum MaintenanceOrigin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CompletedMaintenanceRecord {
     maintenance: MaintenanceRecord,
     outcome: MaintenanceOutcome,
@@ -374,24 +618,130 @@ struct CompletedMaintenanceRecord {
     gate_generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum StateMigrationPhase {
+    Prepared,
+    JournalReplaced,
+    SnapshotReplaced,
+    Complete,
+    RollbackPrepared,
+    RollbackJournalReplaced,
+    RollbackSnapshotReplaced,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateMigrationMarker {
+    migration_version: u32,
+    migration_id: String,
+    from_schema_version: u32,
+    to_schema_version: u32,
+    phase: StateMigrationPhase,
+    schema1_profile: LegacyStateProfile,
+    request_id: String,
+    maintenance_token_sha256: String,
+    target_kind: UpdateTargetKind,
+    plan_id: String,
+    plan_digest: String,
+    component_artifact_digests: BTreeMap<String, String>,
+    expected_gate_generation: u64,
+    expected_catalog_generation: u64,
+    source_state_sha256: String,
+    source_journal_sha256: String,
+    target_state_sha256: String,
+    target_journal_sha256: String,
+    backup_state_file: String,
+    backup_journal_file: String,
+    backup_schema2_state_file: String,
+    backup_schema2_journal_file: String,
+    rollback_from_state_sha256: Option<String>,
+    rollback_from_journal_sha256: Option<String>,
+    rollback_target_state_sha256: Option<String>,
+    rollback_target_journal_sha256: Option<String>,
+    rollback_target_state_file: Option<String>,
+    rollback_target_journal_file: Option<String>,
+}
+
+impl StateMigrationMarker {
+    fn backup_state_path(&self, directory: &Path) -> PathBuf {
+        directory.join(&self.backup_state_file)
+    }
+
+    fn backup_journal_path(&self, directory: &Path) -> PathBuf {
+        directory.join(&self.backup_journal_file)
+    }
+
+    fn backup_schema2_state_path(&self, directory: &Path) -> PathBuf {
+        directory.join(&self.backup_schema2_state_file)
+    }
+
+    fn backup_schema2_journal_path(&self, directory: &Path) -> PathBuf {
+        directory.join(&self.backup_schema2_journal_file)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskRecord {
     admission: TaskAdmission,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceRecord {
     last_heartbeat_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingOperationRecord {
+    request_id: String,
+    operation_token: String,
+    source_id: String,
+    scope: BindingOperationScope,
+    started_at_unix_ms: u64,
+}
+
+impl BindingOperationRecord {
+    fn admission(
+        &self,
+        catalog_generation: u64,
+        gate_generation: u64,
+        already_in_flight: bool,
+        already_completed: bool,
+    ) -> BindingOperationAdmission {
+        BindingOperationAdmission {
+            request_id: self.request_id.clone(),
+            source_id: self.source_id.clone(),
+            scope: self.scope.clone(),
+            operation_token: self.operation_token.clone(),
+            catalog_generation,
+            gate_generation,
+            already_in_flight,
+            already_completed,
+        }
+    }
+
+    fn activity(&self) -> BindingOperationActivity {
+        BindingOperationActivity {
+            request_id: self.request_id.clone(),
+            source_id: self.source_id.clone(),
+            scope: self.scope.clone(),
+            started_at_unix_ms: self.started_at_unix_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JournalEntry {
     sequence: u64,
     event: JournalEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 enum JournalEvent {
     CatalogConfigured {
         generation: u64,
@@ -426,6 +776,12 @@ enum JournalEvent {
         token: String,
     },
     RuntimeAdmissionsRecovered,
+    BindingOperationAdmitted {
+        record: BindingOperationRecord,
+    },
+    BindingOperationCompleted {
+        record: BindingOperationRecord,
+    },
     MaintenanceBegan {
         record: MaintenanceRecord,
     },
@@ -473,6 +829,7 @@ impl RuntimeMaintenance {
         reject_symlink_directory(&directory)?;
         set_shared_directory(&directory)?;
         validate_shared_files(&directory)?;
+        ensure_migration_marker_allows_state2(&directory)?;
         let this = Self {
             inner: Arc::new(Inner {
                 directory,
@@ -489,6 +846,93 @@ impl RuntimeMaintenance {
     /// serving the next admission/readiness operation.
     pub fn refresh_catalog(&self) -> Result<(), MaintenanceError> {
         self.with_state(|_| Ok(()))
+    }
+
+    /// Commits a root-managed catalog replacement while holding the same lock as
+    /// operation admission and completion. The writer runs only when the expected
+    /// catalog is current, no binding operation is active, and any maintenance
+    /// hold has the exact transaction, token, and plan proof.
+    pub fn commit_activity_source_catalog(
+        &self,
+        expected_generation: u64,
+        catalog: TrustedActivitySourceCatalog,
+        maintenance_proof: Option<&MaintenanceHoldProof>,
+        write_catalog: impl FnOnce() -> Result<(), MaintenanceError>,
+    ) -> Result<(), MaintenanceError> {
+        catalog.validate()?;
+        let next_generation = expected_generation.checked_add(1).ok_or_else(|| {
+            MaintenanceError::InvalidRequest("activity catalog generation exhausted".to_string())
+        })?;
+        if catalog.generation != next_generation {
+            return Err(MaintenanceError::InvalidRequest(
+                "replacement catalog generation must advance exactly once".to_string(),
+            ));
+        }
+
+        let lock = open_lock_file(&self.inner.directory)?;
+        lock.lock()?;
+        let mut state = load_state_locked(&self.inner.directory)?;
+        let result = (|| {
+            self.refresh_catalog_locked(&mut state)?;
+            let current = self.catalog_snapshot()?;
+            if current.generation != expected_generation
+                || state.install_catalog_generation != expected_generation
+            {
+                return Err(MaintenanceError::CatalogUnavailable(
+                    "activity catalog changed while replacement was being prepared".to_string(),
+                ));
+            }
+            if !state.binding_operations.is_empty() {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATIONS_INFLIGHT".to_string(),
+                ));
+            }
+            match (state.maintenance.as_ref(), maintenance_proof) {
+                (None, None) => {}
+                (None, Some(_)) => {
+                    return Err(MaintenanceError::AdmissionDenied(
+                        "MAINTENANCE_NOT_ACTIVE".to_string(),
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(MaintenanceError::AdmissionDenied(
+                        "MAINTENANCE_HOLD_PROOF_REQUIRED".to_string(),
+                    ));
+                }
+                (Some(active), Some(proof))
+                    if active.request_id == proof.request_id
+                        && active.token == proof.maintenance_token
+                        && active.plan == proof.plan =>
+                {
+                    // The exact transaction owner may update the catalog under its hold.
+                }
+                (Some(_), Some(_)) => {
+                    return Err(MaintenanceError::AdmissionDenied(
+                        "MAINTENANCE_HOLD_PROOF_MISMATCH".to_string(),
+                    ));
+                }
+            }
+
+            write_catalog()?;
+            append_and_apply(
+                &self.inner.directory,
+                &mut state,
+                JournalEvent::CatalogConfigured {
+                    generation: catalog.generation,
+                },
+            )?;
+            let mut current = self.inner.catalog.write().map_err(|_| {
+                MaintenanceError::StateUnknown("trusted catalog lock poisoned".into())
+            })?;
+            *current = catalog;
+            Ok(())
+        })();
+        let unlock_result = lock.unlock();
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(MaintenanceError::Storage(error)),
+        }
     }
 
     /// Adjusts the source freshness window for a deployment or deterministic test.
@@ -697,6 +1141,224 @@ impl RuntimeMaintenance {
                 },
             )
         })
+    }
+
+    /// Durably admits one exact package binding operation before the daemon mutates runtime state.
+    ///
+    /// Catalog generation, source token, peer UID/GID, exact binding scope, and
+    /// maintenance state are checked while holding the shared file lock. The
+    /// reservation survives process exit until the daemon completes this exact
+    /// request; no age-based cleanup can make an unknown operation look idle.
+    pub fn admit_binding_operation(
+        &self,
+        request_id: &str,
+        caller: &BindingOperationCaller,
+        scope: &BindingOperationScope,
+    ) -> Result<BindingOperationAdmission, MaintenanceError> {
+        validate_identifier(request_id, "request_id")?;
+        validate_binding_operation_scope(scope)?;
+        validate_identifier(&caller.source_id, "source_id")?;
+        if caller.source_token.is_empty() || caller.source_token.len() > 4096 {
+            return Err(MaintenanceError::InvalidRequest(
+                "source_token must be non-empty and at most 4096 bytes".to_string(),
+            ));
+        }
+        self.with_state(|state| {
+            self.require_binding_operation_authority(state, caller, scope)?;
+
+            let candidate = BindingOperationRecord {
+                request_id: request_id.to_string(),
+                operation_token: String::new(),
+                source_id: caller.source_id.clone(),
+                scope: scope.clone(),
+                started_at_unix_ms: 0,
+            };
+            if let Some(existing) = state.binding_operations.get(request_id) {
+                if same_binding_operation(existing, &candidate) {
+                    if state.maintenance.is_some() {
+                        return Err(MaintenanceError::AdmissionDenied(
+                            "UPDATE_MAINTENANCE_ACTIVE".to_string(),
+                        ));
+                    }
+                    return Ok(existing.admission(
+                        state.install_catalog_generation,
+                        state.gate_generation,
+                        true,
+                        false,
+                    ));
+                }
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATION_REQUEST_ID_CONFLICT".to_string(),
+                ));
+            }
+            if let Some(existing) = state.completed_binding_operations.get(request_id) {
+                if same_binding_operation(existing, &candidate) {
+                    return Ok(existing.admission(
+                        state.install_catalog_generation,
+                        state.gate_generation,
+                        false,
+                        true,
+                    ));
+                }
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATION_REQUEST_ID_CONFLICT".to_string(),
+                ));
+            }
+            if state
+                .binding_operations
+                .values()
+                .any(|active| active.scope.binding_id == scope.binding_id)
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATION_ALREADY_INFLIGHT".to_string(),
+                ));
+            }
+            if state.maintenance.is_some() {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "UPDATE_MAINTENANCE_ACTIVE".to_string(),
+                ));
+            }
+
+            let record = BindingOperationRecord {
+                request_id: request_id.to_string(),
+                operation_token: Uuid::new_v4().to_string(),
+                source_id: caller.source_id.clone(),
+                scope: scope.clone(),
+                started_at_unix_ms: now_unix_ms(),
+            };
+            append_and_apply(
+                &self.inner.directory,
+                state,
+                JournalEvent::BindingOperationAdmitted {
+                    record: record.clone(),
+                },
+            )?;
+            Ok(record.admission(
+                state.install_catalog_generation,
+                state.gate_generation,
+                false,
+                false,
+            ))
+        })
+    }
+
+    /// Completes only the same authenticated owner, request, and exact operation scope.
+    ///
+    /// Replays of an already completed identical request are idempotent. A
+    /// mismatched token, owner, binding, package, installation, or operation is
+    /// rejected and leaves the durable blocker intact.
+    pub fn complete_binding_operation(
+        &self,
+        request_id: &str,
+        caller: &BindingOperationCaller,
+        scope: &BindingOperationScope,
+        operation_token: &str,
+    ) -> Result<BindingOperationCompletion, MaintenanceError> {
+        validate_identifier(request_id, "request_id")?;
+        validate_binding_operation_scope(scope)?;
+        validate_identifier(&caller.source_id, "source_id")?;
+        if caller.source_token.is_empty() || caller.source_token.len() > 4096 {
+            return Err(MaintenanceError::InvalidRequest(
+                "source_token must be non-empty and at most 4096 bytes".to_string(),
+            ));
+        }
+        if operation_token.is_empty() || operation_token.len() > 256 {
+            return Err(MaintenanceError::InvalidRequest(
+                "operation_token must be non-empty and at most 256 bytes".to_string(),
+            ));
+        }
+        self.with_state(|state| {
+            self.require_binding_operation_authority(state, caller, scope)?;
+            let expected = BindingOperationRecord {
+                request_id: request_id.to_string(),
+                operation_token: operation_token.to_string(),
+                source_id: caller.source_id.clone(),
+                scope: scope.clone(),
+                started_at_unix_ms: 0,
+            };
+            if let Some(completed) = state.completed_binding_operations.get(request_id) {
+                if same_binding_operation(completed, &expected)
+                    && completed.operation_token == operation_token
+                {
+                    return Ok(BindingOperationCompletion {
+                        completed: true,
+                        gate_generation: state.gate_generation,
+                    });
+                }
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATION_COMPLETION_SCOPE_MISMATCH".to_string(),
+                ));
+            }
+            let Some(active) = state.binding_operations.get(request_id) else {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATION_NOT_FOUND".to_string(),
+                ));
+            };
+            if !same_binding_operation(active, &expected)
+                || active.operation_token != operation_token
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "BINDING_OPERATION_COMPLETION_SCOPE_MISMATCH".to_string(),
+                ));
+            }
+            append_and_apply(
+                &self.inner.directory,
+                state,
+                JournalEvent::BindingOperationCompleted {
+                    record: active.clone(),
+                },
+            )?;
+            Ok(BindingOperationCompletion {
+                completed: true,
+                gate_generation: state.gate_generation,
+            })
+        })
+    }
+
+    fn require_binding_operation_authority(
+        &self,
+        state: &PersistedState,
+        caller: &BindingOperationCaller,
+        scope: &BindingOperationScope,
+    ) -> Result<(), MaintenanceError> {
+        let catalog = self.catalog_snapshot()?;
+        if caller.expected_catalog_generation != catalog.generation
+            || caller.expected_catalog_generation != state.install_catalog_generation
+        {
+            return Err(MaintenanceError::AdmissionDenied(
+                "ACTIVITY_CATALOG_GENERATION_MISMATCH".to_string(),
+            ));
+        }
+        let source = catalog.source(&caller.source_id).ok_or_else(|| {
+            MaintenanceError::AdmissionDenied("ACTIVITY_SOURCE_UNTRUSTED".to_string())
+        })?;
+        if source.uid != caller.peer_uid || source.gid.is_some_and(|gid| gid != caller.peer_gid) {
+            return Err(MaintenanceError::AdmissionDenied(
+                "ACTIVITY_SOURCE_CALLER_MISMATCH".to_string(),
+            ));
+        }
+        let expected_token_hash = source.source_token_sha256.as_bytes();
+        let actual_token_hash = format!("{:x}", Sha256::digest(caller.source_token.as_bytes()));
+        if !constant_time_eq(expected_token_hash, actual_token_hash.as_bytes()) {
+            return Err(MaintenanceError::AdmissionDenied(
+                "ACTIVITY_SOURCE_AUTH_INVALID".to_string(),
+            ));
+        }
+        let authorized = source.binding_scopes.iter().any(|binding_scope| {
+            binding_scope.binding_id == scope.binding_id
+                && binding_scope.package_id == scope.package_id
+                && binding_scope
+                    .installation_ids
+                    .iter()
+                    .any(|id| id == &scope.installation_id)
+                && binding_scope.operations.contains(&scope.operation)
+        });
+        if !authorized {
+            return Err(MaintenanceError::AdmissionDenied(
+                "BINDING_OPERATION_SCOPE_UNTRUSTED".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Lists the durable active tasks for one trusted source before startup reconciliation.
@@ -1156,6 +1818,8 @@ impl RuntimeMaintenance {
                 || !state.completed_maintenances.is_empty()
                 || !state.tasks.is_empty()
                 || !state.runtime_admissions.is_empty()
+                || !state.binding_operations.is_empty()
+                || !state.completed_binding_operations.is_empty()
             {
                 return Err(MaintenanceError::AdmissionDenied(
                     "CORE_BOOTSTRAP_REQUIRES_FRESH_STORE".to_string(),
@@ -1272,6 +1936,89 @@ impl RuntimeMaintenance {
                     ReadinessStatus::MaintenanceActive
                 },
                 gate_generation: state.gate_generation,
+            })
+        })
+    }
+
+    /// Read-only proof that the exact maintenance hold and expected generations are current.
+    pub fn validate_maintenance_hold(
+        &self,
+        proof: &MaintenanceHoldProof,
+        target_kind: UpdateTargetKind,
+        component_id: &str,
+        artifact_digest: &str,
+        expected_gate_generation: u64,
+        expected_catalog_generation: u64,
+    ) -> Result<MaintenanceHoldValidation, MaintenanceError> {
+        validate_identifier(&proof.request_id, "request_id")?;
+        validate_identifier(component_id, "component_id")?;
+        validate_plan(&proof.plan)?;
+        if proof.maintenance_token.is_empty() || proof.maintenance_token.len() > 256 {
+            return Err(MaintenanceError::InvalidRequest(
+                "maintenance token must be non-empty and at most 256 bytes".to_string(),
+            ));
+        }
+        if artifact_digest.is_empty() || artifact_digest.len() > 512 {
+            return Err(MaintenanceError::InvalidRequest(
+                "artifact digest must be non-empty and at most 512 bytes".to_string(),
+            ));
+        }
+
+        self.with_state(|state| {
+            let catalog = self.catalog_snapshot()?;
+            if state.gate_generation != expected_gate_generation {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_GATE_GENERATION_MISMATCH".to_string(),
+                ));
+            }
+            if state.install_catalog_generation != expected_catalog_generation
+                || catalog.generation != expected_catalog_generation
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "ACTIVITY_CATALOG_GENERATION_MISMATCH".to_string(),
+                ));
+            }
+            let active = state.maintenance.as_ref().ok_or_else(|| {
+                MaintenanceError::AdmissionDenied("MAINTENANCE_NOT_ACTIVE".to_string())
+            })?;
+            if active.request_id != proof.request_id || active.token != proof.maintenance_token {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_TOKEN_INVALID".to_string(),
+                ));
+            }
+            if active.target_kind != target_kind || active.plan != proof.plan {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_PLAN_MISMATCH".to_string(),
+                ));
+            }
+            if active
+                .plan
+                .component_artifact_digests
+                .get(component_id)
+                .is_none_or(|expected| expected != artifact_digest)
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_COMPONENT_DIGEST_MISMATCH".to_string(),
+                ));
+            }
+            if !state.tasks.is_empty()
+                || !state.runtime_admissions.is_empty()
+                || !state.binding_operations.is_empty()
+            {
+                return Err(MaintenanceError::AdmissionDenied(
+                    "MAINTENANCE_WORK_INFLIGHT".to_string(),
+                ));
+            }
+
+            Ok(MaintenanceHoldValidation {
+                valid: true,
+                request_id: active.request_id.clone(),
+                target_kind: active.target_kind,
+                plan: active.plan.clone(),
+                component_id: component_id.to_string(),
+                artifact_digest: artifact_digest.to_string(),
+                gate_generation: state.gate_generation,
+                catalog_generation: state.install_catalog_generation,
             })
         })
     }
@@ -1411,6 +2158,7 @@ impl RuntimeMaintenance {
                         "trusted activity-source catalog generation regressed".to_string(),
                     ));
                 }
+                ensure_catalog_adoption_allowed(state)?;
                 append_and_apply(
                     &self.inner.directory,
                     state,
@@ -1438,6 +2186,9 @@ impl RuntimeMaintenance {
                 "trusted activity-source catalog generation regressed".to_string(),
             ));
         }
+        if state.install_catalog_generation != catalog.generation {
+            ensure_catalog_adoption_allowed(state)?;
+        }
         *current = catalog.clone();
         drop(current);
         if state.install_catalog_generation != catalog.generation {
@@ -1451,6 +2202,26 @@ impl RuntimeMaintenance {
         }
         Ok(())
     }
+}
+
+/// Blocks adoption of an out-of-band catalog generation while durable work
+/// still depends on the current authority snapshot.
+///
+/// The supported catalog writer validates the active hold proof or pending
+/// operation under this same lock before it updates the file and journal.
+/// 中文：避免未受门禁保护的文件替换切断当前操作的授权或维护事务。
+fn ensure_catalog_adoption_allowed(state: &PersistedState) -> Result<(), MaintenanceError> {
+    if !state.binding_operations.is_empty() {
+        return Err(MaintenanceError::AdmissionDenied(
+            "BINDING_OPERATIONS_INFLIGHT".to_string(),
+        ));
+    }
+    if state.maintenance.is_some() {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_HOLD_PROOF_REQUIRED".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Result wrapper retaining either gate rejection or the caller's action error.
@@ -1508,6 +2279,11 @@ fn readiness_snapshot(
     unknown_activity_sources.dedup();
 
     let mut blocker_codes = Vec::new();
+    let active_binding_operations = state
+        .binding_operations
+        .values()
+        .map(BindingOperationRecord::activity)
+        .collect::<Vec<_>>();
     let status = if state.install_catalog_generation != request.expected_catalog_generation
         || state.install_catalog_generation != catalog.generation
         || !unknown_activity_sources.is_empty()
@@ -1522,7 +2298,13 @@ fn readiness_snapshot(
         ReadinessStatus::Unknown
     } else if !active_tasks.is_empty() {
         blocker_codes.push("ACTIVE_TASKS_PRESENT".to_string());
+        if !active_binding_operations.is_empty() {
+            blocker_codes.push("BINDING_OPERATIONS_INFLIGHT".to_string());
+        }
         ReadinessStatus::ActiveTasks
+    } else if !active_binding_operations.is_empty() {
+        blocker_codes.push("BINDING_OPERATIONS_INFLIGHT".to_string());
+        ReadinessStatus::ActiveBindingOperations
     } else if request.target_kind == UpdateTargetKind::CoreRuntime
         && (runtime_usage.active_worker_count > 0 || runtime_usage.active_allocation_count > 0)
     {
@@ -1547,6 +2329,8 @@ fn readiness_snapshot(
         active_task_count: active_tasks.len() as u64,
         active_tasks,
         inflight_runtime_admission_count: state.runtime_admissions.len() as u64,
+        active_binding_operation_count: active_binding_operations.len() as u64,
+        active_binding_operations,
         unknown_activity_sources,
         active_worker_count: runtime_usage.active_worker_count,
         active_allocation_count: runtime_usage.active_allocation_count,
@@ -1708,12 +2492,7 @@ fn apply_entry(state: &mut PersistedState, entry: &JournalEntry) -> Result<(), M
             source_id,
             at_unix_ms,
         } => {
-            state.sources.insert(
-                source_id.clone(),
-                SourceRecord {
-                    last_heartbeat_unix_ms: *at_unix_ms,
-                },
-            );
+            record_monotonic_source_heartbeat(state, source_id, *at_unix_ms);
         }
         JournalEvent::TaskAdmitted { admission } | JournalEvent::TaskUpdated { admission } => {
             state.tasks.insert(
@@ -1744,12 +2523,7 @@ fn apply_entry(state: &mut PersistedState, entry: &JournalEntry) -> Result<(), M
                     },
                 );
             }
-            state.sources.insert(
-                source_id.clone(),
-                SourceRecord {
-                    last_heartbeat_unix_ms: *at_unix_ms,
-                },
-            );
+            record_monotonic_source_heartbeat(state, source_id, *at_unix_ms);
             state.gate_generation = state.gate_generation.saturating_add(1);
         }
         JournalEvent::StateCheckpoint { .. } => {
@@ -1769,6 +2543,38 @@ fn apply_entry(state: &mut PersistedState, entry: &JournalEntry) -> Result<(), M
         }
         JournalEvent::RuntimeAdmissionsRecovered => {
             state.runtime_admissions.clear();
+            state.gate_generation = state.gate_generation.saturating_add(1);
+        }
+        JournalEvent::BindingOperationAdmitted { record } => {
+            if state.binding_operations.contains_key(&record.request_id)
+                || state
+                    .completed_binding_operations
+                    .contains_key(&record.request_id)
+            {
+                return Err(MaintenanceError::StateUnknown(
+                    "binding operation request id was admitted more than once".to_string(),
+                ));
+            }
+            state
+                .binding_operations
+                .insert(record.request_id.clone(), record.clone());
+            state.gate_generation = state.gate_generation.saturating_add(1);
+        }
+        JournalEvent::BindingOperationCompleted { record } => {
+            let Some(active) = state.binding_operations.get(&record.request_id) else {
+                return Err(MaintenanceError::StateUnknown(
+                    "binding operation completion has no active reservation".to_string(),
+                ));
+            };
+            if active != record {
+                return Err(MaintenanceError::StateUnknown(
+                    "binding operation completion does not match its reservation".to_string(),
+                ));
+            }
+            state.binding_operations.remove(&record.request_id);
+            state
+                .completed_binding_operations
+                .insert(record.request_id.clone(), record.clone());
             state.gate_generation = state.gate_generation.saturating_add(1);
         }
         JournalEvent::MaintenanceBegan { record } => {
@@ -1827,18 +2633,184 @@ fn apply_entry(state: &mut PersistedState, entry: &JournalEntry) -> Result<(), M
     Ok(())
 }
 
+/// Retains monotonic durable heartbeat timestamps if the wall clock steps back.
+fn record_monotonic_source_heartbeat(
+    state: &mut PersistedState,
+    source_id: &str,
+    observed_at_unix_ms: u64,
+) {
+    state
+        .sources
+        .entry(source_id.to_string())
+        .and_modify(|source| {
+            source.last_heartbeat_unix_ms = source.last_heartbeat_unix_ms.max(observed_at_unix_ms);
+        })
+        .or_insert(SourceRecord {
+            last_heartbeat_unix_ms: observed_at_unix_ms,
+        });
+}
+
+/// Accepts only the exact persisted top-level fields for a known state profile.
+fn validate_persisted_state_shape(
+    value: &serde_json::Value,
+    schema_version: u32,
+    legacy_profile: Option<LegacyStateProfile>,
+) -> Result<(), MaintenanceError> {
+    let object = value.as_object().ok_or_else(|| {
+        MaintenanceError::StateUnknown("persisted state must be a JSON object".to_string())
+    })?;
+    let common = [
+        "schema_version",
+        "journal_sequence",
+        "gate_generation",
+        "install_catalog_generation",
+        "maintenance",
+        "completed_maintenances",
+        "tasks",
+        "runtime_admissions",
+        "sources",
+    ];
+    let has_active_binding = object.contains_key("binding_operations");
+    let has_completed_binding = object.contains_key("completed_binding_operations");
+
+    if schema_version == LEGACY_STATE_SCHEMA_VERSION {
+        let profile = legacy_profile.ok_or_else(|| {
+            MaintenanceError::StateUnknown(
+                "schema-1 state requires an explicit migration profile".to_string(),
+            )
+        })?;
+        let layout_matches = match profile {
+            LegacyStateProfile::ReleasedV1NoBindingAdmissions => {
+                !has_active_binding && !has_completed_binding
+            }
+            LegacyStateProfile::ExperimentalV1BindingAdmissions => {
+                has_active_binding && has_completed_binding
+            }
+        };
+        if !layout_matches {
+            return Err(MaintenanceError::StateUnknown(
+                "schema-1 binding-operation fields do not match the declared migration profile"
+                    .to_string(),
+            ));
+        }
+    } else if schema_version == STATE_SCHEMA_VERSION {
+        if !has_active_binding
+            || !has_completed_binding
+            || !object.contains_key("core_bootstrap_eligible")
+        {
+            return Err(MaintenanceError::StateUnknown(
+                "schema-2 state is missing required persisted fields".to_string(),
+            ));
+        }
+    } else {
+        return Err(MaintenanceError::StateUnknown(
+            "unsupported maintenance state schema".to_string(),
+        ));
+    }
+
+    let mut allowed = common.into_iter().collect::<BTreeSet<_>>();
+    if schema_version == STATE_SCHEMA_VERSION
+        || matches!(
+            legacy_profile,
+            Some(LegacyStateProfile::ExperimentalV1BindingAdmissions)
+        )
+    {
+        allowed.insert("binding_operations");
+        allowed.insert("completed_binding_operations");
+    }
+    if schema_version == STATE_SCHEMA_VERSION || object.contains_key("core_bootstrap_eligible") {
+        allowed.insert("core_bootstrap_eligible");
+    }
+    if object.keys().any(|key| !allowed.contains(key.as_str())) {
+        return Err(MaintenanceError::StateUnknown(
+            "persisted state contains an unknown field".to_string(),
+        ));
+    }
+    if common.iter().any(|key| !object.contains_key(*key)) {
+        return Err(MaintenanceError::StateUnknown(
+            "persisted state is missing a required field".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks checkpoint shape before serde defaults could conceal a lost map.
+fn validate_journal_entry_shape(
+    line: &[u8],
+    schema_version: u32,
+    legacy_profile: Option<LegacyStateProfile>,
+) -> Result<(), MaintenanceError> {
+    let value: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+        MaintenanceError::StateUnknown(format!("journal entry parse failed: {error}"))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        MaintenanceError::StateUnknown("journal entry must be a JSON object".to_string())
+    })?;
+    if object.len() != 2 || !object.contains_key("sequence") || !object.contains_key("event") {
+        return Err(MaintenanceError::StateUnknown(
+            "journal entry contains missing or unknown fields".to_string(),
+        ));
+    }
+    let event = object
+        .get("event")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            MaintenanceError::StateUnknown("journal event must be a JSON object".to_string())
+        })?;
+    let kind = event
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            MaintenanceError::StateUnknown("journal event kind is missing".to_string())
+        })?;
+    if legacy_profile == Some(LegacyStateProfile::ReleasedV1NoBindingAdmissions)
+        && matches!(
+            kind,
+            "binding_operation_admitted" | "binding_operation_completed"
+        )
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "released schema-1 profile contains binding-operation events".to_string(),
+        ));
+    }
+    if kind == "state_checkpoint" {
+        let checkpoint = event.get("state").ok_or_else(|| {
+            MaintenanceError::StateUnknown("journal checkpoint state is missing".to_string())
+        })?;
+        validate_persisted_state_shape(checkpoint, schema_version, legacy_profile)?;
+    }
+    Ok(())
+}
+
 fn load_state_locked(directory: &Path) -> Result<PersistedState, MaintenanceError> {
+    load_state_locked_with_schema(directory, STATE_SCHEMA_VERSION, None, true)
+}
+
+/// Reads one known persistence generation. Migration uses `repair=false` so an
+/// incomplete source is never rewritten before its exact layout is verified.
+fn load_state_locked_with_schema(
+    directory: &Path,
+    expected_schema_version: u32,
+    legacy_profile: Option<LegacyStateProfile>,
+    repair: bool,
+) -> Result<PersistedState, MaintenanceError> {
     let state_path = directory.join(STATE_FILE);
     let journal_path = directory.join(JOURNAL_FILE);
     let state_existed = state_path.exists();
     let mut state = match fs::read(&state_path) {
-        Ok(bytes) => serde_json::from_slice::<PersistedState>(&bytes).map_err(|error| {
-            MaintenanceError::StateUnknown(format!("snapshot parse failed: {error}"))
-        })?,
+        Ok(bytes) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+                MaintenanceError::StateUnknown(format!("snapshot parse failed: {error}"))
+            })?;
+            validate_persisted_state_shape(&value, expected_schema_version, legacy_profile)?;
+            serde_json::from_value::<PersistedState>(value).map_err(|error| {
+                MaintenanceError::StateUnknown(format!("snapshot parse failed: {error}"))
+            })?
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => PersistedState::default(),
         Err(error) => return Err(MaintenanceError::Storage(error)),
     };
-    if state.schema_version != STATE_SCHEMA_VERSION {
+    if state.schema_version != expected_schema_version {
         return Err(MaintenanceError::StateUnknown(
             "unsupported maintenance snapshot schema".to_string(),
         ));
@@ -1886,9 +2858,15 @@ fn load_state_locked(directory: &Path) -> Result<PersistedState, MaintenanceErro
                         "snapshot is newer than the valid maintenance journal tail: {error}"
                     )));
                 }
-                let file = OpenOptions::new().write(true).open(&journal_path)?;
-                file.set_len(valid_bytes as u64)?;
-                file.sync_all()?;
+                if repair {
+                    let file = OpenOptions::new().write(true).open(&journal_path)?;
+                    file.set_len(valid_bytes as u64)?;
+                    file.sync_all()?;
+                } else {
+                    return Err(MaintenanceError::StateUnknown(
+                        "maintenance journal has an incomplete final record".to_string(),
+                    ));
+                }
                 break;
             }
             Err(error) => {
@@ -1897,6 +2875,8 @@ fn load_state_locked(directory: &Path) -> Result<PersistedState, MaintenanceErro
                 )));
             }
         };
+
+        validate_journal_entry_shape(line, expected_schema_version, legacy_profile)?;
 
         if let Some(last_sequence) = last_sequence {
             let expected = last_sequence.saturating_add(1);
@@ -1912,15 +2892,16 @@ fn load_state_locked(directory: &Path) -> Result<PersistedState, MaintenanceErro
             match &entry.event {
                 JournalEvent::StateCheckpoint { state: checkpoint } => {
                     if entry.sequence == 0
-                        || checkpoint.schema_version != STATE_SCHEMA_VERSION
+                        || checkpoint.schema_version != expected_schema_version
                         || checkpoint.journal_sequence != entry.sequence
-                        || state.journal_sequence > entry.sequence
                     {
                         return Err(MaintenanceError::StateUnknown(
                             "maintenance journal checkpoint is inconsistent".to_string(),
                         ));
                     }
-                    state = (**checkpoint).clone();
+                    if checkpoint.journal_sequence > state.journal_sequence {
+                        state = (**checkpoint).clone();
+                    }
                 }
                 _ if entry.sequence != 1 => {
                     return Err(MaintenanceError::StateUnknown(
@@ -1946,19 +2927,1225 @@ fn load_state_locked(directory: &Path) -> Result<PersistedState, MaintenanceErro
         ));
     };
     if needs_terminal_newline {
-        let mut file = OpenOptions::new().append(true).open(&journal_path)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
+        if repair {
+            let mut file = OpenOptions::new().append(true).open(&journal_path)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+        } else {
+            return Err(MaintenanceError::StateUnknown(
+                "maintenance journal is missing its terminal newline".to_string(),
+            ));
+        }
     }
     if state.journal_sequence > last_sequence {
         return Err(MaintenanceError::StateUnknown(
             "maintenance journal is truncated before the durable snapshot".to_string(),
         ));
     }
-    if state.journal_sequence > snapshot_sequence {
+    if repair && state.journal_sequence > snapshot_sequence {
         write_snapshot_atomic(directory, &state)?;
     }
     Ok(state)
+}
+
+/// Converts one proven schema-1 layout to schema 2 without allowing an ordinary
+/// broker or Kernel open to guess which legacy fields were present.
+pub fn migrate_state_schema1(
+    directory: impl AsRef<Path>,
+    proof: &StateMigrationProof,
+) -> Result<StateMigrationResult, MaintenanceError> {
+    require_root_for_schema_change()?;
+    let directory = directory.as_ref();
+    validate_migration_proof(proof)?;
+    prepare_offline_state_directory(directory)?;
+    let lock = open_existing_lock_file(directory)?;
+    lock.lock()?;
+    let result = migrate_state_schema1_locked(directory, proof);
+    let unlock = lock.unlock();
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(MaintenanceError::Storage(error)),
+    }
+}
+
+/// Restores a prior schema-1 writer only while a matching hold remains active
+/// and schema-2 changes are limited to compatible startup metadata.
+pub fn rollback_state_schema1(
+    directory: impl AsRef<Path>,
+    proof: &StateMigrationProof,
+) -> Result<StateMigrationResult, MaintenanceError> {
+    require_root_for_schema_change()?;
+    let directory = directory.as_ref();
+    validate_migration_proof(proof)?;
+    prepare_offline_state_directory(directory)?;
+    let lock = open_existing_lock_file(directory)?;
+    lock.lock()?;
+    let result = rollback_state_schema1_locked(directory, proof);
+    let unlock = lock.unlock();
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(MaintenanceError::Storage(error)),
+    }
+}
+
+fn migrate_state_schema1_locked(
+    directory: &Path,
+    proof: &StateMigrationProof,
+) -> Result<StateMigrationResult, MaintenanceError> {
+    let marker_path = directory.join(STATE_MIGRATION_MARKER_FILE);
+    match fs::symlink_metadata(&marker_path) {
+        Ok(_) => {
+            let mut marker = read_migration_marker(directory)?;
+            validate_marker(&marker, directory)?;
+            ensure_marker_matches_proof(&marker, proof)?;
+            verify_migration_backups(directory, &marker)?;
+            match marker.phase {
+                StateMigrationPhase::Prepared
+                | StateMigrationPhase::JournalReplaced
+                | StateMigrationPhase::SnapshotReplaced => {
+                    resume_schema1_migration(directory, &mut marker)?;
+                }
+                StateMigrationPhase::Complete => {
+                    let live = load_state_locked_with_schema(
+                        directory,
+                        STATE_SCHEMA_VERSION,
+                        None,
+                        false,
+                    )?;
+                    validate_held_state_for_rollback(&live, &marker)?;
+                    return Ok(StateMigrationResult {
+                        migrated: true,
+                        schema_version: STATE_SCHEMA_VERSION,
+                        migration_id: marker.migration_id,
+                        gate_generation: live.gate_generation,
+                        catalog_generation: live.install_catalog_generation,
+                    });
+                }
+                StateMigrationPhase::RollbackPrepared
+                | StateMigrationPhase::RollbackJournalReplaced
+                | StateMigrationPhase::RollbackSnapshotReplaced => {
+                    return Err(MaintenanceError::StateUnknown(
+                        "state rollback is in progress; use rollback-state to resume".to_string(),
+                    ));
+                }
+            }
+            return migration_result(&marker);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(MaintenanceError::Storage(error)),
+    }
+
+    let source_state_path = directory.join(STATE_FILE);
+    let source_journal_path = directory.join(JOURNAL_FILE);
+    let source_state = read_regular_bytes(&source_state_path)?;
+    let source_journal = read_regular_bytes(&source_journal_path)?;
+    let legacy = load_state_locked_with_schema(
+        directory,
+        LEGACY_STATE_SCHEMA_VERSION,
+        Some(proof.schema1_profile),
+        false,
+    )?;
+    validate_held_state(&legacy, proof, true)?;
+
+    let mut migrated = legacy.clone();
+    migrated.schema_version = STATE_SCHEMA_VERSION;
+    let target_state = serde_json::to_vec(&migrated)?;
+    validate_persisted_state_shape(
+        &serde_json::from_slice(&target_state).map_err(|error| {
+            MaintenanceError::StateUnknown(format!("migrated state serialization failed: {error}"))
+        })?,
+        STATE_SCHEMA_VERSION,
+        None,
+    )?;
+    let target_journal = compacted_journal_bytes(&migrated)?;
+
+    let migration_id = Uuid::new_v4().to_string();
+    let mut marker = StateMigrationMarker {
+        migration_version: 1,
+        migration_id: migration_id.clone(),
+        from_schema_version: LEGACY_STATE_SCHEMA_VERSION,
+        to_schema_version: STATE_SCHEMA_VERSION,
+        phase: StateMigrationPhase::Prepared,
+        schema1_profile: proof.schema1_profile,
+        request_id: proof.request_id.clone(),
+        maintenance_token_sha256: digest(proof.maintenance_token.as_bytes()),
+        target_kind: proof.target_kind,
+        plan_id: proof.plan_id.clone(),
+        plan_digest: proof.plan_digest.clone(),
+        component_artifact_digests: proof.component_artifact_digests.clone(),
+        expected_gate_generation: proof.expected_gate_generation,
+        expected_catalog_generation: proof.expected_catalog_generation,
+        source_state_sha256: digest(&source_state),
+        source_journal_sha256: digest(&source_journal),
+        target_state_sha256: digest(&target_state),
+        target_journal_sha256: digest(&target_journal),
+        backup_state_file: format!("maintenance-state.schema1-backup-{migration_id}.json"),
+        backup_journal_file: format!("maintenance-journal.schema1-backup-{migration_id}.jsonl"),
+        backup_schema2_state_file: format!("maintenance-state.schema2-backup-{migration_id}.json"),
+        backup_schema2_journal_file: format!(
+            "maintenance-journal.schema2-backup-{migration_id}.jsonl"
+        ),
+        rollback_from_state_sha256: None,
+        rollback_from_journal_sha256: None,
+        rollback_target_state_sha256: None,
+        rollback_target_journal_sha256: None,
+        rollback_target_state_file: None,
+        rollback_target_journal_file: None,
+    };
+
+    write_private_backup(&directory.join(&marker.backup_state_file), &source_state)?;
+    write_private_backup(
+        &directory.join(&marker.backup_journal_file),
+        &source_journal,
+    )?;
+    write_private_backup(&marker.backup_schema2_state_path(directory), &target_state)?;
+    write_private_backup(
+        &marker.backup_schema2_journal_path(directory),
+        &target_journal,
+    )?;
+    verify_migration_backups(directory, &marker)?;
+    write_migration_marker(directory, &marker)?;
+    resume_schema1_migration(directory, &mut marker)?;
+    migration_result(&marker)
+}
+
+fn resume_schema1_migration(
+    directory: &Path,
+    marker: &mut StateMigrationMarker,
+) -> Result<(), MaintenanceError> {
+    let state_path = directory.join(STATE_FILE);
+    let journal_path = directory.join(JOURNAL_FILE);
+    let state_hash = digest(&read_regular_bytes(&state_path)?);
+    let journal_hash = digest(&read_regular_bytes(&journal_path)?);
+    let source_pair =
+        state_hash == marker.source_state_sha256 && journal_hash == marker.source_journal_sha256;
+    let journal_replaced_pair =
+        state_hash == marker.source_state_sha256 && journal_hash == marker.target_journal_sha256;
+    let target_pair =
+        state_hash == marker.target_state_sha256 && journal_hash == marker.target_journal_sha256;
+    if !(source_pair || journal_replaced_pair || target_pair) {
+        return Err(MaintenanceError::StateUnknown(
+            "migration state files do not match a known source/target phase".to_string(),
+        ));
+    }
+    if marker.phase == StateMigrationPhase::Complete {
+        if !target_pair {
+            return Err(MaintenanceError::StateUnknown(
+                "completed migration files no longer match the target hashes".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if matches!(
+        marker.phase,
+        StateMigrationPhase::RollbackPrepared
+            | StateMigrationPhase::RollbackJournalReplaced
+            | StateMigrationPhase::RollbackSnapshotReplaced
+    ) {
+        return Err(MaintenanceError::StateUnknown(
+            "rollback marker cannot be resumed as a migration".to_string(),
+        ));
+    }
+
+    let target_state = read_regular_bytes(&marker.backup_schema2_state_path(directory))?;
+    let target_journal = read_regular_bytes(&marker.backup_schema2_journal_path(directory))?;
+    if digest(&target_state) != marker.target_state_sha256
+        || digest(&target_journal) != marker.target_journal_sha256
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "schema-2 migration target backup does not match the marker".to_string(),
+        ));
+    }
+    if source_pair {
+        atomic_replace_bytes(&journal_path, &target_journal, 0o660)?;
+    }
+    if marker.phase == StateMigrationPhase::Prepared {
+        marker.phase = StateMigrationPhase::JournalReplaced;
+        write_migration_marker(directory, marker)?;
+    }
+    let current_journal_hash = digest(&read_regular_bytes(&journal_path)?);
+    let current_state_hash = digest(&read_regular_bytes(&state_path)?);
+    if current_journal_hash != marker.target_journal_sha256
+        || !matches!(current_state_hash.as_str(), hash if hash == marker.source_state_sha256 || hash == marker.target_state_sha256)
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "migration resume found an unknown state/journal pair".to_string(),
+        ));
+    }
+    if current_state_hash == marker.source_state_sha256 {
+        atomic_replace_bytes(&state_path, &target_state, 0o660)?;
+    }
+    marker.phase = StateMigrationPhase::SnapshotReplaced;
+    write_migration_marker(directory, marker)?;
+    let migrated = load_state_locked_with_schema(directory, STATE_SCHEMA_VERSION, None, false)?;
+    if migrated.gate_generation != marker.expected_gate_generation
+        || migrated.install_catalog_generation != marker.expected_catalog_generation
+        || !held_state_matches_marker(&migrated, marker)
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "migrated state no longer matches the active maintenance hold".to_string(),
+        ));
+    }
+    marker.phase = StateMigrationPhase::Complete;
+    write_migration_marker(directory, marker)?;
+    Ok(())
+}
+
+fn rollback_state_schema1_locked(
+    directory: &Path,
+    proof: &StateMigrationProof,
+) -> Result<StateMigrationResult, MaintenanceError> {
+    let mut marker = read_migration_marker(directory)?;
+    validate_marker(&marker, directory)?;
+    ensure_marker_matches_proof(&marker, proof)?;
+    verify_migration_backups(directory, &marker)?;
+
+    if !matches!(
+        marker.phase,
+        StateMigrationPhase::RollbackPrepared
+            | StateMigrationPhase::RollbackJournalReplaced
+            | StateMigrationPhase::RollbackSnapshotReplaced
+    ) {
+        if marker.phase == StateMigrationPhase::Complete {
+            let baseline_bytes = read_private_backup(&marker.backup_schema2_state_path(directory))?;
+            let baseline: PersistedState =
+                serde_json::from_slice(&baseline_bytes).map_err(|error| {
+                    MaintenanceError::StateUnknown(format!(
+                        "schema-2 rollback baseline is invalid: {error}"
+                    ))
+                })?;
+            let current =
+                load_state_locked_with_schema(directory, STATE_SCHEMA_VERSION, None, false)?;
+            validate_held_state_for_rollback(&current, &marker)?;
+            let safe_gate_advances = validate_rollback_journal_delta(
+                directory,
+                baseline.journal_sequence,
+                baseline.install_catalog_generation,
+                current.journal_sequence,
+                current.install_catalog_generation,
+            )?;
+            ensure_rollback_compatible_delta(&current, &baseline, safe_gate_advances)?;
+            let (rollback_state, rollback_journal) =
+                rollback_schema1_bytes(&current, marker.schema1_profile)?;
+            let migration_id = &marker.migration_id;
+            let rollback_state_name =
+                format!("maintenance-state.rollback-target-{migration_id}.json");
+            let rollback_journal_name =
+                format!("maintenance-journal.rollback-target-{migration_id}.jsonl");
+            write_private_backup_idempotent(
+                &directory.join(&rollback_state_name),
+                &rollback_state,
+            )?;
+            write_private_backup_idempotent(
+                &directory.join(&rollback_journal_name),
+                &rollback_journal,
+            )?;
+            marker.rollback_from_state_sha256 =
+                Some(digest(&read_regular_bytes(&directory.join(STATE_FILE))?));
+            marker.rollback_from_journal_sha256 =
+                Some(digest(&read_regular_bytes(&directory.join(JOURNAL_FILE))?));
+            marker.rollback_target_state_sha256 = Some(digest(&rollback_state));
+            marker.rollback_target_journal_sha256 = Some(digest(&rollback_journal));
+            marker.rollback_target_state_file = Some(rollback_state_name);
+            marker.rollback_target_journal_file = Some(rollback_journal_name);
+            marker.phase = StateMigrationPhase::RollbackPrepared;
+            write_migration_marker(directory, &marker)?;
+        } else if matches!(
+            marker.phase,
+            StateMigrationPhase::Prepared
+                | StateMigrationPhase::JournalReplaced
+                | StateMigrationPhase::SnapshotReplaced
+        ) {
+            // Before the new cohort has opened schema 2, restore the exact v1
+            // backup pair. The in-progress marker kept every writer closed.
+            let current_state_hash = digest(&read_regular_bytes(&directory.join(STATE_FILE))?);
+            let current_journal_hash = digest(&read_regular_bytes(&directory.join(JOURNAL_FILE))?);
+            let pair_is_known = if current_state_hash == marker.source_state_sha256 {
+                current_journal_hash == marker.source_journal_sha256
+                    || current_journal_hash == marker.target_journal_sha256
+            } else if current_state_hash == marker.target_state_sha256 {
+                current_journal_hash == marker.target_journal_sha256
+            } else {
+                false
+            };
+            if !pair_is_known {
+                return Err(MaintenanceError::StateUnknown(
+                    "in-progress migration files do not match a known rollback phase".to_string(),
+                ));
+            }
+            let source_state = read_private_backup(&marker.backup_state_path(directory))?;
+            let source_journal = read_private_backup(&marker.backup_journal_path(directory))?;
+            restore_legacy_pair(directory, &mut marker, &source_state, &source_journal)?;
+            return migration_result(&marker);
+        }
+    }
+
+    resume_schema1_rollback(directory, &mut marker)?;
+    let restored = load_state_locked_with_schema(
+        directory,
+        LEGACY_STATE_SCHEMA_VERSION,
+        Some(marker.schema1_profile),
+        false,
+    )?;
+    let mut result = migration_result(&marker)?;
+    result.gate_generation = restored.gate_generation;
+    result.catalog_generation = restored.install_catalog_generation;
+    Ok(result)
+}
+
+fn resume_schema1_rollback(
+    directory: &Path,
+    marker: &mut StateMigrationMarker,
+) -> Result<(), MaintenanceError> {
+    let (from_state, from_journal, target_state, target_journal, state_name, journal_name) =
+        rollback_artifacts(marker)?;
+    let state_path = directory.join(STATE_FILE);
+    let journal_path = directory.join(JOURNAL_FILE);
+    let state_hash = digest(&read_regular_bytes(&state_path)?);
+    let journal_hash = digest(&read_regular_bytes(&journal_path)?);
+    let before = state_hash == from_state && journal_hash == from_journal;
+    let journal_replaced = state_hash == from_state && journal_hash == target_journal;
+    let target_pair = state_hash == target_state && journal_hash == target_journal;
+    if !(before || journal_replaced || target_pair) {
+        return Err(MaintenanceError::StateUnknown(
+            "rollback files do not match a known source/target phase".to_string(),
+        ));
+    }
+    let target_state_bytes = read_private_backup(&directory.join(state_name))?;
+    let target_journal_bytes = read_private_backup(&directory.join(journal_name))?;
+    if digest(&target_state_bytes) != target_state
+        || digest(&target_journal_bytes) != target_journal
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "rollback target backup does not match the marker".to_string(),
+        ));
+    }
+    if before {
+        atomic_replace_bytes(&journal_path, &target_journal_bytes, 0o660)?;
+    }
+    if marker.phase == StateMigrationPhase::RollbackPrepared {
+        marker.phase = StateMigrationPhase::RollbackJournalReplaced;
+        write_migration_marker(directory, marker)?;
+    }
+    if digest(&read_regular_bytes(&state_path)?) == from_state {
+        atomic_replace_bytes(&state_path, &target_state_bytes, 0o660)?;
+    }
+    marker.phase = StateMigrationPhase::RollbackSnapshotReplaced;
+    write_migration_marker(directory, marker)?;
+    let restored = load_state_locked_with_schema(
+        directory,
+        LEGACY_STATE_SCHEMA_VERSION,
+        Some(marker.schema1_profile),
+        false,
+    )?;
+    if !held_state_identity_matches_marker(&restored, marker)
+        || restored.gate_generation < marker.expected_gate_generation
+        || restored.install_catalog_generation < marker.expected_catalog_generation
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "restored schema-1 state does not preserve the active maintenance hold".to_string(),
+        ));
+    }
+    remove_migration_marker(directory)?;
+    Ok(())
+}
+
+fn restore_legacy_pair(
+    directory: &Path,
+    marker: &mut StateMigrationMarker,
+    source_state: &[u8],
+    source_journal: &[u8],
+) -> Result<(), MaintenanceError> {
+    if digest(source_state) != marker.source_state_sha256
+        || digest(source_journal) != marker.source_journal_sha256
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "schema-1 backup pair does not match its source hashes".to_string(),
+        ));
+    }
+    atomic_replace_bytes(&directory.join(JOURNAL_FILE), source_journal, 0o660)?;
+    atomic_replace_bytes(&directory.join(STATE_FILE), source_state, 0o660)?;
+    let restored = load_state_locked_with_schema(
+        directory,
+        LEGACY_STATE_SCHEMA_VERSION,
+        Some(marker.schema1_profile),
+        false,
+    )?;
+    if !held_state_matches_marker(&restored, marker) {
+        return Err(MaintenanceError::StateUnknown(
+            "schema-1 backup did not retain the active maintenance hold".to_string(),
+        ));
+    }
+    marker.phase = StateMigrationPhase::RollbackSnapshotReplaced;
+    remove_migration_marker(directory)
+}
+
+fn validate_migration_proof(proof: &StateMigrationProof) -> Result<(), MaintenanceError> {
+    if proof.target_kind != UpdateTargetKind::CoreRuntime {
+        return Err(MaintenanceError::InvalidRequest(
+            "state migration requires a CORE_RUNTIME maintenance hold".to_string(),
+        ));
+    }
+    validate_identifier(&proof.request_id, "request_id")?;
+    if proof.maintenance_token.is_empty() || proof.maintenance_token.len() > 256 {
+        return Err(MaintenanceError::InvalidRequest(
+            "maintenance token must be non-empty and at most 256 bytes".to_string(),
+        ));
+    }
+    validate_plan(&MaintenancePlan {
+        plan_id: proof.plan_id.clone(),
+        plan_digest: proof.plan_digest.clone(),
+        component_artifact_digests: proof.component_artifact_digests.clone(),
+    })?;
+    for component in ["cyrene-kernel", "cyrene-runtime-maintenance"] {
+        if !proof.component_artifact_digests.contains_key(component) {
+            return Err(MaintenanceError::InvalidRequest(format!(
+                "migration proof is missing required component digest: {component}"
+            )));
+        }
+    }
+    if proof.expected_gate_generation == 0 || proof.expected_catalog_generation == 0 {
+        return Err(MaintenanceError::InvalidRequest(
+            "migration proof generations must be nonzero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_root_for_schema_change() -> Result<(), MaintenanceError> {
+    if nix::unistd::geteuid().as_raw() != 0 && !cfg!(test) {
+        return Err(MaintenanceError::AdmissionDenied(
+            "ROOT_OPERATOR_REQUIRED".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_held_state(
+    state: &PersistedState,
+    proof: &StateMigrationProof,
+    require_original_catalog_generation: bool,
+) -> Result<(), MaintenanceError> {
+    if state.schema_version != LEGACY_STATE_SCHEMA_VERSION
+        || state.gate_generation != proof.expected_gate_generation
+        || (require_original_catalog_generation
+            && state.install_catalog_generation != proof.expected_catalog_generation)
+        || state.install_catalog_generation < proof.expected_catalog_generation
+    {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_GENERATION_MISMATCH".to_string(),
+        ));
+    }
+    let active = state
+        .maintenance
+        .as_ref()
+        .ok_or_else(|| MaintenanceError::AdmissionDenied("MAINTENANCE_NOT_ACTIVE".to_string()))?;
+    let plan = MaintenancePlan {
+        plan_id: proof.plan_id.clone(),
+        plan_digest: proof.plan_digest.clone(),
+        component_artifact_digests: proof.component_artifact_digests.clone(),
+    };
+    if active.request_id != proof.request_id || active.token != proof.maintenance_token {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_TOKEN_INVALID".to_string(),
+        ));
+    }
+    if active.target_kind != UpdateTargetKind::CoreRuntime
+        || !active.requires_restart
+        || !active.user_confirmed_restart
+        || active.expected_catalog_generation != proof.expected_catalog_generation
+        || active.plan != plan
+    {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_PLAN_MISMATCH".to_string(),
+        ));
+    }
+    ensure_migration_has_no_runtime_work(state)
+}
+
+fn ensure_migration_has_no_runtime_work(state: &PersistedState) -> Result<(), MaintenanceError> {
+    if !state.tasks.is_empty()
+        || !state.runtime_admissions.is_empty()
+        || !state.binding_operations.is_empty()
+    {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_WORK_INFLIGHT".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn held_state_matches_marker(state: &PersistedState, marker: &StateMigrationMarker) -> bool {
+    state.gate_generation == marker.expected_gate_generation
+        && held_state_identity_matches_marker(state, marker)
+}
+
+fn held_state_identity_matches_marker(
+    state: &PersistedState,
+    marker: &StateMigrationMarker,
+) -> bool {
+    state.install_catalog_generation >= marker.expected_catalog_generation
+        && state.maintenance.as_ref().is_some_and(|active| {
+            active.request_id == marker.request_id
+                && digest(active.token.as_bytes()) == marker.maintenance_token_sha256
+                && active.target_kind == UpdateTargetKind::CoreRuntime
+                && active.requires_restart
+                && active.user_confirmed_restart
+                && active.expected_catalog_generation == marker.expected_catalog_generation
+                && active.plan.plan_id == marker.plan_id
+                && active.plan.plan_digest == marker.plan_digest
+                && active.plan.component_artifact_digests == marker.component_artifact_digests
+        })
+        && state.tasks.is_empty()
+        && state.runtime_admissions.is_empty()
+        && state.binding_operations.is_empty()
+}
+
+fn validate_held_state_for_rollback(
+    state: &PersistedState,
+    marker: &StateMigrationMarker,
+) -> Result<(), MaintenanceError> {
+    if state.schema_version != STATE_SCHEMA_VERSION
+        || !held_state_identity_matches_marker(state, marker)
+        || state.gate_generation < marker.expected_gate_generation
+    {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_HOLD_PROOF_MISMATCH".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_rollback_compatible_delta(
+    current: &PersistedState,
+    baseline: &PersistedState,
+    allowed_gate_advances: u64,
+) -> Result<(), MaintenanceError> {
+    if current.schema_version != STATE_SCHEMA_VERSION
+        || baseline.schema_version != STATE_SCHEMA_VERSION
+        || current.journal_sequence < baseline.journal_sequence
+        || current.gate_generation
+            != baseline
+                .gate_generation
+                .saturating_add(allowed_gate_advances)
+        || current.install_catalog_generation < baseline.install_catalog_generation
+        || (!baseline.core_bootstrap_eligible && current.core_bootstrap_eligible)
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "schema-2 changes are not safe for rollback".to_string(),
+        ));
+    }
+    for (source_id, previous) in &baseline.sources {
+        let Some(current_source) = current.sources.get(source_id) else {
+            return Err(MaintenanceError::StateUnknown(
+                "rollback would remove a persisted activity source".to_string(),
+            ));
+        };
+        if current_source.last_heartbeat_unix_ms < previous.last_heartbeat_unix_ms {
+            return Err(MaintenanceError::StateUnknown(
+                "rollback would regress an activity-source heartbeat".to_string(),
+            ));
+        }
+    }
+
+    let mut current_value = serde_json::to_value(current)?;
+    let baseline_value = serde_json::to_value(baseline)?;
+    let current_object = current_value.as_object_mut().ok_or_else(|| {
+        MaintenanceError::StateUnknown("current state did not serialize as an object".to_string())
+    })?;
+    let baseline_object = baseline_value.as_object().ok_or_else(|| {
+        MaintenanceError::StateUnknown("baseline did not serialize as an object".to_string())
+    })?;
+    for field in [
+        "journal_sequence",
+        "gate_generation",
+        "install_catalog_generation",
+        "sources",
+        "core_bootstrap_eligible",
+    ] {
+        current_object.insert(
+            field.to_string(),
+            baseline_object.get(field).cloned().ok_or_else(|| {
+                MaintenanceError::StateUnknown(format!("baseline is missing {field}"))
+            })?,
+        );
+    }
+    if current_value != baseline_value {
+        return Err(MaintenanceError::StateUnknown(
+            "rollback found a task, lease, binding, hold, or schema-2-only state change"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whitelists only journal writes with no task, lease, or binding side effects.
+fn validate_rollback_journal_delta(
+    directory: &Path,
+    baseline_sequence: u64,
+    baseline_catalog_generation: u64,
+    current_sequence: u64,
+    current_catalog_generation: u64,
+) -> Result<u64, MaintenanceError> {
+    let bytes = read_regular_bytes(&directory.join(JOURNAL_FILE))?;
+    if !bytes.ends_with(b"\n") {
+        return Err(MaintenanceError::StateUnknown(
+            "rollback journal has an incomplete final record".to_string(),
+        ));
+    }
+    let chunks = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    let mut previous_sequence: Option<u64> = None;
+    let mut catalog_generation = baseline_catalog_generation;
+    let mut safe_gate_advances = 0_u64;
+    for (index, line) in chunks.iter().enumerate() {
+        if line.is_empty() {
+            if index + 1 == chunks.len() {
+                continue;
+            }
+            return Err(MaintenanceError::StateUnknown(
+                "rollback journal contains an empty record".to_string(),
+            ));
+        }
+        let entry: JournalEntry = serde_json::from_slice(line).map_err(|error| {
+            MaintenanceError::StateUnknown(format!("rollback journal entry is invalid: {error}"))
+        })?;
+        validate_journal_entry_shape(line, STATE_SCHEMA_VERSION, None)?;
+        if let Some(previous) = previous_sequence {
+            if entry.sequence != previous.saturating_add(1) {
+                return Err(MaintenanceError::StateUnknown(
+                    "rollback journal sequence is discontinuous".to_string(),
+                ));
+            }
+        } else {
+            match &entry.event {
+                JournalEvent::StateCheckpoint { state }
+                    if entry.sequence == baseline_sequence
+                        && state.journal_sequence == baseline_sequence => {}
+                _ => {
+                    return Err(MaintenanceError::StateUnknown(
+                        "rollback journal no longer contains the migration baseline checkpoint"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        previous_sequence = Some(entry.sequence);
+        if entry.sequence <= baseline_sequence {
+            continue;
+        }
+        match &entry.event {
+            JournalEvent::SourceHeartbeat { .. } => {}
+            JournalEvent::CatalogConfigured { generation } => {
+                if *generation != catalog_generation.saturating_add(1) {
+                    return Err(MaintenanceError::StateUnknown(
+                        "rollback catalog generation changes are not sequential".to_string(),
+                    ));
+                }
+                catalog_generation = *generation;
+            }
+            JournalEvent::TasksReconciled { active_tasks, .. } if active_tasks.is_empty() => {
+                safe_gate_advances = safe_gate_advances.saturating_add(1);
+            }
+            _ => {
+                return Err(MaintenanceError::StateUnknown(
+                    "rollback journal contains a task, runtime admission, binding, or hold mutation"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    if previous_sequence != Some(current_sequence)
+        || catalog_generation != current_catalog_generation
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "rollback journal does not account for the current state generations".to_string(),
+        ));
+    }
+    Ok(safe_gate_advances)
+}
+
+fn rollback_schema1_bytes(
+    current: &PersistedState,
+    profile: LegacyStateProfile,
+) -> Result<(Vec<u8>, Vec<u8>), MaintenanceError> {
+    let mut legacy = current.clone();
+    legacy.schema_version = LEGACY_STATE_SCHEMA_VERSION;
+    let mut state_value = serde_json::to_value(&legacy)?;
+    let object = state_value.as_object_mut().ok_or_else(|| {
+        MaintenanceError::StateUnknown("rollback state did not serialize as an object".to_string())
+    })?;
+    object.insert(
+        "schema_version".to_string(),
+        serde_json::Value::from(LEGACY_STATE_SCHEMA_VERSION),
+    );
+    if profile == LegacyStateProfile::ReleasedV1NoBindingAdmissions {
+        if !legacy.binding_operations.is_empty() || !legacy.completed_binding_operations.is_empty()
+        {
+            return Err(MaintenanceError::StateUnknown(
+                "released schema-1 profile cannot represent binding-operation records".to_string(),
+            ));
+        }
+        object.remove("binding_operations");
+        object.remove("completed_binding_operations");
+    }
+    validate_persisted_state_shape(&state_value, LEGACY_STATE_SCHEMA_VERSION, Some(profile))?;
+    let state_bytes = serde_json::to_vec(&state_value)?;
+    let entry = serde_json::json!({
+        "sequence": legacy.journal_sequence,
+        "event": {
+            "event": "state_checkpoint",
+            "state": state_value,
+        }
+    });
+    let mut journal = serde_json::to_vec(&entry)?;
+    journal.push(b'\n');
+    Ok((state_bytes, journal))
+}
+
+fn compacted_journal_bytes(state: &PersistedState) -> Result<Vec<u8>, MaintenanceError> {
+    let entry = JournalEntry {
+        sequence: state.journal_sequence,
+        event: JournalEvent::StateCheckpoint {
+            state: Box::new(state.clone()),
+        },
+    };
+    let mut bytes = serde_json::to_vec(&entry)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn migration_result(
+    marker: &StateMigrationMarker,
+) -> Result<StateMigrationResult, MaintenanceError> {
+    let state_version = if matches!(
+        marker.phase,
+        StateMigrationPhase::RollbackPrepared
+            | StateMigrationPhase::RollbackJournalReplaced
+            | StateMigrationPhase::RollbackSnapshotReplaced
+    ) {
+        LEGACY_STATE_SCHEMA_VERSION
+    } else {
+        STATE_SCHEMA_VERSION
+    };
+    Ok(StateMigrationResult {
+        migrated: state_version == STATE_SCHEMA_VERSION,
+        schema_version: state_version,
+        migration_id: marker.migration_id.clone(),
+        gate_generation: marker.expected_gate_generation,
+        catalog_generation: marker.expected_catalog_generation,
+    })
+}
+
+fn rollback_artifacts(
+    marker: &StateMigrationMarker,
+) -> Result<(String, String, String, String, String, String), MaintenanceError> {
+    let required = |value: Option<&String>, field: &str| {
+        value.cloned().ok_or_else(|| {
+            MaintenanceError::StateUnknown(format!("rollback marker is missing {field}"))
+        })
+    };
+    Ok((
+        required(
+            marker.rollback_from_state_sha256.as_ref(),
+            "rollback_from_state_sha256",
+        )?,
+        required(
+            marker.rollback_from_journal_sha256.as_ref(),
+            "rollback_from_journal_sha256",
+        )?,
+        required(
+            marker.rollback_target_state_sha256.as_ref(),
+            "rollback_target_state_sha256",
+        )?,
+        required(
+            marker.rollback_target_journal_sha256.as_ref(),
+            "rollback_target_journal_sha256",
+        )?,
+        required(
+            marker.rollback_target_state_file.as_ref(),
+            "rollback_target_state_file",
+        )?,
+        required(
+            marker.rollback_target_journal_file.as_ref(),
+            "rollback_target_journal_file",
+        )?,
+    ))
+}
+
+fn prepare_offline_state_directory(directory: &Path) -> Result<(), MaintenanceError> {
+    reject_symlink_directory(directory)?;
+    validate_shared_files(directory)?;
+    for name in [STATE_FILE, JOURNAL_FILE, LOCK_FILE] {
+        let metadata = fs::symlink_metadata(directory.join(name))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(MaintenanceError::StateUnknown(format!(
+                "offline state migration requires an existing regular {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn open_existing_lock_file(directory: &Path) -> Result<File, MaintenanceError> {
+    let path = directory.join(LOCK_FILE);
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MaintenanceError::StateUnknown(
+            "maintenance lock must be an existing regular file".to_string(),
+        ));
+    }
+    Ok(OpenOptions::new().read(true).write(true).open(path)?)
+}
+
+fn read_regular_bytes(path: &Path) -> Result<Vec<u8>, MaintenanceError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MaintenanceError::StateUnknown(format!(
+            "{} must be a regular non-symlink file",
+            path.display()
+        )));
+    }
+    Ok(fs::read(path)?)
+}
+
+fn read_private_backup(path: &Path) -> Result<Vec<u8>, MaintenanceError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MaintenanceError::StateUnknown(format!(
+            "{} must be a regular rollback backup",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let test_owner = cfg!(test) && metadata.uid() == nix::unistd::geteuid().as_raw();
+        if (metadata.uid() != 0 && !test_owner) || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(MaintenanceError::StateUnknown(
+                "rollback backups must be root-owned mode 0600".to_string(),
+            ));
+        }
+    }
+    fs::read(path).map_err(MaintenanceError::Storage)
+}
+
+fn write_private_backup(path: &Path, bytes: &[u8]) -> Result<(), MaintenanceError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    set_private_file(&mut options);
+    let mut file = options.open(path)?;
+    set_file_mode(&file, 0o600)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
+    Ok(())
+}
+
+fn write_private_backup_idempotent(path: &Path, bytes: &[u8]) -> Result<(), MaintenanceError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            if read_private_backup(path)? == bytes {
+                Ok(())
+            } else {
+                Err(MaintenanceError::StateUnknown(
+                    "existing rollback target does not match regenerated bytes".to_string(),
+                ))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_private_backup(path, bytes)
+        }
+        Err(error) => Err(MaintenanceError::Storage(error)),
+    }
+}
+
+fn atomic_replace_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<(), MaintenanceError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(format!(".state-migration-tmp-{}", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    set_shared_file(&mut options);
+    let mut file = options.open(&temp_path)?;
+    set_file_mode(&file, mode)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&temp_path, path)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn write_migration_marker(
+    directory: &Path,
+    marker: &StateMigrationMarker,
+) -> Result<(), MaintenanceError> {
+    let marker_path = directory.join(STATE_MIGRATION_MARKER_FILE);
+    if let Ok(metadata) = fs::symlink_metadata(&marker_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(MaintenanceError::StateUnknown(
+                "refusing to replace an unknown migration marker".to_string(),
+            ));
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(marker)?;
+    atomic_replace_bytes(&marker_path, &bytes, 0o640)
+}
+
+fn read_migration_marker(directory: &Path) -> Result<StateMigrationMarker, MaintenanceError> {
+    let path = directory.join(STATE_MIGRATION_MARKER_FILE);
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MaintenanceError::StateUnknown(
+            "state migration marker must be a regular non-symlink file".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory_gid = fs::metadata(directory)?.gid();
+        let test_owner = cfg!(test) && metadata.uid() == nix::unistd::geteuid().as_raw();
+        if (metadata.uid() != 0 && !test_owner)
+            || metadata.gid() != directory_gid
+            || metadata.permissions().mode() & 0o007 != 0
+            || metadata.permissions().mode() & 0o040 == 0
+            || metadata.permissions().mode() & 0o020 != 0
+        {
+            return Err(MaintenanceError::StateUnknown(
+                "state migration marker must be root-owned and authority-group-readable"
+                    .to_string(),
+            ));
+        }
+    }
+    let marker = serde_json::from_slice(&fs::read(path)?).map_err(|error| {
+        MaintenanceError::StateUnknown(format!("state migration marker is invalid: {error}"))
+    })?;
+    Ok(marker)
+}
+
+fn validate_marker(
+    marker: &StateMigrationMarker,
+    directory: &Path,
+) -> Result<(), MaintenanceError> {
+    if marker.migration_version != 1
+        || marker.from_schema_version != LEGACY_STATE_SCHEMA_VERSION
+        || marker.to_schema_version != STATE_SCHEMA_VERSION
+        || marker.expected_gate_generation == 0
+        || marker.expected_catalog_generation == 0
+        || Uuid::parse_str(&marker.migration_id)
+            .map(|id| id.to_string() != marker.migration_id)
+            .unwrap_or(true)
+        || marker.target_kind != UpdateTargetKind::CoreRuntime
+        || marker.backup_state_file
+            != format!(
+                "maintenance-state.schema1-backup-{}.json",
+                marker.migration_id
+            )
+        || marker.backup_journal_file
+            != format!(
+                "maintenance-journal.schema1-backup-{}.jsonl",
+                marker.migration_id
+            )
+        || marker.backup_schema2_state_file
+            != format!(
+                "maintenance-state.schema2-backup-{}.json",
+                marker.migration_id
+            )
+        || marker.backup_schema2_journal_file
+            != format!(
+                "maintenance-journal.schema2-backup-{}.jsonl",
+                marker.migration_id
+            )
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "state migration marker identity is unsupported".to_string(),
+        ));
+    }
+    validate_identifier(&marker.request_id, "request_id")?;
+    validate_plan(&MaintenancePlan {
+        plan_id: marker.plan_id.clone(),
+        plan_digest: marker.plan_digest.clone(),
+        component_artifact_digests: marker.component_artifact_digests.clone(),
+    })?;
+    for component in ["cyrene-kernel", "cyrene-runtime-maintenance"] {
+        if !marker.component_artifact_digests.contains_key(component) {
+            return Err(MaintenanceError::StateUnknown(format!(
+                "migration marker is missing component digest {component}"
+            )));
+        }
+    }
+    for hash in [
+        &marker.source_state_sha256,
+        &marker.source_journal_sha256,
+        &marker.target_state_sha256,
+        &marker.target_journal_sha256,
+        &marker.maintenance_token_sha256,
+    ] {
+        validate_digest(hash, "migration marker hash")?;
+    }
+    let rollback_phase = matches!(
+        marker.phase,
+        StateMigrationPhase::RollbackPrepared
+            | StateMigrationPhase::RollbackJournalReplaced
+            | StateMigrationPhase::RollbackSnapshotReplaced
+    );
+    let rollback_fields = [
+        marker.rollback_from_state_sha256.as_ref(),
+        marker.rollback_from_journal_sha256.as_ref(),
+        marker.rollback_target_state_sha256.as_ref(),
+        marker.rollback_target_journal_sha256.as_ref(),
+        marker.rollback_target_state_file.as_ref(),
+        marker.rollback_target_journal_file.as_ref(),
+    ];
+    let all_rollback_fields_present = rollback_fields.iter().all(Option::is_some);
+    let all_rollback_fields_absent = rollback_fields.iter().all(Option::is_none);
+    if (rollback_phase && !all_rollback_fields_present)
+        || (!rollback_phase && !all_rollback_fields_absent)
+    {
+        return Err(MaintenanceError::StateUnknown(
+            "state migration marker rollback fields do not match its phase".to_string(),
+        ));
+    }
+    if rollback_phase {
+        for hash in [
+            marker.rollback_from_state_sha256.as_ref().unwrap(),
+            marker.rollback_from_journal_sha256.as_ref().unwrap(),
+            marker.rollback_target_state_sha256.as_ref().unwrap(),
+            marker.rollback_target_journal_sha256.as_ref().unwrap(),
+        ] {
+            validate_digest(hash, "rollback marker hash")?;
+        }
+        let state_file = format!(
+            "maintenance-state.rollback-target-{}.json",
+            marker.migration_id
+        );
+        let journal_file = format!(
+            "maintenance-journal.rollback-target-{}.jsonl",
+            marker.migration_id
+        );
+        if marker.rollback_target_state_file.as_deref() != Some(state_file.as_str())
+            || marker.rollback_target_journal_file.as_deref() != Some(journal_file.as_str())
+        {
+            return Err(MaintenanceError::StateUnknown(
+                "rollback marker target filenames are unsupported".to_string(),
+            ));
+        }
+    }
+    let _ = directory;
+    Ok(())
+}
+
+fn verify_migration_backups(
+    directory: &Path,
+    marker: &StateMigrationMarker,
+) -> Result<(), MaintenanceError> {
+    for (path, expected) in [
+        (
+            marker.backup_state_path(directory),
+            &marker.source_state_sha256,
+        ),
+        (
+            marker.backup_journal_path(directory),
+            &marker.source_journal_sha256,
+        ),
+        (
+            marker.backup_schema2_state_path(directory),
+            &marker.target_state_sha256,
+        ),
+        (
+            marker.backup_schema2_journal_path(directory),
+            &marker.target_journal_sha256,
+        ),
+    ] {
+        if digest(&read_private_backup(&path)?) != *expected {
+            return Err(MaintenanceError::StateUnknown(
+                "a migration backup hash does not match the marker".to_string(),
+            ));
+        }
+    }
+    let state1 = read_private_backup(&marker.backup_state_path(directory))?;
+    let state1_value: serde_json::Value = serde_json::from_slice(&state1).map_err(|error| {
+        MaintenanceError::StateUnknown(format!("schema-1 backup state is invalid: {error}"))
+    })?;
+    validate_persisted_state_shape(
+        &state1_value,
+        LEGACY_STATE_SCHEMA_VERSION,
+        Some(marker.schema1_profile),
+    )?;
+    let state2 = read_private_backup(&marker.backup_schema2_state_path(directory))?;
+    let state2_value: serde_json::Value = serde_json::from_slice(&state2).map_err(|error| {
+        MaintenanceError::StateUnknown(format!("schema-2 backup state is invalid: {error}"))
+    })?;
+    validate_persisted_state_shape(&state2_value, STATE_SCHEMA_VERSION, None)?;
+    let journal2 = read_private_backup(&marker.backup_schema2_journal_path(directory))?;
+    if !journal2.ends_with(b"\n") {
+        return Err(MaintenanceError::StateUnknown(
+            "schema-2 checkpoint backup has no terminal newline".to_string(),
+        ));
+    }
+    validate_journal_entry_shape(
+        &journal2[..journal2.len().saturating_sub(1)],
+        STATE_SCHEMA_VERSION,
+        None,
+    )?;
+    Ok(())
+}
+
+fn ensure_marker_matches_proof(
+    marker: &StateMigrationMarker,
+    proof: &StateMigrationProof,
+) -> Result<(), MaintenanceError> {
+    if marker.schema1_profile != proof.schema1_profile
+        || marker.request_id != proof.request_id
+        || marker.maintenance_token_sha256 != digest(proof.maintenance_token.as_bytes())
+        || marker.target_kind != proof.target_kind
+        || marker.plan_id != proof.plan_id
+        || marker.plan_digest != proof.plan_digest
+        || marker.component_artifact_digests != proof.component_artifact_digests
+        || marker.expected_gate_generation != proof.expected_gate_generation
+        || marker.expected_catalog_generation != proof.expected_catalog_generation
+    {
+        return Err(MaintenanceError::AdmissionDenied(
+            "MAINTENANCE_HOLD_PROOF_MISMATCH".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_migration_marker_allows_state2(directory: &Path) -> Result<(), MaintenanceError> {
+    let path = directory.join(STATE_MIGRATION_MARKER_FILE);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(MaintenanceError::Storage(error)),
+        Ok(_) => {
+            let marker = read_migration_marker(directory)?;
+            validate_marker(&marker, directory)?;
+            if marker.phase == StateMigrationPhase::Complete {
+                Ok(())
+            } else {
+                Err(MaintenanceError::StateUnknown(
+                    "schema migration or rollback is incomplete".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn remove_migration_marker(directory: &Path) -> Result<(), MaintenanceError> {
+    let path = directory.join(STATE_MIGRATION_MARKER_FILE);
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MaintenanceError::StateUnknown(
+            "refusing to remove an unknown migration marker".to_string(),
+        ));
+    }
+    fs::remove_file(path)?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 fn write_compacted_journal(
@@ -2199,6 +4386,21 @@ fn validate_plan(plan: &MaintenancePlan) -> Result<(), MaintenanceError> {
     Ok(())
 }
 
+fn validate_binding_operation_scope(scope: &BindingOperationScope) -> Result<(), MaintenanceError> {
+    validate_identifier(&scope.binding_id, "binding_id")?;
+    validate_identifier(&scope.package_id, "package_id")?;
+    validate_identifier(&scope.installation_id, "installation_id")
+}
+
+fn same_binding_operation(
+    stored: &BindingOperationRecord,
+    requested: &BindingOperationRecord,
+) -> bool {
+    stored.request_id == requested.request_id
+        && stored.source_id == requested.source_id
+        && stored.scope == requested.scope
+}
+
 fn validate_digest(value: &str, field: &str) -> Result<(), MaintenanceError> {
     let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
@@ -2251,13 +4453,14 @@ mod tests {
     fn setup() -> (TempDir, RuntimeMaintenance, ReadinessRequest) {
         let dir = TempDir::new().unwrap();
         let catalog = TrustedActivitySourceCatalog {
-            schema_version: STATE_SCHEMA_VERSION,
+            schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
             generation: 7,
             sources: vec![TrustedActivitySource {
                 source_id: "cyrene-catalogs".to_string(),
                 uid: 1001,
                 gid: Some(1000),
                 source_token_sha256: format!("{:x}", Sha256::digest(b"test-source-token")),
+                binding_scopes: Vec::new(),
             }],
         };
         let maintenance = RuntimeMaintenance::open(dir.path(), catalog).unwrap();
@@ -2292,16 +4495,149 @@ mod tests {
         }
     }
 
+    fn binding_test_catalog() -> TrustedActivitySourceCatalog {
+        let make_scope = |binding_id: &str| TrustedBindingScope {
+            binding_id: binding_id.to_string(),
+            package_id: "llf.trainer".to_string(),
+            installation_ids: vec!["llf.install.2026".to_string()],
+            operations: vec![
+                BindingOperationKind::Activate,
+                BindingOperationKind::Recover,
+                BindingOperationKind::Deactivate,
+            ],
+        };
+        TrustedActivitySourceCatalog {
+            schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
+            generation: 12,
+            sources: vec![
+                TrustedActivitySource {
+                    source_id: "cyrene-other".to_string(),
+                    uid: 1002,
+                    gid: Some(1002),
+                    source_token_sha256: format!("{:x}", Sha256::digest(b"other-source-token")),
+                    binding_scopes: vec![make_scope("binding-other")],
+                },
+                TrustedActivitySource {
+                    source_id: "cyrene-yield".to_string(),
+                    uid: 1001,
+                    gid: Some(1000),
+                    source_token_sha256: format!("{:x}", Sha256::digest(b"yield-source-token")),
+                    binding_scopes: vec![make_scope("binding-main")],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn replayed_source_heartbeats_never_regress_when_wall_clock_moves_back() {
+        let mut state = PersistedState::default();
+        state.sources.insert(
+            "cyrene-kernel".to_string(),
+            SourceRecord {
+                last_heartbeat_unix_ms: 100,
+            },
+        );
+
+        apply_entry(
+            &mut state,
+            &JournalEntry {
+                sequence: 1,
+                event: JournalEvent::SourceHeartbeat {
+                    source_id: "cyrene-kernel".to_string(),
+                    at_unix_ms: 99,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.sources["cyrene-kernel"].last_heartbeat_unix_ms, 100);
+
+        apply_entry(
+            &mut state,
+            &JournalEntry {
+                sequence: 2,
+                event: JournalEvent::TasksReconciled {
+                    source_id: "cyrene-kernel".to_string(),
+                    active_tasks: Vec::new(),
+                    at_unix_ms: 98,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.sources["cyrene-kernel"].last_heartbeat_unix_ms, 100);
+    }
+
+    fn binding_setup() -> (
+        TempDir,
+        RuntimeMaintenance,
+        ReadinessRequest,
+        BindingOperationCaller,
+        BindingOperationScope,
+        BindingOperationCaller,
+        BindingOperationScope,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let catalog = binding_test_catalog();
+        let maintenance = RuntimeMaintenance::open(dir.path(), catalog).unwrap();
+        maintenance
+            .heartbeat_activity_source("cyrene-yield")
+            .unwrap();
+        maintenance
+            .heartbeat_activity_source("cyrene-other")
+            .unwrap();
+        let request = ReadinessRequest {
+            target_kind: UpdateTargetKind::PackageOnly,
+            requires_restart: false,
+            expected_catalog_generation: 12,
+            expected_activity_sources: vec!["cyrene-other".to_string(), "cyrene-yield".to_string()],
+        };
+        let caller = BindingOperationCaller {
+            source_id: "cyrene-yield".to_string(),
+            source_token: "yield-source-token".to_string(),
+            peer_uid: 1001,
+            peer_gid: 1000,
+            expected_catalog_generation: 12,
+        };
+        let scope = BindingOperationScope {
+            binding_id: "binding-main".to_string(),
+            package_id: "llf.trainer".to_string(),
+            installation_id: "llf.install.2026".to_string(),
+            operation: BindingOperationKind::Activate,
+        };
+        let other_caller = BindingOperationCaller {
+            source_id: "cyrene-other".to_string(),
+            source_token: "other-source-token".to_string(),
+            peer_uid: 1002,
+            peer_gid: 1002,
+            expected_catalog_generation: 12,
+        };
+        let other_scope = BindingOperationScope {
+            binding_id: "binding-other".to_string(),
+            package_id: "llf.trainer".to_string(),
+            installation_id: "llf.install.2026".to_string(),
+            operation: BindingOperationKind::Activate,
+        };
+        (
+            dir,
+            maintenance,
+            request,
+            caller,
+            scope,
+            other_caller,
+            other_scope,
+        )
+    }
+
     fn bootstrap_setup() -> (TempDir, RuntimeMaintenance, ReadinessRequest) {
         let dir = TempDir::new().unwrap();
         let catalog = TrustedActivitySourceCatalog {
-            schema_version: STATE_SCHEMA_VERSION,
+            schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
             generation: 7,
             sources: vec![TrustedActivitySource {
                 source_id: "cyrene-catalogs".to_string(),
                 uid: 1001,
                 gid: Some(1000),
                 source_token_sha256: format!("{:x}", Sha256::digest(b"test-source-token")),
+                binding_scopes: Vec::new(),
             }],
         };
         let maintenance = RuntimeMaintenance::open(dir.path(), catalog).unwrap();
@@ -2312,6 +4648,114 @@ mod tests {
             expected_activity_sources: vec!["cyrene-catalogs".to_string()],
         };
         (dir, maintenance, request)
+    }
+
+    fn legacy_migration_fixture(
+        profile: LegacyStateProfile,
+    ) -> (TempDir, StateMigrationProof, TrustedActivitySourceCatalog) {
+        let dir = TempDir::new().unwrap();
+        let catalog = TrustedActivitySourceCatalog {
+            schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
+            generation: 7,
+            sources: vec![TrustedActivitySource {
+                source_id: "cyrene-kernel".to_string(),
+                uid: nix::unistd::getuid().as_raw(),
+                gid: Some(nix::unistd::getgid().as_raw()),
+                source_token_sha256: format!("{:x}", Sha256::digest(b"kernel-source-token")),
+                binding_scopes: Vec::new(),
+            }],
+        };
+        let gate = RuntimeMaintenance::open(dir.path(), catalog.clone()).unwrap();
+        gate.heartbeat_activity_source("cyrene-kernel").unwrap();
+        let readiness = ReadinessRequest {
+            target_kind: UpdateTargetKind::CoreRuntime,
+            requires_restart: true,
+            expected_catalog_generation: catalog.generation,
+            expected_activity_sources: vec!["cyrene-kernel".to_string()],
+        };
+        let plan = MaintenancePlan {
+            plan_id: "c10-core-runtime-plan".to_string(),
+            plan_digest: format!("sha256:{}", "a".repeat(64)),
+            component_artifact_digests: BTreeMap::from([
+                (
+                    "cyrene-kernel".to_string(),
+                    format!("sha256:{}", "b".repeat(64)),
+                ),
+                (
+                    "cyrene-runtime-maintenance".to_string(),
+                    format!("sha256:{}", "c".repeat(64)),
+                ),
+            ]),
+        };
+        let expected_gate_generation = gate.current_gate_generation().unwrap();
+        let begin = gate
+            .begin_maintenance(
+                "c10-migration-hold",
+                &plan,
+                &readiness,
+                expected_gate_generation,
+                true,
+                RuntimeUsage {
+                    known: true,
+                    active_worker_count: 0,
+                    active_allocation_count: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(begin.status, ReadinessStatus::MaintenanceActive);
+        let maintenance_token = begin.maintenance_token.unwrap();
+        drop(gate);
+
+        let mut state = load_state_locked(dir.path()).unwrap();
+        if profile == LegacyStateProfile::ExperimentalV1BindingAdmissions {
+            state.completed_binding_operations.insert(
+                "completed-before-c10".to_string(),
+                BindingOperationRecord {
+                    request_id: "completed-before-c10".to_string(),
+                    operation_token: "operation-receipt-token".to_string(),
+                    source_id: "cyrene-yield".to_string(),
+                    scope: BindingOperationScope {
+                        binding_id: "binding-before-c10".to_string(),
+                        package_id: "llf.trainer".to_string(),
+                        installation_id: "install-before-c10".to_string(),
+                        operation: BindingOperationKind::Activate,
+                    },
+                    started_at_unix_ms: 1_728_000_000_000,
+                },
+            );
+        }
+        state.schema_version = LEGACY_STATE_SCHEMA_VERSION;
+        let mut state_value = serde_json::to_value(&state).unwrap();
+        if profile == LegacyStateProfile::ReleasedV1NoBindingAdmissions {
+            let object = state_value.as_object_mut().unwrap();
+            object.remove("binding_operations");
+            object.remove("completed_binding_operations");
+        }
+        fs::write(
+            dir.path().join(STATE_FILE),
+            serde_json::to_vec(&state_value).unwrap(),
+        )
+        .unwrap();
+        let checkpoint = serde_json::json!({
+            "sequence": state.journal_sequence,
+            "event": {"event": "state_checkpoint", "state": state_value},
+        });
+        let mut journal_bytes = serde_json::to_vec(&checkpoint).unwrap();
+        journal_bytes.push(b'\n');
+        fs::write(dir.path().join(JOURNAL_FILE), journal_bytes).unwrap();
+
+        let proof = StateMigrationProof {
+            schema1_profile: profile,
+            request_id: "c10-migration-hold".to_string(),
+            maintenance_token,
+            target_kind: UpdateTargetKind::CoreRuntime,
+            plan_id: plan.plan_id,
+            plan_digest: plan.plan_digest,
+            component_artifact_digests: plan.component_artifact_digests,
+            expected_gate_generation: begin.gate_generation,
+            expected_catalog_generation: catalog.generation,
+        };
+        (dir, proof, catalog)
     }
 
     #[test]
@@ -2422,9 +4866,17 @@ mod tests {
                     catalog.sources[0].source_id = "cyrene-other".to_string();
                 }
             }
-            let reopened =
-                RuntimeMaintenance::open(dir.path(), gate.inner.catalog.read().unwrap().clone())
-                    .unwrap();
+            let current_catalog = gate.inner.catalog.read().unwrap().clone();
+            let reopened = RuntimeMaintenance::open(dir.path(), current_catalog);
+            if changed_generation {
+                assert!(matches!(
+                    reopened,
+                    Err(MaintenanceError::AdmissionDenied(code))
+                        if code == "MAINTENANCE_HOLD_PROOF_REQUIRED"
+                ));
+                continue;
+            }
+            let reopened = reopened.unwrap();
             assert!(reopened
                 .begin_core_bootstrap("first-kernel", &package_plan(), &request, 0, true)
                 .is_err());
@@ -2650,13 +5102,14 @@ mod tests {
         RuntimeMaintenance::open(
             path,
             TrustedActivitySourceCatalog {
-                schema_version: STATE_SCHEMA_VERSION,
+                schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
                 generation: 7,
                 sources: vec![TrustedActivitySource {
                     source_id: "cyrene-catalogs".to_string(),
                     uid: 1001,
                     gid: Some(1000),
                     source_token_sha256: format!("{:x}", Sha256::digest(b"test-source-token")),
+                    binding_scopes: Vec::new(),
                 }],
             },
         )
@@ -2826,5 +5279,1075 @@ mod tests {
             unconfirmed.status,
             ReadinessStatus::UserConfirmationRequired
         );
+    }
+
+    #[test]
+    fn binding_operation_is_a_distinct_durable_blocker_and_survives_task_reconciliation() {
+        let (_dir, maintenance, request, caller, scope, other_caller, _) = binding_setup();
+        let admitted = maintenance
+            .admit_binding_operation("yield-activate-1", &caller, &scope)
+            .unwrap();
+        assert_eq!(
+            admitted.catalog_generation,
+            caller.expected_catalog_generation
+        );
+        assert!(!admitted.already_completed);
+
+        let first_readiness = maintenance
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        assert_eq!(
+            first_readiness.status,
+            ReadinessStatus::ActiveBindingOperations
+        );
+        assert_eq!(first_readiness.active_task_count, 0);
+        assert!(first_readiness.active_tasks.is_empty());
+        assert_eq!(first_readiness.active_binding_operation_count, 1);
+        assert_eq!(first_readiness.active_binding_operations.len(), 1);
+
+        maintenance
+            .reconcile_activity_source("cyrene-yield", Vec::new())
+            .unwrap();
+        let reconciled = maintenance
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        assert_eq!(reconciled.active_binding_operation_count, 1);
+        assert_eq!(reconciled.status, ReadinessStatus::ActiveBindingOperations);
+
+        let blocked_update = maintenance
+            .begin_maintenance(
+                "yield-update-blocked",
+                &package_plan(),
+                &request,
+                reconciled.gate_generation,
+                false,
+                package_usage(),
+            )
+            .unwrap();
+        assert_eq!(
+            blocked_update.status,
+            ReadinessStatus::ActiveBindingOperations
+        );
+        assert!(blocked_update.maintenance_token.is_none());
+
+        let wrong_scope = BindingOperationScope {
+            installation_id: "llf.other-install".to_string(),
+            ..scope.clone()
+        };
+        assert!(matches!(
+            maintenance.complete_binding_operation(
+                "yield-activate-1",
+                &caller,
+                &wrong_scope,
+                &admitted.operation_token
+            ),
+            Err(MaintenanceError::AdmissionDenied(_))
+        ));
+        assert!(matches!(
+            maintenance.complete_binding_operation(
+                "yield-activate-1",
+                &other_caller,
+                &scope,
+                &admitted.operation_token
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATION_SCOPE_UNTRUSTED"
+        ));
+        assert_eq!(
+            maintenance
+                .get_update_readiness(&request, package_usage())
+                .unwrap()
+                .active_binding_operation_count,
+            1
+        );
+
+        let completed = maintenance
+            .complete_binding_operation(
+                "yield-activate-1",
+                &caller,
+                &scope,
+                &admitted.operation_token,
+            )
+            .unwrap();
+        assert!(completed.completed);
+        let replay = maintenance
+            .complete_binding_operation(
+                "yield-activate-1",
+                &caller,
+                &scope,
+                &admitted.operation_token,
+            )
+            .unwrap();
+        assert_eq!(replay, completed);
+        assert_eq!(
+            maintenance
+                .get_update_readiness(&request, package_usage())
+                .unwrap()
+                .status,
+            ReadinessStatus::Ready
+        );
+    }
+
+    #[test]
+    fn binding_operation_admission_revalidates_generation_token_peer_and_allowlist() {
+        let (_dir, maintenance, _request, caller, scope, _, _) = binding_setup();
+        let mut stale_generation = caller.clone();
+        stale_generation.expected_catalog_generation = 11;
+        assert!(matches!(
+            maintenance.admit_binding_operation("stale-generation", &stale_generation, &scope),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "ACTIVITY_CATALOG_GENERATION_MISMATCH"
+        ));
+
+        let mut invalid_token = caller.clone();
+        invalid_token.source_token = "not-the-source-token".to_string();
+        assert!(matches!(
+            maintenance.admit_binding_operation("invalid-token", &invalid_token, &scope),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "ACTIVITY_SOURCE_AUTH_INVALID"
+        ));
+
+        let mut wrong_peer = caller.clone();
+        wrong_peer.peer_uid = 0;
+        assert!(matches!(
+            maintenance.admit_binding_operation("wrong-peer", &wrong_peer, &scope),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "ACTIVITY_SOURCE_CALLER_MISMATCH"
+        ));
+
+        let untrusted_scope = BindingOperationScope {
+            installation_id: "llf.unlisted-install".to_string(),
+            operation: BindingOperationKind::Deactivate,
+            ..scope.clone()
+        };
+        assert!(matches!(
+            maintenance.admit_binding_operation("untrusted-scope", &caller, &untrusted_scope),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATION_SCOPE_UNTRUSTED"
+        ));
+    }
+
+    #[test]
+    fn catalog_replacement_waits_for_pending_binding_owner_completion() {
+        let (_dir, maintenance, _request, caller, scope, _, _) = binding_setup();
+        let admission = maintenance
+            .admit_binding_operation("catalog-update-pending", &caller, &scope)
+            .unwrap();
+        let mut replacement = binding_test_catalog();
+        replacement.generation = 13;
+        replacement
+            .sources
+            .retain(|source| source.source_id != "cyrene-yield");
+        replacement.validate().unwrap();
+
+        let mut writer_called = false;
+        let rejected =
+            maintenance.commit_activity_source_catalog(12, replacement.clone(), None, || {
+                writer_called = true;
+                Ok(())
+            });
+        assert!(matches!(
+            rejected,
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATIONS_INFLIGHT"
+        ));
+        assert!(!writer_called);
+        assert_eq!(maintenance.catalog_generation(), 12);
+
+        let completed = maintenance
+            .complete_binding_operation(
+                "catalog-update-pending",
+                &caller,
+                &scope,
+                &admission.operation_token,
+            )
+            .unwrap();
+        assert!(completed.completed);
+
+        maintenance
+            .commit_activity_source_catalog(12, replacement, None, || {
+                writer_called = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(writer_called);
+        assert_eq!(maintenance.catalog_generation(), 13);
+    }
+
+    #[test]
+    fn catalog_replacement_fails_closed_without_clearing_pending_owner() {
+        let (dir, maintenance, request, caller, scope, _, _) = binding_setup();
+        let original_catalog = binding_test_catalog();
+        let admission = maintenance
+            .admit_binding_operation("external-catalog-change", &caller, &scope)
+            .unwrap();
+
+        let mut untrusted_replacement = original_catalog.clone();
+        untrusted_replacement.generation = 13;
+        untrusted_replacement
+            .sources
+            .retain(|source| source.source_id != caller.source_id);
+        *maintenance.inner.catalog.write().unwrap() = untrusted_replacement.clone();
+        assert!(matches!(
+            maintenance.refresh_catalog(),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATIONS_INFLIGHT"
+        ));
+        drop(maintenance);
+
+        assert!(matches!(
+            RuntimeMaintenance::open(dir.path(), untrusted_replacement),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATIONS_INFLIGHT"
+        ));
+
+        // Restoring the authoritative catalog permits only the real owner to
+        // complete; the failed replacement did not auto-clear the reservation.
+        let restored = RuntimeMaintenance::open(dir.path(), original_catalog).unwrap();
+        let readiness = restored
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        assert_eq!(readiness.active_binding_operation_count, 1);
+        assert!(
+            restored
+                .complete_binding_operation(
+                    "external-catalog-change",
+                    &caller,
+                    &scope,
+                    &admission.operation_token,
+                )
+                .unwrap()
+                .completed
+        );
+    }
+
+    #[test]
+    fn exact_hold_proof_allows_catalog_commit_without_invalidating_hold_validation() {
+        let (dir, maintenance, request, _, _, _, _) = binding_setup();
+        let readiness = maintenance
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        let plan = package_plan();
+        let request_id = "llf-package-install";
+        let begun = maintenance
+            .begin_maintenance(
+                request_id,
+                &plan,
+                &request,
+                readiness.gate_generation,
+                false,
+                package_usage(),
+            )
+            .unwrap();
+        assert_eq!(begun.status, ReadinessStatus::MaintenanceActive);
+        let token = begun.maintenance_token.unwrap();
+        let held_gate_generation = begun.gate_generation;
+        let artifact_digest = plan.component_artifact_digests["cyrene-yield"].clone();
+        let proof_for = |maintenance_token: &str, plan: &MaintenancePlan| MaintenanceHoldProof {
+            request_id: request_id.to_string(),
+            maintenance_token: maintenance_token.to_string(),
+            plan: plan.clone(),
+        };
+        let hold_proof = proof_for(&token, &plan);
+
+        let before = maintenance
+            .validate_maintenance_hold(
+                &hold_proof,
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                &artifact_digest,
+                held_gate_generation,
+                12,
+            )
+            .unwrap();
+        assert!(before.valid);
+        assert_eq!(before.catalog_generation, 12);
+        assert_eq!(before.gate_generation, held_gate_generation);
+        let projected = serde_json::to_value(&before).unwrap();
+        assert_eq!(projected["valid"], true);
+        assert_eq!(projected["target_kind"], "PACKAGE_ONLY");
+        assert_eq!(projected["plan_id"], plan.plan_id);
+        assert_eq!(projected["component_id"], "cyrene-yield");
+        assert_eq!(projected["artifact_digest"], artifact_digest);
+        assert!(projected.get("plan").is_none());
+        assert_eq!(
+            maintenance.current_gate_generation().unwrap(),
+            held_gate_generation
+        );
+        assert!(matches!(
+            maintenance.validate_maintenance_hold(
+                &proof_for("wrong-token", &plan),
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                &artifact_digest,
+                held_gate_generation,
+                12,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code)) if code == "MAINTENANCE_TOKEN_INVALID"
+        ));
+        assert!(matches!(
+            maintenance.validate_maintenance_hold(
+                &hold_proof,
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                &artifact_digest,
+                held_gate_generation.saturating_add(1),
+                12,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "MAINTENANCE_GATE_GENERATION_MISMATCH"
+        ));
+        let mut different_plan = plan.clone();
+        different_plan.plan_id.push_str("-different");
+        let different_plan_proof = proof_for(&token, &different_plan);
+        assert!(matches!(
+            maintenance.validate_maintenance_hold(
+                &different_plan_proof,
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                &artifact_digest,
+                held_gate_generation,
+                12,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code)) if code == "MAINTENANCE_PLAN_MISMATCH"
+        ));
+        assert!(matches!(
+            maintenance.validate_maintenance_hold(
+                &hold_proof,
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                "sha256:wrong",
+                held_gate_generation,
+                12,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "MAINTENANCE_COMPONENT_DIGEST_MISMATCH"
+        ));
+
+        let mut replacement = binding_test_catalog();
+        replacement.generation = 13;
+        replacement.sources[1].binding_scopes[0]
+            .installation_ids
+            .push("llf.install.receipt-9".to_string());
+        let proof = MaintenanceHoldProof {
+            request_id: request_id.to_string(),
+            maintenance_token: token.clone(),
+            plan: plan.clone(),
+        };
+
+        let mut writer_called = false;
+        assert!(matches!(
+            maintenance.commit_activity_source_catalog(
+                12,
+                replacement.clone(),
+                None,
+                || {
+                    writer_called = true;
+                    Ok(())
+                }
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "MAINTENANCE_HOLD_PROOF_REQUIRED"
+        ));
+        assert!(!writer_called);
+
+        let wrong_proof = MaintenanceHoldProof {
+            request_id: request_id.to_string(),
+            maintenance_token: "wrong-token".to_string(),
+            plan: plan.clone(),
+        };
+        assert!(matches!(
+            maintenance.commit_activity_source_catalog(
+                12,
+                replacement.clone(),
+                Some(&wrong_proof),
+                || {
+                    writer_called = true;
+                    Ok(())
+                }
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "MAINTENANCE_HOLD_PROOF_MISMATCH"
+        ));
+        assert!(!writer_called);
+
+        let replacement_for_restart = replacement.clone();
+        maintenance
+            .commit_activity_source_catalog(12, replacement, Some(&proof), || {
+                writer_called = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(writer_called);
+        drop(maintenance);
+        let maintenance = RuntimeMaintenance::open(dir.path(), replacement_for_restart).unwrap();
+        assert_eq!(
+            maintenance.current_gate_generation().unwrap(),
+            held_gate_generation
+        );
+        assert!(matches!(
+            maintenance.validate_maintenance_hold(
+                &hold_proof,
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                &artifact_digest,
+                held_gate_generation,
+                12,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "ACTIVITY_CATALOG_GENERATION_MISMATCH"
+        ));
+        let after = maintenance
+            .validate_maintenance_hold(
+                &hold_proof,
+                UpdateTargetKind::PackageOnly,
+                "cyrene-yield",
+                &artifact_digest,
+                held_gate_generation,
+                13,
+            )
+            .unwrap();
+        assert!(after.valid);
+        assert_eq!(after.catalog_generation, 13);
+        assert_eq!(after.gate_generation, held_gate_generation);
+
+        let ended = maintenance
+            .end_maintenance(request_id, &token, MaintenanceOutcome::Success, true)
+            .unwrap();
+        assert!(ended.unlocked);
+    }
+
+    #[test]
+    fn catalog_commit_races_owner_completion_under_the_shared_gate_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_dir, maintenance, _request, caller, scope, _, _) = binding_setup();
+        let admission = maintenance
+            .admit_binding_operation("catalog-complete-race", &caller, &scope)
+            .unwrap();
+        let mut replacement = binding_test_catalog();
+        replacement.generation = 13;
+        replacement
+            .sources
+            .retain(|source| source.source_id != "cyrene-yield");
+        let barrier = Arc::new(Barrier::new(3));
+        let writer_called = Arc::new(AtomicBool::new(false));
+
+        let update_gate = maintenance.clone();
+        let update_barrier = Arc::clone(&barrier);
+        let update_writer_called = Arc::clone(&writer_called);
+        let update = thread::spawn(move || {
+            update_barrier.wait();
+            update_gate.commit_activity_source_catalog(12, replacement, None, || {
+                update_writer_called.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let complete_gate = maintenance.clone();
+        let complete_barrier = Arc::clone(&barrier);
+        let complete = thread::spawn(move || {
+            complete_barrier.wait();
+            complete_gate.complete_binding_operation(
+                "catalog-complete-race",
+                &caller,
+                &scope,
+                &admission.operation_token,
+            )
+        });
+        barrier.wait();
+
+        let update_result = update.join().unwrap();
+        assert!(complete.join().unwrap().unwrap().completed);
+        match update_result {
+            Ok(()) => {
+                assert!(writer_called.load(Ordering::SeqCst));
+                assert_eq!(maintenance.catalog_generation(), 13);
+            }
+            Err(MaintenanceError::AdmissionDenied(code)) => {
+                assert_eq!(code, "BINDING_OPERATIONS_INFLIGHT");
+                assert!(!writer_called.load(Ordering::SeqCst));
+                assert_eq!(maintenance.catalog_generation(), 12);
+            }
+            Err(error) => panic!("unexpected catalog update error: {error}"),
+        }
+    }
+
+    #[test]
+    fn legacy_catalogs_default_to_no_binding_authority() {
+        let source: TrustedActivitySource = serde_json::from_value(serde_json::json!({
+            "source_id": "cyrene-catalogs",
+            "uid": 1001,
+            "gid": 1000,
+            "source_token_sha256": format!("{:x}", Sha256::digest(b"test-source-token")),
+        }))
+        .unwrap();
+        assert!(source.binding_scopes.is_empty());
+
+        let (_dir, maintenance, _request) = setup();
+        let caller = BindingOperationCaller {
+            source_id: "cyrene-catalogs".to_string(),
+            source_token: "test-source-token".to_string(),
+            peer_uid: 1001,
+            peer_gid: 1000,
+            expected_catalog_generation: 7,
+        };
+        let scope = BindingOperationScope {
+            binding_id: "binding-main".to_string(),
+            package_id: "llf.trainer".to_string(),
+            installation_id: "llf.install.2026".to_string(),
+            operation: BindingOperationKind::Activate,
+        };
+        assert!(matches!(
+            maintenance.admit_binding_operation("legacy-catalog-denied", &caller, &scope),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATION_SCOPE_UNTRUSTED"
+        ));
+
+        let mut invalid_catalog = binding_test_catalog();
+        invalid_catalog.sources[0].binding_scopes[0]
+            .installation_ids
+            .clear();
+        assert!(matches!(
+            invalid_catalog.validate(),
+            Err(MaintenanceError::CatalogUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn trusted_catalog_rejects_binding_ownership_shared_between_sources() {
+        let mut catalog = binding_test_catalog();
+        let mut second_owner = catalog.sources[0].clone();
+        second_owner.source_id = "cyrene-third".to_string();
+        second_owner.binding_scopes[0].binding_id = "binding-main".to_string();
+        catalog.sources.push(second_owner);
+        assert!(matches!(
+            catalog.validate(),
+            Err(MaintenanceError::CatalogUnavailable(message))
+                if message.contains("authorized by more than one source")
+        ));
+    }
+
+    #[test]
+    fn binding_operation_request_id_is_scoped_idempotently_across_sources() {
+        let (_dir, maintenance, _request, caller, scope, other_caller, other_scope) =
+            binding_setup();
+        let first = maintenance
+            .admit_binding_operation("shared-request-id", &caller, &scope)
+            .unwrap();
+        let retry = maintenance
+            .admit_binding_operation("shared-request-id", &caller, &scope)
+            .unwrap();
+        assert_eq!(retry.operation_token, first.operation_token);
+        assert_eq!(retry.catalog_generation, caller.expected_catalog_generation);
+        assert_eq!(retry.gate_generation, first.gate_generation);
+        assert!(retry.already_in_flight);
+        assert!(!retry.already_completed);
+
+        assert!(matches!(
+            maintenance.admit_binding_operation("shared-request-id", &other_caller, &other_scope),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATION_REQUEST_ID_CONFLICT"
+        ));
+
+        let completed = maintenance
+            .complete_binding_operation(
+                "shared-request-id",
+                &caller,
+                &scope,
+                &first.operation_token,
+            )
+            .unwrap();
+        assert!(completed.completed);
+        let completed_retry = maintenance
+            .admit_binding_operation("shared-request-id", &caller, &scope)
+            .unwrap();
+        assert!(completed_retry.already_completed);
+        assert_eq!(completed_retry.operation_token, first.operation_token);
+    }
+
+    #[test]
+    fn binding_operation_new_request_id_cannot_overlap_same_binding() {
+        let (_dir, maintenance, request, caller, scope, other_caller, other_scope) =
+            binding_setup();
+        let first = maintenance
+            .admit_binding_operation("binding-first-id", &caller, &scope)
+            .unwrap();
+        let retried_intent_scope = BindingOperationScope {
+            operation: BindingOperationKind::Recover,
+            ..scope.clone()
+        };
+        assert!(matches!(
+            maintenance.admit_binding_operation(
+                "binding-new-id",
+                &caller,
+                &retried_intent_scope,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "BINDING_OPERATION_ALREADY_INFLIGHT"
+        ));
+        assert_eq!(
+            maintenance.current_gate_generation().unwrap(),
+            first.gate_generation
+        );
+        assert_eq!(
+            maintenance
+                .get_update_readiness(&request, package_usage())
+                .unwrap()
+                .active_binding_operation_count,
+            1
+        );
+
+        let different_binding = maintenance
+            .admit_binding_operation("other-binding-id", &other_caller, &other_scope)
+            .unwrap();
+        assert_eq!(
+            maintenance
+                .get_update_readiness(&request, package_usage())
+                .unwrap()
+                .active_binding_operation_count,
+            2
+        );
+
+        assert!(
+            maintenance
+                .complete_binding_operation(
+                    "binding-first-id",
+                    &caller,
+                    &scope,
+                    &first.operation_token,
+                )
+                .unwrap()
+                .completed
+        );
+        let retry_with_new_id = maintenance
+            .admit_binding_operation("binding-new-id", &caller, &retried_intent_scope)
+            .unwrap();
+        assert!(!retry_with_new_id.already_in_flight);
+        assert!(!retry_with_new_id.already_completed);
+        assert!(
+            maintenance
+                .complete_binding_operation(
+                    "binding-new-id",
+                    &caller,
+                    &retried_intent_scope,
+                    &retry_with_new_id.operation_token,
+                )
+                .unwrap()
+                .completed
+        );
+        assert!(
+            maintenance
+                .complete_binding_operation(
+                    "other-binding-id",
+                    &other_caller,
+                    &other_scope,
+                    &different_binding.operation_token,
+                )
+                .unwrap()
+                .completed
+        );
+    }
+
+    #[test]
+    fn binding_operation_crash_pending_survives_reopen_and_has_no_ttl_release() {
+        let (dir, maintenance, request, caller, scope, _, _) = binding_setup();
+        let admitted = maintenance
+            .admit_binding_operation("crash-pending", &caller, &scope)
+            .unwrap();
+        drop(maintenance);
+
+        let reopened = RuntimeMaintenance::open(dir.path(), binding_test_catalog()).unwrap();
+        let readiness = reopened
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        assert_eq!(readiness.active_binding_operation_count, 1);
+        assert_eq!(readiness.status, ReadinessStatus::ActiveBindingOperations);
+
+        let idempotent = reopened
+            .admit_binding_operation("crash-pending", &caller, &scope)
+            .unwrap();
+        assert_eq!(idempotent.operation_token, admitted.operation_token);
+        assert!(!idempotent.already_completed);
+        assert!(
+            reopened
+                .complete_binding_operation(
+                    "crash-pending",
+                    &caller,
+                    &scope,
+                    &admitted.operation_token,
+                )
+                .unwrap()
+                .completed
+        );
+        assert_eq!(
+            reopened
+                .get_update_readiness(&request, package_usage())
+                .unwrap()
+                .status,
+            ReadinessStatus::Ready
+        );
+    }
+
+    #[test]
+    fn binding_admission_and_update_begin_have_one_atomic_winner() {
+        let (_dir, maintenance, request, caller, scope, _, _) = binding_setup();
+        let readiness = maintenance
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let operation_gate = maintenance.clone();
+        let operation_barrier = Arc::clone(&barrier);
+        let operation = thread::spawn(move || {
+            operation_barrier.wait();
+            operation_gate.admit_binding_operation("race-operation", &caller, &scope)
+        });
+
+        let update_gate = maintenance.clone();
+        let update_barrier = Arc::clone(&barrier);
+        let update_request = request.clone();
+        let update = thread::spawn(move || {
+            update_barrier.wait();
+            update_gate.begin_maintenance(
+                "race-update",
+                &package_plan(),
+                &update_request,
+                readiness.gate_generation,
+                false,
+                package_usage(),
+            )
+        });
+        barrier.wait();
+
+        let operation = operation.join().unwrap();
+        let update = update.join().unwrap().unwrap();
+        let operation_won = operation.is_ok();
+        let update_won = update.maintenance_token.is_some();
+        assert_ne!(operation_won, update_won);
+        if operation_won {
+            assert!(matches!(
+                update.status,
+                ReadinessStatus::ActiveBindingOperations | ReadinessStatus::StaleReadiness
+            ));
+            assert!(update.maintenance_token.is_none());
+        } else {
+            assert_eq!(update.status, ReadinessStatus::MaintenanceActive);
+            assert!(matches!(
+                operation,
+                Err(MaintenanceError::AdmissionDenied(code))
+                    if code == "UPDATE_MAINTENANCE_ACTIVE"
+            ));
+        }
+    }
+
+    #[test]
+    fn ordinary_open_refuses_released_schema1_without_rewriting_files() {
+        let (dir, _proof, catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        let state_before = fs::read(dir.path().join(STATE_FILE)).unwrap();
+        let journal_before = fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
+
+        assert!(RuntimeMaintenance::open(dir.path(), catalog).is_err());
+        assert_eq!(fs::read(dir.path().join(STATE_FILE)).unwrap(), state_before);
+        assert_eq!(
+            fs::read(dir.path().join(JOURNAL_FILE)).unwrap(),
+            journal_before
+        );
+    }
+
+    #[test]
+    fn controlled_schema1_migration_preserves_both_supported_profiles() {
+        for profile in [
+            LegacyStateProfile::ReleasedV1NoBindingAdmissions,
+            LegacyStateProfile::ExperimentalV1BindingAdmissions,
+        ] {
+            let (dir, proof, catalog) = legacy_migration_fixture(profile);
+            let source_state = fs::read(dir.path().join(STATE_FILE)).unwrap();
+            let source_journal = fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
+            let mut wrong_profile = proof.clone();
+            wrong_profile.schema1_profile = match profile {
+                LegacyStateProfile::ReleasedV1NoBindingAdmissions => {
+                    LegacyStateProfile::ExperimentalV1BindingAdmissions
+                }
+                LegacyStateProfile::ExperimentalV1BindingAdmissions => {
+                    LegacyStateProfile::ReleasedV1NoBindingAdmissions
+                }
+            };
+            assert!(migrate_state_schema1(dir.path(), &wrong_profile).is_err());
+            assert_eq!(fs::read(dir.path().join(STATE_FILE)).unwrap(), source_state);
+            assert_eq!(
+                fs::read(dir.path().join(JOURNAL_FILE)).unwrap(),
+                source_journal
+            );
+
+            let result = migrate_state_schema1(dir.path(), &proof).unwrap();
+            assert_eq!(result.schema_version, STATE_SCHEMA_VERSION);
+            assert!(result.migrated);
+            let state =
+                load_state_locked_with_schema(dir.path(), STATE_SCHEMA_VERSION, None, false)
+                    .unwrap();
+            assert!(held_state_matches_marker(
+                &state,
+                &read_migration_marker(dir.path()).unwrap()
+            ));
+            assert_eq!(
+                state
+                    .completed_binding_operations
+                    .contains_key("completed-before-c10"),
+                profile == LegacyStateProfile::ExperimentalV1BindingAdmissions
+            );
+            assert!(load_state_locked_with_schema(
+                dir.path(),
+                LEGACY_STATE_SCHEMA_VERSION,
+                Some(profile),
+                false
+            )
+            .is_err());
+            assert!(RuntimeMaintenance::open(dir.path(), catalog).is_ok());
+        }
+    }
+
+    #[test]
+    fn complete_marker_allows_normal_state_and_held_catalog_writes() {
+        let (dir, proof, catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        migrate_state_schema1(dir.path(), &proof).unwrap();
+
+        let gate = RuntimeMaintenance::open(dir.path(), catalog.clone()).unwrap();
+        gate.heartbeat_activity_source("cyrene-kernel").unwrap();
+        let hold_proof = MaintenanceHoldProof {
+            request_id: proof.request_id.clone(),
+            maintenance_token: proof.maintenance_token.clone(),
+            plan: MaintenancePlan {
+                plan_id: proof.plan_id.clone(),
+                plan_digest: proof.plan_digest.clone(),
+                component_artifact_digests: proof.component_artifact_digests.clone(),
+            },
+        };
+        let replacement = TrustedActivitySourceCatalog {
+            schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
+            generation: catalog.generation + 1,
+            sources: catalog.sources.clone(),
+        };
+        gate.commit_activity_source_catalog(
+            catalog.generation,
+            replacement.clone(),
+            Some(&hold_proof),
+            || Ok(()),
+        )
+        .unwrap();
+        drop(gate);
+
+        let reopened = RuntimeMaintenance::open(dir.path(), replacement).unwrap();
+        reopened.heartbeat_activity_source("cyrene-kernel").unwrap();
+        assert_eq!(reopened.catalog_generation(), 8);
+        let live =
+            load_state_locked_with_schema(dir.path(), STATE_SCHEMA_VERSION, None, false).unwrap();
+        assert_eq!(live.install_catalog_generation, 8);
+        assert_eq!(
+            read_migration_marker(dir.path()).unwrap().phase,
+            StateMigrationPhase::Complete
+        );
+
+        let resumed = migrate_state_schema1(dir.path(), &proof).unwrap();
+        assert!(resumed.migrated);
+        assert_eq!(resumed.schema_version, STATE_SCHEMA_VERSION);
+        assert_eq!(resumed.gate_generation, live.gate_generation);
+        assert_eq!(resumed.catalog_generation, live.install_catalog_generation);
+
+        let state_before = fs::read(dir.path().join(STATE_FILE)).unwrap();
+        let journal_before = fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
+        let mut wrong_proof = proof.clone();
+        wrong_proof.maintenance_token = "wrong-maintenance-token".to_string();
+        assert!(migrate_state_schema1(dir.path(), &wrong_proof).is_err());
+        assert_eq!(fs::read(dir.path().join(STATE_FILE)).unwrap(), state_before);
+        assert_eq!(
+            fs::read(dir.path().join(JOURNAL_FILE)).unwrap(),
+            journal_before
+        );
+    }
+
+    #[test]
+    fn completed_migration_resume_rejects_lost_hold_and_corrupt_artifacts() {
+        let (dir, proof, catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        migrate_state_schema1(dir.path(), &proof).unwrap();
+        let gate = RuntimeMaintenance::open(dir.path(), catalog).unwrap();
+        let ended = gate
+            .end_maintenance(
+                &proof.request_id,
+                &proof.maintenance_token,
+                MaintenanceOutcome::Success,
+                true,
+            )
+            .unwrap();
+        assert!(ended.unlocked);
+        drop(gate);
+        assert!(migrate_state_schema1(dir.path(), &proof).is_err());
+
+        let (dir, proof, _catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        migrate_state_schema1(dir.path(), &proof).unwrap();
+        let mut marker = read_migration_marker(dir.path()).unwrap();
+        marker.plan_id = "tampered-plan".to_string();
+        write_migration_marker(dir.path(), &marker).unwrap();
+        assert!(migrate_state_schema1(dir.path(), &proof).is_err());
+
+        let (dir, proof, _catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        migrate_state_schema1(dir.path(), &proof).unwrap();
+        let marker = read_migration_marker(dir.path()).unwrap();
+        let backup_path = marker.backup_schema2_state_path(dir.path());
+        let mut backup = read_private_backup(&backup_path).unwrap();
+        backup.push(b' ');
+        fs::write(backup_path, backup).unwrap();
+        assert!(migrate_state_schema1(dir.path(), &proof).is_err());
+    }
+
+    #[test]
+    fn migration_rejects_partial_or_unknown_schema1_fields_without_mutation() {
+        let (dir, mut proof, _catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        let state_path = dir.path().join(STATE_FILE);
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state
+            .as_object_mut()
+            .unwrap()
+            .insert("binding_operations".to_string(), serde_json::json!({}));
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        proof.schema1_profile = LegacyStateProfile::ExperimentalV1BindingAdmissions;
+        let state_before = fs::read(&state_path).unwrap();
+        let journal_before = fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
+        assert!(migrate_state_schema1(dir.path(), &proof).is_err());
+        assert_eq!(fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(
+            fs::read(dir.path().join(JOURNAL_FILE)).unwrap(),
+            journal_before
+        );
+
+        let (dir, proof, _catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        let state_path = dir.path().join(STATE_FILE);
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state.as_object_mut().unwrap().insert(
+            "unrecognized_field".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let state_before = fs::read(&state_path).unwrap();
+        let journal_before = fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
+        assert!(migrate_state_schema1(dir.path(), &proof).is_err());
+        assert_eq!(fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(
+            fs::read(dir.path().join(JOURNAL_FILE)).unwrap(),
+            journal_before
+        );
+    }
+
+    #[test]
+    fn migration_resumes_only_known_marker_hash_phase_and_old_writer_rejects_v2() {
+        let (dir, proof, catalog) =
+            legacy_migration_fixture(LegacyStateProfile::ReleasedV1NoBindingAdmissions);
+        migrate_state_schema1(dir.path(), &proof).unwrap();
+        let mut marker = read_migration_marker(dir.path()).unwrap();
+        marker.phase = StateMigrationPhase::Prepared;
+        write_migration_marker(dir.path(), &marker).unwrap();
+        fs::write(
+            dir.path().join(STATE_FILE),
+            read_private_backup(&marker.backup_state_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert!(RuntimeMaintenance::open(dir.path(), catalog).is_err());
+
+        let resumed = migrate_state_schema1(dir.path(), &proof).unwrap();
+        assert_eq!(resumed.schema_version, STATE_SCHEMA_VERSION);
+        assert_eq!(
+            read_migration_marker(dir.path()).unwrap().phase,
+            StateMigrationPhase::Complete
+        );
+        assert!(load_state_locked_with_schema(
+            dir.path(),
+            LEGACY_STATE_SCHEMA_VERSION,
+            Some(proof.schema1_profile),
+            false
+        )
+        .is_err());
+
+        let before_state = fs::read(dir.path().join(STATE_FILE)).unwrap();
+        let before_journal = fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
+        fs::write(dir.path().join(JOURNAL_FILE), b"tampered unknown journal\n").unwrap();
+        assert!(rollback_state_schema1(dir.path(), &proof).is_err());
+        assert_eq!(fs::read(dir.path().join(STATE_FILE)).unwrap(), before_state);
+        assert_ne!(
+            fs::read(dir.path().join(JOURNAL_FILE)).unwrap(),
+            before_journal
+        );
+        assert!(fs::symlink_metadata(dir.path().join(STATE_MIGRATION_MARKER_FILE)).is_ok());
+    }
+
+    #[test]
+    fn failed_first_schema2_boot_rolls_back_after_real_kernel_reconciliation() {
+        let profile = LegacyStateProfile::ExperimentalV1BindingAdmissions;
+        let (dir, proof, catalog) = legacy_migration_fixture(profile);
+        migrate_state_schema1(dir.path(), &proof).unwrap();
+        let migrated =
+            load_state_locked_with_schema(dir.path(), STATE_SCHEMA_VERSION, None, false).unwrap();
+        let old_receipt = migrated
+            .completed_binding_operations
+            .get("completed-before-c10")
+            .unwrap()
+            .clone();
+
+        // Exercise the real empty startup reconciliation while the hold is active.
+        let candidate_kernel = RuntimeMaintenance::open(dir.path(), catalog).unwrap();
+        candidate_kernel
+            .reconcile_activity_source("cyrene-kernel", Vec::new())
+            .unwrap();
+        candidate_kernel
+            .heartbeat_activity_source("cyrene-kernel")
+            .unwrap();
+        let candidate_state =
+            load_state_locked_with_schema(dir.path(), STATE_SCHEMA_VERSION, None, false).unwrap();
+        assert!(candidate_state.journal_sequence > migrated.journal_sequence);
+        assert!(candidate_state.gate_generation > proof.expected_gate_generation);
+        assert!(candidate_state.tasks.is_empty());
+        assert!(candidate_state.runtime_admissions.is_empty());
+        assert!(candidate_state.binding_operations.is_empty());
+        drop(candidate_kernel);
+
+        // Model failed candidate health after all writers have been stopped.
+        let rollback = rollback_state_schema1(dir.path(), &proof).unwrap();
+        assert_eq!(rollback.schema_version, LEGACY_STATE_SCHEMA_VERSION);
+        let restored = load_state_locked_with_schema(
+            dir.path(),
+            LEGACY_STATE_SCHEMA_VERSION,
+            Some(profile),
+            false,
+        )
+        .unwrap();
+        assert_eq!(restored.gate_generation, candidate_state.gate_generation);
+        assert_eq!(
+            restored.install_catalog_generation,
+            candidate_state.install_catalog_generation
+        );
+        assert!(restored.tasks.is_empty());
+        assert!(restored.runtime_admissions.is_empty());
+        assert!(restored.binding_operations.is_empty());
+        assert_eq!(
+            restored
+                .completed_binding_operations
+                .get("completed-before-c10"),
+            Some(&old_receipt)
+        );
+        assert_eq!(
+            restored
+                .maintenance
+                .as_ref()
+                .map(|active| active.request_id.as_str()),
+            Some("c10-migration-hold")
+        );
+        assert!(fs::symlink_metadata(dir.path().join(STATE_MIGRATION_MARKER_FILE)).is_err());
     }
 }
