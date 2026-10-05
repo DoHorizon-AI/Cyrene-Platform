@@ -84,7 +84,7 @@ jobs:
             --mount "type=bind,source=${fixture_dir}/server.key,target=/tmp/server.key,readonly" \
             --entrypoint /bin/bash \
             postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f \
-            -lc '
+            -c '
               set -euo pipefail
               install -d -m 0700 -o postgres -g postgres /var/lib/postgresql/tls
               install -m 0644 -o postgres -g postgres /tmp/server.crt /var/lib/postgresql/tls/server.crt
