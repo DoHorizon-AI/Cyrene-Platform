@@ -357,20 +357,20 @@ async fn seed_delivery(
     let now = unix_ms();
     let not_after_unix_ms = now + 600_000;
     let delivery_deadline_unix_ms = now + 300_000;
-    let payload = pending_payload(
+    let payload = pending_payload(PendingDeviceCertificatePayload {
         key,
         generation,
         binding_id,
         approval_id,
         delivery_id,
-        &spki_sha256,
-        &certificate_der,
-        &certificate_sha256,
-        &serial_number,
+        spki_sha256: &spki_sha256,
+        certificate_der: &certificate_der,
+        certificate_sha256: &certificate_sha256,
+        serial_number: &serial_number,
         not_after_unix_ms,
         delivery_deadline_unix_ms,
-        now.saturating_sub(100),
-    );
+        checked_at_unix_ms: now.saturating_sub(100),
+    });
 
     sqlx::query(
         "INSERT INTO cyrene_workspace_directory.device_registration_bindings \
@@ -439,20 +439,36 @@ async fn seed_delivery(
     }
 }
 
-fn pending_payload(
-    key: &WorkspaceDeviceKey,
+struct PendingDeviceCertificatePayload<'a> {
+    key: &'a WorkspaceDeviceKey,
     generation: u64,
     binding_id: Uuid,
     approval_id: [u8; 16],
     delivery_id: [u8; 16],
-    spki_sha256: &[u8; 32],
-    certificate_der: &[u8],
-    certificate_sha256: &[u8; 32],
-    serial_number: &[u8],
+    spki_sha256: &'a [u8; 32],
+    certificate_der: &'a [u8],
+    certificate_sha256: &'a [u8; 32],
+    serial_number: &'a [u8],
     not_after_unix_ms: u64,
     delivery_deadline_unix_ms: u64,
     checked_at_unix_ms: u64,
-) -> Vec<u8> {
+}
+
+fn pending_payload(input: PendingDeviceCertificatePayload<'_>) -> Vec<u8> {
+    let PendingDeviceCertificatePayload {
+        key,
+        generation,
+        binding_id,
+        approval_id,
+        delivery_id,
+        spki_sha256,
+        certificate_der,
+        certificate_sha256,
+        serial_number,
+        not_after_unix_ms,
+        delivery_deadline_unix_ms,
+        checked_at_unix_ms,
+    } = input;
     serde_json::to_vec(&json!({
         "format_version": 5,
         "state": {

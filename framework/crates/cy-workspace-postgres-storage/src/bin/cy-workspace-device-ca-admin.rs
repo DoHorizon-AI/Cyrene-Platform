@@ -73,6 +73,16 @@ fn validate_device_key_part(value: &str) -> Result<String, RestrictedDeviceCaErr
     Ok(value.to_owned())
 }
 
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => {
+            eprintln!("Workspace device CA administration failed; check private configuration and service logs.");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_device_key_part;
@@ -93,15 +103,5 @@ mod tests {
             validate_device_key_part(&"x".repeat(257)),
             Err(RestrictedDeviceCaError::Configuration)
         );
-    }
-}
-
-fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => {
-            eprintln!("Workspace device CA administration failed; check private configuration and service logs.");
-            ExitCode::FAILURE
-        }
     }
 }
