@@ -156,19 +156,6 @@ fn task_activity_from_proto(state: i32) -> Result<TaskActivityState, Status> {
     }
 }
 
-#[cfg(test)]
-mod readiness_status_tests {
-    use super::*;
-
-    #[test]
-    fn binding_operations_use_unknown_wire_status() {
-        assert_eq!(
-            readiness_status_to_proto(ReadinessStatus::ActiveBindingOperations),
-            core_v2::UpdateReadinessStatus::Unspecified as i32
-        );
-    }
-}
-
 fn activity_records_to_proto(
     records: Vec<TaskActivityRecord>,
 ) -> Vec<core_v2::ActiveWorkspaceTask> {
@@ -842,5 +829,18 @@ impl core_v2::kernel_authority_service_server::KernelAuthorityService for Kernel
                 })
                 .collect(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod readiness_status_tests {
+    use super::*;
+
+    #[test]
+    fn binding_operations_use_unknown_wire_status() {
+        assert_eq!(
+            readiness_status_to_proto(ReadinessStatus::ActiveBindingOperations),
+            core_v2::UpdateReadinessStatus::Unspecified as i32
+        );
     }
 }

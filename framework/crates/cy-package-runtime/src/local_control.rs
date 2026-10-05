@@ -1504,6 +1504,8 @@ mod tests {
     const SOURCE_TOKEN: &str = "test-source-token";
     const BINDING_ID: &str = "binding-main";
     const INSTALLATION_ID: &str = "installation-main";
+    const TEST_SOURCE_UID: u32 = 42;
+    const TEST_SOURCE_GID: u32 = 43;
 
     struct TestDependencyPreparer;
 
@@ -1547,6 +1549,13 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    fn test_peer() -> PeerIdentity {
+        PeerIdentity {
+            uid: TEST_SOURCE_UID,
+            gid: TEST_SOURCE_GID,
+        }
     }
 
     fn server(policy: PolicySnapshot) -> PackageRuntimeSocketServer {
@@ -1688,17 +1697,11 @@ mod tests {
 
     #[test]
     fn authority_returns_the_current_generation_and_existing_protocol() {
-        let server = server(test_policy(
-            nix::unistd::geteuid().as_raw(),
-            nix::unistd::getegid().as_raw(),
-        ));
+        let server = server(test_policy(TEST_SOURCE_UID, TEST_SOURCE_GID));
         let response = invoke(
             &server,
             request("authority", Value::Null, source_auth()),
-            PeerIdentity {
-                uid: nix::unistd::geteuid().as_raw(),
-                gid: nix::unistd::getegid().as_raw(),
-            },
+            test_peer(),
         );
         assert_eq!(response["request_id"], "req-1");
         assert_eq!(response["ok"], true);
@@ -1713,10 +1716,7 @@ mod tests {
 
     #[test]
     fn source_and_generation_mismatches_are_denied_without_echoing_credentials() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = server(test_policy(peer.uid, peer.gid));
         let mut bad_token = source_auth();
         bad_token["source_token"] = json!("wrong-token-secret");
@@ -1745,10 +1745,7 @@ mod tests {
 
     #[test]
     fn wrong_peer_and_cross_binding_scope_are_denied() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = server(test_policy(peer.uid, peer.gid));
         let wrong_peer = PeerIdentity {
             uid: peer.uid.saturating_add(1),
@@ -1769,10 +1766,7 @@ mod tests {
 
     #[test]
     fn uninstalled_product_scope_and_root_mutation_fail_closed() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = server(test_policy(peer.uid, peer.gid));
         let mut activate = request("activate", json!(7), source_auth());
         activate["binding_id"] = json!(BINDING_ID);
@@ -1894,10 +1888,7 @@ mod tests {
 
     #[test]
     fn concurrent_mutation_attempts_are_denied_without_runtime_state_change() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = Arc::new(server(test_policy(peer.uid, peer.gid)));
         let barrier = Arc::new(Barrier::new(8));
         let mut workers = Vec::new();
@@ -1953,10 +1944,7 @@ mod tests {
 
     #[test]
     fn broker_health_requires_exact_protocol_capability_and_generation() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = server(test_policy(peer.uid, peer.gid));
         let directory = tempdir().unwrap();
         let socket = directory.path().join("broker.sock");
@@ -2031,10 +2019,7 @@ mod tests {
 
     #[test]
     fn authority_advertises_admission_only_after_exact_broker_health() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let mut server = server(test_policy(peer.uid, peer.gid));
         let directory = tempdir().unwrap();
         let socket = directory.path().join("broker.sock");
@@ -2055,10 +2040,7 @@ mod tests {
 
     #[test]
     fn broker_admission_forwards_exact_source_scope_and_preserves_replay_flags() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let mut server = server(test_policy(peer.uid, peer.gid));
         let directory = tempdir().unwrap();
         let socket = directory.path().join("broker.sock");
@@ -2106,10 +2088,7 @@ mod tests {
 
     #[test]
     fn in_flight_admission_returns_lease_without_dispatching_again() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = server(test_policy(peer.uid, peer.gid));
         let scope = BindingOperationScope {
             binding_id: BINDING_ID.to_string(),
@@ -2159,10 +2138,7 @@ mod tests {
 
     #[test]
     fn broker_generation_and_returned_scope_mismatches_fail_closed() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let mut generation_server = server(test_policy(peer.uid, peer.gid));
         let directory = tempdir().unwrap();
         let socket = directory.path().join("broker.sock");
@@ -2217,10 +2193,7 @@ mod tests {
 
     #[test]
     fn legacy_stdio_authority_wire_remains_unchanged() {
-        let peer = PeerIdentity {
-            uid: nix::unistd::geteuid().as_raw(),
-            gid: nix::unistd::getegid().as_raw(),
-        };
+        let peer = test_peer();
         let server = server(test_policy(peer.uid, peer.gid));
         let mut output = Vec::new();
         server
