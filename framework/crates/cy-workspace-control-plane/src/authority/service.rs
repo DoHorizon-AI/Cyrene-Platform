@@ -21,6 +21,9 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+use crate::deployment_admission::{
+    DeploymentAdmission, DeploymentAdmissionError, DeploymentIdentity,
+};
 use crate::{
     authority::{
         now_unix_ms, AuthorityOutboxError, AuthorityOutboxStore, EnqueueOutcome,
@@ -193,6 +196,12 @@ impl AuthorityCredentialSigner {
 
 /// All durable and trusted dependencies for the Authority process.
 pub struct AuthorityServiceDependencies {
+    /// Root-configured Organization identity used by the first-adoption admission receipt.
+    pub organization_id: String,
+    /// Root-configured Workspace identity used by the first-adoption admission receipt.
+    pub workspace_id: String,
+    /// Root-configured Authority instance identity used by the first-adoption receipt.
+    pub authority_instance_id: String,
     /// Persistent active catalog/policy manager.
     pub snapshots: Arc<crate::authority::ContractSnapshotManager>,
     /// Independently configured Entra verifier.
@@ -217,13 +226,25 @@ pub struct AuthorityServiceDependencies {
 #[derive(Clone)]
 pub struct AuthorityRpcService {
     dependencies: Arc<AuthorityServiceDependencies>,
+    deployment_admission: DeploymentAdmission,
+    deployment_identity: DeploymentIdentity,
 }
 
 impl AuthorityRpcService {
     /// Construct a service with production dependencies; no in-memory fallback exists.
     pub fn new(dependencies: AuthorityServiceDependencies) -> Self {
+        let deployment_identity = DeploymentIdentity {
+            organization_id: dependencies.organization_id.clone(),
+            workspace_id: dependencies.workspace_id.clone(),
+            authority_instance_id: dependencies.authority_instance_id.clone(),
+        };
+        let deployment_admission =
+            DeploymentAdmission::from_environment(deployment_identity.clone())
+                .unwrap_or_else(|_| DeploymentAdmission::invalid_configuration());
         Self {
             dependencies: Arc::new(dependencies),
+            deployment_admission,
+            deployment_identity,
         }
     }
 
@@ -633,6 +654,15 @@ impl WorkspaceAuthorityService for AuthorityRpcService {
                 scope,
             )
             .map_err(map_policy_error)?;
+        let _admission = self
+            .deployment_admission
+            .acquire_dispatch(
+                principal.organization_id(),
+                &workspace_id,
+                &self.deployment_identity.authority_instance_id,
+            )
+            .await
+            .map_err(map_deployment_admission_error)?;
         let target = self
             .dependencies
             .targets
@@ -786,6 +816,15 @@ impl WorkspaceAuthorityService for AuthorityRpcService {
         request: Request<wire::ClaimInvocationsRequest>,
     ) -> Result<Response<wire::ClaimInvocationsResponse>, Status> {
         let peer = self.connector_peer(&request).await?;
+        let _admission = self
+            .deployment_admission
+            .acquire_dispatch(
+                &peer.organization_id,
+                &peer.workspace_id,
+                &self.deployment_identity.authority_instance_id,
+            )
+            .await
+            .map_err(map_deployment_admission_error)?;
         let max_batch_size = request.get_ref().max_batch_size.clamp(1, 32) as usize;
         let records = self
             .dependencies
@@ -1210,6 +1249,17 @@ fn map_identity_error(error: crate::web_identity::WebIdentityError) -> Status {
             Status::permission_denied("web identity is not authorized")
         }
         _ => Status::unavailable("web identity verification is unavailable"),
+    }
+}
+
+fn map_deployment_admission_error(error: DeploymentAdmissionError) -> Status {
+    match error {
+        DeploymentAdmissionError::Closed => {
+            Status::failed_precondition("Control Host Product admission is closed")
+        }
+        DeploymentAdmissionError::Unavailable => {
+            Status::unavailable("Control Host Product admission is unavailable")
+        }
     }
 }
 

@@ -39,6 +39,9 @@ uuid = { version = "1.0", features = ["v4"] }
 zstd = "0.13"
 zeroize = "1.8"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["fs", "user"] }
+
 [dev-dependencies]
 cy-workspace-product-contracts = { version = "0.1.0", path = "../cy-workspace-product-contracts", features = ["test-support"] }
 tempfile = "3.8"
