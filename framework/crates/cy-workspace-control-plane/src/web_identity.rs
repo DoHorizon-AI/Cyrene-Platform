@@ -9,7 +9,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use futures_util::StreamExt;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -29,6 +29,7 @@ const MAX_DISCOVERY_BYTES: usize = 64 * 1024;
 const MAX_JWKS_BYTES: usize = 256 * 1024;
 const MAX_JWKS_KEYS: usize = 128;
 const MAX_KID_BYTES: usize = 128;
+const MAX_CLOUD_INSTANCE_NAME_BYTES: usize = 253;
 const MAX_RSA_MODULUS_BYTES: usize = 512;
 const MIN_RSA_MODULUS_BITS: u32 = 2048;
 const MAX_RSA_MODULUS_BITS: u32 = 4096;
@@ -641,12 +642,21 @@ struct JwkDocument {
     _x5t_sha256: Option<String>,
     #[serde(default, rename = "x5c")]
     _x5c: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_cloud_instance_name")]
+    cloud_instance_name: Option<String>,
     #[serde(default, rename = "crv")]
     _crv: Option<String>,
     #[serde(default, rename = "x")]
     _x: Option<String>,
     #[serde(default, rename = "y")]
     _y: Option<String>,
+}
+
+fn deserialize_cloud_instance_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 fn parse_jwks(body: &[u8]) -> Result<HashMap<String, JwkDocument>, WebIdentityError> {
@@ -663,6 +673,10 @@ fn parse_jwks(body: &[u8]) -> Result<HashMap<String, JwkDocument>, WebIdentityEr
             || !key.kid.is_ascii()
             || key.kid.chars().any(char::is_control)
             || key.kty.is_empty()
+            || key
+                .cloud_instance_name
+                .as_deref()
+                .is_some_and(|name| !valid_cloud_instance_name(name))
             || key.d.is_some()
             || key.p.is_some()
             || key.q.is_some()
@@ -678,6 +692,22 @@ fn parse_jwks(body: &[u8]) -> Result<HashMap<String, JwkDocument>, WebIdentityEr
         }
     }
     Ok(entries)
+}
+
+fn valid_cloud_instance_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_CLOUD_INSTANCE_NAME_BYTES || !name.is_ascii() {
+        return false;
+    }
+
+    name.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.as_bytes()[0].is_ascii_alphanumeric()
+            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
 }
 
 fn decoding_key_for(
@@ -940,6 +970,13 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({ "keys": [key] })).unwrap()
     }
 
+    fn microsoft_shape_jwks(kid: &str) -> Vec<u8> {
+        let mut document: Value = serde_json::from_slice(&jwks(kid, Some("RS256"))).unwrap();
+        document["keys"][0]["x5c"] = serde_json::json!(["bounded-certificate-metadata"]);
+        document["keys"][0]["cloud_instance_name"] = serde_json::json!("login.microsoftonline.com");
+        serde_json::to_vec(&document).unwrap()
+    }
+
     fn claims() -> TestClaims {
         let now = current_unix_seconds().unwrap() as u64;
         TestClaims {
@@ -986,6 +1023,22 @@ mod tests {
             directory.observed_identity.lock().await.as_ref(),
             Some(principal.identity())
         );
+    }
+
+    #[tokio::test]
+    async fn microsoft_cloud_instance_metadata_preserves_signed_token_verification() {
+        let fetcher = Arc::new(TestJwksFetcher::new(microsoft_shape_jwks(TEST_KID)));
+        let verifier = make_verifier(
+            fetcher,
+            directory(Ok(vec!["org-from-directory".to_owned()])),
+            JWKS_CACHE_TTL,
+        );
+
+        let principal = verifier
+            .verify_access_token(&signed_token(TEST_KID, &claims()))
+            .await
+            .unwrap();
+        assert_eq!(principal.organization_id(), "org-from-directory");
     }
 
     #[tokio::test]
@@ -1278,6 +1331,40 @@ mod tests {
             ))
             .unwrap_err(),
             WebIdentityError::InvalidToken
+        );
+    }
+
+    #[test]
+    fn microsoft_cloud_instance_metadata_is_bounded_and_non_authoritative() {
+        let legacy = jwks(TEST_KID, Some("RS256"));
+        let legacy = parse_jwks(&legacy).unwrap();
+        assert!(decoding_key_for(legacy.get(TEST_KID).unwrap(), &config().issuer()).is_ok());
+
+        let parsed = parse_jwks(&microsoft_shape_jwks(TEST_KID)).unwrap();
+        assert!(decoding_key_for(parsed.get(TEST_KID).unwrap(), &config().issuer()).is_ok());
+
+        for invalid_name in [
+            serde_json::json!(null),
+            serde_json::json!(42),
+            serde_json::json!(""),
+            serde_json::json!("bad..example.com"),
+            serde_json::json!(format!("{}.example", "a".repeat(64))),
+            serde_json::json!("a".repeat(MAX_CLOUD_INSTANCE_NAME_BYTES + 1)),
+        ] {
+            let mut invalid: Value =
+                serde_json::from_slice(&jwks(TEST_KID, Some("RS256"))).unwrap();
+            invalid["keys"][0]["cloud_instance_name"] = invalid_name;
+            assert_eq!(
+                parse_jwks(&serde_json::to_vec(&invalid).unwrap()).unwrap_err(),
+                WebIdentityError::Unavailable
+            );
+        }
+
+        let mut unknown: Value = serde_json::from_slice(&jwks(TEST_KID, Some("RS256"))).unwrap();
+        unknown["keys"][0]["unrecognized_metadata"] = serde_json::json!("ignored");
+        assert_eq!(
+            parse_jwks(&serde_json::to_vec(&unknown).unwrap()).unwrap_err(),
+            WebIdentityError::Unavailable
         );
     }
 
