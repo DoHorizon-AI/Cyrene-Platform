@@ -20,6 +20,7 @@ from tooling.release.component_artifacts import ComponentArtifactError, _payload
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 UNIT_PATH = REPOSITORY / "infrastructure/systemd/cyrene-package-runtime.service"
+CATALOG_PATH = Path("trusted-component-catalog.json")
 EXPECTED_TARGETS = {
     "linux-ubuntu-22.04-x86_64-systemd": "2.35",
     "linux-ubuntu-24.04-x86_64-systemd": "2.39",
@@ -42,6 +43,8 @@ def _catalog(target_id: str) -> dict[str, object]:
                 "componentId": native.PACKAGE_RUNTIME_ID,
                 "publisher": "DoHorizon-AI/Cyrene-Platform",
                 "artifactKinds": ["native-binary"],
+                "compatibilityGroup": native.PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
+                "protocolVersion": "cy-package-runtime.control.v1",
                 "dependencies": [],
                 "restart": {"unit": "cyrene-package-runtime.service"},
                 "systemdUnit": "cyrene-package-runtime.service",
@@ -54,7 +57,95 @@ def _catalog(target_id: str) -> dict[str, object]:
                 ],
             }
         ],
+        "compatibilityGroups": [
+            {
+                "groupId": "package-runtime-native-v1",
+                "groupVersion": "2",
+                "contractApiVersion": "0.1.0",
+                "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+                "contractLock": {
+                    "repository": "DoHorizon-AI/Cyrene-Workspace",
+                    "path": "governance/package-runtime-protocols-v1.lock.json",
+                    "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
+                    "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267",
+                },
+            }
+        ],
     }
+
+
+def test_package_runtime_compatibility_uses_its_exact_frozen_lock() -> None:
+    """Bind package-runtime manifests to the independent protocol lock and bytes digest."""
+    catalog = _catalog("linux-ubuntu-22.04-x86_64-systemd")
+    component = catalog["components"][0]
+    expected_lock = catalog["compatibilityGroups"][0]["contractLock"]
+
+    with patch.object(native, "_verify_contract_lock") as verify_lock:
+        compatibility = native._trusted_catalog_compatibility_for_component(CATALOG_PATH, catalog, component)
+
+    assert compatibility == {
+        "groupId": "package-runtime-native-v1",
+        "groupVersion": "2",
+        "contractApiVersion": "0.1.0",
+        "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+        "contractLock": expected_lock,
+    }
+    verify_lock.assert_called_once_with({"contractLock": expected_lock})
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repository", "DoHorizon-AI/Cyrene-Platform"),
+        ("path", "governance/workspace-connection-protocols-v2.lock.json"),
+        ("commit", "1111111111111111111111111111111111111111"),
+        ("sha256", "sha256:" + "1" * 64),
+    ],
+)
+def test_package_runtime_compatibility_rejects_other_lock_pins(field: str, value: str) -> None:
+    """A connection lock or a caller-selected pin cannot satisfy the runtime group."""
+    catalog = _catalog("linux-ubuntu-24.04-x86_64-systemd")
+    component = catalog["components"][0]
+    catalog["compatibilityGroups"][0]["contractLock"][field] = value
+
+    with patch.object(native, "_verify_contract_lock") as verify_lock:
+        with pytest.raises(ComponentArtifactError, match="does not match the frozen protocol lock"):
+            native._trusted_catalog_compatibility_for_component(CATALOG_PATH, catalog, component)
+
+    verify_lock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("groupVersion", "3"),
+        ("contractApiVersion", "9.9.9"),
+        ("wireApiVersion", "other.protocol.v1"),
+    ],
+)
+def test_package_runtime_compatibility_rejects_api_identity_drift(field: str, value: str) -> None:
+    """The exact catalog lock is accepted only with its frozen API identity."""
+    catalog = _catalog("linux-ubuntu-22.04-x86_64-systemd")
+    component = catalog["components"][0]
+    catalog["compatibilityGroups"][0][field] = value
+
+    with patch.object(native, "_verify_contract_lock") as verify_lock:
+        with pytest.raises(ComponentArtifactError, match=f"compatibility {field} does not match"):
+            native._trusted_catalog_compatibility_for_component(CATALOG_PATH, catalog, component)
+
+    verify_lock.assert_not_called()
+
+
+def test_connection_compatibility_stays_on_the_existing_connection_lock_validator() -> None:
+    """Keep the pre-existing connection-protocol trust path unchanged."""
+    catalog = {"compatibilityGroups": []}
+    component = {"componentId": "cy-workspace-web-bff", "compatibilityGroup": "workspace-product-v2"}
+    expected = {"groupId": "workspace-product-v2"}
+
+    with patch.object(native, "trusted_catalog_compatibility", return_value=expected) as verify_connection_lock:
+        assert native._trusted_catalog_compatibility_for_component(CATALOG_PATH, catalog, component) == expected
+
+    verify_connection_lock.assert_called_once_with(CATALOG_PATH, catalog, component)
 
 
 @pytest.mark.parametrize("target_id,glibc", sorted(EXPECTED_TARGETS.items()))
