@@ -433,12 +433,37 @@ def _validate_manifest(document: dict[str, Any]) -> list[str]:
             errors.append("file artifact uri must be a GitHub HTTPS release asset URL")
         if artifact["kind"] == "native-binary":
             try:
-                entrypoint = _safe_relative(artifact.get("entrypoint", ""))
+                raw_entrypoint = artifact.get("entrypoint", "")
+                if not isinstance(raw_entrypoint, str):
+                    raise ComponentArtifactError("unsafe payload path: entrypoint is not a string")
+                entrypoint = _safe_relative(raw_entrypoint)
             except ComponentArtifactError as error:
                 errors.append("native binary requires a safe entrypoint: " + str(error))
             else:
                 if isinstance(files, dict) and entrypoint.as_posix() not in files:
                     errors.append("native binary entrypoint must appear in artifact.files")
+                if "executableFiles" in artifact:
+                    executable_files = artifact["executableFiles"]
+                    if not isinstance(executable_files, list) or not executable_files:
+                        errors.append("artifact.executableFiles must be a non-empty array")
+                    else:
+                        seen_executable_files: set[str] = set()
+                        for relative in executable_files:
+                            if not isinstance(relative, str):
+                                errors.append("artifact.executableFiles entries must be safe relative paths")
+                                continue
+                            try:
+                                _safe_relative(relative)
+                            except ComponentArtifactError as error:
+                                errors.append(f"artifact.executableFiles contains {error}")
+                                continue
+                            if relative in seen_executable_files:
+                                errors.append("artifact.executableFiles entries must be unique")
+                            seen_executable_files.add(relative)
+                            if isinstance(files, dict) and relative not in files:
+                                errors.append("artifact.executableFiles entries must appear in artifact.files")
+                        if entrypoint.as_posix() not in seen_executable_files:
+                            errors.append("artifact.executableFiles must include artifact.entrypoint")
     elif artifact["kind"] == "oci-image":
         repository = artifact.get("repository")
         digest = artifact.get("digest")
@@ -726,7 +751,9 @@ def trusted_catalog_compatibility(
         None,
     )
     if not isinstance(group, dict):
-        raise ComponentArtifactError(f"component references an unknown compatibility group: {component.get('componentId')}")
+        raise ComponentArtifactError(
+            f"component references an unknown compatibility group: {component.get('componentId')}"
+        )
     lock = group.get("contractLock")
     if not isinstance(lock, dict):
         raise ComponentArtifactError("trusted compatibility group has no immutable contractLock pin")
@@ -777,8 +804,12 @@ def _verify_manifest_catalog_metadata(
     if component.get("publisher") != repository:
         raise ComponentArtifactError("component publisher does not match manifest source.repository")
     strict_dependencies = document.get("schemaVersion") == 2
-    actual_dependencies = _dependency_rows(document.get("dependencies"), "manifest dependencies", strict=strict_dependencies)
-    expected_dependencies = _dependency_rows(component.get("dependencies"), "catalog dependencies", strict=strict_dependencies)
+    actual_dependencies = _dependency_rows(
+        document.get("dependencies"), "manifest dependencies", strict=strict_dependencies
+    )
+    expected_dependencies = _dependency_rows(
+        component.get("dependencies"), "catalog dependencies", strict=strict_dependencies
+    )
     if actual_dependencies != expected_dependencies:
         raise ComponentArtifactError("manifest dependencies do not match the trusted component catalog")
     compatibility_groups = catalog.get("compatibilityGroups", [])
@@ -815,7 +846,8 @@ def _verify_manifest_catalog_metadata(
         if expected_protocol is None and expected_group is not None:
             expected_member = next(
                 (
-                    member for member in group_definition.get("members", [])
+                    member
+                    for member in group_definition.get("members", [])
                     if isinstance(member, dict) and member.get("componentId") == document["componentId"]
                 ),
                 None,
@@ -832,8 +864,7 @@ def _verify_manifest_catalog_metadata(
 def _verify_release_metadata(document: dict[str, Any], catalog: dict[str, Any], manifest_path: Path) -> None:
     owner, repository_name, publisher = _verify_manifest_catalog_metadata(document, catalog)
     api_url = (
-        f"https://api.github.com/repos/{owner}/{repository_name}/releases/tags/"
-        f"{quote(document['releaseId'], safe='-')}"
+        f"https://api.github.com/repos/{owner}/{repository_name}/releases/tags/{quote(document['releaseId'], safe='-')}"
     )
     release = _github_json(api_url)
     expected_prerelease = document["channel"] == "preview"
@@ -912,9 +943,7 @@ def _verify_index_catalog_metadata(
             raise ComponentArtifactError("index compatibility lock does not match the trusted catalog")
         _verify_contract_lock({"contractLock": definition.get("contractLock")})
         declared_members = {
-            member.get("componentId")
-            for member in definition.get("members", [])
-            if isinstance(member, dict)
+            member.get("componentId") for member in definition.get("members", []) if isinstance(member, dict)
         }
         if any(member.get("componentId") not in declared_members for member in group["members"]):
             raise ComponentArtifactError("index compatibility group contains a component absent from the catalog")
@@ -925,8 +954,7 @@ def _verify_index_metadata(document: dict[str, Any], catalog: dict[str, Any]) ->
     owner, repository_name, publisher = _verify_index_catalog_metadata(document, catalog)
     release_id = f"{document['channel']}-{document['source']['commit']}"
     release = _github_json(
-        "https://api.github.com/repos/"
-        f"{owner}/{repository_name}/releases/tags/{quote(release_id, safe='-')}"
+        f"https://api.github.com/repos/{owner}/{repository_name}/releases/tags/{quote(release_id, safe='-')}"
     )
     expected_prerelease = document["channel"] == "preview"
     if release.get("tag_name") != release_id or release.get("prerelease") is not expected_prerelease:
@@ -938,9 +966,7 @@ def _verify_index_metadata(document: dict[str, Any], catalog: dict[str, Any]) ->
     asset_names = {row.get("name") for row in release.get("assets", []) if isinstance(row, dict)}
     if index_asset_name != "component-release-index-v1.json" or index_asset_name not in asset_names:
         raise ComponentArtifactError("immutable GitHub Release lacks the trusted index asset")
-    manifest_asset_names = {
-        Path(urlparse(row["manifestUri"]).path).name for row in document["releases"]
-    }
+    manifest_asset_names = {Path(urlparse(row["manifestUri"]).path).name for row in document["releases"]}
     if not manifest_asset_names.issubset(asset_names):
         raise ComponentArtifactError("immutable GitHub Release is missing an indexed component manifest asset")
 
@@ -1457,7 +1483,9 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--output", type=Path, required=True)
     index.set_defaults(handler=_index_command)
 
-    verify_index_parser = commands.add_parser("verify-index", help="verify an index, catalog, release, run, and attestation pin")
+    verify_index_parser = commands.add_parser(
+        "verify-index", help="verify an index, catalog, release, run, and attestation pin"
+    )
     verify_index_parser.add_argument("--index", type=Path, required=True)
     verify_index_parser.add_argument("--catalog", type=Path)
     verify_index_parser.add_argument("--verify-release", action="store_true")

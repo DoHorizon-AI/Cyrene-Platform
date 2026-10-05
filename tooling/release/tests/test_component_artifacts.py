@@ -102,6 +102,36 @@ def _make_fixture_manifest(root: Path) -> tuple[Path, Path]:
     return archive, manifest_path
 
 
+def _make_executable_files_manifest(root: Path) -> tuple[Path, Path, list[str]]:
+    """Create one signed-source descriptor with explicit executable attachments."""
+    payload = root / "executable-payload"
+    (payload / "bin").mkdir(parents=True)
+    (payload / "systemd").mkdir()
+    executable_files = [
+        "bin/cy-workspace-authority-host",
+        "bin/cy-workspace-authority-admin",
+        "bin/cy-workspace-storage-migrator",
+        "bin/cy-workspace-device-ca-admin",
+        "bin/cy-workspace-directory-admin",
+    ]
+    for path in executable_files:
+        binary = payload / path
+        binary.write_bytes(path.encode("ascii") + b"\n")
+        binary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    (payload / "systemd/cyrene-workspace-authority.service").write_bytes(b"[Service]\n")
+    archive = root / "cyrene-sample-linux-ubuntu-24-04-x86-64.tar.gz"
+    artifacts._write_deterministic_tar_gz(payload, archive)
+    descriptor_value = _descriptor(f"preview-{SOURCE_SHA}")
+    artifact = descriptor_value["artifact"]
+    artifact["entrypoint"] = executable_files[0]
+    artifact["executableFiles"] = executable_files
+    descriptor = root / "executable-descriptor.json"
+    descriptor.write_text(json.dumps(descriptor_value, indent=2) + "\n", encoding="utf-8")
+    manifest_path = root / "executable-manifest.json"
+    artifacts.create_manifest(descriptor, manifest_path, archive, payload)
+    return archive, manifest_path, executable_files
+
+
 def test_jcs_golden_manifest_and_index_bytes() -> None:
     """Match the shared Rust/Python/TypeScript RFC 8785 golden bytes."""
     manifest = json.loads((FIXTURES / "component-release-manifest-v1.json").read_text())
@@ -132,6 +162,7 @@ def test_archive_and_manifest_bind_exact_payload_bytes(tmp_path: Path) -> None:
         verify_attestation=False,
     )
     assert manifest["artifact"]["files"]["cyrene-sample"].startswith("sha256:")
+    assert "executableFiles" not in manifest["artifact"]
     archive.write_bytes(archive.read_bytes() + b"tampered")
     with pytest.raises(artifacts.ComponentArtifactError, match="artifact size"):
         artifacts.verify_manifest(
@@ -140,6 +171,50 @@ def test_archive_and_manifest_bind_exact_payload_bytes(tmp_path: Path) -> None:
             verify_run=False,
             verify_attestation=False,
         )
+
+
+def test_executable_files_are_source_and_archive_bound(tmp_path: Path) -> None:
+    """Explicit executable modes are covered by the same signed payload map."""
+    archive, manifest_path, executable_files = _make_executable_files_manifest(tmp_path)
+    manifest = artifacts.verify_manifest(
+        manifest_path,
+        archive,
+        verify_run=False,
+        verify_attestation=False,
+    )
+
+    assert manifest["source"] == _source()
+    assert manifest["artifact"]["executableFiles"] == executable_files
+    assert manifest["artifact"]["entrypoint"] == executable_files[0]
+    assert set(manifest["artifact"]["files"]) == {
+        *executable_files,
+        "systemd/cyrene-workspace-authority.service",
+    }
+    assert artifacts._archive_files(archive) == manifest["artifact"]["files"]
+
+
+@pytest.mark.parametrize(
+    "executable_files,expected_error",
+    [
+        ("bin/cy-workspace-authority-host", "non-empty array"),
+        ([], "non-empty array"),
+        (["bin/cy-workspace-authority-host", "bin/cy-workspace-authority-host"], "unique"),
+        (["bin/cy-workspace-authority-host", "../outside"], "unsafe payload path"),
+        (["bin/cy-workspace-authority-host", "bin/not-in-files"], "appear in artifact.files"),
+        (["bin/cy-workspace-authority-admin"], "must include artifact.entrypoint"),
+        (["bin/cy-workspace-authority-host", 42], "safe relative paths"),
+    ],
+)
+def test_manifest_rejects_invalid_executable_file_lists(
+    tmp_path: Path, executable_files: object, expected_error: str
+) -> None:
+    """Reject unsafe, duplicate, unbound, or entrypoint-omitting declarations."""
+    _archive, manifest_path, _valid_executable_files = _make_executable_files_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact"]["executableFiles"] = executable_files
+    manifest["manifestDigest"] = artifacts._manifest_digest(manifest)
+
+    assert expected_error in "; ".join(artifacts._validate_manifest(manifest))
 
 
 def test_index_uses_exact_asset_name_and_source_pins(tmp_path: Path) -> None:

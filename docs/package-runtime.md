@@ -84,12 +84,98 @@ count.
 
 ## Node-local control process
 
-`cy-package-runtime --root <state-root> --dependency-preparer <path>` owns the lifecycle and supervised
-workers for one node. Adapters exchange one JSON request and response per line
-using `cy-package-runtime.control.v1`. The channel exposes structured error
-codes and remediation, and supports the same inspect, verify, install,
-activation, recovery, upgrade, rollback, uninstall, and cleanup operations as
-the Rust API.
+`cy-package-runtime --root <state-root> --dependency-preparer <path>` owns the
+lifecycle and supervised workers for one node. Production mode serves one
+authenticated JSON request and response on each connection at
+`/run/cyrene-package-runtime/control.sock`; `--socket` may select another
+absolute path. The source policy defaults to
+`/etc/cyrene/runtime-package-sources.json` and can be overridden with
+`--source-policy`. The daemon shares one runtime and supervisor across all
+connections. Its compatibility `--stdio` entrypoint keeps the original
+line-oriented control wire for deterministic local callers.
+
+UDS requests retain the flattened `operation` control shape and add an
+authentication envelope and generation:
+
+```json
+{
+  "request_id": "product-generated-request-id",
+  "operation": "runtime_status",
+  "binding_id": "yield.llama-factory.primary",
+  "auth": {"source_id": "cyrene-yield", "source_token": "<source secret>"},
+  "catalog_generation": 12
+}
+```
+
+The first `authority` request may omit `catalog_generation`; its result returns
+`authority: "platform_package_runtime"`,
+`protocol_version: "cy-package-runtime.control.v1"`, the current generation,
+and `capabilities`. The daemon advertises
+`cy-package-runtime.binding-operation-admission.v1` only when the local
+maintenance broker reports protocol `cyrene.runtime-maintenance.broker.v1`,
+both required capabilities `cyrene.runtime-maintenance.state.v2` and
+`cyrene.runtime-maintenance.binding-operations.v1`, and the same catalog
+generation. The Broker capability list must contain unique, non-empty strings;
+additional valid capabilities are allowed but are never projected by this
+daemon. Otherwise `capabilities` is empty and mutation requests fail closed.
+
+`auth: {}` is accepted only from a root Unix peer. Product callers must provide
+both source fields and the exact generation. The daemon checks `SO_PEERCRED`
+UID/GID against a single source-policy row and hashes the supplied token against
+the row's SHA-256 digest with a constant-time comparison. It never reads the
+root-only activity catalog or stores/logs the source token. The policy file and
+all parent directories must be root-owned real paths without group/world write
+permission; the policy file must be a single-link regular file opened without
+following symlinks. Its top-level shape is:
+
+```json
+{
+  "schema_version": 1,
+  "generation": 12,
+  "sources": [{
+    "source_id": "cyrene-yield",
+    "uid": 1001,
+    "gid": 1001,
+    "source_token_sha256": "<64 lowercase hex characters>",
+    "bindings": [{
+      "binding_id": "yield.llama-factory.primary",
+      "package_id": "org.example.llama-factory",
+      "installation_ids": ["install-<exact-id>"],
+      "operations": ["activate", "recover_binding", "deactivate", "runtime_status", "get_installation"]
+    }]
+  }]
+}
+```
+
+Product policy is exact per source, binding, package, and installation. Missing
+rows, empty scopes, a generation mismatch, or an unrecognized operation deny
+the request. Product operations cannot install packages or select paths. Input
+frames are limited to 1 MiB, the environment map to 256 entries and 256 KiB,
+each connection has a five-second read/write timeout, and at most 32 connections
+are active at once.
+
+The daemon reserves `activate`, `recover_binding` (broker operation `recover`),
+and `deactivate` through the maintenance broker before changing runtime state.
+For activation it derives package identity from the exact installed record; for
+recovery/deactivation it derives package and installation identity from the
+durable binding record. A successful result retains the real `RuntimeStatus`
+fields and adds `result.binding_operation`, which carries the request/source,
+exact scope, both catalog and gate generations, the broker protocol version,
+operation token, and replay flags. The Product owner must persist the returned
+status and `connection_ref` with its own binding record, then call the broker's
+`CompleteBindingOperation` directly using that same source credential, scope,
+request ID, and token. The daemon never completes the owner lease itself.
+
+An `already_in_flight` replay returns `BINDING_OPERATION_PENDING` with the
+receipt under `error.binding_operation`; it never dispatches the mutation a
+second time. An `already_completed` replay returns only a fresh read-only
+runtime status plus its receipt. Mutation errors after reservation also carry
+the receipt so the owner can reconcile durable state explicitly. A process
+crash leaves the durable admission pending and blocks updates until the owner
+reconciles and completes it. Root operator mutations without a Product-scoped
+admission are denied. Idle bindings are not reported as active tasks; update
+readiness remains based on task admissions and the actual supervisor/process
+state.
 
 Descriptor/archive paths, dependency paths, worker environment values, and the
 worker protocol are internal to this node-local seam. A Product adapter must
@@ -97,6 +183,88 @@ project only package identity/version, installation identity, verification,
 binding policy, runtime status, and structured failure/remediation. It must not
 project cache, staging or prepared-runtime paths, ZIP internals, executables, stdio,
 PIDs, or runtime implementation details.
+
+## Root-only offline first install
+
+The first package install runs while Workspace holds a root-validated
+`PACKAGE_ONLY` maintenance transaction. Workspace remains responsible for
+verifying official release attestations. It writes a private request and
+candidate files under `/var/lib/cyrene-updates/plugin-package-bootstrap/<request_id>/`:
+directories are root-owned mode `0700`, and `request.json`, `descriptor.json`,
+and `archive.zip` are root-owned single-link regular files mode `0600`. The
+request is limited to 64 KiB, rejects unknown fields, and binds the package
+component ID to the package ID and artifact digest in the held plan. The
+package artifact digest is distinct from the `cy-package-runtime` host binary
+digest.
+
+The input object contains `schema_version: 1`, a safe `request_id`, a
+`maintenance` object with `transaction_id`, `maintenance_token`,
+`target_kind: "PACKAGE_ONLY"`, `plan_id`, `plan_digest`, the complete
+`component_artifact_digests` map, `expected_gate_generation`, and the current
+`expected_catalog_generation`. Its `candidate` object contains the exact
+descriptor/archive paths in that request directory, `component_id` equal to
+`package_id`, `package_version`, and the artifact, archive, descriptor,
+manifest, and dependency-lock SHA-256 digests. Unknown fields such as a caller
+assertion that proof passed are rejected.
+
+```json
+{
+  "schema_version": 1,
+  "request_id": "bootstrap-request-1",
+  "maintenance": {
+    "transaction_id": "active-package-hold-request-id",
+    "maintenance_token": "<private hold token>",
+    "target_kind": "PACKAGE_ONLY",
+    "plan_id": "workspace-plan-id",
+    "plan_digest": "sha256:<64 lowercase hex characters>",
+    "component_artifact_digests": {
+      "org.example.plugin": "sha256:<plugin package digest>"
+    },
+    "expected_gate_generation": 5,
+    "expected_catalog_generation": 9
+  },
+  "candidate": {
+    "descriptor_path": "/var/lib/cyrene-updates/plugin-package-bootstrap/bootstrap-request-1/descriptor.json",
+    "archive_path": "/var/lib/cyrene-updates/plugin-package-bootstrap/bootstrap-request-1/archive.zip",
+    "component_id": "org.example.plugin",
+    "package_id": "org.example.plugin",
+    "package_version": "1.2.3",
+    "artifact_digest": "sha256:<plugin package digest>",
+    "archive_digest": "sha256:<64 lowercase hex characters>",
+    "descriptor_digest": "sha256:<64 lowercase hex characters>",
+    "manifest_digest": "sha256:<64 lowercase hex characters>",
+    "dependency_lock_digest": "sha256:<64 lowercase hex characters>"
+  }
+}
+```
+
+The root coordinator invokes the installed `cy-package-runtime` native binary
+with `--root /var/lib/cyrene/package-runtime`, `--dependency-preparer
+/usr/libexec/cyrene-plugin-python-preparer`, the pinned `--uv
+/opt/cyrene/uv/0.12.21/uv` and `--python
+/opt/cyrene/python/3.12.14/bin/python3.12` arguments passed as repeated
+`--dependency-preparer-arg` pairs, `--bootstrap-install-offline`, and
+`--bootstrap-input-file
+/var/lib/cyrene-updates/plugin-package-bootstrap/<request_id>/request.json`.
+The command requires effective UID 0, reads the Broker operator credential
+from its fixed root-only file, confirms the daemon is stopped, acquires the
+same process lock as the daemon, and calls `ValidateMaintenanceHold` before and
+after installation. It copies only the public descriptor and archive into a
+root-owned, cyrene-readable handoff under
+`/run/cyrene-package-runtime-bootstrap/<request_id>/`, then runs the normal
+Platform verification and installation code as `cyrene`. External attestation
+verification remains Workspace-owned.
+
+The one-shot command emits one JSON line. Success is
+`{request_id, ok:true, result:{..., installation:<actual InstallationRecord>}}`;
+failure is `{request_id, ok:false, error:{code,message,remediation}}`. The
+receipt includes the exact hold identity and generations plus the actual
+installation ID, version, and digests. It contains no hold token, operator
+credential, operation token, or `connection_ref`. Success and failure both
+leave the maintenance hold active. Workspace updates the exact installation
+scope and derived source policy, starts the daemon, verifies its
+source-authenticated `authority` response at the current generation, and only
+then closes the hold.
 ---
 
 <!-- Chinese Translation / 中文翻译 -->
@@ -147,6 +315,28 @@ PIDs, or runtime implementation details.
 
 ## 节点本地控制进程
 
-`cy-package-runtime --root <state-root> --dependency-preparer <path>` 负责一个节点上的生命周期和受监管 worker。适配器通过 `cy-package-runtime.control.v1` 协议逐行交换一个 JSON 请求和响应。该通道提供结构化错误码及修复建议，并支持与 Rust API 相同的检查、验证、安装、激活、恢复、升级、回滚、卸载和清理操作。
+`cy-package-runtime --root <state-root> --dependency-preparer <path>` 负责一个节点上的生命周期和受监管 worker。生产模式在 `/run/cyrene-package-runtime/control.sock` 上提供经认证的 UDS 控制；每个连接只处理一个请求和响应，`--socket` 可指定其他绝对路径。源策略默认为 `/etc/cyrene/runtime-package-sources.json`，可通过 `--source-policy` 覆盖。所有连接共享唯一 runtime 和 supervisor。兼容性 `--stdio` 入口保留原有逐行 control wire，供本地确定性调用。
+
+UDS 请求沿用扁平 `operation` 结构，并增加认证信封和目录代次。首次 `authority` 请求可以省略 `catalog_generation`；结果返回 `authority: "platform_package_runtime"`、`protocol_version: "cy-package-runtime.control.v1"`、当前 generation 和 `capabilities`。只有本机 maintenance broker 使用 `cyrene.runtime-maintenance.broker.v1`、包含 `cyrene.runtime-maintenance.state.v2` 与 `cyrene.runtime-maintenance.binding-operations.v1` 两项必需 capability，并返回相同目录代次时，daemon 才发布自己的 `cy-package-runtime.binding-operation-admission.v1`。Broker capability 列表必须是有效且无重复的非空字符串；额外的有效 capability 允许存在，但不会由 Package Runtime 转发。缺少必需项或协议/代次不符时 capabilities 为空，所有 mutation fail closed。
+
+`auth: {}` 仅允许 UID 为 root 的 Unix peer。Product 必须同时提供 `source_id`、`source_token` 和精确代次。Daemon 通过 `SO_PEERCRED` 将 UID/GID 与唯一源策略行比较，并对 token 执行常量时间 SHA-256 摘要比较。它不读取 root-only activity catalog，也不存储或记录 token。策略文件和所有父目录必须是 root 所有的真实路径且不可被 group/world 写入；策略文件必须是单链接普通文件，并且不能跟随符号链接打开。策略结构与上方英文示例相同：每个 source 精确绑定 UID/GID、token 摘要、generation，以及每个 binding 的 package、installation IDs 和操作列表。未匹配行、空 scope、代次差异或未知操作都会拒绝请求。
+
+Product 操作不能安装包或选择路径。输入帧上限为 1 MiB，环境映射最多 256 项且合计不超过 256 KiB；每个连接读写超时为 5 秒，同时最多接受 32 个连接。
+
+Daemon 在改变运行时状态之前，先向 maintenance broker 原子申请 `activate`、`recover_binding`（broker operation 为 `recover`）或 `deactivate`。激活时从精确安装记录取得 package identity；恢复和停用时从持久 binding 记录取得 package 与 installation identity。成功响应保留真实 `RuntimeStatus` 字段，并增加 `result.binding_operation`，其中包含 request/source、精确 scope、catalog 与 gate generation、broker 协议版本、operation token 和重放标志。Product owner 必须先将状态与 `connection_ref` 和自己的 binding 记录一同持久化，再使用同一 source credential、scope、request ID 和 token 直接调用 broker 的 `CompleteBindingOperation`。Daemon 不会替 owner 完成 lease。
+
+`already_in_flight` 重放返回 `BINDING_OPERATION_PENDING`，并把 receipt 放在 `error.binding_operation` 中；daemon 不会再次执行 mutation。`already_completed` 重放只读取新的真实运行时状态并返回 receipt。reservation 后发生的 mutation 错误也附带 receipt，供 owner 显式对账。进程崩溃会留下持久 pending admission，在 owner 对账并完成前阻止更新。没有 Product scope 的 root operator mutation 会被拒绝。空闲 binding 不会伪装成活动任务；更新 readiness 仍依据任务 admission 和真实 supervisor/进程状态。
 
 描述符/压缩包路径、依赖路径、worker 环境值和 worker 协议都是此节点本地边界的内部内容。Product 适配器只能投影包身份/版本、安装身份、验证结果、绑定策略、运行时状态以及结构化失败/修复建议。不得投影缓存、暂存或准备后运行时路径、ZIP 内部信息、可执行文件、stdio、PID 或运行时实现细节。
+
+## Root-only 离线首次安装
+
+首次安装必须位于 Workspace 持有并经 root 验证的 `PACKAGE_ONLY` maintenance transaction 中。Workspace 仍负责官方 release attestation 验证。它会在 `/var/lib/cyrene-updates/plugin-package-bootstrap/<request_id>/` 下写入私有请求和候选文件：目录为 root 所有、权限 `0700`；`request.json`、`descriptor.json` 和 `archive.zip` 是 root 所有的单链接普通文件、权限 `0600`。请求上限为 64 KiB，未知字段会被拒绝，并将 package component ID 与 hold plan 中的 package ID 和 artifact digest 精确绑定。插件包的 artifact digest 与 `cy-package-runtime` 宿主二进制 digest 是两个不同值。
+
+请求包含 `schema_version: 1`、安全的 `request_id`，以及 `maintenance` 对象中的 `transaction_id`、`maintenance_token`、`target_kind: "PACKAGE_ONLY"`、`plan_id`、`plan_digest`、完整 `component_artifact_digests` 映射、`expected_gate_generation` 和当前 `expected_catalog_generation`。`candidate` 对象包含该请求目录内的精确 descriptor/archive 路径、与 `package_id` 相同的 `component_id`、`package_version`，以及 artifact、archive、descriptor、manifest 和 dependency-lock 的 SHA-256 digest。包括“调用方证明已通过验签”在内的未知字段都会被拒绝。
+
+英文部分的 JSON 示例展示完整字段结构；其中 `component_artifact_digests[package_id]` 必须等于 `candidate.artifact_digest`。如果同一 plan 也更新宿主二进制，`cy-package-runtime` 使用自己的独立 digest 项。
+
+Root coordinator 调用已安装的 `cy-package-runtime` native binary，传入 `--root /var/lib/cyrene/package-runtime`、`--dependency-preparer /usr/libexec/cyrene-plugin-python-preparer`、固定 `--uv /opt/cyrene/uv/0.12.21/uv` 和 `--python /opt/cyrene/python/3.12.14/bin/python3.12` 参数（每项都以重复的 `--dependency-preparer-arg` 和独立 argv 传入）、`--bootstrap-install-offline` 以及 `--bootstrap-input-file /var/lib/cyrene-updates/plugin-package-bootstrap/<request_id>/request.json`。命令要求 effective UID 0，从固定 root-only 文件读取 Broker operator credential，确认 daemon 已停止，取得与 daemon 相同的 process lock，并在安装前后调用 `ValidateMaintenanceHold`。它只把公开 descriptor/archive 复制到 `/run/cyrene-package-runtime-bootstrap/<request_id>/` 下 root 所有且 cyrene 可读的 handoff，再以 `cyrene` 身份运行 Platform 原有校验和安装逻辑。官方 attestation 验签仍由 Workspace 负责。
+
+一次性命令输出一行 JSON。成功格式为 `{request_id, ok:true, result:{..., installation:<实际 InstallationRecord>}}`；失败格式为 `{request_id, ok:false, error:{code,message,remediation}}`。回执包含精确 hold 身份、代次和真实安装 ID、版本及摘要，不包含 hold token、operator credential、operation token 或 `connection_ref`。成功或失败都会保留 maintenance hold。Workspace 更新精确 installation scope 和派生 source policy、启动 daemon、以 source auth 在当前代次验证 `authority` 响应后，才关闭 hold。

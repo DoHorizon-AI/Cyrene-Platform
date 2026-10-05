@@ -1,0 +1,37 @@
+[Unit]
+Description=CYRENE Package Runtime
+After=local-fs.target cyrene-runtime-maintenance.service
+Requires=cyrene-runtime-maintenance.service
+PartOf=cyrene-runtime-maintenance.service
+
+[Service]
+Type=simple
+User=cyrene
+Group=cyrene
+# Refuse to start until the separately verified Plugin preparer and pinned
+# Python toolchain have been provisioned by the trusted bootstrap transaction.
+ExecStartPre=/usr/bin/test -x /usr/libexec/cyrene-plugin-python-preparer
+ExecStartPre=/usr/bin/test -x /opt/cyrene/uv/0.12.21/uv
+ExecStartPre=/usr/bin/test -x /opt/cyrene/python/3.12.14/bin/python3.12
+ExecStartPre=/usr/bin/test -f /etc/cyrene/runtime-package-sources.json
+ExecStart=/usr/bin/cyrene component-run cy-package-runtime -- --root /var/lib/cyrene/package-runtime --dependency-preparer /usr/libexec/cyrene-plugin-python-preparer --dependency-preparer-arg --uv --dependency-preparer-arg /opt/cyrene/uv/0.12.21/uv --dependency-preparer-arg --python --dependency-preparer-arg /opt/cyrene/python/3.12.14/bin/python3.12 --socket /run/cyrene-package-runtime/control.sock --source-policy /etc/cyrene/runtime-package-sources.json
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=cyrene-package-runtime
+RuntimeDirectoryMode=0750
+StateDirectory=cyrene/package-runtime
+StateDirectoryMode=0700
+UMask=0007
+KillMode=control-group
+TimeoutStopSec=30s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/cyrene/runtime-package-sources.json /usr/libexec/cyrene-plugin-python-preparer /opt/cyrene/uv/0.12.21/uv /opt/cyrene/python/3.12.14/bin/python3.12
+ReadWritePaths=/run/cyrene-package-runtime /var/lib/cyrene/package-runtime
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -88,10 +88,12 @@ jobs:
           python -m pip install --upgrade pip pytest hypothesis "pyyaml>=6.0"
           python -m pip install -e sdk/python/cyrene_artifacts
           python -m pip install -e sdk/python/cyrene_preflight
+          python -m pip install -e sdk/python/cyrene_runtime_maintenance
       - name: Run SDK unit tests
         run: |
           python -m pytest sdk/python/cyrene_artifacts/tests
           python -m pytest sdk/python/cyrene_preflight/tests
+          python -m pytest sdk/python/cyrene_runtime_maintenance/tests
           python -m pytest tooling/docs/tests
           python -m pytest tooling/ci/tests
           python -m pytest tooling/runtime/tests

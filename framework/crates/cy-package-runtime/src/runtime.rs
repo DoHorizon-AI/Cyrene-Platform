@@ -2,6 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Write,
+    os::unix::{
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        io::{AsRawFd, FromRawFd, RawFd},
+    },
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -14,9 +18,10 @@ use zip::ZipArchive;
 
 use crate::{
     ActivationRequest, ArtifactDigest, BindingId, CleanupReport, DependencyPreparationEvidence,
-    InstallationId, InstallationRecord, InstallationState, PackageId, PackageInspection,
-    PackageRuntimeError, PackageSource, PackageVersion, PluginServiceSupervisor, RuntimeGeneration,
-    RuntimeState, RuntimeStatus, ServiceActivationOptions, VerifiedPackage,
+    InstallationId, InstallationRecord, InstallationState, OfflineInstallCandidateIdentity,
+    PackageId, PackageInspection, PackageRuntimeError, PackageSource, PackageVersion,
+    PluginServiceSupervisor, RuntimeGeneration, RuntimeState, RuntimeStatus,
+    ServiceActivationOptions, VerifiedPackage,
     dependency::DependencyPreparer,
     descriptor::{
         digest_entries, digest_file, inspect_source, unix_ms, validate_archive_paths, verify_source,
@@ -25,6 +30,179 @@ use crate::{
 
 const INSTALLATION_RECORD_VERSION: u32 = 1;
 const ACTIVATION_RECORD_VERSION: u32 = 1;
+const PROCESS_LOCK_FILE: &str = ".package-runtime.lock";
+
+/// Cross-process ownership of one package runtime state root.
+///
+/// The lock remains held for the full lifetime of the runtime and prevents a
+/// one-shot bootstrap installer from writing beside the managed daemon.
+/// 中文：通过文件锁保证常驻 daemon 与一次性安装器不会并写同一状态目录。
+pub struct RuntimeProcessLock {
+    file: File,
+    owner_uid: u32,
+    owner_gid: u32,
+}
+
+impl RuntimeProcessLock {
+    /// Acquires the state-root lock for a specific runtime account.
+    pub fn acquire(
+        root: &Path,
+        owner_uid: u32,
+        owner_gid: u32,
+        create_root: bool,
+    ) -> Result<Self, PackageRuntimeError> {
+        if create_root {
+            fs::create_dir_all(root).map_err(io_error("RUNTIME_ROOT_UNAVAILABLE"))?;
+        }
+        validate_runtime_root(root, owner_uid, owner_gid)?;
+
+        let lock_path = root.join(PROCESS_LOCK_FILE);
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = match options.create_new(true).open(&lock_path) {
+            Ok(file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(io_error("RUNTIME_LOCK_UNAVAILABLE"))?;
+                if metadata.uid() != owner_uid || metadata.gid() != owner_gid {
+                    if nix::unistd::geteuid().as_raw() != 0 {
+                        return Err(PackageRuntimeError::new(
+                            "RUNTIME_LOCK_UNAVAILABLE",
+                            "runtime process lock ownership does not match the runtime account",
+                        ));
+                    }
+                    // SAFETY: the file descriptor refers to the newly created
+                    // regular lock file beneath the already validated state root.
+                    if unsafe { libc::fchown(file.as_raw_fd(), owner_uid, owner_gid) } != 0 {
+                        return Err(io_error("RUNTIME_LOCK_UNAVAILABLE")(
+                            std::io::Error::last_os_error(),
+                        ));
+                    }
+                }
+                // SAFETY: the file descriptor refers to the newly created
+                // regular lock file beneath the already validated state root.
+                if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+                    return Err(io_error("RUNTIME_LOCK_UNAVAILABLE")(
+                        std::io::Error::last_os_error(),
+                    ));
+                }
+                file
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => options
+                .create_new(false)
+                .open(&lock_path)
+                .map_err(io_error("RUNTIME_LOCK_UNAVAILABLE"))?,
+            Err(error) => return Err(io_error("RUNTIME_LOCK_UNAVAILABLE")(error)),
+        };
+        let lock = Self {
+            file,
+            owner_uid,
+            owner_gid,
+        };
+        lock.validate_and_lock(root)?;
+        Ok(lock)
+    }
+
+    /// Takes ownership of an inherited lock descriptor in a dropped-privilege worker.
+    ///
+    /// # Safety
+    /// The descriptor must be a valid, uniquely owned handle to this root's
+    /// locked process-lock file and must not be used after this call.
+    pub unsafe fn from_inherited_fd(
+        fd: RawFd,
+        root: &Path,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Self, PackageRuntimeError> {
+        // SAFETY: upheld by this function's caller contract.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let lock = Self {
+            file,
+            owner_uid,
+            owner_gid,
+        };
+        lock.validate_and_lock(root)?;
+        Ok(lock)
+    }
+
+    /// Returns the descriptor to pass to a worker process before exec.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    fn validate_and_lock(&self, root: &Path) -> Result<(), PackageRuntimeError> {
+        let root_metadata =
+            fs::symlink_metadata(root).map_err(io_error("RUNTIME_ROOT_UNAVAILABLE"))?;
+        let lock_metadata = self
+            .file
+            .metadata()
+            .map_err(io_error("RUNTIME_LOCK_UNAVAILABLE"))?;
+        let expected_path = root.join(PROCESS_LOCK_FILE);
+        let named_metadata =
+            fs::symlink_metadata(&expected_path).map_err(io_error("RUNTIME_LOCK_UNAVAILABLE"))?;
+        if root_metadata.file_type().is_symlink()
+            || !root_metadata.is_dir()
+            || root_metadata.uid() != self.owner_uid
+            || root_metadata.gid() != self.owner_gid
+            || root_metadata.permissions().mode() & 0o777 != 0o700
+            || lock_metadata.file_type().is_symlink()
+            || !lock_metadata.is_file()
+            || lock_metadata.nlink() != 1
+            || lock_metadata.uid() != self.owner_uid
+            || lock_metadata.gid() != self.owner_gid
+            || lock_metadata.permissions().mode() & 0o777 != 0o600
+            || named_metadata.file_type().is_symlink()
+            || !named_metadata.is_file()
+            || named_metadata.nlink() != 1
+            || named_metadata.ino() != lock_metadata.ino()
+            || named_metadata.dev() != lock_metadata.dev()
+        {
+            return Err(PackageRuntimeError::new(
+                "RUNTIME_LOCK_UNAVAILABLE",
+                "runtime state root or process lock has unsafe ownership or permissions",
+            ));
+        }
+        // SAFETY: the descriptor is an open regular file and remains owned by
+        // this lock object for the full runtime lifetime.
+        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            let code = if error
+                .raw_os_error()
+                .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+            {
+                "PACKAGE_RUNTIME_ALREADY_RUNNING"
+            } else {
+                "RUNTIME_LOCK_UNAVAILABLE"
+            };
+            return Err(io_error(code)(error));
+        }
+        Ok(())
+    }
+}
+
+fn validate_runtime_root(
+    root: &Path,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<(), PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(root).map_err(io_error("RUNTIME_ROOT_UNAVAILABLE"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != owner_uid
+        || metadata.gid() != owner_gid
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(PackageRuntimeError::new(
+            "RUNTIME_ROOT_UNAVAILABLE",
+            "runtime state root must be a private directory owned by the runtime account",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ActivationRecord {
@@ -46,6 +224,7 @@ pub struct FilesystemPackageRuntime {
     service_supervisor: Mutex<Box<dyn PluginServiceSupervisor>>,
     base_service_options: ServiceActivationOptions,
     lifecycle_lock: Mutex<()>,
+    _process_lock: RuntimeProcessLock,
 }
 
 impl FilesystemPackageRuntime {
@@ -56,6 +235,32 @@ impl FilesystemPackageRuntime {
         base_service_options: ServiceActivationOptions,
     ) -> Result<Self, PackageRuntimeError> {
         let root = root.into();
+        create_private_runtime_root(&root)?;
+        let process_lock = RuntimeProcessLock::acquire(
+            &root,
+            nix::unistd::geteuid().as_raw(),
+            nix::unistd::getegid().as_raw(),
+            false,
+        )?;
+        Self::open_with_process_lock(
+            root,
+            dependency_preparer,
+            service_supervisor,
+            base_service_options,
+            process_lock,
+        )
+    }
+
+    /// Opens the runtime with a process lock already acquired by a trusted parent.
+    pub fn open_with_process_lock(
+        root: impl Into<PathBuf>,
+        dependency_preparer: Arc<dyn DependencyPreparer>,
+        service_supervisor: Box<dyn PluginServiceSupervisor>,
+        base_service_options: ServiceActivationOptions,
+        process_lock: RuntimeProcessLock,
+    ) -> Result<Self, PackageRuntimeError> {
+        let root = root.into();
+        validate_runtime_root(&root, process_lock.owner_uid, process_lock.owner_gid)?;
         for directory in [
             root.join("cache/archives"),
             root.join("cache/descriptors"),
@@ -77,9 +282,39 @@ impl FilesystemPackageRuntime {
             service_supervisor: Mutex::new(service_supervisor),
             base_service_options,
             lifecycle_lock: Mutex::new(()),
+            _process_lock: process_lock,
         };
         runtime.recover_incomplete_transactions()?;
         Ok(runtime)
+    }
+
+    /// Verifies and stages one externally verified candidate for offline install.
+    ///
+    /// The caller supplies identity obtained from its trusted release verifier;
+    /// Platform independently revalidates descriptor, archive, manifest, and lock
+    /// digests before adding the exact bytes to its content-addressed offline cache.
+    pub fn cache_offline_candidate(
+        &self,
+        source: &PackageSource,
+        expected: &OfflineInstallCandidateIdentity,
+    ) -> Result<(), PackageRuntimeError> {
+        let _guard = self.lock_lifecycle()?;
+        let verified = verify_source(source)?;
+        if verified.inspection.package_id != expected.package_id
+            || verified.inspection.package_version != expected.package_version
+            || verified.inspection.artifact_digest != expected.artifact_digest
+            || verified.inspection.archive_digest != expected.archive_digest
+            || verified.inspection.dependency_lock_digest != expected.dependency_lock_digest
+            || verified.evidence.descriptor_digest != expected.descriptor_digest
+            || verified.evidence.manifest_digest != expected.manifest_digest
+        {
+            return Err(PackageRuntimeError::new(
+                "OFFLINE_CANDIDATE_IDENTITY_MISMATCH",
+                "verified offline candidate does not match the held artifact identity",
+            ));
+        }
+        let installation_id = installation_id(&verified);
+        self.cache_verified_source(&verified, &installation_id)
     }
 
     pub fn inspect(
@@ -171,6 +406,19 @@ impl FilesystemPackageRuntime {
             &self.installation_record_path(installation_id),
             "INSTALLATION_NOT_FOUND",
         )
+    }
+
+    /// Reads the exact package and installation currently recorded for a binding.
+    pub(crate) fn binding_package_scope(
+        &self,
+        binding_id: &BindingId,
+    ) -> Result<(String, String), PackageRuntimeError> {
+        let record = self.read_activation(binding_id)?;
+        let installation = self.get_installation(&record.installation_id)?;
+        Ok((
+            installation.package_id.to_string(),
+            record.installation_id.to_string(),
+        ))
     }
 
     pub fn list_installations(&self) -> Result<Vec<InstallationRecord>, PackageRuntimeError> {
@@ -923,6 +1171,39 @@ impl FilesystemPackageRuntime {
 
     fn dependency_path(&self, digest: &ArtifactDigest) -> PathBuf {
         self.root.join("dependencies").join(digest.hex())
+    }
+}
+
+fn create_private_runtime_root(root: &Path) -> Result<(), PackageRuntimeError> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error("RUNTIME_ROOT_UNAVAILABLE")(error)),
+    }
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::create_dir_all(parent).map_err(io_error("RUNTIME_ROOT_UNAVAILABLE"))?;
+    }
+    match fs::create_dir(root) {
+        Ok(()) => {
+            let directory = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+                .open(root)
+                .map_err(io_error("RUNTIME_ROOT_UNAVAILABLE"))?;
+            // SAFETY: the descriptor is a newly created directory whose path
+            // is protected by the validated runtime lock check that follows.
+            if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+                return Err(io_error("RUNTIME_ROOT_UNAVAILABLE")(
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(io_error("RUNTIME_ROOT_UNAVAILABLE")(error)),
     }
 }
 

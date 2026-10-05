@@ -117,6 +117,9 @@ fn readiness_status_to_proto(status: ReadinessStatus) -> i32 {
         ReadinessStatus::Unknown => core_v2::UpdateReadinessStatus::Unspecified,
         ReadinessStatus::Ready => core_v2::UpdateReadinessStatus::Ready,
         ReadinessStatus::ActiveTasks => core_v2::UpdateReadinessStatus::ActiveTasks,
+        // Older readiness wire versions have no binding-operation status. Preserve the
+        // independent blocker code and zero task count in the response projection.
+        ReadinessStatus::ActiveBindingOperations => core_v2::UpdateReadinessStatus::Unspecified,
         ReadinessStatus::IdleRuntimeRequiresUnload => {
             core_v2::UpdateReadinessStatus::IdleRuntimeRequiresUnload
         }
@@ -150,6 +153,19 @@ fn task_activity_from_proto(state: i32) -> Result<TaskActivityState, Status> {
         Ok(core_v2::WorkspaceTaskActivityState::Canceling) => Ok(TaskActivityState::Canceling),
         Ok(core_v2::WorkspaceTaskActivityState::Inflight) => Ok(TaskActivityState::Inflight),
         _ => Err(Status::invalid_argument("task activity state is required")),
+    }
+}
+
+#[cfg(test)]
+mod readiness_status_tests {
+    use super::*;
+
+    #[test]
+    fn binding_operations_use_unknown_wire_status() {
+        assert_eq!(
+            readiness_status_to_proto(ReadinessStatus::ActiveBindingOperations),
+            core_v2::UpdateReadinessStatus::Unspecified as i32
+        );
     }
 }
 
