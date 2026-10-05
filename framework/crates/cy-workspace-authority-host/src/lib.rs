@@ -29,12 +29,13 @@ use cy_workspace_control_plane::{
         SnapshotArtifactInput, SnapshotTrust, VerifiedContractSnapshot,
     },
     AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, WebIdentityDirectory,
-    WebIdentityDirectoryError,
+    WebIdentityDirectoryError, WorkspaceDevicePeerCertificateStatusChecker,
 };
 use cy_workspace_postgres_storage::{
     AuthorityExecutionTargetBinding as PgTarget, DurableDirectoryError,
     PostgresAuthorityExecutionTargetStore, PostgresAuthorityWebSessionStore,
-    PostgresWorkspaceDeviceRegistry, PostgresWorkspaceDirectory, PostgresWorkspaceOutbox,
+    PostgresRelayPeerSignedCrlChecker, PostgresWorkspaceDeviceRegistry, PostgresWorkspaceDirectory,
+    PostgresWorkspaceOutbox,
 };
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -237,6 +238,19 @@ pub async fn run_host() -> Result<(), HostError> {
         .map_err(|_| HostError::Database)?,
     );
     registry.health_check().map_err(|_| HostError::Database)?;
+    let peer_certificate_status_checker = Arc::new(
+        tokio::task::spawn_blocking(PostgresRelayPeerSignedCrlChecker::connect_from_environment)
+            .await
+            .map_err(|_| HostError::Database)?
+            .map_err(|_| HostError::Database)?,
+    );
+    let checker_for_startup = peer_certificate_status_checker.clone();
+    tokio::task::spawn_blocking(move || checker_for_startup.check_current_crl())
+        .await
+        .map_err(|_| HostError::Database)?
+        .map_err(|_| HostError::Database)?;
+    let device_certificate_status: Arc<dyn WorkspaceDevicePeerCertificateStatusChecker> =
+        peer_certificate_status_checker.clone();
 
     let signing_key = SigningKey::from_bytes(&settings.signing_key);
     settings.signing_key.zeroize();
@@ -270,6 +284,7 @@ pub async fn run_host() -> Result<(), HostError> {
         sessions,
         targets,
         device_registry: registry.clone(),
+        device_certificate_status,
         outbox,
         signer,
     });
@@ -308,6 +323,7 @@ pub async fn run_host() -> Result<(), HostError> {
     let readiness = ready.clone();
     let readiness_directory = directory.clone();
     let readiness_registry = registry.clone();
+    let readiness_crl_checker = peer_certificate_status_checker.clone();
     let readiness_verifier = verifier.clone();
     let readiness_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -322,7 +338,12 @@ pub async fn run_host() -> Result<(), HostError> {
                 tokio::task::spawn_blocking(move || registry_for_check.health_check())
                     .await
                     .is_ok_and(|result| result.is_ok());
-            *readiness.write().await = directory_ok && db_ok && verifier_ok && registry_ok;
+            let checker_for_check = readiness_crl_checker.clone();
+            let crl_ok = tokio::task::spawn_blocking(move || checker_for_check.check_current_crl())
+                .await
+                .is_ok_and(|result| result.is_ok());
+            *readiness.write().await =
+                directory_ok && db_ok && verifier_ok && registry_ok && crl_ok;
         }
     });
     let health_task = tokio::spawn(async move { axum::serve(health, health_router).await });

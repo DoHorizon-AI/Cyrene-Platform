@@ -42,6 +42,7 @@ const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DEVICE_REGISTRY_DATABASE_URL";
 const RELAY_DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_RELAY_DEVICE_REGISTRY_DATABASE_URL";
 const MIGRATION_DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DEVICE_REGISTRY_MIGRATION_DATABASE_URL";
 const REGISTRY_TABLE: &str = "cyrene_workspace_device_registry.certificate_records";
+const TERMINAL_DEVICE_KEYS_TABLE: &str = "cyrene_workspace_device_registry.terminal_device_keys";
 const AUTHORIZATION_TABLE: &str = "cyrene_workspace_device_authorization.authorizations";
 const DIRECTORY_BINDINGS_TABLE: &str = "cyrene_workspace_directory.device_registration_bindings";
 const DIRECTORY_IDENTITIES_TABLE: &str = "cyrene_workspace_directory.workspace_device_identities";
@@ -205,6 +206,12 @@ impl PostgresWorkspaceDeviceRegistry {
     pub fn health_check(&self) -> RegistryResult<()> {
         let (reply, result) = mpsc::sync_channel(1);
         self.call(Command::Health(reply), result)
+    }
+
+    /// Read the immutable terminal-revocation state for an exact device key.
+    pub fn is_device_terminal(&self, key: &WorkspaceDeviceKey) -> RegistryResult<bool> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(Command::IsDeviceTerminal(key.clone(), reply), result)
     }
 
     fn start(database_url: &str, apply_migrations: bool) -> RegistryResult<Self> {
@@ -431,6 +438,7 @@ enum Command {
     ),
     Reconcile(usize, Reply<usize>),
     Revoke(WorkspaceDeviceKey, Reply<WorkspaceDeviceRecord>),
+    IsDeviceTerminal(WorkspaceDeviceKey, Reply<bool>),
     FindByKey(WorkspaceDeviceKey, Reply<Option<WorkspaceDeviceRecord>>),
     FindByFingerprint(String, Reply<Option<WorkspaceDeviceRecord>>),
     FindCurrentCertificateIdentity(String, Reply<Option<WorkspaceDeviceCertificateIdentity>>),
@@ -533,6 +541,9 @@ fn worker_main(
             }
             Command::Revoke(key, reply) => {
                 let _ = reply.send(runtime.block_on(revoke_device(&pool, &key)));
+            }
+            Command::IsDeviceTerminal(key, reply) => {
+                let _ = reply.send(runtime.block_on(is_device_terminal(&pool, &key)));
             }
             Command::FindByKey(key, reply) => {
                 let _ = reply.send(runtime.block_on(find_device(&pool, &key)));
@@ -836,6 +847,7 @@ async fn verify_schema(pool: &PgPool) -> RegistryResult<()> {
         format!("SELECT registration_binding_id, device_id, authorization_generation, organization_id, workspace_id, csr_sha256, spki_sha256, approval_id, state_kind, state_deadline_unix_ms, state_payload FROM {AUTHORIZATION_TABLE} LIMIT 0"),
         format!("SELECT binding_id, organization_id, workspace_id, device_id, authorization_generation, csr_sha256, spki_sha256 FROM {DIRECTORY_BINDINGS_TABLE} LIMIT 0"),
         format!("SELECT organization_id, workspace_id, device_id, current_authorization_generation FROM {DIRECTORY_IDENTITIES_TABLE} LIMIT 0"),
+        format!("SELECT organization_id, workspace_id, device_id, revoked_at FROM {TERMINAL_DEVICE_KEYS_TABLE} LIMIT 0"),
     ] {
         sqlx::query(&statement)
             .fetch_all(pool)
@@ -853,6 +865,19 @@ async fn verify_schema(pool: &PgPool) -> RegistryResult<()> {
     .await
     .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
     if !dispatch_fence_available {
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
+    let key_lock_available: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure(\
+            'cyrene_workspace_device_registry.lock_workspace_device_key(\
+                text, text, text\
+            )'\
+        ) IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    if !key_lock_available {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
     let validation_gate_available: bool = sqlx::query_scalar(
@@ -1282,15 +1307,26 @@ async fn stage_pending_delivery(
         .begin()
         .await
         .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
-    let auth = select_authorization_unlocked(&mut transaction, authorization_id)
+    let mut auth = select_authorization_unlocked(&mut transaction, authorization_id)
         .await?
         .ok_or(DeviceRegistryPostgresError::Unavailable)?;
     if auth.id != *authorization_id {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
+    lock_workspace_device_key(&mut transaction, &auth.key).await?;
+    if workspace_device_key_is_terminal(&mut transaction, &auth.key).await? {
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
+    let current_auth = select_authorization_unlocked(&mut transaction, authorization_id)
+        .await?
+        .ok_or(DeviceRegistryPostgresError::Unavailable)?;
+    if current_auth.id != auth.id || current_auth.key != auth.key {
+        return Err(DeviceRegistryPostgresError::Unavailable);
+    }
+    auth = current_auth;
     let now = database_now_ms(&mut transaction).await?;
 
-    if let Some(existing) = select_registry(&mut transaction, authorization_id, true).await? {
+    if let Some(existing) = select_registry(&mut transaction, authorization_id, false).await? {
         let reusable = match auth.state_kind.as_str() {
             "delivery_pending" => {
                 let (delivery, certificate_validation) = decode_delivery_with_validation(&auth)?;
@@ -1331,10 +1367,13 @@ async fn stage_pending_delivery(
     }
 
     let (delivery, certificate_validation) = decode_delivery_with_validation(&auth)?;
+    let directory_matches = directory_binding_matches_delivery(&mut transaction, &delivery).await?;
+    let validation_fresh =
+        certificate_validation_is_fresh(certificate_validation.checked_at_unix_ms, now);
     if delivery.delivery_deadline_unix_ms <= now
         || delivery.not_after_unix_ms <= now
-        || !certificate_validation_is_fresh(certificate_validation.checked_at_unix_ms, now)
-        || !directory_binding_matches_delivery(&mut transaction, &delivery).await?
+        || !validation_fresh
+        || !directory_matches
     {
         return Err(DeviceRegistryPostgresError::Unavailable);
     }
@@ -1364,7 +1403,7 @@ async fn stage_pending_delivery(
         .await
         .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
 
-    let existing = select_registry(&mut transaction, authorization_id, true)
+    let existing = select_registry(&mut transaction, authorization_id, false)
         .await?
         .ok_or(DeviceRegistryPostgresError::Unavailable)?;
     if !delivery_matches_registry(&delivery, &existing)
@@ -1379,6 +1418,36 @@ async fn stage_pending_delivery(
         .commit()
         .await
         .map_err(|_| DeviceRegistryPostgresError::Unavailable)
+}
+
+async fn lock_workspace_device_key(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: &WorkspaceDeviceKey,
+) -> RegistryResult<()> {
+    sqlx::query("SELECT cyrene_workspace_device_registry.lock_workspace_device_key($1, $2, $3)")
+        .bind(&key.organization_id)
+        .bind(&key.workspace_id)
+        .bind(&key.device_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| DeviceRegistryPostgresError::Unavailable)?;
+    Ok(())
+}
+
+async fn workspace_device_key_is_terminal(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: &WorkspaceDeviceKey,
+) -> RegistryResult<bool> {
+    sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {TERMINAL_DEVICE_KEYS_TABLE} \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3)"
+    ))
+    .bind(&key.organization_id)
+    .bind(&key.workspace_id)
+    .bind(&key.device_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| DeviceRegistryPostgresError::Unavailable)
 }
 
 async fn select_authorization_unlocked(
@@ -1580,6 +1649,19 @@ async fn revoke_device(
     Ok(snapshot.record())
 }
 
+async fn is_device_terminal(pool: &PgPool, key: &WorkspaceDeviceKey) -> RegistryResult<bool> {
+    sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {TERMINAL_DEVICE_KEYS_TABLE} \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3)"
+    ))
+    .bind(&key.organization_id)
+    .bind(&key.workspace_id)
+    .bind(&key.device_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| DeviceRegistryPostgresError::Unavailable)
+}
+
 async fn find_device(
     pool: &PgPool,
     key: &WorkspaceDeviceKey,
@@ -1710,6 +1792,12 @@ async fn verify_active_record(
            AND a.organization_id = r.organization_id AND a.workspace_id = r.workspace_id \
            AND a.device_id = r.device_id AND a.authorization_generation = r.authorization_generation \
            AND a.csr_sha256 = r.csr_sha256 AND a.spki_sha256 = r.spki_sha256 \
+           AND NOT EXISTS (
+               SELECT 1 FROM {TERMINAL_DEVICE_KEYS_TABLE} terminal_key \
+               WHERE terminal_key.organization_id = r.organization_id \
+                 AND terminal_key.workspace_id = r.workspace_id \
+                 AND terminal_key.device_id = r.device_id
+           ) \
            AND r.not_after_unix_ms > floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT"
     );
     let row = sqlx::query(&query)
@@ -2079,5 +2167,33 @@ mod tests {
                 "GRANT EXECUTE ON FUNCTION cyrene_workspace_device_registry.relay_dispatch_fence(\n    TEXT, TEXT, TEXT, UUID, BIGINT, BYTEA, BYTEA, BYTEA, BYTEA, BIGINT\n) TO cyrene_workspace_device_registry_owner"
             ));
         }
+    }
+
+    #[test]
+    fn terminal_revocation_migration_serializes_all_registry_writers() {
+        let migration =
+            include_str!("../migrations/device_registry/0011_terminal_device_revocation.up.sql");
+        assert!(migration.contains("PRIMARY KEY (organization_id, workspace_id, device_id)"));
+        assert!(migration.contains("pg_advisory_xact_lock(hashtextextended(lock_identity, 0))"));
+        assert!(migration.contains("certificate_records_terminal_device_key_guard"));
+        assert!(migration.contains("BEFORE INSERT OR UPDATE OF organization_id"));
+        assert!(migration.contains("activate_acknowledged_delivery_without_terminal_key_guard"));
+        assert!(migration.contains("relay_dispatch_fence_without_terminal_key_guard"));
+        assert!(migration.contains("terminal_device_keys"));
+
+        let down =
+            include_str!("../migrations/device_registry/0011_terminal_device_revocation.down.sql");
+        assert!(down.contains("terminal Workspace device revocations cannot be removed"));
+    }
+
+    #[test]
+    fn current_identity_reads_fail_closed_for_terminal_device_keys() {
+        let source = include_str!("device_registry_postgres.rs");
+        let active_query = source
+            .split("async fn verify_active_record(")
+            .nth(1)
+            .expect("active identity verification exists");
+        assert!(active_query.contains("NOT EXISTS ("));
+        assert!(active_query.contains("{TERMINAL_DEVICE_KEYS_TABLE}"));
     }
 }

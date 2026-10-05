@@ -26,6 +26,116 @@ jobs:
       - name: Check Workspace Fabric contract and unit suites
         run: bash tooling/ci/check-distributed-workspace-fabric.sh
 
+  device-registry-terminal-revocation-postgres:
+    name: Device Registry terminal revocation (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Rust 1.96.1
+        uses: dtolnay/rust-toolchain@1.96.1
+      - name: Start isolated TLS-enabled PostgreSQL 17 fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir="${RUNNER_TEMP}/cyrene-device-registry-terminal-revocation"
+          container_name="cyrene-device-registry-terminal-revocation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'CYRENE_TERMINAL_REVOCATION_PG_CONTAINER=%s\n' "${container_name}" >> "${GITHUB_ENV}"
+          printf 'CYRENE_TERMINAL_REVOCATION_PG_FIXTURE_DIR=%s\n' "${fixture_dir}" >> "${GITHUB_ENV}"
+          install -d -m 0700 "${fixture_dir}"
+
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "${fixture_dir}/ca.key" \
+            -out "${fixture_dir}/ca.crt" \
+            -days 2 \
+            -subj "/CN=Cyrene ephemeral CI PostgreSQL CA" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign"
+          openssl req -new -newkey rsa:2048 -nodes \
+            -keyout "${fixture_dir}/server.key" \
+            -out "${fixture_dir}/server.csr" \
+            -subj "/CN=localhost"
+          cat > "${fixture_dir}/server.ext" <<'EOF'
+          subjectAltName=DNS:localhost
+          basicConstraints=critical,CA:FALSE
+          keyUsage=critical,digitalSignature,keyEncipherment
+          extendedKeyUsage=serverAuth
+          EOF
+          openssl x509 -req \
+            -in "${fixture_dir}/server.csr" \
+            -CA "${fixture_dir}/ca.crt" \
+            -CAkey "${fixture_dir}/ca.key" \
+            -CAcreateserial \
+            -out "${fixture_dir}/server.crt" \
+            -days 2 \
+            -sha256 \
+            -extfile "${fixture_dir}/server.ext"
+          chmod 0600 "${fixture_dir}/ca.key" "${fixture_dir}/server.key"
+          chmod 0644 "${fixture_dir}/ca.crt" "${fixture_dir}/server.crt"
+
+          pg_password="$(openssl rand -hex 24)"
+          echo "::add-mask::${pg_password}"
+          docker run --detach \
+            --name "${container_name}" \
+            --publish 127.0.0.1:5432:5432 \
+            --env "POSTGRES_PASSWORD=${pg_password}" \
+            --env "POSTGRES_DB=cyrene_device_registry_revocation" \
+            --mount "type=bind,source=${fixture_dir}/server.crt,target=/tmp/server.crt,readonly" \
+            --mount "type=bind,source=${fixture_dir}/server.key,target=/tmp/server.key,readonly" \
+            --entrypoint /bin/bash \
+            postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f \
+            -lc '
+              set -euo pipefail
+              install -d -m 0700 -o postgres -g postgres /var/lib/postgresql/tls
+              install -m 0644 -o postgres -g postgres /tmp/server.crt /var/lib/postgresql/tls/server.crt
+              install -m 0600 -o postgres -g postgres /tmp/server.key /var/lib/postgresql/tls/server.key
+              exec /usr/local/bin/docker-entrypoint.sh postgres \
+                -c ssl=on \
+                -c ssl_cert_file=/var/lib/postgresql/tls/server.crt \
+                -c ssl_key_file=/var/lib/postgresql/tls/server.key
+            '
+
+          for attempt in $(seq 1 60); do
+            if docker exec "${container_name}" pg_isready \
+              --username postgres \
+              --dbname cyrene_device_registry_revocation; then
+              printf 'Isolated PostgreSQL fixture is ready.\n'
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              docker logs "${container_name}"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          database_url="postgres://postgres:${pg_password}@localhost:5432/cyrene_device_registry_revocation?sslmode=verify-full&sslrootcert=${fixture_dir}/ca.crt"
+          for variable in \
+            CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL \
+            CYRENE_WORKSPACE_DEVICE_AUTHORIZATION_MIGRATION_DATABASE_URL \
+            CYRENE_WORKSPACE_DEVICE_REGISTRY_MIGRATION_DATABASE_URL \
+            CYRENE_WORKSPACE_WEBAUTHN_MIGRATION_DATABASE_URL \
+            CYRENE_WORKSPACE_WEBAUTHN_HTTP_SESSION_BINDING_MIGRATION_DATABASE_URL \
+            CYRENE_WORKSPACE_DEVICE_CA_MIGRATION_DATABASE_URL \
+            CYRENE_WORKSPACE_DEVICE_REGISTRY_TEST_DATABASE_URL; do
+            printf '%s=%s\n' "${variable}" "${database_url}" >> "${GITHUB_ENV}"
+          done
+      - name: Migrate all six Workspace storage components
+        run: cargo run --locked -p cy-workspace-postgres-storage --bin cy-workspace-storage-migrator -- migrate-all
+      - name: Run terminal revocation PostgreSQL regression
+        run: cargo test --locked -p cy-workspace-postgres-storage --test device_registry_terminal_revocation -- --ignored --nocapture
+      - name: Stop and remove isolated PostgreSQL fixture
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${CYRENE_TERMINAL_REVOCATION_PG_CONTAINER:-}" ]]; then
+            docker rm --force --volumes "${CYRENE_TERMINAL_REVOCATION_PG_CONTAINER}" >/dev/null 2>&1 || true
+          fi
+          if [[ -n "${CYRENE_TERMINAL_REVOCATION_PG_FIXTURE_DIR:-}" ]]; then
+            rm -rf "${CYRENE_TERMINAL_REVOCATION_PG_FIXTURE_DIR}"
+          fi
+
   workspace-direct-relay-fail-closed-proof:
     runs-on: ubuntu-latest
     steps:

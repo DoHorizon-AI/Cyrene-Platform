@@ -27,7 +27,10 @@ use crate::{
         ExecutionDevicePeer, InvocationWaitScope, NewAuthorityInvocation,
         PersistedInvocationResult,
     },
-    device_registry::WorkspaceDeviceRegistry,
+    device_registry::{
+        CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError,
+        WorkspaceDevicePeerCertificateStatusChecker, WorkspaceDeviceRegistry,
+    },
     directory::{validate_descriptor, WorkspaceDirectory},
     web_identity::{VerifiedWebPrincipal, WebPrincipalVerifier},
 };
@@ -49,6 +52,8 @@ impl From<AuthorityServiceError> for Status {
 }
 
 type AuthorityHelperResult<T> = Result<T, AuthorityServiceError>;
+
+const MAX_CONNECTOR_CRL_EVIDENCE_AGE_MS: u64 = 5 * 60 * 1_000;
 
 /// Durable identity for one Authority-verified bearer session.
 #[derive(Debug, Clone)]
@@ -200,6 +205,8 @@ pub struct AuthorityServiceDependencies {
     pub targets: Arc<dyn AuthorityExecutionTargetStore>,
     /// Certificate registry for real Connector mTLS peers.
     pub device_registry: Arc<dyn WorkspaceDeviceRegistry>,
+    /// Fresh signed-CRL status checker for Tonic-authenticated Connector peer certificates.
+    pub device_certificate_status: Arc<dyn WorkspaceDevicePeerCertificateStatusChecker>,
     /// Unique durable invocation outbox.
     pub outbox: Arc<dyn AuthorityOutboxStore>,
     /// Protected-config signer.
@@ -263,29 +270,25 @@ impl AuthorityRpcService {
     }
 
     async fn connector_peer<T>(&self, request: &Request<T>) -> Result<ExecutionDevicePeer, Status> {
-        let certificate = request
+        let certificates = request
             .peer_certs()
-            .and_then(|certs| certs.first().cloned())
             .ok_or_else(|| Status::unauthenticated("Connector certificate is required"))?;
-        let fingerprint = Sha256::digest(certificate.as_ref());
-        let identity = self
-            .dependencies
-            .device_registry
-            .find_current_device_certificate_identity(&encode_hex(&fingerprint))
-            .map_err(|_| Status::unavailable("Connector registry is unavailable"))?
-            .ok_or_else(|| Status::unauthenticated("Connector certificate is not active"))?;
-        let digest: [u8; 32] = decode_hex(&identity.certificate_fingerprint_sha256)
-            .map_err(|_| Status::unauthenticated("Connector registry identity is invalid"))?
-            .try_into()
-            .map_err(|_| Status::unauthenticated("Connector registry identity is invalid"))?;
-        Ok(ExecutionDevicePeer {
-            organization_id: identity.key.organization_id,
-            workspace_id: identity.key.workspace_id,
-            device_id: identity.key.device_id,
-            authorization_id: identity.authorization_id,
-            authorization_generation: identity.authorization_generation,
-            certificate_fingerprint_sha256: digest,
-        })
+        let certificate = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("Connector certificate is required"))?;
+        let intermediate_chain_der = certificates
+            .iter()
+            .skip(1)
+            .map(|certificate| certificate.as_ref().to_vec())
+            .collect::<Vec<_>>();
+        connector_peer_from_certificate_chain(
+            self.dependencies.device_certificate_status.as_ref(),
+            self.dependencies.device_registry.as_ref(),
+            certificate.as_ref(),
+            &intermediate_chain_der,
+            now_unix_ms(),
+        )
+        .map_err(ConnectorPeerAdmissionError::into_status)
     }
 
     async fn validate_product_result(
@@ -355,6 +358,107 @@ impl AuthorityRpcService {
             })
             .map_err(|_| Status::data_loss("Product response violates the pinned schema or scope"))
     }
+}
+
+/// Check current signed-CRL evidence before resolving a peer's active Registry identity.
+///
+/// `leaf_certificate_der` and `intermediate_chain_der` must come only from the server-side Tonic
+/// peer-certificate extension. Registry lookup remains a separate required authorization fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectorPeerAdmissionError {
+    CertificateRequired,
+    CertificateRevoked,
+    RevocationStatusUnavailable,
+    RegistryUnavailable,
+    CertificateNotActive,
+    RegistryIdentityInvalid,
+}
+
+impl ConnectorPeerAdmissionError {
+    fn into_status(self) -> Status {
+        match self {
+            Self::CertificateRequired => {
+                Status::unauthenticated("Connector certificate is required")
+            }
+            Self::CertificateRevoked => Status::unauthenticated("Connector certificate is revoked"),
+            Self::RevocationStatusUnavailable => {
+                Status::unavailable("Connector certificate revocation status is unavailable")
+            }
+            Self::RegistryUnavailable => Status::unavailable("Connector registry is unavailable"),
+            Self::CertificateNotActive => {
+                Status::unauthenticated("Connector certificate is not active")
+            }
+            Self::RegistryIdentityInvalid => {
+                Status::unauthenticated("Connector registry identity is invalid")
+            }
+        }
+    }
+}
+
+fn connector_peer_from_certificate_chain(
+    status_checker: &dyn WorkspaceDevicePeerCertificateStatusChecker,
+    device_registry: &dyn WorkspaceDeviceRegistry,
+    leaf_certificate_der: &[u8],
+    intermediate_chain_der: &[Vec<u8>],
+    checked_at_unix_ms: u64,
+) -> Result<ExecutionDevicePeer, ConnectorPeerAdmissionError> {
+    if leaf_certificate_der.is_empty() {
+        return Err(ConnectorPeerAdmissionError::CertificateRequired);
+    }
+
+    let fingerprint: [u8; 32] = Sha256::digest(leaf_certificate_der).into();
+    let revocation_evidence = status_checker
+        .require_current_good_status_for_peer_chain(
+            leaf_certificate_der,
+            intermediate_chain_der,
+            checked_at_unix_ms,
+        )
+        .map_err(|error| match error {
+            RelayPeerRevocationCheckError::Revoked => {
+                ConnectorPeerAdmissionError::CertificateRevoked
+            }
+            RelayPeerRevocationCheckError::Unknown => {
+                ConnectorPeerAdmissionError::RevocationStatusUnavailable
+            }
+        })?;
+    if !current_revocation_evidence_matches(&revocation_evidence, &fingerprint, checked_at_unix_ms)
+    {
+        return Err(ConnectorPeerAdmissionError::RevocationStatusUnavailable);
+    }
+
+    let identity = device_registry
+        .find_current_device_certificate_identity(&encode_hex(&fingerprint))
+        .map_err(|_| ConnectorPeerAdmissionError::RegistryUnavailable)?
+        .ok_or(ConnectorPeerAdmissionError::CertificateNotActive)?;
+    let digest: [u8; 32] = decode_hex(&identity.certificate_fingerprint_sha256)
+        .map_err(|_| ConnectorPeerAdmissionError::RegistryIdentityInvalid)?
+        .try_into()
+        .map_err(|_| ConnectorPeerAdmissionError::RegistryIdentityInvalid)?;
+    if digest != fingerprint {
+        return Err(ConnectorPeerAdmissionError::RegistryIdentityInvalid);
+    }
+
+    Ok(ExecutionDevicePeer {
+        organization_id: identity.key.organization_id,
+        workspace_id: identity.key.workspace_id,
+        device_id: identity.key.device_id,
+        authorization_id: identity.authorization_id,
+        authorization_generation: identity.authorization_generation,
+        certificate_fingerprint_sha256: digest,
+    })
+}
+
+fn current_revocation_evidence_matches(
+    evidence: &CurrentRelayPeerRevocationEvidence,
+    certificate_fingerprint: &[u8; 32],
+    checked_at_unix_ms: u64,
+) -> bool {
+    evidence.certificate_sha256 == *certificate_fingerprint
+        && evidence.this_update_unix_ms <= checked_at_unix_ms
+        && evidence.next_update_unix_ms > checked_at_unix_ms
+        && evidence.next_update_unix_ms > evidence.this_update_unix_ms
+        && checked_at_unix_ms.saturating_sub(evidence.this_update_unix_ms)
+            <= MAX_CONNECTOR_CRL_EVIDENCE_AGE_MS
 }
 
 #[tonic::async_trait]
@@ -1146,5 +1250,290 @@ fn map_outbox_error(error: AuthorityOutboxError) -> Status {
         AuthorityOutboxError::Unavailable => {
             Status::unavailable("durable invocation store is unavailable")
         }
+    }
+}
+
+#[cfg(test)]
+mod connector_peer_tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    use super::connector_peer_from_certificate_chain;
+    use crate::{
+        authority::ExecutionDevicePeer,
+        device_registry::{
+            ApprovedWorkspaceDeviceCertificate, CurrentRelayPeerRevocationEvidence,
+            RelayPeerRevocationCheckError, WorkspaceDeviceCertificateIdentity,
+            WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
+            WorkspaceDevicePeerCertificateStatusChecker, WorkspaceDeviceRecord,
+            WorkspaceDeviceRegistry,
+        },
+        directory::WorkspaceDirectoryError,
+    };
+
+    const CHECKED_AT_UNIX_MS: u64 = 500_000;
+    const LEAF_CERTIFICATE_DER: &[u8] = b"transport-authenticated leaf certificate";
+    type CapturedPeerCheckInput = (Vec<u8>, Vec<Vec<u8>>, u64);
+
+    #[derive(Clone, Copy)]
+    enum StatusResult {
+        Good,
+        Revoked,
+        Unknown,
+        WrongFingerprint,
+        Stale,
+    }
+
+    struct TestStatusChecker {
+        result: StatusResult,
+        calls: AtomicUsize,
+        input: Mutex<Option<CapturedPeerCheckInput>>,
+    }
+
+    impl TestStatusChecker {
+        fn new(result: StatusResult) -> Self {
+            Self {
+                result,
+                calls: AtomicUsize::new(0),
+                input: Mutex::new(None),
+            }
+        }
+    }
+
+    impl WorkspaceDevicePeerCertificateStatusChecker for TestStatusChecker {
+        fn require_current_good_status_for_peer_chain(
+            &self,
+            leaf_certificate_der: &[u8],
+            intermediate_chain_der: &[Vec<u8>],
+            checked_at_unix_ms: u64,
+        ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            *self.input.lock().unwrap() = Some((
+                leaf_certificate_der.to_vec(),
+                intermediate_chain_der.to_vec(),
+                checked_at_unix_ms,
+            ));
+            match self.result {
+                StatusResult::Good => Ok(
+                    CurrentRelayPeerRevocationEvidence::from_verified_good_status(
+                        Sha256::digest(leaf_certificate_der).into(),
+                        checked_at_unix_ms - 1_000,
+                        checked_at_unix_ms + 10_000,
+                    ),
+                ),
+                StatusResult::Revoked => Err(RelayPeerRevocationCheckError::Revoked),
+                StatusResult::Unknown => Err(RelayPeerRevocationCheckError::Unknown),
+                StatusResult::WrongFingerprint => Ok(
+                    CurrentRelayPeerRevocationEvidence::from_verified_good_status(
+                        [0; 32],
+                        checked_at_unix_ms - 1_000,
+                        checked_at_unix_ms + 10_000,
+                    ),
+                ),
+                StatusResult::Stale => Ok(
+                    CurrentRelayPeerRevocationEvidence::from_verified_good_status(
+                        Sha256::digest(leaf_certificate_der).into(),
+                        checked_at_unix_ms - 300_001,
+                        checked_at_unix_ms + 10_000,
+                    ),
+                ),
+            }
+        }
+    }
+
+    struct TestRegistry {
+        identity: WorkspaceDeviceCertificateIdentity,
+        lookups: AtomicUsize,
+    }
+
+    impl TestRegistry {
+        fn new(identity: WorkspaceDeviceCertificateIdentity) -> Self {
+            Self {
+                identity,
+                lookups: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl WorkspaceDeviceRegistry for TestRegistry {
+        fn import_approved_device_certificate(
+            &self,
+            _certificate: ApprovedWorkspaceDeviceCertificate,
+        ) -> Result<WorkspaceDeviceRecord, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn revoke_device(
+            &self,
+            _key: &WorkspaceDeviceKey,
+        ) -> Result<WorkspaceDeviceRecord, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn find_device(
+            &self,
+            _key: &WorkspaceDeviceKey,
+        ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn find_device_by_certificate_fingerprint(
+            &self,
+            _fingerprint_sha256: &str,
+        ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn find_current_device_certificate_identity(
+            &self,
+            fingerprint_sha256: &str,
+        ) -> Result<Option<WorkspaceDeviceCertificateIdentity>, WorkspaceDirectoryError> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            if fingerprint_sha256 != self.identity.certificate_fingerprint_sha256 {
+                return Ok(None);
+            }
+            Ok(Some(self.identity.clone()))
+        }
+
+        fn acquire_relay_dispatch_fence(
+            &self,
+            _expected: &WorkspaceDeviceCertificateIdentity,
+        ) -> Result<Box<dyn WorkspaceDeviceDispatchFence>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+    }
+
+    fn registry_for_leaf(leaf_certificate_der: &[u8]) -> TestRegistry {
+        let fingerprint: [u8; 32] = Sha256::digest(leaf_certificate_der).into();
+        TestRegistry::new(WorkspaceDeviceCertificateIdentity {
+            key: WorkspaceDeviceKey {
+                organization_id: "org-test".into(),
+                workspace_id: "workspace-test".into(),
+                device_id: "device-test".into(),
+            },
+            certificate_fingerprint_sha256: fingerprint
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            authorization_id: Uuid::from_bytes([7; 16]),
+            registration_binding_id: [8; 16],
+            authorization_generation: 9,
+            csr_sha256: [10; 32],
+            spki_sha256: [11; 32],
+            serial_number: vec![1, 2, 3],
+            not_after_unix_ms: 900_000,
+        })
+    }
+
+    #[test]
+    fn connector_peer_rejects_revoked_and_unknown_status_before_registry_lookup() {
+        for (checker_result, expected_code) in [
+            (StatusResult::Revoked, tonic::Code::Unauthenticated),
+            (StatusResult::Unknown, tonic::Code::Unavailable),
+        ] {
+            let checker = TestStatusChecker::new(checker_result);
+            let registry = registry_for_leaf(LEAF_CERTIFICATE_DER);
+            let result = connector_peer_from_certificate_chain(
+                &checker,
+                &registry,
+                LEAF_CERTIFICATE_DER,
+                &[],
+                CHECKED_AT_UNIX_MS,
+            );
+
+            assert_eq!(result.unwrap_err().into_status().code(), expected_code);
+            assert_eq!(checker.calls.load(Ordering::Relaxed), 1);
+            assert_eq!(registry.lookups.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn connector_peer_requires_fresh_evidence_for_the_exact_transport_leaf() {
+        for checker_result in [StatusResult::WrongFingerprint, StatusResult::Stale] {
+            let checker = TestStatusChecker::new(checker_result);
+            let registry = registry_for_leaf(LEAF_CERTIFICATE_DER);
+            let result = connector_peer_from_certificate_chain(
+                &checker,
+                &registry,
+                LEAF_CERTIFICATE_DER,
+                &[],
+                CHECKED_AT_UNIX_MS,
+            );
+
+            assert_eq!(
+                result.unwrap_err().into_status().code(),
+                tonic::Code::Unavailable
+            );
+            assert_eq!(registry.lookups.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn connector_peer_passes_tonic_chain_and_current_time_then_requires_registry_identity() {
+        let checker = TestStatusChecker::new(StatusResult::Good);
+        let registry = registry_for_leaf(LEAF_CERTIFICATE_DER);
+        let intermediates = vec![vec![0x30, 0x01, 0x00]];
+        let peer: ExecutionDevicePeer = connector_peer_from_certificate_chain(
+            &checker,
+            &registry,
+            LEAF_CERTIFICATE_DER,
+            &intermediates,
+            CHECKED_AT_UNIX_MS,
+        )
+        .unwrap();
+
+        assert_eq!(
+            checker.input.lock().unwrap().as_ref().unwrap(),
+            &(
+                LEAF_CERTIFICATE_DER.to_vec(),
+                intermediates,
+                CHECKED_AT_UNIX_MS,
+            )
+        );
+        assert_eq!(registry.lookups.load(Ordering::Relaxed), 1);
+        assert_eq!(peer.organization_id, "org-test");
+        assert_eq!(peer.workspace_id, "workspace-test");
+        assert_eq!(peer.device_id, "device-test");
+        assert_eq!(peer.authorization_id, Uuid::from_bytes([7; 16]));
+        assert_eq!(peer.authorization_generation, 9);
+        assert_eq!(
+            peer.certificate_fingerprint_sha256,
+            Sha256::digest(LEAF_CERTIFICATE_DER).as_slice()
+        );
+    }
+
+    #[test]
+    fn connector_peer_rejects_missing_leaf_without_consulting_authorities() {
+        let checker = TestStatusChecker::new(StatusResult::Good);
+        let registry = registry_for_leaf(LEAF_CERTIFICATE_DER);
+        let result = connector_peer_from_certificate_chain(
+            &checker,
+            &registry,
+            &[],
+            &[],
+            CHECKED_AT_UNIX_MS,
+        );
+
+        assert_eq!(
+            result.unwrap_err().into_status().code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(checker.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(registry.lookups.load(Ordering::Relaxed), 0);
     }
 }
