@@ -227,10 +227,12 @@ impl core_v1::kernel_authority_service_server::KernelAuthorityService for Kernel
                 .operation
                 .ok_or_else(|| Status::invalid_argument("operation is required"))?,
         )?;
-        let operation = self
-            .authority()
-            .create_operation(&context, &principal, operation)
-            .map_err(authority_status)?;
+        let authority = self.authority();
+        let operation = self.with_runtime_admission("core-v1-create-operation", || {
+            authority
+                .create_operation(&context, &principal, operation)
+                .map_err(authority_status)
+        })?;
         Ok(Response::new(to_semantic_proto_operation(&operation)))
     }
 
