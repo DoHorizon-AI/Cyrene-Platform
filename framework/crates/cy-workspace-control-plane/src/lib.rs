@@ -52,8 +52,9 @@ pub use control_plane::{
 pub use cy_proto::workspace_v1;
 pub use cy_workspace_client_sdk::WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES;
 pub use device_registry::{
-    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
-    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
+    ApprovedWorkspaceDeviceCertificate, CurrentRelayPeerRevocationEvidence,
+    DeviceAuthorizationStatus, RelayPeerRevocationCheckError, WorkspaceDeviceCertificateIdentity,
+    WorkspaceDeviceDispatchFence, WorkspaceDeviceKey, WorkspaceDevicePeerCertificateStatusChecker,
     WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
 };
 pub use direct_server::DirectWorkspaceServer;
