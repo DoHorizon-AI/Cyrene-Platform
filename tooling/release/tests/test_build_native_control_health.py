@@ -26,7 +26,7 @@ from tooling.release import component_artifacts as artifacts
 from tooling.release.validate_component_schema import validate_document
 
 
-C11_CATALOG_SHA256 = "fc2d6dc485bfc6a6fbbef426c93acf2a640b771e6e24a7284b030804fd02fab0"
+C12_CATALOG_SHA256 = "4f0696f0f7dd24fe65d955a5269f3e2591517f4b75c79b7b7fced921dfb4bb81"
 CATALOG_PATH = Path(
     os.environ.get("CYRENE_COMPONENT_CATALOG", "workspace-catalog/governance/component-catalog-v1.json")
 )
@@ -44,9 +44,9 @@ def _compatibility_from_catalog(catalog: dict[str, Any], group_id: str) -> dict[
 
 
 def test_native_control_manifests_bind_fixed_readiness_and_preserve_c11_contracts(tmp_path: Path) -> None:
-    """Build signed manifests from the exact C11 catalog and validate the existing v2 schema."""
+    """Build manifests from the verified C12 catalog and preserve the C11 contract values."""
     catalog_raw = CATALOG_PATH.read_bytes()
-    assert hashlib.sha256(catalog_raw).hexdigest() == C11_CATALOG_SHA256
+    assert hashlib.sha256(catalog_raw).hexdigest() == C12_CATALOG_SHA256
     catalog = json.loads(catalog_raw.decode("utf-8", "strict"))
 
     repository = tmp_path / "source"
@@ -99,7 +99,7 @@ def test_native_control_manifests_bind_fixed_readiness_and_preserve_c11_contract
             run_id="123456789",
             run_attempt=1,
             catalog_path=CATALOG_PATH,
-            catalog_sha256=C11_CATALOG_SHA256,
+            catalog_sha256=C12_CATALOG_SHA256,
             target_id=TARGET_ID,
         )
 
