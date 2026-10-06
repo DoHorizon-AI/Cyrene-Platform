@@ -12,6 +12,7 @@ pub mod authority_service;
 pub mod caller;
 pub mod connector_session;
 pub mod control_plane;
+pub mod deployment_admission;
 pub mod device_registry;
 pub mod direct_server;
 pub mod directory;
@@ -51,9 +52,17 @@ pub use control_plane::{
 };
 pub use cy_proto::workspace_v1;
 pub use cy_workspace_client_sdk::WORKSPACE_API_GRPC_MESSAGE_MAX_BYTES;
+pub use deployment_admission::{
+    AdmissionGateEvidence, AdmissionHealthEvidence, AdoptionHoldEvidence, AdoptionHoldPhase,
+    DeploymentAdmission, DeploymentAdmissionError, DeploymentIdentity, DispatchAdmissionGuard,
+    CONTROL_HOST_ADMISSION_DIRECTORY, CONTROL_HOST_ADMISSION_PROFILE,
+    CONTROL_HOST_ADMISSION_PROFILE_ENV, CONTROL_HOST_ADMISSION_SCHEMA,
+    CONTROL_HOST_ADMISSION_SCOPE, CONTROL_HOST_ADMISSION_SOURCE,
+};
 pub use device_registry::{
-    ApprovedWorkspaceDeviceCertificate, DeviceAuthorizationStatus,
-    WorkspaceDeviceCertificateIdentity, WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
+    ApprovedWorkspaceDeviceCertificate, CurrentRelayPeerRevocationEvidence,
+    DeviceAuthorizationStatus, RelayPeerRevocationCheckError, WorkspaceDeviceCertificateIdentity,
+    WorkspaceDeviceDispatchFence, WorkspaceDeviceKey, WorkspaceDevicePeerCertificateStatusChecker,
     WorkspaceDeviceRecord, WorkspaceDeviceRegistry,
 };
 pub use direct_server::DirectWorkspaceServer;

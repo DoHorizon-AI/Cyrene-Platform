@@ -801,7 +801,7 @@ impl RuntimeMaintenance {
         directory: impl Into<PathBuf>,
         catalog: TrustedActivitySourceCatalog,
     ) -> Result<Self, MaintenanceError> {
-        Self::open_inner(directory.into(), catalog, None)
+        Self::open_inner(directory.into(), catalog, None, false)
     }
 
     /// Opens shared state with a root-managed catalog that is reloaded under
@@ -814,20 +814,31 @@ impl RuntimeMaintenance {
     ) -> Result<Self, MaintenanceError> {
         let catalog_path = catalog_path.into();
         let catalog = TrustedActivitySourceCatalog::load(&catalog_path)?;
-        Self::open_inner(directory.into(), catalog, Some(catalog_path))
+        Self::open_inner(directory.into(), catalog, Some(catalog_path), false)
+    }
+
+    /// Opens isolated test state owned by the test process without weakening
+    /// production callers' root-managed shared-directory requirement.
+    #[cfg(feature = "test-utils")]
+    pub fn open_for_test(
+        directory: impl Into<PathBuf>,
+        catalog: TrustedActivitySourceCatalog,
+    ) -> Result<Self, MaintenanceError> {
+        Self::open_inner(directory.into(), catalog, None, true)
     }
 
     fn open_inner(
         directory: PathBuf,
         catalog: TrustedActivitySourceCatalog,
         catalog_path: Option<PathBuf>,
+        allow_test_owner: bool,
     ) -> Result<Self, MaintenanceError> {
         catalog.validate()?;
         if !directory.exists() {
             fs::create_dir_all(&directory)?;
         }
         reject_symlink_directory(&directory)?;
-        set_shared_directory(&directory)?;
+        set_shared_directory(&directory, allow_test_owner)?;
         validate_shared_files(&directory)?;
         ensure_migration_marker_allows_state2(&directory)?;
         let this = Self {
@@ -4264,7 +4275,7 @@ fn set_private_directory(path: &Path) -> Result<(), MaintenanceError> {
     Ok(())
 }
 
-fn set_shared_directory(path: &Path) -> Result<(), MaintenanceError> {
+fn set_shared_directory(path: &Path, allow_test_owner: bool) -> Result<(), MaintenanceError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -4275,7 +4286,7 @@ fn set_shared_directory(path: &Path) -> Result<(), MaintenanceError> {
             fs::set_permissions(path, fs::Permissions::from_mode(0o2770))?;
         } else if owner == 0 && mode == 0o2770 {
             // Kernel is a member of the dedicated authority group but does not own this path.
-        } else if cfg!(test) && owner == nix::unistd::geteuid().as_raw() {
+        } else if (allow_test_owner || cfg!(test)) && owner == nix::unistd::geteuid().as_raw() {
             fs::set_permissions(path, fs::Permissions::from_mode(0o2770))?;
         } else {
             return Err(MaintenanceError::StateUnknown(
@@ -4283,6 +4294,8 @@ fn set_shared_directory(path: &Path) -> Result<(), MaintenanceError> {
             ));
         }
     }
+    #[cfg(not(unix))]
+    let _ = allow_test_owner;
     Ok(())
 }
 

@@ -865,6 +865,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "jsonwebtoken",
+ "nix 0.29.0",
  "prost",
  "prost-types",
  "reqwest",

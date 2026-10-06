@@ -20,7 +20,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use axum::{routing::get, Router};
+use axum::{routing::get, Json, Router};
 use cy_proto::cyrene::workspace::authority::v2::workspace_authority_service_server::WorkspaceAuthorityServiceServer;
 use cy_workspace_control_plane::{
     authority::{
@@ -28,15 +28,18 @@ use cy_workspace_control_plane::{
         AuthorityServiceDependencies, AuthorityWebSessionStore, ContractSnapshotManager,
         SnapshotArtifactInput, SnapshotTrust, VerifiedContractSnapshot,
     },
-    AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier, WebIdentityDirectory,
-    WebIdentityDirectoryError,
+    AdmissionHealthEvidence, AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier,
+    DeploymentAdmission, DeploymentIdentity, WebIdentityDirectory, WebIdentityDirectoryError,
+    WorkspaceDevicePeerCertificateStatusChecker,
 };
 use cy_workspace_postgres_storage::{
     AuthorityExecutionTargetBinding as PgTarget, DurableDirectoryError,
     PostgresAuthorityExecutionTargetStore, PostgresAuthorityWebSessionStore,
-    PostgresWorkspaceDeviceRegistry, PostgresWorkspaceDirectory, PostgresWorkspaceOutbox,
+    PostgresRelayPeerSignedCrlChecker, PostgresWorkspaceDeviceRegistry, PostgresWorkspaceDirectory,
+    PostgresWorkspaceOutbox,
 };
 use ed25519_dalek::SigningKey;
+use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -146,6 +149,10 @@ impl AdminResponse {
 
 pub async fn run_host() -> Result<(), HostError> {
     let mut settings = Settings::load()?;
+    let deployment_admission = Arc::new(
+        DeploymentAdmission::from_environment(settings.deployment_identity())
+            .map_err(|_| HostError::Configuration)?,
+    );
     if settings.state_dir != Path::new(STATE_DIR_DEFAULT)
         || settings.bff_uds != Path::new(BFF_UDS_DEFAULT)
         || settings.admin_uds != Path::new(ADMIN_UDS_DEFAULT)
@@ -237,6 +244,19 @@ pub async fn run_host() -> Result<(), HostError> {
         .map_err(|_| HostError::Database)?,
     );
     registry.health_check().map_err(|_| HostError::Database)?;
+    let peer_certificate_status_checker = Arc::new(
+        tokio::task::spawn_blocking(PostgresRelayPeerSignedCrlChecker::connect_from_environment)
+            .await
+            .map_err(|_| HostError::Database)?
+            .map_err(|_| HostError::Database)?,
+    );
+    let checker_for_startup = peer_certificate_status_checker.clone();
+    tokio::task::spawn_blocking(move || checker_for_startup.check_current_crl())
+        .await
+        .map_err(|_| HostError::Database)?
+        .map_err(|_| HostError::Database)?;
+    let device_certificate_status: Arc<dyn WorkspaceDevicePeerCertificateStatusChecker> =
+        peer_certificate_status_checker.clone();
 
     let signing_key = SigningKey::from_bytes(&settings.signing_key);
     settings.signing_key.zeroize();
@@ -264,12 +284,16 @@ pub async fn run_host() -> Result<(), HostError> {
     });
 
     let rpc = AuthorityRpcService::new(AuthorityServiceDependencies {
+        organization_id: settings.organization_id.clone(),
+        workspace_id: settings.workspace_id.clone(),
+        authority_instance_id: settings.authority_instance_id.clone(),
         snapshots: state.manager.clone(),
         web_verifier: verifier.clone(),
         directory: directory.clone(),
         sessions,
         targets,
         device_registry: registry.clone(),
+        device_certificate_status,
         outbox,
         signer,
     });
@@ -293,14 +317,14 @@ pub async fn run_host() -> Result<(), HostError> {
         "/readyz",
         get({
             let ready = ready.clone();
+            let deployment_admission = Arc::clone(&deployment_admission);
             move || {
                 let ready = ready.clone();
+                let deployment_admission = Arc::clone(&deployment_admission);
                 async move {
-                    if *ready.read().await {
-                        (http::StatusCode::OK, "ready")
-                    } else {
-                        (http::StatusCode::SERVICE_UNAVAILABLE, "not ready")
-                    }
+                    let api_ready = *ready.read().await;
+                    let evidence = deployment_admission.health_evidence(api_ready);
+                    health_response(evidence)
                 }
             }
         }),
@@ -308,6 +332,7 @@ pub async fn run_host() -> Result<(), HostError> {
     let readiness = ready.clone();
     let readiness_directory = directory.clone();
     let readiness_registry = registry.clone();
+    let readiness_crl_checker = peer_certificate_status_checker.clone();
     let readiness_verifier = verifier.clone();
     let readiness_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -322,7 +347,12 @@ pub async fn run_host() -> Result<(), HostError> {
                 tokio::task::spawn_blocking(move || registry_for_check.health_check())
                     .await
                     .is_ok_and(|result| result.is_ok());
-            *readiness.write().await = directory_ok && db_ok && verifier_ok && registry_ok;
+            let checker_for_check = readiness_crl_checker.clone();
+            let crl_ok = tokio::task::spawn_blocking(move || checker_for_check.check_current_crl())
+                .await
+                .is_ok_and(|result| result.is_ok());
+            *readiness.write().await =
+                directory_ok && db_ok && verifier_ok && registry_ok && crl_ok;
         }
     });
     let health_task = tokio::spawn(async move { axum::serve(health, health_router).await });
@@ -407,10 +437,21 @@ struct Settings {
     client_ca: Vec<u8>,
     bff_peer_uid: u32,
     admin_peer_uid: u32,
+    organization_id: String,
+    workspace_id: String,
+    authority_instance_id: String,
 }
 
 impl Settings {
     fn load() -> Result<Self, HostError> {
+        let deployment_identity = DeploymentIdentity {
+            organization_id: env::var("CYRENE_ORGANIZATION_ID").unwrap_or_default(),
+            workspace_id: env::var("CYRENE_WORKSPACE_ID").unwrap_or_default(),
+            authority_instance_id: env::var("CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID")
+                .unwrap_or_default(),
+        };
+        DeploymentAdmission::from_environment(deployment_identity.clone())
+            .map_err(|_| HostError::Configuration)?;
         let database_url_file = path_env("CYRENE_AUTHORITY_DATABASE_URL_FILE")?;
         let mut database_url_bytes = Zeroizing::new(read_secret_file(&database_url_file, 8192)?);
         while matches!(database_url_bytes.last(), Some(b'\n' | b'\r')) {
@@ -470,7 +511,18 @@ impl Settings {
                 .unwrap_or_else(|_| "0".into())
                 .parse()
                 .map_err(|_| HostError::Configuration)?,
+            organization_id: deployment_identity.organization_id,
+            workspace_id: deployment_identity.workspace_id,
+            authority_instance_id: deployment_identity.authority_instance_id,
         })
+    }
+
+    fn deployment_identity(&self) -> DeploymentIdentity {
+        DeploymentIdentity {
+            organization_id: self.organization_id.clone(),
+            workspace_id: self.workspace_id.clone(),
+            authority_instance_id: self.authority_instance_id.clone(),
+        }
     }
 }
 
@@ -485,6 +537,82 @@ struct SelectedArtifact {
     artifact_id: String,
     generation: u64,
     epoch: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorityHealthResponse {
+    status: &'static str,
+    #[serde(flatten)]
+    evidence: AdmissionHealthEvidence,
+}
+
+fn health_response(
+    evidence: AdmissionHealthEvidence,
+) -> (StatusCode, Json<AuthorityHealthResponse>) {
+    let status = if evidence.api_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = AuthorityHealthResponse {
+        status: if evidence.api_ready {
+            "ready"
+        } else {
+            "not_ready"
+        },
+        evidence,
+    };
+    (status, Json(body))
+}
+
+#[cfg(test)]
+mod deployment_admission_health_tests {
+    use super::*;
+    use cy_workspace_control_plane::{
+        AdmissionGateEvidence, AdoptionHoldEvidence, AdoptionHoldPhase,
+        CONTROL_HOST_ADMISSION_SCOPE, CONTROL_HOST_ADMISSION_SOURCE,
+    };
+
+    #[test]
+    fn held_product_gate_keeps_api_health_ready_and_reports_exact_gate_proof() {
+        let plan_digest = format!("sha256:{}", "c".repeat(64));
+        let (status, Json(body)) = health_response(AdmissionHealthEvidence {
+            api_ready: true,
+            execution_ready: false,
+            business_ready: false,
+            gate: AdmissionGateEvidence {
+                source: CONTROL_HOST_ADMISSION_SOURCE,
+                scope: CONTROL_HOST_ADMISSION_SCOPE,
+                state: "closed",
+                reader_gid: Some(999),
+                generation: Some(7),
+                catalog_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                topology_digest: Some(format!("sha256:{}", "b".repeat(64))),
+                plan_digest: Some(plan_digest.clone()),
+                adoption_hold: Some(AdoptionHoldEvidence {
+                    request_id: "adoption-7".to_owned(),
+                    organization_id: "organization-1".to_owned(),
+                    workspace_id: "workspace-1".to_owned(),
+                    authority_instance_id: "authority-1".to_owned(),
+                    phase: AdoptionHoldPhase::ActiveHeld,
+                    plan_digest: plan_digest.clone(),
+                }),
+            },
+        });
+        let json = serde_json::to_value(body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "ready");
+        assert_eq!(json["apiReady"], true);
+        assert_eq!(json["executionReady"], false);
+        assert_eq!(json["businessReady"], false);
+        assert_eq!(json["gate"]["source"], CONTROL_HOST_ADMISSION_SOURCE);
+        assert_eq!(json["gate"]["scope"], CONTROL_HOST_ADMISSION_SCOPE);
+        assert_eq!(json["gate"]["state"], "closed");
+        assert_eq!(json["gate"]["planDigest"], plan_digest);
+        assert_eq!(json["gate"]["adoptionHold"]["phase"], "ACTIVE_HELD");
+    }
 }
 
 fn read_initial_artifact(

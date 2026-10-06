@@ -118,6 +118,169 @@ fn canonical_start_worker_preserves_limits_and_runtime_owned_device_injection() 
     assert_eq!(observed[0].memory_max_bytes, Some(24 * 1024 * 1024 * 1024));
 }
 
+#[test]
+fn v1_and_v2_create_operation_obey_the_durable_runtime_maintenance_hold() {
+    use core_v1::kernel_authority_service_server::KernelAuthorityService as KernelAuthorityV1;
+    use core_v2::kernel_authority_service_server::KernelAuthorityService as KernelAuthorityV2;
+    use cy_runtime_maintenance::{
+        MaintenanceOutcome, MaintenancePlan, ReadinessRequest, ReadinessStatus, RuntimeMaintenance,
+        RuntimeUsage, TrustedActivitySourceCatalog, UpdateTargetKind,
+    };
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let gate = RuntimeMaintenance::open_for_test(
+        state_dir.path(),
+        TrustedActivitySourceCatalog {
+            schema_version: 1,
+            generation: 1,
+            sources: Vec::new(),
+        },
+    )
+    .unwrap();
+    let readiness_request = ReadinessRequest {
+        target_kind: UpdateTargetKind::CoreRuntime,
+        requires_restart: true,
+        expected_catalog_generation: 1,
+        expected_activity_sources: Vec::new(),
+    };
+    let runtime_usage = || RuntimeUsage {
+        known: true,
+        active_worker_count: 0,
+        active_allocation_count: 0,
+    };
+    let readiness = gate
+        .get_update_readiness_with(&readiness_request, runtime_usage)
+        .unwrap();
+    assert_eq!(readiness.status, ReadinessStatus::Ready);
+    let plan = MaintenancePlan {
+        plan_id: "workspace-first-adoption".to_string(),
+        plan_digest: format!("sha256:{}", "a".repeat(64)),
+        component_artifact_digests: BTreeMap::from([(
+            "cyrene-kernel".to_string(),
+            format!("sha256:{}", "b".repeat(64)),
+        )]),
+    };
+    let hold = gate
+        .begin_maintenance_with(
+            "workspace-first-adoption",
+            &plan,
+            &readiness_request,
+            readiness.gate_generation,
+            true,
+            runtime_usage,
+        )
+        .unwrap();
+    let token = hold
+        .maintenance_token
+        .expect("the exact workspace plan should receive a persistent hold");
+
+    let adapter = semantic_worker_adapter().with_runtime_maintenance(gate.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let make_operation = |id: &str| semantic_v1::Operation {
+        identity: Some(semantic_v1::Identity {
+            id: id.to_string(),
+            generation: 1,
+        }),
+        owner: Some(semantic_v1::Identity {
+            id: "unix-principal/uid-1000/gid-1000".to_string(),
+            generation: 1,
+        }),
+        executor: Some(semantic_v1::Identity {
+            id: "unix-principal/uid-1000/gid-1000".to_string(),
+            generation: 1,
+        }),
+        kind: "ai.train".to_string(),
+        state: semantic_v1::OperationState::Created as i32,
+        deadline: None,
+        parent: None,
+        metadata: Default::default(),
+    };
+
+    let v1_denied = runtime.block_on(
+        <KernelServiceAdapter as KernelAuthorityV1>::create_operation(
+            &adapter,
+            authority_request(core_v1::CreateOperationRequest {
+                context: Some(authority_context("create-under-hold-v1")),
+                operation: Some(make_operation("held-operation-v1")),
+            }),
+        ),
+    );
+    let v2_denied = runtime.block_on(
+        <KernelServiceAdapter as KernelAuthorityV2>::create_operation(
+            &adapter,
+            authority_request(core_v2::CreateOperationRequest {
+                context: Some(core_v2::AuthorityCallContext {
+                    namespace: "default".to_string(),
+                    contract: Some(to_semantic_proto_contract_revision(
+                        &semantic::ContractRevision::current(),
+                    )),
+                    request_id: "create-under-hold-v2".to_string(),
+                    idempotency_key: "create-under-hold-v2".to_string(),
+                }),
+                operation: Some(make_operation("held-operation-v2")),
+            }),
+        ),
+    );
+    for denied in [v1_denied, v2_denied] {
+        let error = denied.expect_err("maintenance hold must reject new operations");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("UPDATE_MAINTENANCE_ACTIVE"));
+    }
+
+    let ended = gate
+        .end_maintenance(
+            "workspace-first-adoption",
+            &token,
+            MaintenanceOutcome::Success,
+            true,
+        )
+        .unwrap();
+    assert!(ended.unlocked);
+
+    let v1_created = runtime
+        .block_on(
+            <KernelServiceAdapter as KernelAuthorityV1>::create_operation(
+                &adapter,
+                authority_request(core_v1::CreateOperationRequest {
+                    context: Some(authority_context("create-after-hold-v1")),
+                    operation: Some(make_operation("released-operation-v1")),
+                }),
+            ),
+        )
+        .unwrap()
+        .into_inner();
+    let v2_created = runtime
+        .block_on(
+            <KernelServiceAdapter as KernelAuthorityV2>::create_operation(
+                &adapter,
+                authority_request(core_v2::CreateOperationRequest {
+                    context: Some(core_v2::AuthorityCallContext {
+                        namespace: "default".to_string(),
+                        contract: Some(to_semantic_proto_contract_revision(
+                            &semantic::ContractRevision::current(),
+                        )),
+                        request_id: "create-after-hold-v2".to_string(),
+                        idempotency_key: "create-after-hold-v2".to_string(),
+                    }),
+                    operation: Some(make_operation("released-operation-v2")),
+                }),
+            ),
+        )
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        v1_created.state,
+        semantic_v1::OperationState::Created as i32
+    );
+    assert_eq!(
+        v2_created.state,
+        semantic_v1::OperationState::Created as i32
+    );
+}
+
 pub(super) fn semantic_worker_adapter_with_resources(
     resources: Vec<semantic::Resource>,
 ) -> KernelServiceAdapter {

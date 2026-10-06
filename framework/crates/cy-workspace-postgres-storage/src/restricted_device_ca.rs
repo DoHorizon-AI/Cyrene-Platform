@@ -57,6 +57,7 @@ use crate::device_enrollment_authorization_service::{
 use cy_workspace_control_plane::device_registry::{
     CurrentRelayPeerRevocationEvidence, RelayPeerCertificateRevocationChecker,
     RelayPeerRevocationCheckError, RelayPeerRevocationQuery, WorkspaceDeviceKey,
+    WorkspaceDevicePeerCertificateStatusChecker,
 };
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DEVICE_CA_DATABASE_URL";
@@ -262,6 +263,24 @@ impl PostgresRestrictedDeviceCa {
     pub fn check_current_crl(&self) -> Result<(), RestrictedDeviceCaError> {
         let (reply, result) = mpsc::sync_channel(1);
         self.call(Command::CheckHealth(reply), result)
+            .map_err(|_| RestrictedDeviceCaError::Unavailable)
+    }
+
+    /// Retire every issued certificate for one exact device key and re-sign the CRL after each.
+    ///
+    /// Registry revocation must commit before this method is called. Replaying it is safe because
+    /// each certificate is retired through the existing idempotent retirement path.
+    pub fn retire_device_certificates(
+        &self,
+        key: &WorkspaceDeviceKey,
+    ) -> Result<(), RestrictedDeviceCaError> {
+        let device_key = DeviceAuthorizationDeviceKey {
+            organization_id: key.organization_id.clone(),
+            workspace_id: key.workspace_id.clone(),
+            device_id: key.device_id.clone(),
+        };
+        let (reply, result) = mpsc::sync_channel(1);
+        self.call(Command::RetireDevice(device_key, reply), result)
             .map_err(|_| RestrictedDeviceCaError::Unavailable)
     }
 
@@ -584,6 +603,32 @@ impl RelayPeerCertificateRevocationChecker for PostgresRelayPeerSignedCrlChecker
     }
 }
 
+impl WorkspaceDevicePeerCertificateStatusChecker for PostgresRelayPeerSignedCrlChecker {
+    fn require_current_good_status_for_peer_chain(
+        &self,
+        leaf_certificate_der: &[u8],
+        intermediate_chain_der: &[Vec<u8>],
+        checked_at_unix_ms: u64,
+    ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError> {
+        let certificate = X509::from_der(leaf_certificate_der)
+            .map_err(|_| RelayPeerRevocationCheckError::Unknown)?;
+        let serial_number =
+            canonical_serial(&certificate).map_err(|_| RelayPeerRevocationCheckError::Unknown)?;
+        let certificate_sha256 = Sha256::digest(leaf_certificate_der).into();
+        let trusted_roots_der = vec![self.certificate_der.clone()];
+        let query = RelayPeerRevocationQuery::new(
+            leaf_certificate_der,
+            intermediate_chain_der,
+            &trusted_roots_der,
+            &serial_number,
+            certificate_sha256,
+            checked_at_unix_ms,
+        );
+
+        RelayPeerCertificateRevocationChecker::require_current_good_status(self, &query)
+    }
+}
+
 impl Drop for PostgresRelayPeerSignedCrlChecker {
     fn drop(&mut self) {
         drop(self.sender.take());
@@ -876,6 +921,7 @@ enum Command {
     Issue(IssueInput, Reply<IssuedDeviceCertificate>),
     Lookup(IssueInput, Reply<Option<IssuedDeviceCertificate>>),
     Retire(RetireInput, Reply<()>),
+    RetireDevice(DeviceAuthorizationDeviceKey, Reply<()>),
     CheckCertificate {
         certificate_der: Vec<u8>,
         serial_number: Vec<u8>,
@@ -992,6 +1038,10 @@ fn worker_main(
             }
             Command::Retire(input, reply) => {
                 let result = runtime.block_on(retire_certificate(&mut state, input));
+                let _ = reply.send(result);
+            }
+            Command::RetireDevice(key, reply) => {
+                let result = runtime.block_on(retire_device_certificates(&mut state, key));
                 let _ = reply.send(result);
             }
             Command::CheckCertificate {
@@ -1202,6 +1252,81 @@ async fn retire_certificate(state: &mut CaRuntime, input: RetireInput) -> CaResu
         regenerate_crl_in_transaction(state, &mut transaction, now).await?;
     }
     transaction.commit().await.map_err(|_| CaError::Unavailable)
+}
+
+async fn retire_device_certificates(
+    state: &mut CaRuntime,
+    device_key: DeviceAuthorizationDeviceKey,
+) -> CaResult<()> {
+    let rows = sqlx::query(
+        "SELECT authorization_id, registration_binding_id, authorization_generation, \
+                organization_id, workspace_id, device_id, certificate_der, certificate_sha256, \
+                serial_number, spki_sha256 \
+         FROM cyrene_workspace_device_ca.issued_certificates \
+         WHERE organization_id = $1 AND workspace_id = $2 AND device_id = $3 \
+         ORDER BY authorization_generation, authorization_id",
+    )
+    .bind(&device_key.organization_id)
+    .bind(&device_key.workspace_id)
+    .bind(&device_key.device_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|_| CaError::Unavailable)?;
+
+    // Query every generation because the Registry's latest fingerprint does not cover old active
+    // or pending issuance records.
+    for row in rows {
+        let authorization_id: Vec<u8> = row
+            .try_get("authorization_id")
+            .map_err(|_| CaError::Unavailable)?;
+        let authorization_id: DeviceAuthorizationId = authorization_id
+            .try_into()
+            .map_err(|_| CaError::Unavailable)?;
+        let registration_binding_id: uuid::Uuid = row
+            .try_get("registration_binding_id")
+            .map_err(|_| CaError::Unavailable)?;
+        let authorization_generation: i64 = row
+            .try_get("authorization_generation")
+            .map_err(|_| CaError::Unavailable)?;
+        let organization_id: String = row
+            .try_get("organization_id")
+            .map_err(|_| CaError::Unavailable)?;
+        let workspace_id: String = row
+            .try_get("workspace_id")
+            .map_err(|_| CaError::Unavailable)?;
+        let device_id: String = row.try_get("device_id").map_err(|_| CaError::Unavailable)?;
+        let certificate_der: Vec<u8> = row
+            .try_get("certificate_der")
+            .map_err(|_| CaError::Unavailable)?;
+        let certificate_sha256: [u8; 32] = array32(
+            row.try_get("certificate_sha256")
+                .map_err(|_| CaError::Unavailable)?,
+        )?;
+        let serial_number: Vec<u8> = row
+            .try_get("serial_number")
+            .map_err(|_| CaError::Unavailable)?;
+        let spki_sha256: [u8; 32] = array32(
+            row.try_get("spki_sha256")
+                .map_err(|_| CaError::Unavailable)?,
+        )?;
+        let input = RetireInput {
+            authorization_id,
+            certificate_sha256,
+            certificate_der,
+            serial_number,
+            registration_binding_id: *registration_binding_id.as_bytes(),
+            device_key: DeviceAuthorizationDeviceKey {
+                organization_id,
+                workspace_id,
+                device_id,
+            },
+            authorization_generation: u64::try_from(authorization_generation)
+                .map_err(|_| CaError::Unavailable)?,
+            spki_sha256,
+        };
+        retire_certificate(state, input).await?;
+    }
+    Ok(())
 }
 
 async fn check_certificate_status(

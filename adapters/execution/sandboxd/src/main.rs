@@ -25,21 +25,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
-    let log_format = std::env::var("CYRENE_LOG_FORMAT")
-        .ok()
-        .and_then(|f| f.parse().ok())
-        .unwrap_or(cy_observability::LogFormat::Json);
-    let log_level = std::env::var("CYRENE_LOG_LEVEL")
-        .or_else(|_| std::env::var("RUST_LOG"))
-        .unwrap_or_else(|_| "info".to_string());
-    let obs_config = cy_observability::ObservabilityConfig::managed("cyrene-sandboxd")
-        .with_format(log_format)
-        .with_log_level(log_level);
-    let _guard = cy_observability::init_observability(obs_config).ok();
+    let init_observability = || {
+        let log_format = std::env::var("CYRENE_LOG_FORMAT")
+            .ok()
+            .and_then(|format| format.parse().ok())
+            .unwrap_or(cy_observability::LogFormat::Json);
+        let log_level = std::env::var("CYRENE_LOG_LEVEL")
+            .or_else(|_| std::env::var("RUST_LOG"))
+            .unwrap_or_else(|_| "info".to_string());
+        let obs_config = cy_observability::ObservabilityConfig::managed("cyrene-sandboxd")
+            .with_format(log_format)
+            .with_log_level(log_level);
+        cy_observability::init_observability(obs_config).ok()
+    };
 
     let args = match Args::parse() {
         Ok(a) => a,
         Err(err) => {
+            let _guard = init_observability();
             tracing::error!(
                 event.name = "platform.service.startup_failed",
                 error.code = cy_observability::PlatformErrorCode::SandboxCgroupInitFailed.as_str(),
@@ -49,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(err);
         }
     };
+    let uses_delegated_default = args.cgroup_root.is_none() && !args.dev_mode;
     let root = match args.cgroup_root {
         Some(root) => root,
         None => {
@@ -66,7 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_bpf_enabled: !args.disable_device_bpf && !args.dev_mode,
         dev_mode: args.dev_mode,
     }));
-    runtime.initialize_owned_root()?;
+    if uses_delegated_default {
+        runtime.initialize_delegated_owned_root()?;
+    } else {
+        runtime.initialize_owned_root()?;
+    }
+    let _guard = init_observability();
 
     if let Some(parent) = args.socket.parent() {
         fs::create_dir_all(parent)?;

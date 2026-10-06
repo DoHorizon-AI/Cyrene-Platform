@@ -27,6 +27,7 @@ use cy_workspace_product_contracts::{
 };
 use thiserror::Error;
 
+use crate::deployment_admission::{DeploymentAdmission, DeploymentAdmissionError};
 use crate::product_authorization::authorize_product_invocation;
 use crate::product_projection::{
     product_invocation_rpc_status, validate_product_invocation, validate_product_response,
@@ -110,6 +111,9 @@ pub enum WorkspaceControlPlaneConfigError {
     /// An instance marker is required for API projections.
     #[error("authority_instance_id must not be empty")]
     EmptyAuthorityInstanceId,
+    /// The configured Control Host admission profile is unknown.
+    #[error("control-host admission profile is invalid")]
+    InvalidDeploymentAdmissionProfile,
 }
 
 /// Application-level Workspace API handler.
@@ -125,6 +129,7 @@ pub struct WorkspaceControlPlane {
     product_contracts: Option<Arc<ProductContractBundle>>,
     product_policy: Option<Arc<TrustedProductPolicy>>,
     product_invocation_adapter: Option<Arc<dyn ProductInvocationAdapter>>,
+    deployment_admission: DeploymentAdmission,
 }
 
 impl WorkspaceControlPlane {
@@ -152,6 +157,14 @@ impl WorkspaceControlPlane {
         if authority_instance_id.trim().is_empty() {
             return Err(WorkspaceControlPlaneConfigError::EmptyAuthorityInstanceId);
         }
+        let deployment_admission = DeploymentAdmission::from_environment(
+            crate::deployment_admission::DeploymentIdentity {
+                organization_id: organization_id.clone(),
+                workspace_id: workspace_id.clone(),
+                authority_instance_id: authority_instance_id.clone(),
+            },
+        )
+        .map_err(|_| WorkspaceControlPlaneConfigError::InvalidDeploymentAdmissionProfile)?;
 
         Ok(Self {
             organization_id,
@@ -161,6 +174,7 @@ impl WorkspaceControlPlane {
             product_contracts: None,
             product_policy: None,
             product_invocation_adapter: None,
+            deployment_admission,
         })
     }
 
@@ -322,6 +336,29 @@ impl WorkspaceApi for WorkspaceControlPlane {
                 Err(message) => return Self::error_response(request_id, 3, message),
             };
 
+        let _admission = match self
+            .deployment_admission
+            .acquire_dispatch(
+                &self.organization_id,
+                &self.workspace_id,
+                &self.authority_instance_id,
+            )
+            .await
+        {
+            Ok(guard) => guard,
+            Err(DeploymentAdmissionError::Closed) => {
+                return Self::dispatch_error_response(
+                    request_id,
+                    WorkspaceDispatchError::FailedPrecondition,
+                )
+            }
+            Err(DeploymentAdmissionError::Unavailable) => {
+                return Self::dispatch_error_response(
+                    request_id,
+                    WorkspaceDispatchError::Unavailable,
+                )
+            }
+        };
         let projection = match self
             .dispatcher
             .dispatch(&self.workspace_id, product_request)
@@ -374,6 +411,29 @@ impl WorkspaceControlPlane {
             Ok(authorized) => authorized,
             Err(error) => return Self::product_invocation_error_response(request_id, error),
         };
+        let _admission = match self
+            .deployment_admission
+            .acquire_dispatch(
+                &self.organization_id,
+                &self.workspace_id,
+                &self.authority_instance_id,
+            )
+            .await
+        {
+            Ok(guard) => guard,
+            Err(DeploymentAdmissionError::Closed) => {
+                return Self::product_invocation_error_response(
+                    request_id,
+                    ProductInvocationError::FailedPrecondition,
+                )
+            }
+            Err(DeploymentAdmissionError::Unavailable) => {
+                return Self::product_invocation_error_response(
+                    request_id,
+                    ProductInvocationError::Unavailable,
+                )
+            }
+        };
         let response = match adapter.invoke(&authorized).await {
             Ok(response) => response,
             Err(error) => return Self::product_invocation_error_response(request_id, error),
@@ -422,6 +482,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::PermissionsExt};
+
     use cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2;
     use cy_proto::workspace_v1::{
         workspace_api_request, workspace_api_response, UserIdentityRef, WorkspaceOperationState,
@@ -429,7 +492,11 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(unix)]
+    use crate::deployment_admission::CONTROL_HOST_ADMISSION_SCHEMA;
     use crate::PRODUCT_JSON_BODY_MAX_BYTES;
+    #[cfg(unix)]
+    use tempfile::tempdir;
 
     struct RecordingDispatcher {
         response: Mutex<Option<Result<WorkspaceOperationProjection, WorkspaceDispatchError>>>,
@@ -552,6 +619,74 @@ mod tests {
             dispatcher.request.lock().expect("request mutex").as_ref(),
             Some(WorkspaceProductRequest::GetOperation(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_control_host_admission_blocks_product_dispatch_under_the_live_gate() {
+        let directory = tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(directory.path().join("admission.lock"), b"").unwrap();
+        fs::set_permissions(
+            directory.path().join("admission.lock"),
+            fs::Permissions::from_mode(0o660),
+        )
+        .unwrap();
+        let receipt = serde_json::json!({
+            "schema": CONTROL_HOST_ADMISSION_SCHEMA,
+            "source": "control-host-adoption-helper.v1",
+            "scope": "workspace-product-v2/control-host",
+            "state": "closed",
+            "generation": 1,
+            "readerGid": nix::unistd::getegid().as_raw(),
+            "catalogDigest": format!("sha256:{}", "a".repeat(64)),
+            "topologyDigest": format!("sha256:{}", "b".repeat(64)),
+            "planDigest": format!("sha256:{}", "c".repeat(64)),
+            "adoptionHold": {
+                "requestId": "adoption-1",
+                "organizationId": "organization-1",
+                "workspaceId": "workspace-1",
+                "authorityInstanceId": "authority-1",
+                "phase": "ACTIVE_HELD",
+                "planDigest": format!("sha256:{}", "c".repeat(64))
+            }
+        });
+        fs::write(
+            directory.path().join("state.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            directory.path().join("state.json"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+
+        let dispatcher = Arc::new(RecordingDispatcher::new(Ok(projection(
+            "workspace-1",
+            identity("operation-1", 4),
+        ))));
+        let mut control_plane = handler(dispatcher.clone());
+        control_plane.deployment_admission = DeploymentAdmission::for_test(
+            directory.path().to_path_buf(),
+            crate::deployment_admission::DeploymentIdentity {
+                organization_id: "organization-1".to_owned(),
+                workspace_id: "workspace-1".to_owned(),
+                authority_instance_id: "authority-1".to_owned(),
+            },
+        );
+
+        let status = error(
+            control_plane
+                .handle_authenticated(
+                    request("workspace-1", identity("operation-1", 4)),
+                    member_caller(),
+                )
+                .await,
+        );
+        assert_eq!(status.code, 9);
+        assert_eq!(status.message, "WORKSPACE_REQUEST_FAILED_PRECONDITION");
+        assert!(dispatcher.request.lock().expect("request mutex").is_none());
     }
 
     #[tokio::test]

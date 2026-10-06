@@ -338,3 +338,24 @@ pub trait RelayPeerCertificateRevocationChecker: Send + Sync {
         query: &RelayPeerRevocationQuery<'_>,
     ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError>;
 }
+
+/// Current-status gate for a Workspace device certificate received from Authority mTLS.
+///
+/// Callers must provide only the leaf and intermediates obtained from the server-side Tonic
+/// peer-certificate context, in leaf-first order. Implementations bind the certificate to their
+/// configured CA and require a fresh, signed CRL status. This check does not replace the current
+/// Directory and Registry identity lookup performed by Authority.
+///
+/// Authority 的调用方只能传入服务端 Tonic mTLS peer context 中的证书链；请求字段不能提供证书或身份。
+pub trait WorkspaceDevicePeerCertificateStatusChecker: Send + Sync {
+    /// Require the exact transport peer certificate to have a current good signed-CRL status.
+    ///
+    /// `checked_at_unix_ms` is the local check time in Unix milliseconds. Unknown, stale, or
+    /// unavailable status must return [`RelayPeerRevocationCheckError::Unknown`].
+    fn require_current_good_status_for_peer_chain(
+        &self,
+        leaf_certificate_der: &[u8],
+        intermediate_chain_der: &[Vec<u8>],
+        checked_at_unix_ms: u64,
+    ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError>;
+}

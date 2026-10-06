@@ -97,6 +97,12 @@ SYSTEMD_UNIT_COMPONENTS = {
     "cyrene-runtime-maintenance": "cyrene-runtime-maintenance.service",
 }
 WORKER_SCOPED_COMPONENT_UNITS = {"cy-runtime-agent": "cy-runtime-agent.service"}
+# Only these two native control hosts have fixed HTTP readiness endpoints in the release contract.
+# 端口来自已确认的生产端点配置；不从可变环境变量或其他组件推测探测地址。
+NATIVE_HTTP_READINESS = {
+    "cy-workspace-authority-host": {"kind": "http", "port": 8080, "path": "/readyz"},
+    "cy-workspace-web-bff": {"kind": "http", "port": 18084, "path": "/readyz"},
+}
 PACKAGE_RUNTIME_ID = "cy-package-runtime"
 PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID = "package-runtime-native-v1"
 PACKAGE_RUNTIME_COMPATIBILITY = {
@@ -218,7 +224,9 @@ def _trusted_package_runtime_compatibility(group: dict[str, Any]) -> dict[str, A
     """
     for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion"):
         if group.get(key) != PACKAGE_RUNTIME_COMPATIBILITY[key]:
-            raise ComponentArtifactError(f"trusted package-runtime compatibility {key} does not match the frozen protocol")
+            raise ComponentArtifactError(
+                f"trusted package-runtime compatibility {key} does not match the frozen protocol"
+            )
 
     lock = group.get("contractLock")
     expected_lock = PACKAGE_RUNTIME_COMPATIBILITY["contractLock"]
@@ -263,9 +271,7 @@ def _trusted_catalog_compatibility_for_component(
     if not isinstance(groups, list):
         raise ComponentArtifactError("trusted catalog has no compatibilityGroups array")
     matches = [
-        row
-        for row in groups
-        if isinstance(row, dict) and row.get("groupId") == PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID
+        row for row in groups if isinstance(row, dict) and row.get("groupId") == PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID
     ]
     if len(matches) != 1:
         raise ComponentArtifactError("trusted catalog must declare package-runtime-native-v1 exactly once")
@@ -725,6 +731,9 @@ def build(
                 catalog,
                 catalog_component,
             )
+        http_readiness = NATIVE_HTTP_READINESS.get(component["id"])
+        if http_readiness is not None:
+            descriptor["health"] = dict(http_readiness)
         descriptor_path = component_dir / "descriptor.json"
         descriptor_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n", encoding="utf-8")
