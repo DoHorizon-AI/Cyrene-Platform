@@ -45,6 +45,8 @@ use cy_kernel_api::{
 };
 
 #[cfg(target_os = "linux")]
+use crate::config::{prepare_delegated_process_with, LinuxDelegatedCgroupIo};
+#[cfg(target_os = "linux")]
 use crate::sys::{open_pidfd, spawn_gated_process, try_wait_pid, wait_pid};
 use crate::{
     bpf::{attach_device_bpf_filter, probe_device_bpf_attach},
@@ -287,6 +289,38 @@ impl CgroupV2Runtime {
     /// direct child belongs to a previous Kernel process.
     /// 中文：创建并校验专用根目录，并在其父级启用可用控制器。重启清理会有意延后到 Kernel 基于日志的恢复阶段；sandboxd 不会猜测某个直接子进程是否属于此前的 Kernel 进程。
     pub fn initialize_owned_root(&self) -> Result<OwnedCgroupCleanupReport, ProviderError> {
+        self.initialize_owned_root_inner()
+    }
+
+    /// Moves the daemon into its fixed control leaf, then initializes its worker root.
+    ///
+    /// Use only when `root` is the default child of this daemon's delegated service
+    /// cgroup. The ordinary initializer remains available for development and
+    /// explicitly configured roots.
+    /// 中文：仅当 `root` 是守护进程委派服务组下的默认子目录时使用；开发模式和显式配置根目录继续使用普通初始化器。
+    ///
+    /// # Errors
+    /// Returns an error if process membership cannot be verified, the service group
+    /// contains foreign processes or children, the self-only move fails, or root
+    /// initialization fails.
+    #[cfg(target_os = "linux")]
+    pub fn initialize_delegated_owned_root(
+        &self,
+    ) -> Result<OwnedCgroupCleanupReport, ProviderError> {
+        if self.config.dev_mode {
+            return Err(ProviderError::new(
+                "linux-cgroup-v2",
+                "CGROUP_DELEGATION_DEV_MODE_FORBIDDEN",
+                "development mode must not move the daemon into a delegated cgroup",
+            ));
+        }
+        let mut io = LinuxDelegatedCgroupIo;
+        prepare_delegated_process_with(&self.config.root, &mut io, |_, _, _| {
+            self.initialize_owned_root_inner()
+        })
+    }
+
+    fn initialize_owned_root_inner(&self) -> Result<OwnedCgroupCleanupReport, ProviderError> {
         self.validate_owned_root()?;
         fs::create_dir_all(&self.config.root).map_err(|error| {
             ProviderError::new(
@@ -762,6 +796,26 @@ impl CgroupV2Runtime {
             })
             .map(|controller| format!("+{controller}"))
             .collect::<Vec<_>>();
+        // The mount root is exempt from the no-internal-process rule. A delegated
+        // non-root domain must be empty before its controllers can be enabled.
+        // 中文：cgroup 挂载根目录不受无内部进程约束限制；启用委派的非根域控制器前，其直接进程必须为空。
+        if parent != Path::new("/sys/fs/cgroup") {
+            let parent_processes =
+                fs::read_to_string(parent.join("cgroup.procs")).map_err(|error| {
+                    ProviderError::new(
+                        "linux-cgroup-v2",
+                        "CGROUP_PARENT_PROCESS_STATE_READ_FAILED",
+                        &error.to_string(),
+                    )
+                })?;
+            if !parent_processes.trim().is_empty() {
+                return Err(ProviderError::new(
+                    "linux-cgroup-v2",
+                    "CGROUP_PARENT_HAS_PROCESSES",
+                    "cannot enable delegated controllers while the parent cgroup contains processes",
+                ));
+            }
+        }
         if requested.is_empty() {
             return Ok(());
         }
