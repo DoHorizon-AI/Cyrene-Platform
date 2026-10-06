@@ -9,6 +9,9 @@ license = "AGPL-3.0-only"
 name = "cy_runtime_maintenance"
 path = "src/lib.rs"
 
+[features]
+test-utils = []
+
 [[bin]]
 name = "cyrene-runtime-maintenance"
 path = "src/main.rs"
