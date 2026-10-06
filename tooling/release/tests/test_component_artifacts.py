@@ -241,6 +241,47 @@ def test_index_uses_exact_asset_name_and_source_pins(tmp_path: Path) -> None:
     assert artifacts.verify_index(index_path, verify_run=False, verify_attestation=False) == index
 
 
+def test_trusted_catalog_compatibility_accepts_frozen_package_runtime_lock() -> None:
+    """Validate the C12 Package Runtime group against its own pinned Workspace lock."""
+    group = dict(artifacts.PACKAGE_RUNTIME_COMPATIBILITY)
+    component = {
+        "componentId": "cyrene-runtime-maintenance",
+        "compatibilityGroup": artifacts.PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
+    }
+    catalog = {"compatibilityGroups": [group]}
+
+    with patch.object(artifacts, "_verify_contract_lock") as verify_lock:
+        result = artifacts.trusted_catalog_compatibility(Path("catalog.json"), catalog, component)
+
+    assert result == group
+    verify_lock.assert_called_once_with({"contractLock": group["contractLock"]})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("contractLock", {"repository": "DoHorizon-AI/Cyrene-Platform"}),
+        ("wireApiVersion", "cyrene.workspace.product.v2"),
+    ],
+)
+def test_trusted_catalog_compatibility_rejects_unpinned_package_runtime_contract(
+    field: str, value: object
+) -> None:
+    """Reject a mutated Package Runtime lock or wire identity before release creation."""
+    group = dict(artifacts.PACKAGE_RUNTIME_COMPATIBILITY)
+    group[field] = value
+    component = {
+        "componentId": "cyrene-runtime-maintenance",
+        "compatibilityGroup": artifacts.PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
+    }
+
+    with patch.object(artifacts, "_verify_contract_lock") as verify_lock:
+        with pytest.raises(artifacts.ComponentArtifactError, match="frozen protocol lock"):
+            artifacts.trusted_catalog_compatibility(Path("catalog.json"), {"compatibilityGroups": [group]}, component)
+
+    verify_lock.assert_not_called()
+
+
 def test_github_run_verification_checks_actual_api_identity() -> None:
     """Reject a successful run response from a different source identity."""
     payload = {

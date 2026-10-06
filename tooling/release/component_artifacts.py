@@ -38,6 +38,19 @@ ATTACHMENT_KINDS = {"native-binary", "python-bundle"}
 ARTIFACT_KINDS = ATTACHMENT_KINDS | {"oci-image"}
 ATTESTATION_PREDICATE = "https://slsa.dev/provenance/v1"
 SEMVER_RANGE_TERM = re.compile(r"^(?:=|>=|>|<=|<|\^|~)?[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$")
+PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID = "package-runtime-native-v1"
+PACKAGE_RUNTIME_COMPATIBILITY = {
+    "groupId": PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
+    "groupVersion": "2",
+    "contractApiVersion": "0.1.0",
+    "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+    "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "path": "governance/package-runtime-protocols-v1.lock.json",
+        "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
+        "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267",
+    },
+}
 
 
 class ComponentArtifactError(ValueError):
@@ -738,7 +751,7 @@ def trusted_catalog_compatibility(
 
     The source repository's Product bundle lock is deliberately not consulted
     here: it governs data-bundle inputs, while this pin governs shared wire/API
-    compatibility for independently released connection components.
+    compatibility for independently released Platform components.
     """
     group_id = component.get("compatibilityGroup")
     if group_id is None:
@@ -757,15 +770,28 @@ def trusted_catalog_compatibility(
     lock = group.get("contractLock")
     if not isinstance(lock, dict):
         raise ComponentArtifactError("trusted compatibility group has no immutable contractLock pin")
+    if group_id == PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID:
+        if any(
+            group.get(key) != PACKAGE_RUNTIME_COMPATIBILITY[key]
+            for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion", "contractLock")
+        ):
+            raise ComponentArtifactError("trusted Package Runtime compatibility does not match its frozen protocol lock")
+    elif group_id != "workspace-product-v2":
+        raise ComponentArtifactError(f"unsupported trusted compatibility group: {group_id}")
     if lock.get("repository") != "DoHorizon-AI/Cyrene-Workspace":
-        raise ComponentArtifactError("connection protocol lock must be pinned to Cyrene-Workspace")
+        raise ComponentArtifactError("trusted protocol lock must be pinned to Cyrene-Workspace")
     commit = lock.get("commit")
     path = lock.get("path")
     digest = lock.get("sha256")
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ComponentArtifactError("trusted contractLock commit must be a full lower-case Git SHA")
-    if not isinstance(path, str) or path != "governance/workspace-connection-protocols-v2.lock.json":
-        raise ComponentArtifactError("trusted connection contractLock path is not the frozen protocol lock")
+    expected_path = (
+        PACKAGE_RUNTIME_COMPATIBILITY["contractLock"]["path"]
+        if group_id == PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID
+        else "governance/workspace-connection-protocols-v2.lock.json"
+    )
+    if not isinstance(path, str) or path != expected_path:
+        raise ComponentArtifactError("trusted contractLock path is not the frozen protocol lock for its group")
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ComponentArtifactError("trusted contractLock sha256 must be sha256:<64 lowercase hex>")
 
