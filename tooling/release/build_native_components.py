@@ -22,6 +22,8 @@ from typing import Any
 
 if __package__:
     from .component_artifacts import (
+        PACKAGE_RUNTIME_COMPATIBILITY,
+        PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
         ComponentArtifactError,
         _component_target,
         _verify_contract_lock,
@@ -32,6 +34,8 @@ if __package__:
     )
 else:
     from component_artifacts import (
+        PACKAGE_RUNTIME_COMPATIBILITY,
+        PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
         ComponentArtifactError,
         _component_target,
         _verify_contract_lock,
@@ -104,19 +108,6 @@ NATIVE_HTTP_READINESS = {
     "cy-workspace-web-bff": {"kind": "http", "port": 18084, "path": "/readyz"},
 }
 PACKAGE_RUNTIME_ID = "cy-package-runtime"
-PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID = "package-runtime-native-v1"
-PACKAGE_RUNTIME_COMPATIBILITY = {
-    "groupId": PACKAGE_RUNTIME_COMPATIBILITY_GROUP_ID,
-    "groupVersion": "2",
-    "contractApiVersion": "0.1.0",
-    "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
-    "contractLock": {
-        "repository": "DoHorizon-AI/Cyrene-Workspace",
-        "path": "governance/package-runtime-protocols-v1.lock.json",
-        "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
-        "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267",
-    },
-}
 ATTACHED_NATIVE_BINARIES = {
     "cy-workspace-authority-host": (
         ("cy-workspace-authority-host", "cy-workspace-authority-admin"),
