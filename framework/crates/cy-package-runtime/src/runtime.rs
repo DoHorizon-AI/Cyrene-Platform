@@ -444,17 +444,24 @@ impl FilesystemPackageRuntime {
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
         let _guard = self.lock_lifecycle()?;
         let previous = self.read_activation_optional(&request.binding_id)?;
-        let generation = RuntimeGeneration::new(
-            previous
-                .as_ref()
-                .map_or(1, |record| record.generation.value() + 1),
-        )?;
+        if previous.is_some() {
+            // `activate` is the only mutation admitted to a catalog source for
+            // selecting an exact InstallationId. Preserve upgrade semantics
+            // for an existing binding so a failed replacement restores its
+            // previously installed identity instead of leaving it stopped.
+            return self.switch_installation_locked(
+                &request.binding_id,
+                &request.installation_id,
+                request.environment,
+            );
+        }
+        let generation = RuntimeGeneration::new(1)?;
         let connection_ref = self.activate_service(&request, generation)?;
         let record = ActivationRecord {
             record_version: ACTIVATION_RECORD_VERSION,
             binding_id: request.binding_id.clone(),
             installation_id: request.installation_id.clone(),
-            previous_installation_id: previous.map(|record| record.installation_id),
+            previous_installation_id: None,
             generation,
             desired_active: true,
             last_failure_code: None,
@@ -544,6 +551,9 @@ impl FilesystemPackageRuntime {
         &self,
         binding_id: &BindingId,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
+        // Readback used to reconcile a pending broker lease must observe the
+        // completed mutation, not an activation record midway through a switch.
+        let _guard = self.lock_lifecycle()?;
         let record = self.read_activation(binding_id)?;
         let mut supervisor = self.service_supervisor()?;
         let state = supervisor.status(binding_id)?;
@@ -569,7 +579,7 @@ impl FilesystemPackageRuntime {
         installation_id: &InstallationId,
         environment: BTreeMap<String, String>,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
-        self.switch_installation(binding_id, installation_id, environment, false)
+        self.switch_installation(binding_id, installation_id, environment)
     }
 
     pub fn rollback(
@@ -584,7 +594,7 @@ impl FilesystemPackageRuntime {
                 format!("no rollback target for {binding_id}"),
             )
         })?;
-        self.switch_installation(binding_id, &previous, environment, true)
+        self.switch_installation(binding_id, &previous, environment)
     }
 
     pub fn remove_binding_reference(
@@ -630,7 +640,40 @@ impl FilesystemPackageRuntime {
                 format!("installation is not present: {installation_id}"),
             ));
         }
-        fs::remove_dir_all(path).map_err(io_error("UNINSTALL_FAILED"))
+        // The same-filesystem rename is the uninstall commit point. If it fails,
+        // the installed record remains at its original path for safe retry.
+        let quarantine = self.root.join("staging").join(format!(
+            ".uninstall-{}-{}",
+            installation_id.as_str(),
+            Uuid::new_v4()
+        ));
+        fs::rename(&path, &quarantine).map_err(io_error("UNINSTALL_FAILED"))?;
+        if let Err(error) = sync_directory(&self.root.join("installations"))
+            .and_then(|()| sync_directory(&self.root.join("staging")))
+        {
+            tracing::warn!(
+                event.name = "platform.package.uninstall_sync_deferred",
+                installation_id = %installation_id,
+                error = %error,
+                message = "Package was removed from the installed set but directory durability sync failed",
+            );
+        }
+        if let Err(error) = fs::remove_dir_all(&quarantine) {
+            tracing::warn!(
+                event.name = "platform.package.uninstall_cleanup_deferred",
+                installation_id = %installation_id,
+                error = %error,
+                message = "Package uninstall committed; private staging cleanup will retry on runtime startup",
+            );
+        } else if let Err(error) = sync_directory(&self.root.join("staging")) {
+            tracing::warn!(
+                event.name = "platform.package.uninstall_sync_deferred",
+                installation_id = %installation_id,
+                error = %error,
+                message = "Package uninstall committed but staging cleanup durability sync failed",
+            );
+        }
+        Ok(())
     }
 
     pub fn cleanup(&self) -> Result<CleanupReport, PackageRuntimeError> {
@@ -997,9 +1040,17 @@ impl FilesystemPackageRuntime {
         binding_id: &BindingId,
         installation_id: &InstallationId,
         environment: BTreeMap<String, String>,
-        rollback: bool,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
         let _guard = self.lock_lifecycle()?;
+        self.switch_installation_locked(binding_id, installation_id, environment)
+    }
+
+    fn switch_installation_locked(
+        &self,
+        binding_id: &BindingId,
+        installation_id: &InstallationId,
+        environment: BTreeMap<String, String>,
+    ) -> Result<RuntimeStatus, PackageRuntimeError> {
         self.get_installation(installation_id)?;
         let current = self.read_activation(binding_id)?;
         let generation = RuntimeGeneration::new(current.generation.value() + 1)?;
@@ -1012,12 +1063,23 @@ impl FilesystemPackageRuntime {
         let connection_ref = match self.activate_service(&request, generation) {
             Ok(connection_ref) => connection_ref,
             Err(error) => {
-                let restore = ActivationRequest {
-                    binding_id: binding_id.clone(),
-                    installation_id: current.installation_id.clone(),
-                    environment,
-                };
-                let _ = self.activate_service(&restore, current.generation);
+                if current.desired_active {
+                    let restore = ActivationRequest {
+                        binding_id: binding_id.clone(),
+                        installation_id: current.installation_id.clone(),
+                        environment,
+                    };
+                    if let Err(restore_error) = self.activate_service(&restore, current.generation)
+                    {
+                        tracing::error!(
+                            event.name = "platform.package.activation_restore_failed",
+                            binding_id = %binding_id,
+                            installation_id = %current.installation_id,
+                            error = %restore_error,
+                            message = "Failed to restore the previously active installation after a failed switch",
+                        );
+                    }
+                }
                 return Err(error);
             }
         };
@@ -1025,17 +1087,51 @@ impl FilesystemPackageRuntime {
             record_version: ACTIVATION_RECORD_VERSION,
             binding_id: binding_id.clone(),
             installation_id: installation_id.clone(),
-            previous_installation_id: Some(current.installation_id),
+            previous_installation_id: Some(current.installation_id.clone()),
             generation,
             desired_active: true,
             last_failure_code: None,
             last_failure_message: None,
         };
         if let Err(error) = self.write_activation(&record) {
-            let _ = self.service_supervisor()?.deactivate(binding_id);
+            let mut supervisor = self.service_supervisor()?;
+            if let Err(deactivate_error) = supervisor.deactivate(binding_id) {
+                tracing::error!(
+                    event.name = "platform.package.deactivation_failed",
+                    binding_id = %binding_id,
+                    error = %deactivate_error,
+                    write_error = %error,
+                    message = "Failed to stop the replacement service after activation record commit failed",
+                );
+            }
+            if let Err(restore_record_error) = self.write_activation(&current) {
+                tracing::error!(
+                    event.name = "platform.package.activation_record_restore_failed",
+                    binding_id = %binding_id,
+                    error = %restore_record_error,
+                    write_error = %error,
+                    message = "Failed to restore the previous activation record after a failed switch",
+                );
+            }
+            if current.desired_active {
+                let restore = ActivationRequest {
+                    binding_id: binding_id.clone(),
+                    installation_id: current.installation_id.clone(),
+                    environment,
+                };
+                if let Err(restore_error) = self.activate_service(&restore, current.generation) {
+                    tracing::error!(
+                        event.name = "platform.package.activation_restore_failed",
+                        binding_id = %binding_id,
+                        installation_id = %current.installation_id,
+                        error = %restore_error,
+                        write_error = %error,
+                        message = "Failed to restore the previously active service after activation record commit failed",
+                    );
+                }
+            }
             return Err(error);
         }
-        let _ = rollback;
         Ok(RuntimeStatus {
             binding_id: binding_id.clone(),
             installation_id: installation_id.clone(),

@@ -2,7 +2,7 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │  📄 test_package_runtime_binding_operations.py                      │
 │  Module: cyrene_runtime_maintenance.tests.binding_operations         │
-│  Role: Product owner completion tests for admitted binding changes.  │
+│  Role: Source owner completion tests for admitted binding changes.   │
 │                                                                      │
 │  模块职责：验证持久提交回调与维护门禁完成之间的安全顺序。               │
 └─────────────────────────────────────────────────────────────────────┘
@@ -263,6 +263,66 @@ def test_persist_callback_runs_before_exact_broker_completion(tmp_path: Path) ->
             "protocol_version": _BINDING_PROTOCOL,
         }
     ]
+
+
+def test_cataloged_standalone_source_uses_uds_and_broker_admission(tmp_path: Path) -> None:
+    package_socket = tmp_path / "package.sock"
+    broker_socket = tmp_path / "broker.sock"
+    token_path = tmp_path / "standalone-source.token"
+    source_id = "cyrene-standalone-plugins"
+    source_token = "standalone-owner-secret"
+    binding_id = "plugin.catalog.binding"
+    token_path.write_text(source_token, encoding="utf-8")
+    token_path.chmod(0o600)
+
+    def activate(request: dict[str, Any]) -> dict[str, Any]:
+        assert request["auth"] == {"source_id": source_id, "source_token": source_token}
+        scope = {
+            "binding_id": binding_id,
+            "package_id": "package-a",
+            "installation_id": "install-a",
+            "operation": "activate",
+        }
+        receipt = _receipt(request, overrides={"source_id": source_id, "scope": scope})
+        status = {**_STATUS, "binding_id": binding_id}
+        return _ok(request, {**status, "binding_operation": receipt})
+
+    package_server = _start_server(
+        package_socket,
+        [lambda request: _ok(request, _AUTHORITY), activate],
+    )
+    broker_server = _start_server(
+        broker_socket,
+        [lambda request: {
+            "request_id": request["request_id"],
+            "result": {"completed": True, "gate_generation": 13},
+        }],
+    )
+    client = PackageRuntimeClient.from_source_secret(
+        source_id,
+        token_path,
+        socket_path=package_socket,
+        catalog_generation=7,
+        maintenance_socket_path=broker_socket,
+    )
+
+    status = client.activate_and_persist(
+        binding_id,
+        "install-a",
+        package_id="package-a",
+        persist_intent=_persist_intent_noop,
+        persist=lambda _status, _receipt_value: None,
+    )
+
+    package_requests = _join_server(package_server)
+    broker_requests = _join_server(broker_server)
+    assert status["binding_id"] == binding_id
+    assert package_requests[1]["auth"] == {"source_id": source_id, "source_token": source_token}
+    assert package_requests[1]["binding_id"] == binding_id
+    assert broker_requests[0]["auth"] == {"source_id": source_id, "source_token": source_token}
+    assert broker_requests[0]["params"]["source_id"] == source_id
+    assert broker_requests[0]["params"]["binding_id"] == binding_id
+    assert broker_requests[0]["params"]["operation"] == "activate"
 
 
 def test_persistence_failure_leaves_receipt_pending_without_broker_call(tmp_path: Path) -> None:
@@ -547,6 +607,57 @@ def test_complete_failure_keeps_owner_receipt_and_redacts_token(tmp_path: Path) 
     assert persisted[0].operation_token == _OPERATION_TOKEN
 
 
+def test_explicit_failed_activation_outcome_is_persisted_before_lease_completion(tmp_path: Path) -> None:
+    package_socket = tmp_path / "package.sock"
+    broker_socket = tmp_path / "broker.sock"
+    events: list[str] = []
+    persisted: list[BindingOperationReceipt] = []
+
+    def authority(request: dict[str, Any]) -> dict[str, Any]:
+        events.append("authority")
+        return _ok(request, _AUTHORITY)
+
+    package_server = _start_server(package_socket, [authority])
+
+    def complete(request: dict[str, Any]) -> dict[str, Any]:
+        assert events == ["authority", "persist_outcome"]
+        events.append("complete")
+        assert request["params"]["operation_token"] == _OPERATION_TOKEN
+        return {
+            "request_id": request["request_id"],
+            "result": {"completed": True, "gate_generation": 12},
+        }
+
+    broker_server = _start_server(broker_socket, [complete])
+    client = _client(package_socket, broker_socket)
+    receipt = BindingOperationReceipt(
+        request_id="failed-first-activation",
+        source_id=_SOURCE_ID,
+        protocol_version=_BINDING_PROTOCOL,
+        catalog_generation=7,
+        scope=BindingOperationScope("binding-a", "package-a", "install-a", "activate"),
+        operation_token=_OPERATION_TOKEN,
+        gate_generation=12,
+        already_in_flight=False,
+        already_completed=False,
+    )
+
+    def persist_outcome(pending_receipt: BindingOperationReceipt) -> None:
+        assert pending_receipt is receipt
+        persisted.append(pending_receipt)
+        events.append("persist_outcome")
+
+    client.commit_binding_operation_outcome(receipt, persist_outcome=persist_outcome)
+
+    package_requests = _join_server(package_server)
+    broker_requests = _join_server(broker_server)
+    assert events == ["authority", "persist_outcome", "complete"]
+    assert persisted == [receipt]
+    assert [request["operation"] for request in package_requests] == ["authority"]
+    assert broker_requests[0]["method"] == "CompleteBindingOperation"
+    assert broker_requests[0]["request_id"] == receipt.request_id
+
+
 @pytest.mark.parametrize("reply_shape", ["wrong_request_id", "invalid_generation", "extra_field"])
 def test_malformed_complete_reply_keeps_persisted_receipt_pending(tmp_path: Path, reply_shape: str) -> None:
     package_socket = tmp_path / "package.sock"
@@ -757,6 +868,113 @@ def test_lost_admission_reply_replays_same_request_id_then_reconciles_pending_le
     ]
     assert broker_requests[0]["request_id"] == stable_request_id
     assert broker_requests[0]["params"]["operation_token"] == _OPERATION_TOKEN
+
+
+def test_pending_first_activation_failure_reconciles_absent_binding_record(tmp_path: Path) -> None:
+    package_socket = tmp_path / "package.sock"
+    broker_socket = tmp_path / "broker.sock"
+    request_id = "stable-first-activation-failure"
+    observed_outcomes: list[tuple[Mapping[str, Any] | None, BindingOperationReceipt]] = []
+
+    def lost_first_activation_reply(_request: dict[str, Any]) -> None:
+        # The daemon completed the failed activation before this dropped reply;
+        # the owner must learn the outcome from serialized status readback.
+        return None
+
+    def pending_replay(request: dict[str, Any]) -> dict[str, Any]:
+        receipt = _receipt(request, overrides={"already_in_flight": True})
+        return {
+            "request_id": request["request_id"],
+            "ok": False,
+            "error": {
+                "code": "BINDING_OPERATION_PENDING",
+                "message": "matching operation remains pending",
+                "remediation": "reconcile owner state",
+                "binding_operation": receipt,
+            },
+        }
+
+    def missing_binding(request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "request_id": request["request_id"],
+            "ok": False,
+            "error": {
+                "code": "BINDING_NOT_FOUND",
+                "message": "first activation failed before a binding record was created",
+                "remediation": "record the failed activation outcome",
+            },
+        }
+
+    package_server = _start_server(
+        package_socket,
+        [
+            lambda request: _ok(request, _AUTHORITY),
+            lost_first_activation_reply,
+            lambda request: _ok(request, _AUTHORITY),
+            pending_replay,
+            lambda request: _ok(request, _AUTHORITY),
+            missing_binding,
+            lambda request: _ok(request, _INSTALLATION),
+        ],
+    )
+
+    def complete(request: dict[str, Any]) -> dict[str, Any]:
+        assert observed_outcomes
+        return {
+            "request_id": request["request_id"],
+            "result": {"completed": True, "gate_generation": 12},
+        }
+
+    broker_server = _start_server(broker_socket, [complete])
+    client = _client(package_socket, broker_socket)
+    with pytest.raises(PackageRuntimeError) as lost:
+        client.activate_and_persist(
+            "binding-a",
+            "install-a",
+            package_id="package-a",
+            persist_intent=_persist_intent_noop,
+            persist=lambda _status, _receipt_value: None,
+            request_id=request_id,
+        )
+    assert lost.value.pending_binding_operation is None
+
+    recovered_client = _client(package_socket, broker_socket)
+    with pytest.raises(PackageRuntimeError) as replay:
+        recovered_client.activate_and_persist(
+            "binding-a",
+            "install-a",
+            package_id="package-a",
+            persist_intent=_persist_intent_noop,
+            persist=lambda _status, _receipt_value: None,
+            request_id=request_id,
+        )
+    receipt = replay.value.pending_binding_operation
+    assert replay.value.code == "BINDING_OPERATION_PENDING"
+    assert receipt is not None and receipt.already_in_flight
+
+    result = recovered_client.reconcile_binding_operation_and_persist(
+        receipt,
+        reconcile=lambda status, _installation, saved_receipt: observed_outcomes.append(
+            (status, saved_receipt)
+        ),
+    )
+
+    package_requests = _join_server(package_server)
+    broker_requests = _join_server(broker_server)
+    assert observed_outcomes == [(None, receipt)]
+    assert result.runtime_status is None
+    assert result.installation == _INSTALLATION
+    assert result.binding_operation is receipt
+    assert [request["operation"] for request in package_requests] == [
+        "authority",
+        "activate",
+        "authority",
+        "activate",
+        "authority",
+        "runtime_status",
+        "get_installation",
+    ]
+    assert broker_requests[0]["request_id"] == request_id
 
 
 def test_lost_complete_reply_reconciles_persisted_fresh_receipt_without_changing_flags(tmp_path: Path) -> None:

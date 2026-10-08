@@ -19,12 +19,15 @@ mod types;
 
 pub use bootstrap::{
     BootstrapCandidateInput, BootstrapInstallInput, BootstrapInstallReceipt,
-    BootstrapMaintenanceInput, BootstrapWorkerError, BootstrapWorkerInput, BootstrapWorkerOutput,
+    BootstrapInstalledIdentity, BootstrapMaintenanceInput, BootstrapUninstallInput,
+    BootstrapUninstallReceipt, BootstrapWorkerError, BootstrapWorkerInput,
+    BootstrapWorkerOperation, BootstrapWorkerOutput, BootstrapWorkerUninstallResult,
     ValidatedMaintenanceHold, cleanup_worker_candidate_handoff, ensure_runtime_daemon_stopped,
-    ensure_runtime_state_root, parse_bootstrap_input, prepare_worker_candidate,
-    read_bootstrap_file, read_bootstrap_stdin, read_operator_token,
-    validate_bootstrap_input_file_location, validate_bootstrap_toolchain, validate_candidate_paths,
-    validate_maintenance_hold, validate_persistent_candidate_paths, verify_root_worker_peer,
+    ensure_runtime_state_root, parse_bootstrap_input, parse_bootstrap_uninstall_input,
+    prepare_worker_candidate, read_bootstrap_file, read_bootstrap_uninstall_file,
+    read_operator_token, validate_bootstrap_input_file_location, validate_bootstrap_toolchain,
+    validate_candidate_paths, validate_maintenance_hold, validate_persistent_candidate_paths,
+    validate_uninstall_maintenance_hold, verify_root_worker_peer,
 };
 pub use control::{ControlCommand, ControlRequest, ControlResponse, PackageRuntimeControlServer};
 pub use dependency::{CommandDependencyPreparer, DependencyPreparer};

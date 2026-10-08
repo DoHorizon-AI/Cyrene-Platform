@@ -2,7 +2,9 @@
 
 `cy-package-runtime` is the node-local control-plane owner for verified package
 installation, locked dependency preparation, binding activation, process
-supervision, status, upgrade, rollback, and cleanup.
+supervision, status, upgrade, rollback, and cleanup. Production offline
+installation and uninstall use the root-only `PACKAGE_ONLY` maintenance path;
+Product mutations use the authenticated Unix-domain socket.
 
 A package supplies a language-neutral launch command. A configured external
 adapter prepares language dependencies through
@@ -27,3 +29,5 @@ or domain-error API.
 Package 提供与语言无关的 launch command。配置好的外部 adapter 通过 `cyrene.package-dependency-preparer.v1` 准备语言依赖；Platform 校验其有界 JSON 证据，但不需要理解 Python、Java、.NET 或其他 toolchain。随后 supervisor 执行已验证的、相对于 package 的 binary 或准备好的 runtime executable，附加通用 readiness 参数，并返回不透明的 `connection_ref`。语言 adapter 和 capability 协议留在 package 所属仓库。
 
 Product 使用 Plugin 所有的版本化 client 打开 `connection_ref`。此 crate 不提供 invoke、stream、subscribe、method、request/response payload 或 domain-error API。
+
+生产离线安装和卸载走 root-only `PACKAGE_ONLY` maintenance 流程；Product mutation 通过已认证 Unix-domain socket 执行。

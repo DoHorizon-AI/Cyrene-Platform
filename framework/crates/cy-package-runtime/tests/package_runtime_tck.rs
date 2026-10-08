@@ -3,6 +3,7 @@ use std::{
     fs,
     io::Write,
     net::TcpStream,
+    os::unix::fs::PermissionsExt,
     path::Path,
     sync::{
         Arc, Barrier,
@@ -274,6 +275,12 @@ fn generic_package_runtime_tck() {
     let runtime_root = temp.path().join("runtime");
     let source_v1 = build_package(&package_root.join("v1"), "1.0.0");
     let source_v2 = build_package(&package_root.join("v2"), "1.1.0");
+    let broken_runtime = b"raise RuntimeError('synthetic startup failure')\n";
+    let source_v3_broken = build_package_with_entry(
+        &package_root.join("v3-broken"),
+        "1.2.0",
+        Some(("src/cyrene_plugin_runtime/server.py", broken_runtime, None)),
+    );
     let preparer = FixtureDependencyPreparer::successful();
     let prepare_calls = Arc::clone(&preparer.calls);
     let runtime = Arc::new(open_runtime(&runtime_root, preparer));
@@ -333,6 +340,7 @@ fn generic_package_runtime_tck() {
     );
 
     let installation_v2 = runtime.install(&source_v2).unwrap();
+    let installation_v3_broken = runtime.install(&source_v3_broken).unwrap();
     assert_ne!(
         installation_v1.installation_id,
         installation_v2.installation_id
@@ -369,6 +377,19 @@ fn generic_package_runtime_tck() {
         Some(main_connection)
     );
 
+    let failed_activation = runtime
+        .activate(ActivationRequest {
+            binding_id: main.clone(),
+            installation_id: installation_v3_broken.installation_id.clone(),
+            environment: BTreeMap::new(),
+        })
+        .unwrap_err();
+    assert_eq!(failed_activation.code, "PLUGIN_READINESS_INVALID");
+    let restored = runtime.runtime_status(&main).unwrap();
+    assert_eq!(restored.installation_id, installation_v1.installation_id);
+    assert_eq!(restored.state, RuntimeState::Running);
+    assert_connection_is_reachable(restored.connection_ref.as_deref().unwrap());
+
     let upgraded = runtime
         .upgrade(&main, &installation_v2.installation_id, BTreeMap::new())
         .unwrap();
@@ -386,7 +407,7 @@ fn generic_package_runtime_tck() {
 
     drop(runtime);
     let restarted = open_runtime(&runtime_root, FixtureDependencyPreparer::successful());
-    assert_eq!(restarted.list_installations().unwrap().len(), 2);
+    assert_eq!(restarted.list_installations().unwrap().len(), 3);
     assert_eq!(
         restarted.runtime_status(&main).unwrap().state,
         RuntimeState::Failed
@@ -410,6 +431,12 @@ fn generic_package_runtime_tck() {
         .uninstall(&installation_v1.installation_id)
         .unwrap_err();
     assert_eq!(referenced.code, "INSTALLATION_REFERENCED");
+    assert_eq!(
+        restarted
+            .get_installation(&installation_v1.installation_id)
+            .unwrap(),
+        installation_v1
+    );
     restarted.deactivate(&main).unwrap();
     restarted.deactivate(&secondary).unwrap();
     restarted.remove_binding_reference(&main).unwrap();
@@ -428,10 +455,70 @@ fn generic_package_runtime_tck() {
     restarted
         .uninstall(&installation_v2.installation_id)
         .unwrap();
+    restarted
+        .uninstall(&installation_v3_broken.installation_id)
+        .unwrap();
+    assert_eq!(
+        restarted
+            .get_installation(&installation_v2.installation_id)
+            .unwrap_err()
+            .code,
+        "INSTALLATION_NOT_FOUND"
+    );
     let cleanup = restarted.cleanup().unwrap();
     assert_eq!(cleanup.orphan_runtimes, 0);
     assert_eq!(restarted.orphan_runtime_count().unwrap(), 0);
     assert!(restarted.list_installations().unwrap().is_empty());
+}
+
+#[test]
+fn process_lock_serializes_daemon_and_offline_mutations() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("runtime");
+    let _runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let second = FilesystemPackageRuntime::open(
+        &root,
+        Arc::new(FixtureDependencyPreparer::successful()),
+        Box::new(ProcessPluginServiceSupervisor::default()),
+        service_options(),
+    );
+    match second {
+        Ok(_) => panic!("a second runtime owner bypassed the process lock"),
+        Err(error) => assert_eq!(error.code, "PACKAGE_RUNTIME_ALREADY_RUNNING"),
+    }
+}
+
+#[test]
+fn failed_uninstall_rename_keeps_the_exact_installation_for_retry() {
+    if nix::unistd::geteuid().as_raw() == 0 {
+        return;
+    }
+    let temp = TempDir::new().unwrap();
+    let runtime_root = temp.path().join("runtime");
+    let runtime = open_runtime(&runtime_root, FixtureDependencyPreparer::successful());
+    let source = build_package(&temp.path().join("candidate"), "1.0.0");
+    let installed = runtime.install(&source).unwrap();
+
+    let installations = runtime_root.join("installations");
+    fs::set_permissions(&installations, fs::Permissions::from_mode(0o500)).unwrap();
+    let error = runtime.uninstall(&installed.installation_id).unwrap_err();
+    fs::set_permissions(&installations, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(error.code, "UNINSTALL_FAILED");
+    assert_eq!(
+        runtime
+            .get_installation(&installed.installation_id)
+            .unwrap(),
+        installed
+    );
+
+    runtime.uninstall(&installed.installation_id).unwrap();
+    assert_eq!(
+        runtime
+            .get_installation(&installed.installation_id)
+            .unwrap_err()
+            .code,
+        "INSTALLATION_NOT_FOUND"
+    );
 }
 
 #[test]

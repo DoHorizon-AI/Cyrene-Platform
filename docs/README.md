@@ -38,6 +38,7 @@ recommended path from protocol definitions to executable adapters.
 - [`architecture/overview.md`](architecture/overview.md) — Mermaid component map and request flow.
 - [`architecture/tool-system.md`](architecture/tool-system.md) — framework extension and worker boundaries.
 - [`architecture/mcp-integration.md`](architecture/mcp-integration.md) — protocol integration rules.
+- [`package-runtime.md`](package-runtime.md) — authenticated package lifecycle and held offline install/uninstall.
 - [`glossary.md`](glossary.md) — English/Chinese terminology.
 - [`faq.md`](faq.md) — common questions and troubleshooting.
 - [`logging-and-errors.md`](logging-and-errors.md) — cross-repository logging, error codes, and diagnostics specification (草案 v0.1).

@@ -191,7 +191,17 @@ impl PackageRuntimeControlServer {
                 }
             };
             let shutdown = matches!(&request.command, ControlCommand::Shutdown);
-            let response = self.handle_command(request.request_id, request.command);
+            let response = if request.command.is_state_mutation() {
+                failure_response(
+                    request.request_id,
+                    PackageRuntimeError::new(
+                        "MAINTENANCE_ADMISSION_REQUIRED",
+                        "stdio transport cannot authorize package or binding mutations",
+                    ),
+                )
+            } else {
+                self.handle_command(request.request_id, request.command)
+            };
             self.write_response(&mut output, &response)?;
             if shutdown {
                 break;
@@ -203,8 +213,8 @@ impl PackageRuntimeControlServer {
     /// Dispatches one already parsed command through the single owned runtime.
     ///
     /// The local socket transport performs peer, source, scope, and generation
-    /// checks before calling this method. Mutation gating belongs at that
-    /// transport boundary; this method preserves the deterministic stdio API.
+    /// checks before calling this method. The public stdio loop is read-only;
+    /// authenticated mutations reach this dispatcher only after UDS admission.
     pub(crate) fn handle_command(
         &self,
         request_id: String,
