@@ -111,7 +111,7 @@ class PackageRuntimeOperationResult(Mapping[str, Any]):
 class PackageRuntimeReconciliationResult:
     """Read-only runtime/install snapshot reconciled against an owner receipt."""
 
-    runtime_status: Mapping[str, Any] = field(repr=False)
+    runtime_status: Mapping[str, Any] | None = field(repr=False)
     installation: Mapping[str, Any] = field(repr=False)
     binding_operation: BindingOperationReceipt = field(repr=False)
 
@@ -123,17 +123,18 @@ class PackageRuntimeReconciliationResult:
 class PackageRuntimeClient:
     """Calls the local Package Runtime control socket using the current protocol.
 
-    Product callers authenticate with their activity-source credential. An
-    operator caller must opt into root mode explicitly; the daemon still checks
-    the Unix peer credentials before authorizing administrative operations.
-    The Product owner keeps lifecycle ownership and commits its durable state
-    through the supplied callback. Control replies alone are not training or
-    deployment proof.
+    Cataloged workload callers authenticate with their installed source
+    credential. This includes Product sources and separately cataloged
+    standalone package operators; the daemon still checks the Unix peer
+    credentials against the source policy. A root operator must opt into root
+    mode explicitly. The source owner keeps lifecycle ownership and commits its
+    durable state through the supplied callback. Control replies alone are not
+    training or deployment proof.
 
     Args:
         socket_path: Absolute path to the Package Runtime UDS, separate from
             the runtime-maintenance broker socket.
-        source_id: Installed Product activity-source ID.
+        source_id: Installed catalog source ID for a Product or standalone owner.
         source_token: Secret loaded for that source from a protected file.
         operator: Explicit root-peer mode for an updater or other host operator.
         catalog_generation: Expected installed catalog generation, if known.
@@ -169,9 +170,9 @@ class PackageRuntimeClient:
         if (source_id is None) != (source_token is None):
             raise ValueError("source_id and source_token must be supplied together")
         if operator and source_id is not None:
-            raise ValueError("operator mode cannot use Product source credentials")
+            raise ValueError("operator mode cannot use source credentials")
         if not operator and source_id is None:
-            raise ValueError("Product source credentials or explicit root operator mode are required")
+            raise ValueError("source credentials or explicit root operator mode are required")
         if source_id is not None and not isinstance(source_id, str):
             raise ValueError("source_id must be text")
         if source_token is not None and not isinstance(source_token, str):
@@ -188,13 +189,13 @@ class PackageRuntimeClient:
             raise ValueError("maintenance_socket_path must be an absolute path")
         if maintenance_client is not None:
             if operator or source_id is None or normalized_token is None:
-                raise ValueError("a maintenance client requires Product source credentials")
+                raise ValueError("a maintenance client requires source credentials")
             if (
                 maintenance_client.source_id != source_id.strip()
                 or maintenance_client.source_token != normalized_token
                 or maintenance_client.operator_token is not None
             ):
-                raise ValueError("maintenance client must use the same Product source credentials")
+                raise ValueError("maintenance client must use the same source credentials")
 
         self.socket_path = path
         self.source_id = source_id.strip() if source_id is not None else None
@@ -219,7 +220,12 @@ class PackageRuntimeClient:
         timeout_seconds: float = 5.0,
         maintenance_socket_path: str | os.PathLike[str] = "/run/cyrene/runtime-maintenance.sock",
     ) -> PackageRuntimeClient:
-        """Loads one source's token from a mounted secret file without logging it."""
+        """Loads one cataloged source token from a protected file without logging it.
+
+        The caller must run with the UID/GID assigned to ``source_id`` in the
+        installed Package Runtime source policy. The token file path is an
+        installer/service credential setting, not a Package Runtime policy field.
+        """
         token = _read_token_file(token_path)
         return cls(
             socket_path,
@@ -290,7 +296,7 @@ class PackageRuntimeClient:
         return result
 
     def runtime_status(self, binding_id: str) -> dict[str, Any]:
-        """Returns the daemon's status for one Product-owned binding."""
+        """Returns the daemon's status for one source-owned binding."""
         return self._request("runtime_status", {"binding_id": _require_text(binding_id, "binding_id")})
 
     def get_installation(self, installation_id: str) -> dict[str, Any]:
@@ -469,7 +475,7 @@ class PackageRuntimeClient:
         allow_in_flight: bool,
     ) -> dict[str, Any]:
         """Completes a receipt only after an owner-controlled durable commit."""
-        self._require_product_source()
+        self._require_source_credentials()
         if not isinstance(receipt, BindingOperationReceipt):
             raise TypeError("receipt must be a BindingOperationReceipt")
         if receipt.source_id != self.source_id:
@@ -490,7 +496,7 @@ class PackageRuntimeClient:
         self,
         receipt: BindingOperationReceipt,
         *,
-        reconcile: Callable[[Mapping[str, Any], Mapping[str, Any], BindingOperationReceipt], None],
+        reconcile: Callable[[Mapping[str, Any] | None, Mapping[str, Any], BindingOperationReceipt], None],
     ) -> PackageRuntimeReconciliationResult:
         """Reconciles a pending lease from read-only evidence, then completes it.
 
@@ -498,7 +504,7 @@ class PackageRuntimeClient:
         expected state, commit the observed outcome, and return ``None``. This
         method never changes receipt flags or repeats the original mutation.
         """
-        self._require_product_source()
+        self._require_source_credentials()
         if not isinstance(receipt, BindingOperationReceipt):
             raise TypeError("receipt must be a BindingOperationReceipt")
         if not callable(reconcile):
@@ -522,7 +528,7 @@ class PackageRuntimeClient:
                     "BINDING_OPERATION_NOT_PENDING", "a completed binding receipt cannot be reconciled"
                 )
 
-            # A fresh handshake confirms this Product still uses the same catalog
+            # A fresh handshake confirms this source still uses the same catalog
             # generation and that the daemon still exposes the admission bridge.
             authority = self.authority()
             if authority["catalog_generation"] != receipt.catalog_generation:
@@ -531,7 +537,21 @@ class PackageRuntimeClient:
                 )
             self._require_binding_operation_capability()
 
-            status = _validate_runtime_status(self.runtime_status(scope.binding_id), scope)
+            try:
+                status_value = self.runtime_status(scope.binding_id)
+            except PackageRuntimeError as error:
+                if scope.operation != "activate" or error.code != "BINDING_NOT_FOUND":
+                    raise
+                # A first activation may fail before it writes a binding record.
+                # runtime_status is lifecycle-serialized, so this absence is
+                # observed after the original synchronous mutation has ended.
+                status = None
+            else:
+                status = (
+                    _validate_observed_runtime_status(status_value, scope.binding_id)
+                    if scope.operation == "activate"
+                    else _validate_runtime_status(status_value, scope)
+                )
             installation = _validate_installation_scope(self.get_installation(scope.installation_id), scope)
 
             try:
@@ -568,6 +588,69 @@ class PackageRuntimeClient:
             error.request_id = receipt.request_id
             raise
 
+    def commit_binding_operation_outcome(
+        self,
+        receipt: BindingOperationReceipt,
+        *,
+        persist_outcome: Callable[[BindingOperationReceipt], None],
+    ) -> None:
+        """Persists an owner-observed outcome, then completes its pending lease.
+
+        Use this for an explicit failure outcome when no runtime status exists
+        to reconcile, such as the first activation of a binding failing before
+        its activation record is created. The callback must durably commit the
+        owner's outcome and be safe to replay with the same receipt. A callback
+        failure leaves the Broker lease pending. This method never retries the
+        Package Runtime mutation.
+        """
+        self._require_source_credentials()
+        if not isinstance(receipt, BindingOperationReceipt):
+            raise TypeError("receipt must be a BindingOperationReceipt")
+        if not callable(persist_outcome):
+            raise TypeError("persist_outcome must be callable")
+        if receipt.source_id != self.source_id:
+            raise PackageRuntimeError("ACTIVITY_SOURCE_CALLER_MISMATCH", "receipt belongs to another source")
+        if receipt.already_completed:
+            raise PackageRuntimeError(
+                "BINDING_OPERATION_NOT_PENDING", "a completed binding receipt cannot be committed again"
+            )
+        if receipt.already_in_flight:
+            raise PackageRuntimeError(
+                "BINDING_OPERATION_PENDING",
+                "an in-flight lease must be reconciled from runtime readback before it can be completed",
+                request_id=receipt.request_id,
+            )
+
+        scope = receipt.scope
+        validated_receipt = _parse_binding_operation_receipt(
+            _binding_operation_receipt_value(receipt),
+            request_id=receipt.request_id,
+            source_id=self.source_id,
+            expected_generation=receipt.catalog_generation,
+            expected_scope=scope,
+        )
+        if validated_receipt != receipt:
+            raise PackageRuntimeError(
+                "PACKAGE_RUNTIME_PROTOCOL_INVALID", "binding operation receipt is not canonical"
+            )
+
+        authority = self.authority()
+        if authority["catalog_generation"] != receipt.catalog_generation:
+            raise PackageRuntimeError(
+                "CATALOG_GENERATION_CHANGED", "receipt catalog generation does not match Package Runtime"
+            )
+        self._require_binding_operation_capability()
+        _invoke_sync_none_callback(
+            persist_outcome,
+            (receipt,),
+            "persist_outcome",
+            "persist_outcome callback must return None after its durable commit",
+        )
+        self._complete_binding_operation_after_owner_commit(
+            receipt,
+            allow_in_flight=False,
+        )
+
     def _binding_operation(
         self,
         operation: str,
@@ -576,10 +659,10 @@ class PackageRuntimeClient:
         expected_scope: BindingOperationScope,
         request_id: str | None = None,
     ) -> PackageRuntimeOperationResult:
-        """Sends one Product mutation and validates its daemon-issued receipt."""
+        """Sends one source-owned mutation and validates its daemon-issued receipt."""
         request_id = _resolve_request_id(request_id)
         try:
-            self._require_product_source()
+            self._require_source_credentials()
             result, sent_request_id = self._request_with_id(
                 operation, fields, expected_scope=expected_scope, request_id=request_id
             )
@@ -648,10 +731,10 @@ class PackageRuntimeClient:
             )
         return self._maintenance_client
 
-    def _require_product_source(self) -> None:
+    def _require_source_credentials(self) -> None:
         if self.operator or self.source_id is None or self._source_token is None:
             raise PackageRuntimeError(
-                "ACTIVITY_SOURCE_AUTH_REQUIRED", "Product source credentials are required for binding operations"
+                "ACTIVITY_SOURCE_AUTH_REQUIRED", "catalog source credentials are required for binding operations"
             )
 
     def _require_binding_operation_capability(self) -> None:
@@ -728,7 +811,7 @@ class PackageRuntimeClient:
             # The daemon authorizes this empty credential object only for peer UID 0.
             return {}
         if self.source_id is None or self._source_token is None:
-            raise PackageRuntimeError("SOURCE_AUTH_REQUIRED", "Product source credentials are required")
+            raise PackageRuntimeError("SOURCE_AUTH_REQUIRED", "catalog source credentials are required")
         return {"source_id": self.source_id, "source_token": self._source_token}
 
     def _exchange(
@@ -1005,7 +1088,7 @@ def _parse_binding_operation_receipt(
     expected_generation: int | None,
     expected_scope: BindingOperationScope,
 ) -> BindingOperationReceipt:
-    """Validates every lease field against this request and Product scope.
+    """Validates every lease field against this request and source scope.
 
     A receipt is the only proof that the daemon reserved this exact operation.
     Its opaque token stays out of all error text and representations.
@@ -1127,6 +1210,30 @@ def _validate_runtime_status(
     ):
         raise PackageRuntimeError(
             "PACKAGE_RUNTIME_PROTOCOL_INVALID", "binding operation RuntimeStatus does not match its scope"
+        )
+    return {field: value[field] for field in _STATUS_FIELDS}
+
+
+def _validate_observed_runtime_status(value: Any, binding_id: str) -> dict[str, Any]:
+    """Validates a post-mutation binding status whose install may be rolled back."""
+    if not isinstance(value, dict) or not set(_STATUS_FIELDS).issubset(value):
+        raise PackageRuntimeError(
+            "PACKAGE_RUNTIME_PROTOCOL_INVALID", "binding readback returned an invalid RuntimeStatus"
+        )
+    if (
+        value["binding_id"] != binding_id
+        or not _is_protocol_text(value["binding_id"])
+        or not _is_protocol_text(value["installation_id"])
+        or type(value["generation"]) is not int
+        or value["generation"] <= 0
+        or not isinstance(value["state"], str)
+        or value["state"] not in {"RUNNING", "STOPPED", "FAILED"}
+        or not _is_optional_protocol_text(value["failure_code"])
+        or not _is_optional_protocol_text(value["failure_message"])
+        or not _is_optional_protocol_text(value["connection_ref"])
+    ):
+        raise PackageRuntimeError(
+            "PACKAGE_RUNTIME_PROTOCOL_INVALID", "binding readback RuntimeStatus is invalid"
         )
     return {field: value[field] for field in _STATUS_FIELDS}
 

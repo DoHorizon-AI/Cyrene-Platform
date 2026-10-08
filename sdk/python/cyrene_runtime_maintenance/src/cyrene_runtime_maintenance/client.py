@@ -33,7 +33,7 @@ BindingOperation = Literal["activate", "recover", "deactivate"]
 
 @dataclass(frozen=True, slots=True)
 class BindingOperationScope:
-    """The Product-owned scope reserved for one package binding operation."""
+    """The source-owned scope reserved for one package binding operation."""
 
     binding_id: str
     package_id: str
@@ -82,8 +82,8 @@ class RuntimeMaintenanceClient:
 
     Args:
         socket_path: Broker socket path shared with the caller.
-        source_id: Trusted catalog source ID for Product activity calls.
-        source_token: Read-only per-source token from a mounted secret file.
+        source_id: Trusted catalog source ID for source-owned activity calls.
+        source_token: Per-source token from a protected credential file.
         operator_token: Root-only capability used by a privileged updater.
         catalog_generation: Installed source catalog generation reported by the installer.
         timeout_seconds: Per-request connect/read timeout.

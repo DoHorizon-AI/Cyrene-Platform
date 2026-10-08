@@ -18,14 +18,16 @@ use std::{
 };
 
 use cy_package_runtime::{
-    BootstrapInstallReceipt, BootstrapWorkerError, BootstrapWorkerInput, BootstrapWorkerOutput,
-    CommandDependencyPreparer, FilesystemPackageRuntime, InstallationRecord,
+    BootstrapInstallReceipt, BootstrapUninstallReceipt, BootstrapWorkerError, BootstrapWorkerInput,
+    BootstrapWorkerOperation, BootstrapWorkerOutput, BootstrapWorkerUninstallResult,
+    CommandDependencyPreparer, FilesystemPackageRuntime, InstallationId, InstallationRecord,
     PackageRuntimeControlServer, PackageRuntimeError, PackageRuntimeSocketServer,
     ProcessPluginServiceSupervisor, RuntimeProcessLock, ServiceActivationOptions,
     cleanup_worker_candidate_handoff, ensure_runtime_daemon_stopped, ensure_runtime_state_root,
-    prepare_worker_candidate, read_bootstrap_file, read_bootstrap_stdin, read_operator_token,
-    validate_bootstrap_input_file_location, validate_bootstrap_toolchain, validate_candidate_paths,
-    validate_maintenance_hold, validate_persistent_candidate_paths, verify_root_worker_peer,
+    prepare_worker_candidate, read_bootstrap_file, read_bootstrap_uninstall_file,
+    read_operator_token, validate_bootstrap_input_file_location, validate_bootstrap_toolchain,
+    validate_candidate_paths, validate_maintenance_hold, validate_persistent_candidate_paths,
+    validate_uninstall_maintenance_hold, verify_root_worker_peer,
 };
 use nix::unistd::User;
 use serde::Serialize;
@@ -81,6 +83,9 @@ fn main() -> ExitCode {
         ExecutionMode::BootstrapInstall { input_file } => {
             run_bootstrap_parent(configuration, input_file)
         }
+        ExecutionMode::BootstrapUninstall { input_file } => {
+            run_bootstrap_uninstall_parent(configuration, input_file)
+        }
         ExecutionMode::BootstrapWorker { lock_fd, auth_fd } => {
             run_bootstrap_worker(configuration, lock_fd, auth_fd)
         }
@@ -107,7 +112,7 @@ fn run_service(configuration: Configuration, stdio: bool) -> Result<(), PackageR
     }
 }
 
-fn run_bootstrap_parent(configuration: Configuration, input_file: Option<PathBuf>) -> ExitCode {
+fn run_bootstrap_parent(configuration: Configuration, input_file: PathBuf) -> ExitCode {
     let mut response_request_id = String::new();
     let result = install_offline_as_root(configuration, input_file, &mut response_request_id);
     let (response, exit_code) = match result {
@@ -146,9 +151,48 @@ fn run_bootstrap_parent(configuration: Configuration, input_file: Option<PathBuf
     exit_code
 }
 
+fn run_bootstrap_uninstall_parent(configuration: Configuration, input_file: PathBuf) -> ExitCode {
+    let mut response_request_id = String::new();
+    let result = uninstall_offline_as_root(configuration, input_file, &mut response_request_id);
+    let (response, exit_code) = match result {
+        Ok(receipt) => (
+            json!({
+                "request_id": response_request_id,
+                "ok": true,
+                "result": receipt,
+            }),
+            ExitCode::SUCCESS,
+        ),
+        Err(error) => {
+            let code = safe_error_code(&error.code);
+            tracing::error!(
+                event.name = "platform.package.bootstrap_uninstall_failed",
+                error.code = %code,
+                message = "offline uninstall failed; maintenance hold remains active",
+            );
+            (
+                json!({
+                    "request_id": response_request_id,
+                    "ok": false,
+                    "error": {
+                        "code": code,
+                        "message": "offline uninstall failed; maintenance hold remains active",
+                        "remediation": "Keep the hold active and correct the failed precondition before retrying."
+                    }
+                }),
+                ExitCode::FAILURE,
+            )
+        }
+    };
+    if write_json_line(&response).is_err() {
+        return ExitCode::FAILURE;
+    }
+    exit_code
+}
+
 fn install_offline_as_root(
     configuration: Configuration,
-    input_file: Option<PathBuf>,
+    input_file: PathBuf,
     response_request_id: &mut String,
 ) -> Result<BootstrapInstallReceipt, PackageRuntimeError> {
     if nix::unistd::geteuid().as_raw() != 0 {
@@ -173,20 +217,14 @@ fn install_offline_as_root(
     let process_lock = RuntimeProcessLock::acquire(&root, runtime_uid, runtime_gid, false)?;
     ensure_runtime_daemon_stopped(runtime_uid)?;
 
-    if let Some(path) = &input_file {
-        validate_bootstrap_input_file_location(path)?;
-    }
-    let input = match input_file.as_ref() {
-        Some(path) => read_bootstrap_file(path)?,
-        None => read_bootstrap_stdin()?,
-    };
+    validate_bootstrap_input_file_location(&input_file)?;
+    let input = read_bootstrap_file(&input_file)?;
     *response_request_id = input.request_id.clone();
     let identity = input.validate()?;
-    if let Some(path) = input_file
-        && path
-            != Path::new(PERSISTENT_BOOTSTRAP_ROOT)
-                .join(&input.request_id)
-                .join("request.json")
+    if input_file
+        != Path::new(PERSISTENT_BOOTSTRAP_ROOT)
+            .join(&input.request_id)
+            .join("request.json")
     {
         return Err(PackageRuntimeError::new(
             "BOOTSTRAP_PRIVATE_FILE_INVALID",
@@ -211,7 +249,9 @@ fn install_offline_as_root(
         &process_lock,
         BootstrapWorkerInput {
             request_id: input.request_id.clone(),
-            candidate: worker_candidate,
+            action: BootstrapWorkerOperation::Install {
+                candidate: worker_candidate,
+            },
         },
     );
 
@@ -255,6 +295,106 @@ fn install_offline_as_root(
     })
 }
 
+fn uninstall_offline_as_root(
+    configuration: Configuration,
+    input_file: PathBuf,
+    response_request_id: &mut String,
+) -> Result<BootstrapUninstallReceipt, PackageRuntimeError> {
+    if nix::unistd::geteuid().as_raw() != 0 {
+        return Err(PackageRuntimeError::new(
+            "ROOT_REQUIRED",
+            "offline package uninstall requires effective UID 0",
+        ));
+    }
+    if configuration.root != Path::new(RUNTIME_ROOT) {
+        return Err(PackageRuntimeError::new(
+            "BOOTSTRAP_CONFIGURATION_INVALID",
+            "offline bootstrap is bound to the managed package runtime root",
+        ));
+    }
+
+    let (runtime_uid, runtime_gid) = runtime_account()?;
+    validate_bootstrap_toolchain(
+        &configuration.dependency_preparer,
+        &configuration.dependency_preparer_args,
+    )?;
+    let root = ensure_runtime_state_root(runtime_uid, runtime_gid)?;
+    let process_lock = RuntimeProcessLock::acquire(&root, runtime_uid, runtime_gid, false)?;
+    ensure_runtime_daemon_stopped(runtime_uid)?;
+
+    validate_bootstrap_input_file_location(&input_file)?;
+    let input = read_bootstrap_uninstall_file(&input_file)?;
+    *response_request_id = input.request_id.clone();
+    input.validate()?;
+    if input_file
+        != Path::new(PERSISTENT_BOOTSTRAP_ROOT)
+            .join(&input.request_id)
+            .join("request.json")
+    {
+        return Err(PackageRuntimeError::new(
+            "BOOTSTRAP_PRIVATE_FILE_INVALID",
+            "bootstrap request path does not match its request ID",
+        ));
+    }
+
+    let hold_before = {
+        let operator_token = read_operator_token()?;
+        let validated = validate_uninstall_maintenance_hold(&input, &operator_token)?;
+        drop(operator_token);
+        validated
+    };
+    let removal_result = run_uninstall_worker(
+        &configuration,
+        &root,
+        runtime_uid,
+        runtime_gid,
+        &process_lock,
+        BootstrapWorkerInput {
+            request_id: input.request_id.clone(),
+            action: BootstrapWorkerOperation::Uninstall {
+                installation: input.installation.clone(),
+            },
+        },
+    );
+
+    // Keep the exact PACKAGE_ONLY hold valid across both success and failure.
+    let hold_after = {
+        let operator_token = read_operator_token()?;
+        let validated = validate_uninstall_maintenance_hold(&input, &operator_token)?;
+        drop(operator_token);
+        validated
+    };
+    if hold_after != hold_before {
+        return Err(PackageRuntimeError::new(
+            "MAINTENANCE_ADMISSION_DENIED",
+            "maintenance hold changed during offline package uninstall",
+        ));
+    }
+    let removal = removal_result?;
+    if removal.installation_id != input.installation.installation_id {
+        return Err(PackageRuntimeError::new(
+            "OFFLINE_UNINSTALL_RECEIPT_MISMATCH",
+            "uninstalled package identity did not match the held request",
+        ));
+    }
+
+    Ok(BootstrapUninstallReceipt {
+        transaction_id: input.maintenance.transaction_id.clone(),
+        target_kind: hold_after.target_kind,
+        plan_id: input.maintenance.plan_id.clone(),
+        plan_digest: input.maintenance.plan_digest.clone(),
+        component_artifact_digests: input.maintenance.component_artifact_digests.clone(),
+        component_id: input.installation.component_id.clone(),
+        artifact_digest: input.installation.artifact_digest.clone(),
+        expected_gate_generation: input.maintenance.expected_gate_generation,
+        expected_catalog_generation: input.maintenance.expected_catalog_generation,
+        gate_generation: hold_after.gate_generation,
+        catalog_generation: hold_after.catalog_generation,
+        installation: input.installation,
+        already_absent: removal.already_absent,
+    })
+}
+
 fn run_install_worker(
     configuration: &Configuration,
     root: &Path,
@@ -263,6 +403,44 @@ fn run_install_worker(
     process_lock: &RuntimeProcessLock,
     input: BootstrapWorkerInput,
 ) -> Result<InstallationRecord, PackageRuntimeError> {
+    let output = run_worker_process(
+        configuration,
+        root,
+        runtime_uid,
+        runtime_gid,
+        process_lock,
+        input,
+    )?;
+    output.installation.ok_or_else(worker_failed)
+}
+
+fn run_uninstall_worker(
+    configuration: &Configuration,
+    root: &Path,
+    runtime_uid: u32,
+    runtime_gid: u32,
+    process_lock: &RuntimeProcessLock,
+    input: BootstrapWorkerInput,
+) -> Result<BootstrapWorkerUninstallResult, PackageRuntimeError> {
+    let output = run_worker_process(
+        configuration,
+        root,
+        runtime_uid,
+        runtime_gid,
+        process_lock,
+        input,
+    )?;
+    output.uninstalled.ok_or_else(worker_failed)
+}
+
+fn run_worker_process(
+    configuration: &Configuration,
+    root: &Path,
+    runtime_uid: u32,
+    runtime_gid: u32,
+    process_lock: &RuntimeProcessLock,
+    input: BootstrapWorkerInput,
+) -> Result<BootstrapWorkerOutput, PackageRuntimeError> {
     let expected_request_id = input.request_id.clone();
     let worker_input = serde_json::to_vec(&input).map_err(|_| worker_failed())?;
     if worker_input.len() > MAX_WORKER_FRAME_BYTES {
@@ -376,16 +554,24 @@ fn run_install_worker(
     }
     let output: BootstrapWorkerOutput =
         serde_json::from_slice(&stdout.bytes).map_err(|_| worker_failed())?;
-    match (status.success(), output.installation, output.error) {
-        (true, Some(installation), None) if output.request_id == expected_request_id => {
-            Ok(installation)
-        }
-        (false, None, Some(error)) => Err(PackageRuntimeError::new(
-            safe_error_code(&error.code),
-            "offline package installation failed; maintenance hold remains active",
-        )),
-        _ => Err(worker_failed()),
+    if status.success()
+        && output.request_id == expected_request_id
+        && output.error.is_none()
+        && (output.installation.is_some() ^ output.uninstalled.is_some())
+    {
+        return Ok(output);
     }
+    if !status.success()
+        && output.installation.is_none()
+        && output.uninstalled.is_none()
+        && let Some(error) = output.error
+    {
+        return Err(PackageRuntimeError::new(
+            safe_error_code(&error.code),
+            "offline package operation failed; maintenance hold remains active",
+        ));
+    }
+    Err(worker_failed())
 }
 
 fn terminate_worker_group(child: &mut std::process::Child) {
@@ -442,11 +628,12 @@ fn run_bootstrap_worker(configuration: Configuration, lock_fd: i32, auth_fd: i32
             ));
         }
     };
-    let expected = match input.validate() {
-        Ok(expected) => expected,
-        Err(error) => return emit_worker_error(error),
-    };
-    if validate_candidate_paths(&input.candidate, runtime_uid, runtime_gid).is_err() {
+    if let Err(error) = input.validate() {
+        return emit_worker_error(error);
+    }
+    if let BootstrapWorkerOperation::Install { candidate } = &input.action
+        && validate_candidate_paths(candidate, runtime_uid, runtime_gid).is_err()
+    {
         return emit_worker_error(PackageRuntimeError::new(
             "BOOTSTRAP_CANDIDATE_PATH_INVALID",
             "candidate files are missing or unsafe",
@@ -477,42 +664,91 @@ fn run_bootstrap_worker(configuration: Configuration, lock_fd: i32, auth_fd: i32
         Ok(runtime) => runtime,
         Err(error) => return emit_worker_error(error),
     };
-    if let Err(error) =
-        runtime.cache_offline_candidate(&input.candidate.package_source(), &expected)
-    {
-        return emit_worker_error(error);
+    match input.action {
+        BootstrapWorkerOperation::Install { candidate } => {
+            let expected = match candidate.identity() {
+                Ok(expected) => expected,
+                Err(error) => return emit_worker_error(error),
+            };
+            if let Err(error) =
+                runtime.cache_offline_candidate(&candidate.package_source(), &expected)
+            {
+                return emit_worker_error(error);
+            }
+            let installation =
+                match runtime.install_offline(&expected.package_id, &expected.package_version) {
+                    Ok(installation) => installation,
+                    Err(error) => return emit_worker_error(error),
+                };
+            if !installation_matches(&installation, &expected) {
+                return emit_worker_error(PackageRuntimeError::new(
+                    "OFFLINE_INSTALL_RECEIPT_MISMATCH",
+                    "installed package record did not match the candidate identity",
+                ));
+            }
+            emit_worker_output(BootstrapWorkerOutput {
+                request_id: input.request_id,
+                installation: Some(installation),
+                uninstalled: None,
+                error: None,
+            })
+        }
+        BootstrapWorkerOperation::Uninstall { installation } => {
+            let installation_id = match InstallationId::new(installation.installation_id.clone()) {
+                Ok(installation_id) => installation_id,
+                Err(error) => return emit_worker_error(error),
+            };
+            let already_absent = match runtime.get_installation(&installation_id) {
+                Ok(record) if installation.matches_record(&record) => {
+                    if let Err(error) = runtime.uninstall(&installation_id) {
+                        return emit_worker_error(error);
+                    }
+                    false
+                }
+                Ok(_) => {
+                    return emit_worker_error(PackageRuntimeError::new(
+                        "OFFLINE_UNINSTALL_IDENTITY_MISMATCH",
+                        "installed package record did not match the held identity",
+                    ));
+                }
+                Err(error) if error.code == "INSTALLATION_NOT_FOUND" => {
+                    if let Err(reference_error) = runtime.uninstall(&installation_id)
+                        && reference_error.code != "INSTALLATION_NOT_FOUND"
+                    {
+                        return emit_worker_error(reference_error);
+                    }
+                    true
+                }
+                Err(error) => return emit_worker_error(error),
+            };
+            emit_worker_output(BootstrapWorkerOutput {
+                request_id: input.request_id,
+                installation: None,
+                uninstalled: Some(BootstrapWorkerUninstallResult {
+                    installation_id: installation.installation_id,
+                    already_absent,
+                }),
+                error: None,
+            })
+        }
     }
-    let installation =
-        match runtime.install_offline(&expected.package_id, &expected.package_version) {
-            Ok(installation) => installation,
-            Err(error) => return emit_worker_error(error),
-        };
-    if !installation_matches(&installation, &expected) {
-        return emit_worker_error(PackageRuntimeError::new(
-            "OFFLINE_INSTALL_RECEIPT_MISMATCH",
-            "installed package record did not match the candidate identity",
-        ));
-    }
-    emit_worker_output(BootstrapWorkerOutput {
-        request_id: input.request_id,
-        installation: Some(installation),
-        error: None,
-    })
 }
 
 fn emit_worker_error(error: PackageRuntimeError) -> ExitCode {
     emit_worker_output(BootstrapWorkerOutput {
         request_id: String::new(),
         installation: None,
+        uninstalled: None,
         error: Some(BootstrapWorkerError {
             code: safe_error_code(&error.code),
-            message: "offline package installation failed".to_string(),
+            message: "offline package operation failed".to_string(),
         }),
     })
 }
 
 fn emit_worker_output(output: BootstrapWorkerOutput) -> ExitCode {
-    let successful = output.installation.is_some() && output.error.is_none();
+    let successful =
+        output.error.is_none() && (output.installation.is_some() ^ output.uninstalled.is_some());
     match write_json_line(&output) {
         Ok(()) if successful => ExitCode::SUCCESS,
         Ok(()) | Err(_) => ExitCode::FAILURE,
@@ -614,14 +850,15 @@ fn runtime_account_error() -> PackageRuntimeError {
 fn worker_failed() -> PackageRuntimeError {
     PackageRuntimeError::new(
         "BOOTSTRAP_WORKER_FAILED",
-        "offline package installation worker failed",
+        "offline package operation worker failed",
     )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ExecutionMode {
     Service { stdio: bool },
-    BootstrapInstall { input_file: Option<PathBuf> },
+    BootstrapInstall { input_file: PathBuf },
+    BootstrapUninstall { input_file: PathBuf },
     BootstrapWorker { lock_fd: i32, auth_fd: i32 },
 }
 
@@ -645,6 +882,7 @@ impl Configuration {
         let mut policy_explicit = false;
         let mut stdio = false;
         let mut bootstrap_install = false;
+        let mut bootstrap_uninstall = false;
         let mut bootstrap_input_file = None;
         let mut worker = false;
         let mut worker_lock_fd = None;
@@ -693,6 +931,14 @@ impl Configuration {
                     }
                     bootstrap_install = true;
                 }
+                "--bootstrap-uninstall-offline" => {
+                    if bootstrap_uninstall {
+                        return Err(
+                            "--bootstrap-uninstall-offline may be provided only once".to_string()
+                        );
+                    }
+                    bootstrap_uninstall = true;
+                }
                 "--bootstrap-input-file" => {
                     if bootstrap_input_file
                         .replace(PathBuf::from(value(&mut arguments)?))
@@ -720,7 +966,7 @@ impl Configuration {
                 }
                 "--help" | "-h" => {
                     return Err(
-                        "usage: cy-package-runtime --root PATH --dependency-preparer PATH [--dependency-preparer-arg VALUE] [--socket ABSOLUTE_PATH] [--source-policy ABSOLUTE_PATH] [--stdio] | --bootstrap-install-offline [--bootstrap-input-file ROOT_PRIVATE_FILE]".to_string(),
+                        "usage: cy-package-runtime --root PATH --dependency-preparer PATH [--dependency-preparer-arg VALUE] [--socket ABSOLUTE_PATH] [--source-policy ABSOLUTE_PATH] [--stdio] | --bootstrap-install-offline|--bootstrap-uninstall-offline --bootstrap-input-file ROOT_PRIVATE_FILE".to_string(),
                     );
                 }
                 _ => return Err(format!("unknown argument: {argument}")),
@@ -729,8 +975,12 @@ impl Configuration {
         let root = root.ok_or_else(|| "--root is required".to_string())?;
         let dependency_preparer =
             dependency_preparer.ok_or_else(|| "--dependency-preparer is required".to_string())?;
+        if bootstrap_install && bootstrap_uninstall {
+            return Err("select only one offline bootstrap operation".to_string());
+        }
         let mode = if worker {
             if bootstrap_install
+                || bootstrap_uninstall
                 || bootstrap_input_file.is_some()
                 || stdio
                 || socket_explicit
@@ -754,13 +1004,22 @@ impl Configuration {
             if stdio || socket_explicit || policy_explicit {
                 return Err("offline bootstrap cannot start a control server".to_string());
             }
-            ExecutionMode::BootstrapInstall {
-                input_file: bootstrap_input_file,
+            let input_file = bootstrap_input_file.ok_or_else(|| {
+                "offline bootstrap requires a root-private --bootstrap-input-file".to_string()
+            })?;
+            ExecutionMode::BootstrapInstall { input_file }
+        } else if bootstrap_uninstall {
+            if stdio || socket_explicit || policy_explicit {
+                return Err("offline bootstrap cannot start a control server".to_string());
             }
+            let input_file = bootstrap_input_file.ok_or_else(|| {
+                "offline bootstrap requires a root-private --bootstrap-input-file".to_string()
+            })?;
+            ExecutionMode::BootstrapUninstall { input_file }
         } else {
             if bootstrap_input_file.is_some() {
                 return Err(
-                    "--bootstrap-input-file requires --bootstrap-install-offline".to_string(),
+                    "--bootstrap-input-file requires an offline bootstrap operation".to_string(),
                 );
             }
             ExecutionMode::Service { stdio }
@@ -800,11 +1059,46 @@ mod tests {
             "--dependency-preparer",
             "/usr/libexec/cyrene-plugin-python-preparer",
             "--bootstrap-install-offline",
+            "--bootstrap-input-file",
+            "/var/lib/cyrene-updates/plugin-package-bootstrap/install-request-1/request.json",
         ])
         .unwrap();
         assert_eq!(
             valid.mode,
-            ExecutionMode::BootstrapInstall { input_file: None }
+            ExecutionMode::BootstrapInstall {
+                input_file: PathBuf::from(
+                    "/var/lib/cyrene-updates/plugin-package-bootstrap/install-request-1/request.json",
+                ),
+            }
+        );
+        let valid_uninstall = parse(&[
+            "--root",
+            RUNTIME_ROOT,
+            "--dependency-preparer",
+            "/usr/libexec/cyrene-plugin-python-preparer",
+            "--bootstrap-uninstall-offline",
+            "--bootstrap-input-file",
+            "/var/lib/cyrene-updates/plugin-package-bootstrap/remove-request-1/request.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            valid_uninstall.mode,
+            ExecutionMode::BootstrapUninstall {
+                input_file: PathBuf::from(
+                    "/var/lib/cyrene-updates/plugin-package-bootstrap/remove-request-1/request.json",
+                ),
+            }
+        );
+
+        assert!(
+            parse(&[
+                "--root",
+                RUNTIME_ROOT,
+                "--dependency-preparer",
+                "/usr/libexec/cyrene-plugin-python-preparer",
+                "--bootstrap-install-offline",
+            ])
+            .is_err()
         );
 
         assert!(
@@ -815,6 +1109,28 @@ mod tests {
                 "/usr/libexec/cyrene-plugin-python-preparer",
                 "--bootstrap-install-offline",
                 "--stdio",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--root",
+                RUNTIME_ROOT,
+                "--dependency-preparer",
+                "/usr/libexec/cyrene-plugin-python-preparer",
+                "--bootstrap-uninstall-offline",
+                "--stdio",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--root",
+                RUNTIME_ROOT,
+                "--dependency-preparer",
+                "/usr/libexec/cyrene-plugin-python-preparer",
+                "--bootstrap-install-offline",
+                "--bootstrap-uninstall-offline",
             ])
             .is_err()
         );

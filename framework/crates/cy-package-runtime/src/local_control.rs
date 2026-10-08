@@ -286,7 +286,7 @@ impl PackageRuntimeSocketServer {
             return Ok(error_response(
                 request.control.request_id,
                 "MAINTENANCE_ADMISSION_REQUIRED",
-                "binding mutation requires an authenticated Product source",
+                "binding mutation requires an authenticated catalog source",
             ));
         };
         let Some(scope) = self.binding_operation_scope(&request.control.command)? else {
@@ -299,20 +299,20 @@ impl PackageRuntimeSocketServer {
         let source_id = request.auth.source_id.as_deref().ok_or_else(|| {
             PackageRuntimeError::new(
                 "CONTROL_AUTH_INVALID",
-                "authenticated Product source is required for a binding mutation",
+                "authenticated catalog source is required for a binding mutation",
             )
         })?;
         let source_token = request.auth.source_token.as_deref().ok_or_else(|| {
             PackageRuntimeError::new(
                 "CONTROL_AUTH_INVALID",
-                "authenticated Product source is required for a binding mutation",
+                "authenticated catalog source is required for a binding mutation",
             )
         })?;
         if source.source_id != source_id {
             return Ok(error_response(
                 request.control.request_id,
                 "CONTROL_AUTH_INVALID",
-                "authenticated Product source is inconsistent",
+                "authenticated catalog source is inconsistent",
             ));
         }
         let generation = policy.generation;
@@ -1787,6 +1787,11 @@ mod tests {
         let response = invoke(&server, root_install, PeerIdentity { uid: 0, gid: 0 });
         assert_eq!(response["error"]["code"], "MAINTENANCE_ADMISSION_REQUIRED");
 
+        let mut root_uninstall = request("uninstall", json!(7), json!({}));
+        root_uninstall["installation_id"] = json!(INSTALLATION_ID);
+        let response = invoke(&server, root_uninstall, PeerIdentity { uid: 0, gid: 0 });
+        assert_eq!(response["error"]["code"], "MAINTENANCE_ADMISSION_REQUIRED");
+
         let response = invoke(
             &server,
             request("cleanup", json!(7), json!({})),
@@ -1798,12 +1803,62 @@ mod tests {
 
     #[test]
     fn malformed_policy_scopes_and_request_limits_fail_closed() {
-        let duplicate_source = json!({
+        let empty_product_policy = json!({
             "schema_version": 1,
             "generation": 7,
             "sources": []
         });
-        assert!(parse_policy(&serde_json::to_vec(&duplicate_source).unwrap()).is_ok());
+        // A package-only transaction can start with no Product sources installed.
+        assert!(parse_policy(&serde_json::to_vec(&empty_product_policy).unwrap()).is_ok());
+        let disabled_standalone_policy = json!({
+            "schema_version": 1,
+            "generation": 7,
+            "sources": [{
+                "source_id": "cyrene-plugin-standalone-operator",
+                "uid": 1001,
+                "gid": 1001,
+                "source_token_sha256": "0".repeat(64),
+                "bindings": []
+            }]
+        });
+        assert!(parse_policy(&serde_json::to_vec(&disabled_standalone_policy).unwrap()).is_ok());
+        let multiple_catalog_sources = json!({
+            "schema_version": 1,
+            "generation": 7,
+            "sources": [
+                {
+                    "source_id": "cyrene-plugin-standalone-operator",
+                    "uid": 1001,
+                    "gid": 1001,
+                    "source_token_sha256": "0".repeat(64),
+                    "bindings": [{
+                        "binding_id": "plugin.catalog.binding",
+                        "package_id": "com.cyrene.test",
+                        "installation_ids": [INSTALLATION_ID],
+                        "operations": [
+                            "activate",
+                            "recover_binding",
+                            "deactivate",
+                            "runtime_status",
+                            "get_installation"
+                        ]
+                    }]
+                },
+                {
+                    "source_id": "product-two",
+                    "uid": 1002,
+                    "gid": 1002,
+                    "source_token_sha256": "1".repeat(64),
+                    "bindings": [{
+                        "binding_id": "product.two.binding",
+                        "package_id": "com.cyrene.test",
+                        "installation_ids": [INSTALLATION_ID],
+                        "operations": ["runtime_status"]
+                    }]
+                }
+            ]
+        });
+        assert!(parse_policy(&serde_json::to_vec(&multiple_catalog_sources).unwrap()).is_ok());
         let duplicated_binding = json!({
             "schema_version": 1,
             "generation": 7,
@@ -1835,23 +1890,25 @@ mod tests {
             ]
         });
         assert!(parse_policy(&serde_json::to_vec(&duplicated_binding).unwrap()).is_err());
-        let invalid_operation = json!({
-            "schema_version": 1,
-            "generation": 7,
-            "sources": [{
-                "source_id": SOURCE_ID,
-                "uid": 1000,
-                "gid": 1000,
-                "source_token_sha256": "0".repeat(64),
-                "bindings": [{
-                    "binding_id": BINDING_ID,
-                    "package_id": "com.cyrene.test",
-                    "installation_ids": [INSTALLATION_ID],
-                    "operations": ["activate", "install"]
+        for operation in ["install", "upgrade", "rollback", "recover"] {
+            let invalid_operation = json!({
+                "schema_version": 1,
+                "generation": 7,
+                "sources": [{
+                    "source_id": SOURCE_ID,
+                    "uid": 1000,
+                    "gid": 1000,
+                    "source_token_sha256": "0".repeat(64),
+                    "bindings": [{
+                        "binding_id": BINDING_ID,
+                        "package_id": "com.cyrene.test",
+                        "installation_ids": [INSTALLATION_ID],
+                        "operations": ["activate", operation]
+                    }]
                 }]
-            }]
-        });
-        assert!(parse_policy(&serde_json::to_vec(&invalid_operation).unwrap()).is_err());
+            });
+            assert!(parse_policy(&serde_json::to_vec(&invalid_operation).unwrap()).is_err());
+        }
 
         let mut extra_field_request = request("authority", json!(7), source_auth());
         extra_field_request["unexpected"] = json!("ignored? no");
@@ -2212,5 +2269,25 @@ mod tests {
             "cy-package-runtime.control.v1"
         );
         assert!(response["result"].get("capabilities").is_none());
+    }
+
+    #[test]
+    fn legacy_stdio_transport_cannot_mutate_package_or_binding_state() {
+        let peer = test_peer();
+        let server = server(test_policy(peer.uid, peer.gid));
+        let mut output = Vec::new();
+        server
+            .control
+            .run(
+                Cursor::new(
+                    b"{\"request_id\":\"stdio-mutation\",\"operation\":\"uninstall\",\"installation_id\":\"installation-1234567890abcdef1234567890abcdef\"}\n",
+                ),
+                &mut output,
+            )
+            .unwrap();
+        let response: Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(response["request_id"], "stdio-mutation");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "MAINTENANCE_ADMISSION_REQUIRED");
     }
 }

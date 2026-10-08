@@ -24,7 +24,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ArtifactDigest, InstallationRecord, OfflineInstallCandidateIdentity, PackageId,
+    ArtifactDigest, InstallationId, InstallationRecord, OfflineInstallCandidateIdentity, PackageId,
     PackageRuntimeError, PackageSource, PackageVersion,
 };
 
@@ -57,8 +57,37 @@ pub struct BootstrapInstallInput {
     pub candidate: BootstrapCandidateInput,
 }
 
+/// Exact already-installed package identity authorized for one offline removal.
+///
+/// Workspace reads this identity from the authenticated Package Runtime UDS,
+/// then binds its artifact digest into the `PACKAGE_ONLY` hold. 中文：卸载只接受
+/// 已安装记录的完整摘要身份，不接受路径或通用包名选择。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapInstalledIdentity {
+    pub component_id: String,
+    pub installation_id: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub artifact_digest: String,
+    pub archive_digest: String,
+    pub descriptor_digest: String,
+    pub manifest_digest: String,
+    pub dependency_lock_digest: String,
+}
+
+/// Strict root-only request to uninstall one exact, previously installed package.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapUninstallInput {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub maintenance: BootstrapMaintenanceInput,
+    pub installation: BootstrapInstalledIdentity,
+}
+
 /// Exact current maintenance hold requested by the root Workspace coordinator.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapMaintenanceInput {
     pub transaction_id: String,
@@ -139,31 +168,74 @@ pub struct BootstrapInstallReceipt {
     pub installation: InstallationRecord,
 }
 
+/// Secret-free receipt of an exact package removal under a current hold.
+#[derive(Debug, Serialize)]
+pub struct BootstrapUninstallReceipt {
+    pub transaction_id: String,
+    pub target_kind: String,
+    pub plan_id: String,
+    pub plan_digest: String,
+    pub component_artifact_digests: BTreeMap<String, String>,
+    pub component_id: String,
+    pub artifact_digest: String,
+    pub expected_gate_generation: u64,
+    pub expected_catalog_generation: u64,
+    pub gate_generation: u64,
+    pub catalog_generation: u64,
+    pub installation: BootstrapInstalledIdentity,
+    pub already_absent: bool,
+}
+
 /// Worker-only request. It deliberately contains no hold token or operator secret.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapWorkerInput {
     pub request_id: String,
-    pub candidate: BootstrapCandidateInput,
+    pub action: BootstrapWorkerOperation,
+}
+
+/// One operation executed by the unprivileged worker holding the runtime lock.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BootstrapWorkerOperation {
+    Install {
+        candidate: BootstrapCandidateInput,
+    },
+    Uninstall {
+        installation: BootstrapInstalledIdentity,
+    },
 }
 
 impl BootstrapWorkerInput {
-    /// Validates the secret-free install request before the unprivileged worker opens inputs.
-    pub fn validate(&self) -> Result<OfflineInstallCandidateIdentity, PackageRuntimeError> {
-        if !valid_broker_identifier(&self.request_id)
-            || self.candidate.component_id != self.candidate.package_id
-            || self.candidate.descriptor_path
-                != Path::new(BOOTSTRAP_STAGE_ROOT)
-                    .join(&self.request_id)
-                    .join("descriptor.json")
-            || self.candidate.archive_path
-                != Path::new(BOOTSTRAP_STAGE_ROOT)
-                    .join(&self.request_id)
-                    .join("archive.zip")
-        {
+    /// Validates one unprivileged operation and its path-free package identity.
+    pub fn validate(&self) -> Result<(), PackageRuntimeError> {
+        if !valid_broker_identifier(&self.request_id) {
             return Err(invalid_bootstrap_input());
         }
-        self.candidate.identity()
+        match &self.action {
+            BootstrapWorkerOperation::Install { candidate } => {
+                if !valid_broker_identifier(&candidate.component_id)
+                    || candidate.descriptor_path
+                        != Path::new(BOOTSTRAP_STAGE_ROOT)
+                            .join(&self.request_id)
+                            .join("descriptor.json")
+                    || candidate.archive_path
+                        != Path::new(BOOTSTRAP_STAGE_ROOT)
+                            .join(&self.request_id)
+                            .join("archive.zip")
+                {
+                    return Err(invalid_bootstrap_input());
+                }
+                candidate.identity()?;
+            }
+            BootstrapWorkerOperation::Uninstall { installation } => {
+                if !valid_broker_identifier(&installation.component_id) {
+                    return Err(invalid_bootstrap_input());
+                }
+                installation.identity()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -171,8 +243,19 @@ impl BootstrapWorkerInput {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapWorkerOutput {
     pub request_id: String,
+    #[serde(default)]
     pub installation: Option<InstallationRecord>,
+    #[serde(default)]
+    pub uninstalled: Option<BootstrapWorkerUninstallResult>,
+    #[serde(default)]
     pub error: Option<BootstrapWorkerError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapWorkerUninstallResult {
+    pub installation_id: String,
+    pub already_absent: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -188,31 +271,14 @@ impl BootstrapInstallInput {
         if self.schema_version != 1 || !valid_broker_identifier(&self.request_id) {
             return Err(invalid_bootstrap_input());
         }
-        let hold = &self.maintenance;
-        if !valid_broker_identifier(&hold.transaction_id)
-            || hold.maintenance_token.is_empty()
-            || hold.maintenance_token.len() > MAX_MAINTENANCE_TOKEN_BYTES
-            || hold.target_kind != "PACKAGE_ONLY"
-            || !valid_broker_identifier(&hold.plan_id)
-            || hold.plan_digest.is_empty()
-            || hold.expected_gate_generation == 0
-            || hold.expected_catalog_generation == 0
-        {
-            return Err(invalid_bootstrap_input());
-        }
-        ArtifactDigest::new(hold.plan_digest.clone()).map_err(|_| invalid_bootstrap_input())?;
-        if hold.component_artifact_digests.is_empty()
-            || hold.component_artifact_digests.iter().any(|(id, digest)| {
-                !valid_broker_identifier(id) || ArtifactDigest::new(digest.clone()).is_err()
-            })
-        {
-            return Err(invalid_bootstrap_input());
-        }
+        validate_maintenance_input(&self.maintenance)?;
 
         let candidate = &self.candidate;
-        if candidate.component_id.is_empty()
-            || candidate.component_id != candidate.package_id
-            || hold.component_artifact_digests.get(&candidate.component_id)
+        if !valid_broker_identifier(&candidate.component_id)
+            || self
+                .maintenance
+                .component_artifact_digests
+                .get(&candidate.component_id)
                 != Some(&candidate.artifact_digest)
             || candidate.descriptor_path
                 != Path::new(PERSISTENT_BOOTSTRAP_ROOT)
@@ -230,6 +296,73 @@ impl BootstrapInstallInput {
         }
 
         candidate.identity()
+    }
+}
+
+impl BootstrapUninstallInput {
+    /// Validates the held plan and exact installed identity before a worker starts.
+    pub fn validate(&self) -> Result<(), PackageRuntimeError> {
+        if self.schema_version != 1 || !valid_broker_identifier(&self.request_id) {
+            return Err(invalid_bootstrap_input());
+        }
+        validate_maintenance_input(&self.maintenance)?;
+        let installation = &self.installation;
+        let _identity = installation.identity()?;
+        if !valid_broker_identifier(&installation.component_id)
+            || self
+                .maintenance
+                .component_artifact_digests
+                .get(&installation.component_id)
+                != Some(&installation.artifact_digest)
+        {
+            return Err(PackageRuntimeError::new(
+                "OFFLINE_CANDIDATE_IDENTITY_MISMATCH",
+                "installed identity does not match its held package artifact",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl BootstrapInstalledIdentity {
+    /// Parses all caller-provided identity strings into Platform package types.
+    pub fn identity(&self) -> Result<OfflineInstallCandidateIdentity, PackageRuntimeError> {
+        let installation_id = InstallationId::new(self.installation_id.clone())?;
+        let package_id = PackageId::new(self.package_id.clone())?;
+        let package_version = PackageVersion::new(self.package_version.clone())?;
+        let artifact_digest = ArtifactDigest::new(self.artifact_digest.clone())?;
+        let derived_identity = format!("{package_id}\0{package_version}\0{artifact_digest}");
+        let derived_digest = format!("{:x}", Sha256::digest(derived_identity.as_bytes()));
+        if installation_id.as_str() != format!("installation-{}", &derived_digest[..32]) {
+            return Err(PackageRuntimeError::new(
+                "OFFLINE_UNINSTALL_IDENTITY_INVALID",
+                "installation ID is not derived from the supplied package identity",
+            ));
+        }
+        Ok(OfflineInstallCandidateIdentity {
+            package_id,
+            package_version,
+            artifact_digest,
+            archive_digest: ArtifactDigest::new(self.archive_digest.clone())?,
+            descriptor_digest: ArtifactDigest::new(self.descriptor_digest.clone())?,
+            manifest_digest: ArtifactDigest::new(self.manifest_digest.clone())?,
+            dependency_lock_digest: ArtifactDigest::new(self.dependency_lock_digest.clone())?,
+        })
+    }
+
+    /// Checks all immutable package and lock evidence against the installed record.
+    pub fn matches_record(&self, record: &InstallationRecord) -> bool {
+        record.installation_id.as_str() == self.installation_id
+            && record.package_id.as_str() == self.package_id
+            && record.package_version.as_str() == self.package_version
+            && record.artifact_digest.as_str() == self.artifact_digest
+            && record.archive_digest.as_str() == self.archive_digest
+            && record.verification.artifact_digest.as_str() == self.artifact_digest
+            && record.verification.archive_digest.as_str() == self.archive_digest
+            && record.verification.descriptor_digest.as_str() == self.descriptor_digest
+            && record.verification.manifest_digest.as_str() == self.manifest_digest
+            && record.verification.dependency_lock_digest.as_str() == self.dependency_lock_digest
+            && record.dependencies.lock_digest.as_str() == self.dependency_lock_digest
     }
 }
 
@@ -256,17 +389,20 @@ impl BootstrapCandidateInput {
     }
 }
 
-/// Reads a bounded one-shot JSON request from stdin.
-pub fn read_bootstrap_stdin() -> Result<BootstrapInstallInput, PackageRuntimeError> {
-    let bytes = read_bounded(io::stdin().lock(), MAX_BOOTSTRAP_INPUT_BYTES)?;
-    parse_bootstrap_input(&bytes)
-}
-
 /// Reads a bounded root-owned, private bootstrap JSON file without following links.
 pub fn read_bootstrap_file(path: &Path) -> Result<BootstrapInstallInput, PackageRuntimeError> {
     validate_bootstrap_input_file_location(path)?;
     let bytes = read_root_private_file(path, MAX_BOOTSTRAP_INPUT_BYTES)?;
     parse_bootstrap_input(&bytes)
+}
+
+/// Reads a bounded root-owned uninstall request without following symlinks.
+pub fn read_bootstrap_uninstall_file(
+    path: &Path,
+) -> Result<BootstrapUninstallInput, PackageRuntimeError> {
+    validate_bootstrap_input_file_location(path)?;
+    let bytes = read_root_private_file(path, MAX_BOOTSTRAP_INPUT_BYTES)?;
+    parse_bootstrap_uninstall_input(&bytes)
 }
 
 /// Restricts private input files to the Workspace-owned persistent bootstrap request layout.
@@ -314,6 +450,44 @@ pub fn parse_bootstrap_input(bytes: &[u8]) -> Result<BootstrapInstallInput, Pack
         serde_json::from_slice(bytes).map_err(|_| invalid_bootstrap_input())?;
     input.validate()?;
     Ok(input)
+}
+
+/// Parses and validates one strict offline uninstall request.
+pub fn parse_bootstrap_uninstall_input(
+    bytes: &[u8],
+) -> Result<BootstrapUninstallInput, PackageRuntimeError> {
+    if bytes.len() > MAX_BOOTSTRAP_INPUT_BYTES {
+        return Err(PackageRuntimeError::new(
+            "BOOTSTRAP_INPUT_TOO_LARGE",
+            "bootstrap input exceeds its 64 KiB limit",
+        ));
+    }
+    let input: BootstrapUninstallInput =
+        serde_json::from_slice(bytes).map_err(|_| invalid_bootstrap_input())?;
+    input.validate()?;
+    Ok(input)
+}
+
+fn validate_maintenance_input(hold: &BootstrapMaintenanceInput) -> Result<(), PackageRuntimeError> {
+    if !valid_broker_identifier(&hold.transaction_id)
+        || hold.maintenance_token.is_empty()
+        || hold.maintenance_token.len() > MAX_MAINTENANCE_TOKEN_BYTES
+        || hold.target_kind != "PACKAGE_ONLY"
+        || !valid_broker_identifier(&hold.plan_id)
+        || hold.expected_gate_generation == 0
+        || hold.expected_catalog_generation == 0
+    {
+        return Err(invalid_bootstrap_input());
+    }
+    ArtifactDigest::new(hold.plan_digest.clone()).map_err(|_| invalid_bootstrap_input())?;
+    if hold.component_artifact_digests.is_empty()
+        || hold.component_artifact_digests.iter().any(|(id, digest)| {
+            !valid_broker_identifier(id) || ArtifactDigest::new(digest.clone()).is_err()
+        })
+    {
+        return Err(invalid_bootstrap_input());
+    }
+    Ok(())
 }
 
 /// Reads the Broker's fixed root-only operator credential without exposing it.
@@ -576,16 +750,42 @@ pub fn validate_maintenance_hold(
     input: &BootstrapInstallInput,
     operator_token: &str,
 ) -> Result<ValidatedMaintenanceHold, PackageRuntimeError> {
-    validate_maintenance_hold_at(input, operator_token, Path::new(BROKER_SOCKET), 0)
+    input.validate()?;
+    validate_maintenance_hold_for(
+        &input.maintenance,
+        &input.candidate.component_id,
+        &input.candidate.artifact_digest,
+        operator_token,
+        Path::new(BROKER_SOCKET),
+        0,
+    )
 }
 
-fn validate_maintenance_hold_at(
-    input: &BootstrapInstallInput,
+/// Validates the Broker's current PACKAGE_ONLY hold for one installed identity.
+pub fn validate_uninstall_maintenance_hold(
+    input: &BootstrapUninstallInput,
+    operator_token: &str,
+) -> Result<ValidatedMaintenanceHold, PackageRuntimeError> {
+    input.validate()?;
+    validate_maintenance_hold_for(
+        &input.maintenance,
+        &input.installation.component_id,
+        &input.installation.artifact_digest,
+        operator_token,
+        Path::new(BROKER_SOCKET),
+        0,
+    )
+}
+
+fn validate_maintenance_hold_for(
+    hold: &BootstrapMaintenanceInput,
+    component_id: &str,
+    artifact_digest: &str,
     operator_token: &str,
     broker_socket: &Path,
     expected_peer_uid: u32,
 ) -> Result<ValidatedMaintenanceHold, PackageRuntimeError> {
-    input.validate()?;
+    validate_maintenance_input(hold)?;
     if operator_token.is_empty() || operator_token.len() > MAX_OPERATOR_TOKEN_BYTES {
         return Err(PackageRuntimeError::new(
             "OPERATOR_AUTH_UNAVAILABLE",
@@ -613,7 +813,6 @@ fn validate_maintenance_hold_at(
         ));
     }
 
-    let hold = &input.maintenance;
     let request = json!({
         "request_id": hold.transaction_id,
         "method": "ValidateMaintenanceHold",
@@ -626,8 +825,8 @@ fn validate_maintenance_hold_at(
             "plan_id": hold.plan_id,
             "plan_digest": hold.plan_digest,
             "component_artifact_digests": hold.component_artifact_digests,
-            "component_id": input.candidate.component_id,
-            "artifact_digest": input.candidate.artifact_digest,
+            "component_id": component_id,
+            "artifact_digest": artifact_digest,
             "expected_gate_generation": hold.expected_gate_generation,
             "expected_catalog_generation": hold.expected_catalog_generation
         }
@@ -639,18 +838,19 @@ fn validate_maintenance_hold_at(
         .map_err(|_| broker_protocol_error())?;
 
     let response_bytes = read_bounded(&mut stream, MAX_BROKER_FRAME_BYTES)?;
-    let response = parse_broker_response(&response_bytes, &hold.transaction_id, input)?;
+    let response = parse_broker_response(&response_bytes, hold, component_id, artifact_digest)?;
     Ok(response)
 }
 
 fn parse_broker_response(
     bytes: &[u8],
-    broker_request_id: &str,
-    input: &BootstrapInstallInput,
+    hold: &BootstrapMaintenanceInput,
+    component_id: &str,
+    artifact_digest: &str,
 ) -> Result<ValidatedMaintenanceHold, PackageRuntimeError> {
     let response: BrokerResponse =
         serde_json::from_slice(bytes).map_err(|_| broker_protocol_error())?;
-    if response.request_id != broker_request_id {
+    if response.request_id != hold.transaction_id {
         return Err(broker_protocol_error());
     }
     let validated = match (response.result, response.error) {
@@ -669,15 +869,14 @@ fn parse_broker_response(
         }
         _ => return Err(broker_protocol_error()),
     };
-    let hold = &input.maintenance;
     if !validated.valid
         || validated.request_id != hold.transaction_id
         || validated.target_kind != "PACKAGE_ONLY"
         || validated.plan_id != hold.plan_id
         || validated.plan_digest != hold.plan_digest
         || validated.component_artifact_digests != hold.component_artifact_digests
-        || validated.component_id != input.candidate.component_id
-        || validated.artifact_digest != input.candidate.artifact_digest
+        || validated.component_id != component_id
+        || validated.artifact_digest != artifact_digest
         || validated.gate_generation != hold.expected_gate_generation
         || validated.catalog_generation != hold.expected_catalog_generation
     {
@@ -1208,6 +1407,12 @@ mod tests {
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+    fn sample_installation_id() -> String {
+        let identity = format!("org.cyrene.example-plugin\0{}\0{DIGEST_B}", "1.2.3");
+        let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+        format!("installation-{}", &digest[..32])
+    }
+
     fn valid_input() -> Value {
         json!({
             "schema_version": 1,
@@ -1218,14 +1423,42 @@ mod tests {
                 "target_kind": "PACKAGE_ONLY",
                 "plan_id": "package-plan-1",
                 "plan_digest": DIGEST_A,
-                "component_artifact_digests": {"org.cyrene.example-plugin": DIGEST_B},
+                "component_artifact_digests": {"cyrene-tools-example-plugin": DIGEST_B},
                 "expected_gate_generation": 5,
                 "expected_catalog_generation": 9
             },
             "candidate": {
                 "descriptor_path": "/var/lib/cyrene-updates/plugin-package-bootstrap/install-request-1/descriptor.json",
                 "archive_path": "/var/lib/cyrene-updates/plugin-package-bootstrap/install-request-1/archive.zip",
-                "component_id": "org.cyrene.example-plugin",
+                "component_id": "cyrene-tools-example-plugin",
+                "package_id": "org.cyrene.example-plugin",
+                "package_version": "1.2.3",
+                "artifact_digest": DIGEST_B,
+                "archive_digest": DIGEST_A,
+                "descriptor_digest": DIGEST_A,
+                "manifest_digest": DIGEST_B,
+                "dependency_lock_digest": DIGEST_A
+            }
+        })
+    }
+
+    fn valid_uninstall_input() -> Value {
+        json!({
+            "schema_version": 1,
+            "request_id": "remove-request-1",
+            "maintenance": {
+                "transaction_id": "package-hold-1",
+                "maintenance_token": "private-maintenance-token",
+                "target_kind": "PACKAGE_ONLY",
+                "plan_id": "package-plan-1",
+                "plan_digest": DIGEST_A,
+                "component_artifact_digests": {"cyrene-tools-example-plugin": DIGEST_B},
+                "expected_gate_generation": 5,
+                "expected_catalog_generation": 9
+            },
+            "installation": {
+                "component_id": "cyrene-tools-example-plugin",
+                "installation_id": sample_installation_id(),
                 "package_id": "org.cyrene.example-plugin",
                 "package_version": "1.2.3",
                 "artifact_digest": DIGEST_B,
@@ -1242,6 +1475,7 @@ mod tests {
         let input: BootstrapInstallInput =
             serde_json::from_value(valid_input()).expect("valid bootstrap request");
         assert!(input.validate().is_ok());
+        assert_ne!(input.candidate.component_id, input.candidate.package_id);
 
         let mut mismatch = valid_input();
         mismatch["candidate"]["component_id"] = json!("cy-package-runtime");
@@ -1271,6 +1505,77 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_input_binds_exact_installed_identity_to_the_package_only_hold() {
+        let input =
+            parse_bootstrap_uninstall_input(&serde_json::to_vec(&valid_uninstall_input()).unwrap())
+                .unwrap();
+        assert_ne!(
+            input.installation.component_id,
+            input.installation.package_id
+        );
+        assert_eq!(input.installation.package_version, "1.2.3");
+
+        let mut mismatch = valid_uninstall_input();
+        mismatch["installation"]["dependency_lock_digest"] = json!("sha256:bad");
+        assert!(parse_bootstrap_uninstall_input(&serde_json::to_vec(&mismatch).unwrap()).is_err());
+        let mut mismatch = valid_uninstall_input();
+        mismatch["maintenance"]["component_artifact_digests"]["cyrene-tools-example-plugin"] =
+            json!(DIGEST_A);
+        assert!(parse_bootstrap_uninstall_input(&serde_json::to_vec(&mismatch).unwrap()).is_err());
+        let mut mismatch = valid_uninstall_input();
+        mismatch["installation"]["installation_id"] =
+            json!("installation-1234567890abcdef1234567890abcdef");
+        assert!(parse_bootstrap_uninstall_input(&serde_json::to_vec(&mismatch).unwrap()).is_err());
+
+        let mut unknown = valid_uninstall_input();
+        unknown["installation"]["skip_reference_check"] = json!(true);
+        assert!(parse_bootstrap_uninstall_input(&serde_json::to_vec(&unknown).unwrap()).is_err());
+    }
+
+    #[test]
+    fn uninstall_identity_matches_the_installed_record_and_dependency_lock() {
+        let input =
+            parse_bootstrap_uninstall_input(&serde_json::to_vec(&valid_uninstall_input()).unwrap())
+                .unwrap();
+        let identity = &input.installation;
+        let record = InstallationRecord {
+            record_version: 1,
+            installation_id: InstallationId::new(identity.installation_id.clone()).unwrap(),
+            package_id: PackageId::new(identity.package_id.clone()).unwrap(),
+            package_version: PackageVersion::new(identity.package_version.clone()).unwrap(),
+            artifact_digest: ArtifactDigest::new(identity.artifact_digest.clone()).unwrap(),
+            archive_digest: ArtifactDigest::new(identity.archive_digest.clone()).unwrap(),
+            capabilities: Vec::new(),
+            state: crate::InstallationState::Installed,
+            verification: crate::VerificationEvidence {
+                verifier: "package-spec-v0.1".to_string(),
+                verified_at_unix_ms: 1,
+                artifact_digest: ArtifactDigest::new(identity.artifact_digest.clone()).unwrap(),
+                archive_digest: ArtifactDigest::new(identity.archive_digest.clone()).unwrap(),
+                descriptor_digest: ArtifactDigest::new(identity.descriptor_digest.clone()).unwrap(),
+                manifest_digest: ArtifactDigest::new(identity.manifest_digest.clone()).unwrap(),
+                dependency_lock_digest: ArtifactDigest::new(
+                    identity.dependency_lock_digest.clone(),
+                )
+                .unwrap(),
+            },
+            dependencies: crate::DependencyPreparationEvidence {
+                preparer: "test-preparer".to_string(),
+                prepared_at_unix_ms: 1,
+                lock_digest: ArtifactDigest::new(identity.dependency_lock_digest.clone()).unwrap(),
+                runtime_digest: ArtifactDigest::new(DIGEST_A).unwrap(),
+                runtime_executable: None,
+            },
+            installed_at_unix_ms: 1,
+        };
+        assert!(identity.matches_record(&record));
+
+        let mut changed_lock = record;
+        changed_lock.dependencies.lock_digest = ArtifactDigest::new(DIGEST_B).unwrap();
+        assert!(!identity.matches_record(&changed_lock));
+    }
+
+    #[test]
     fn broker_response_must_confirm_every_current_hold_field() {
         let input: BootstrapInstallInput =
             serde_json::from_value(valid_input()).expect("valid bootstrap request");
@@ -1282,8 +1587,8 @@ mod tests {
                 "target_kind": "PACKAGE_ONLY",
                 "plan_id": "package-plan-1",
                 "plan_digest": DIGEST_A,
-                "component_artifact_digests": {"org.cyrene.example-plugin": DIGEST_B},
-                "component_id": "org.cyrene.example-plugin",
+                "component_artifact_digests": {"cyrene-tools-example-plugin": DIGEST_B},
+                "component_id": "cyrene-tools-example-plugin",
                 "artifact_digest": DIGEST_B,
                 "gate_generation": 5,
                 "catalog_generation": 9
@@ -1291,8 +1596,9 @@ mod tests {
         });
         let validated = parse_broker_response(
             &serde_json::to_vec(&response).unwrap(),
-            "package-hold-1",
-            &input,
+            &input.maintenance,
+            &input.candidate.component_id,
+            &input.candidate.artifact_digest,
         )
         .unwrap();
         assert_eq!(validated.catalog_generation, 9);
@@ -1302,8 +1608,51 @@ mod tests {
         assert!(
             parse_broker_response(
                 &serde_json::to_vec(&mismatch).unwrap(),
-                "package-hold-1",
-                &input,
+                &input.maintenance,
+                &input.candidate.component_id,
+                &input.candidate.artifact_digest,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn uninstall_broker_receipt_must_confirm_the_same_package_digest_and_generations() {
+        let input =
+            parse_bootstrap_uninstall_input(&serde_json::to_vec(&valid_uninstall_input()).unwrap())
+                .unwrap();
+        let response = json!({
+            "request_id": "package-hold-1",
+            "result": {
+                "valid": true,
+                "request_id": "package-hold-1",
+                "target_kind": "PACKAGE_ONLY",
+                "plan_id": "package-plan-1",
+                "plan_digest": DIGEST_A,
+                "component_artifact_digests": {"cyrene-tools-example-plugin": DIGEST_B},
+                "component_id": "cyrene-tools-example-plugin",
+                "artifact_digest": DIGEST_B,
+                "gate_generation": 5,
+                "catalog_generation": 9
+            }
+        });
+        let validated = parse_broker_response(
+            &serde_json::to_vec(&response).unwrap(),
+            &input.maintenance,
+            &input.installation.component_id,
+            &input.installation.artifact_digest,
+        )
+        .unwrap();
+        assert_eq!(validated.catalog_generation, 9);
+
+        let mut wrong_identity = response;
+        wrong_identity["result"]["artifact_digest"] = json!(DIGEST_A);
+        assert!(
+            parse_broker_response(
+                &serde_json::to_vec(&wrong_identity).unwrap(),
+                &input.maintenance,
+                &input.installation.component_id,
+                &input.installation.artifact_digest,
             )
             .is_err()
         );
