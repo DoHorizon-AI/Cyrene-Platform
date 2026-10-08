@@ -325,8 +325,18 @@ fn run_serve(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
         DEFAULT_OPERATOR_TOKEN,
     ));
     let kernel_socket = PathBuf::from(option(&options, "kernel-socket", DEFAULT_KERNEL_SOCKET));
-    let gate = RuntimeMaintenance::open_with_catalog_file(state_dir, &catalog_path)
+    let gate = RuntimeMaintenance::open_with_optional_catalog_file(state_dir, &catalog_path)
         .map_err(|error| error.to_string())?;
+    if gate.catalog_generation() == 0 {
+        // First boot: the trusted activity-source catalog is provisioned by
+        // `init-catalog` during the first package admission. Serving fail-closed
+        // beats crash-looping, and the per-operation reload adopts the catalog
+        // as soon as it is provisioned.
+        eprintln!(
+            "cyrene-runtime-maintenance: trusted activity-source catalog is not provisioned yet ({}); serving fail-closed until init-catalog provisions it",
+            catalog_path.display()
+        );
+    }
     gate.initialize_operator_capability(&private_token_path)
         .map_err(|error| error.to_string())?;
     let broker = Arc::new(Broker {
