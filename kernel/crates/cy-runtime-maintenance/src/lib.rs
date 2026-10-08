@@ -243,7 +243,8 @@ pub struct TrustedActivitySourceCatalog {
 
 impl TrustedActivitySourceCatalog {
     /// Loads and validates the root-owned installed-source catalog.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, MaintenanceError> {        let path = path.as_ref();
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, MaintenanceError> {
+        let path = path.as_ref();
         reject_symlink_file(path)?;
         validate_catalog_permissions(path)?;
         let catalog: Self = serde_json::from_slice(&fs::read(path).map_err(|error| {
@@ -844,7 +845,19 @@ impl RuntimeMaintenance {
         catalog_path: impl Into<PathBuf>,
     ) -> Result<Self, MaintenanceError> {
         let catalog_path = catalog_path.into();
-        let provisioned = catalog_path.exists();
+        // Only a genuinely absent catalog file is the first-boot unprovisioned
+        // state. Anything unclassifiable (dangling symlink, permission error,
+        // ...) must stay fail-closed instead of being treated as absent.
+        let provisioned = match fs::symlink_metadata(&catalog_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(MaintenanceError::CatalogUnavailable(format!(
+                    "{}: {error}",
+                    catalog_path.display()
+                )))
+            }
+            Ok(_) => true,
+        };
         let catalog = if provisioned {
             TrustedActivitySourceCatalog::load(&catalog_path)?
         } else {
@@ -2231,12 +2244,17 @@ impl RuntimeMaintenance {
                 // First-boot tolerance: an absent catalog file on a broker that
                 // has never provisioned one (state and in-memory generation
                 // both zero) stays unprovisioned and fail-closed instead of
-                // failing the whole operation. Any other load failure, or an
-                // absent file after a catalog was provisioned, still fails.
-                if self.catalog_snapshot()?.generation == 0
+                // failing the whole operation. Only a true ENOENT qualifies;
+                // dangling symlinks and other unclassifiable states, any other
+                // load failure, and an absent file after a catalog was
+                // provisioned still fail closed.
+                let never_provisioned = self.catalog_snapshot()?.generation == 0
                     && state.install_catalog_generation == 0
-                    && !path.exists()
-                {
+                    && matches!(
+                        fs::symlink_metadata(path),
+                        Err(ref missing) if missing.kind() == std::io::ErrorKind::NotFound
+                    );
+                if never_provisioned {
                     return Ok(());
                 }
                 return Err(error);
@@ -6432,8 +6450,17 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn running_as_root() -> bool {
-        std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/").unwrap()) == 0
-            || nix::unistd::geteuid().as_raw() == 0
+        // Root-only file tests need a genuinely privileged process: the
+        // effective UID decides whether the root-owned catalog checks can
+        // pass. A skip is logged so CI evidence shows which tests ran.
+        let privileged = nix::unistd::geteuid().as_raw() == 0;
+        if !privileged {
+            eprintln!(
+                "skipping root-only catalog file tests: effective uid is {} (requires uid 0)",
+                nix::unistd::geteuid().as_raw()
+            );
+        }
+        privileged
     }
 
     fn write_catalog_file(path: &Path, catalog: &TrustedActivitySourceCatalog) {
@@ -6519,14 +6546,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let catalog_path = dir.path().join("activity-sources.json");
         fs::write(&catalog_path, b"{not json").unwrap();
-        let error =
-            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
-                .err()
-                .expect("corrupt catalog must fail open");
-        assert!(matches!(
-            error,
-            MaintenanceError::CatalogUnavailable(_)
-        ));
+        let error = RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
+            .err()
+            .expect("corrupt catalog must fail open");
+        assert!(matches!(error, MaintenanceError::CatalogUnavailable(_)));
     }
 
     #[test]
@@ -6539,14 +6562,10 @@ mod tests {
         write_catalog_file(&catalog_path, &single_source_catalog(1));
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&catalog_path, fs::Permissions::from_mode(0o664)).unwrap();
-        let error =
-            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
-                .err()
-                .expect("group-writable catalog must fail open");
-        assert!(matches!(
-            error,
-            MaintenanceError::CatalogUnavailable(_)
-        ));
+        let error = RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
+            .err()
+            .expect("group-writable catalog must fail open");
+        assert!(matches!(error, MaintenanceError::CatalogUnavailable(_)));
     }
 
     #[test]
@@ -6566,8 +6585,7 @@ mod tests {
         assert!(gate.refresh_catalog().is_err());
         drop(gate);
         assert!(
-            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
-                .is_err()
+            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path).is_err()
         );
     }
 
@@ -6598,8 +6616,48 @@ mod tests {
         }
         // Abnormal-exit recovery analog: the lock is released when the holder
         // is dropped, so a fresh broker can take over immediately.
-        let gate = RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
-            .unwrap();
+        let gate =
+            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path).unwrap();
         assert_eq!(gate.catalog_generation(), 0);
+    }
+
+    #[test]
+    fn dangling_symlink_catalog_fails_closed() {
+        if !running_as_root() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let catalog_path = dir.path().join("activity-sources.json");
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &catalog_path).unwrap();
+        // A dangling symlink is an anomaly, not an absent catalog: it must not
+        // be misread as the unprovisioned first-boot state.
+        assert!(
+            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path).is_err()
+        );
+        // The same holds mid-flight: a provisioned broker whose catalog file
+        // is replaced by a dangling symlink fails closed on reload instead of
+        // regressing to the unprovisioned state.
+        fs::remove_file(&catalog_path).unwrap();
+        write_catalog_file(&catalog_path, &single_source_catalog(1));
+        let gate =
+            RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path).unwrap();
+        assert_eq!(gate.catalog_generation(), 1);
+        fs::remove_file(&catalog_path).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &catalog_path).unwrap();
+        assert!(gate.refresh_catalog().is_err());
+    }
+
+    #[test]
+    fn directory_at_catalog_path_fails_closed() {
+        if !running_as_root() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let catalog_path = dir.path().join("activity-sources.json");
+        fs::create_dir_all(&catalog_path).unwrap();
+        let error = RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
+            .err()
+            .expect("a directory at the catalog path must fail open");
+        assert!(matches!(error, MaintenanceError::CatalogUnavailable(_)));
     }
 }
