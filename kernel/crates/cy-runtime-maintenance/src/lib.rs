@@ -29,6 +29,7 @@ use uuid::Uuid;
 const STATE_FILE: &str = "maintenance-state.json";
 const JOURNAL_FILE: &str = "maintenance-journal.jsonl";
 const LOCK_FILE: &str = "maintenance.lock";
+const LOCK_TEMP_PREFIX: &str = ".maintenance.lock.init-";
 const STATE_MIGRATION_MARKER_FILE: &str = "maintenance-schema-migration.json";
 const OPERATOR_TOKEN_HASH_FILE: &str = "operator-token.sha256";
 const STATE_SCHEMA_VERSION: u32 = 2;
@@ -3886,7 +3887,25 @@ fn open_existing_lock_file(directory: &Path) -> Result<File, MaintenanceError> {
             "maintenance lock must be an existing regular file".to_string(),
         ));
     }
-    Ok(OpenOptions::new().read(true).write(true).open(path)?)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        validate_shared_file_metadata(&path, &metadata, fs::metadata(directory)?.gid())?;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    }
+    let file = options.open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        validate_shared_file_metadata(&path, &file.metadata()?, fs::metadata(directory)?.gid())?;
+    }
+    Ok(file)
 }
 
 fn read_regular_bytes(path: &Path) -> Result<Vec<u8>, MaintenanceError> {
@@ -4279,22 +4298,80 @@ fn write_snapshot_atomic(directory: &Path, state: &PersistedState) -> Result<(),
     Ok(())
 }
 
+/// Publishes a fully permissioned lock inode atomically so concurrent startup
+/// never observes the temporary mode imposed by the process umask.
 fn open_lock_file(directory: &Path) -> Result<File, MaintenanceError> {
     let path = directory.join(LOCK_FILE);
+
+    match open_existing_lock_file(directory) {
+        Ok(file) => return Ok(file),
+        Err(MaintenanceError::Storage(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let temporary_path = directory.join(format!("{LOCK_TEMP_PREFIX}{}", Uuid::new_v4()));
     let mut create_options = OpenOptions::new();
     create_options.read(true).write(true).create_new(true);
     set_shared_file(&mut create_options);
-    match create_options.open(&path) {
-        Ok(file) => {
-            set_file_mode(&file, 0o660)?;
-            Ok(file)
+    let file = create_options.open(&temporary_path)?;
+    let mut temporary_file = TemporaryLockPath::new(temporary_path.clone());
+
+    (|| {
+        set_file_mode(&file, 0o660)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            validate_shared_file_metadata(
+                &path,
+                &file.metadata()?,
+                fs::metadata(directory)?.gid(),
+            )?;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let mut existing_options = OpenOptions::new();
-            existing_options.read(true).write(true);
-            Ok(existing_options.open(path)?)
+        file.sync_all()?;
+
+        let published_file = match fs::hard_link(&temporary_path, &path) {
+            Ok(()) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                open_existing_lock_file(directory)?
+            }
+            Err(error) => return Err(MaintenanceError::Storage(error)),
+        };
+        temporary_file.remove()?;
+        File::open(directory)?.sync_all()?;
+        Ok(published_file)
+    })()
+}
+
+/// Keeps an unpublished lock path from surviving ordinary error returns.
+struct TemporaryLockPath {
+    path: Option<PathBuf>,
+}
+
+impl TemporaryLockPath {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn remove(&mut self) -> Result<(), MaintenanceError> {
+        let Some(path) = self.path.take() else {
+            return Ok(());
+        };
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                self.path = Some(path);
+                Err(MaintenanceError::Storage(error))
+            }
         }
-        Err(error) => Err(MaintenanceError::Storage(error)),
+    }
+}
+
+impl Drop for TemporaryLockPath {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -4390,17 +4467,7 @@ fn validate_shared_files(directory: &Path) -> Result<(), MaintenanceError> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(MaintenanceError::Storage(error)),
             };
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || metadata.gid() != directory_gid
-                || metadata.permissions().mode() & 0o007 != 0
-                || metadata.permissions().mode() & 0o060 != 0o060
-            {
-                return Err(MaintenanceError::StateUnknown(format!(
-                    "shared state file {} must be a regular file in the authority group with mode 0660",
-                    path.display()
-                )));
-            }
+            validate_shared_file_metadata(&path, &metadata, directory_gid)?;
         }
         let operator_hash = directory.join(OPERATOR_TOKEN_HASH_FILE);
         if let Ok(metadata) = fs::symlink_metadata(&operator_hash) {
@@ -4418,6 +4485,27 @@ fn validate_shared_files(directory: &Path) -> Result<(), MaintenanceError> {
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_shared_file_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+    directory_gid: u32,
+) -> Result<(), MaintenanceError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.gid() != directory_gid
+        || metadata.permissions().mode() & 0o007 != 0
+        || metadata.permissions().mode() & 0o060 != 0o060
+    {
+        return Err(MaintenanceError::StateUnknown(format!(
+            "shared state file {} must be a regular file in the authority group with mode 0660",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -6589,11 +6677,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn concurrent_optional_opens_recover_locks() {
-        if !running_as_root() {
-            return;
-        }
+    fn assert_concurrent_optional_opens_recover_locks() {
         let dir = TempDir::new().unwrap();
         let catalog_path = dir.path().join("activity-sources.json");
         let barrier = std::sync::Arc::new(Barrier::new(4));
@@ -6619,6 +6703,118 @@ mod tests {
         let gate =
             RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path).unwrap();
         assert_eq!(gate.catalog_generation(), 0);
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory_metadata = fs::metadata(dir.path()).unwrap();
+        let lock_metadata = fs::symlink_metadata(dir.path().join(LOCK_FILE)).unwrap();
+        assert!(lock_metadata.is_file());
+        assert_eq!(lock_metadata.gid(), directory_metadata.gid());
+        assert_eq!(lock_metadata.permissions().mode() & 0o777, 0o660);
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(LOCK_TEMP_PREFIX)
+        }));
+    }
+
+    #[test]
+    fn concurrent_optional_opens_recover_locks() {
+        assert_concurrent_optional_opens_recover_locks();
+    }
+
+    #[test]
+    fn concurrent_optional_opens_recover_locks_with_restrictive_umask() {
+        const CHILD_PROCESS: &str = "CYRENE_TEST_RESTRICTIVE_UMASK_CHILD";
+        if std::env::var_os(CHILD_PROCESS).is_some() {
+            nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o027));
+            assert_concurrent_optional_opens_recover_locks();
+            return;
+        }
+
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::concurrent_optional_opens_recover_locks_with_restrictive_umask",
+                "--nocapture",
+            ])
+            .env(CHILD_PROCESS, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "restricted-umask child test failed");
+    }
+
+    #[test]
+    fn concurrent_lock_openers_keep_the_published_inode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = TempDir::new().unwrap();
+        set_shared_directory(dir.path(), true).unwrap();
+        let barrier = std::sync::Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let directory = dir.path().to_path_buf();
+                let barrier = std::sync::Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    open_lock_file(&directory).unwrap()
+                })
+            })
+            .collect();
+        let files: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let identities: Vec<_> = files
+            .iter()
+            .map(|file| {
+                let metadata = file.metadata().unwrap();
+                (metadata.dev(), metadata.ino())
+            })
+            .collect();
+        assert!(identities.iter().all(|identity| *identity == identities[0]));
+
+        let directory_metadata = fs::metadata(dir.path()).unwrap();
+        let path_metadata = fs::symlink_metadata(dir.path().join(LOCK_FILE)).unwrap();
+        assert_eq!(
+            (path_metadata.dev(), path_metadata.ino()),
+            identities[0],
+            "the published path must continue to name the winning inode"
+        );
+        assert_eq!(path_metadata.gid(), directory_metadata.gid());
+        assert_eq!(path_metadata.permissions().mode() & 0o777, 0o660);
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(LOCK_TEMP_PREFIX)
+        }));
+    }
+
+    #[test]
+    fn existing_unsafe_lock_files_are_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        set_shared_directory(dir.path(), true).unwrap();
+        let catalog_path = dir.path().join("activity-sources.json");
+        let lock_path = dir.path().join(LOCK_FILE);
+
+        fs::write(&lock_path, b"").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
+            .err()
+            .expect("a lock without authority-group access must be rejected");
+        assert!(matches!(error, MaintenanceError::StateUnknown(_)));
+
+        fs::remove_file(&lock_path).unwrap();
+        let target_path = dir.path().join("lock-target");
+        fs::write(&target_path, b"").unwrap();
+        fs::set_permissions(&target_path, fs::Permissions::from_mode(0o660)).unwrap();
+        std::os::unix::fs::symlink(&target_path, &lock_path).unwrap();
+        let error = RuntimeMaintenance::open_with_optional_catalog_file(dir.path(), &catalog_path)
+            .err()
+            .expect("a symlink at the lock path must be rejected");
+        assert!(matches!(error, MaintenanceError::StateUnknown(_)));
     }
 
     #[test]
