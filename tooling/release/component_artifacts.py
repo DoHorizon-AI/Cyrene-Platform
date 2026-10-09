@@ -52,7 +52,7 @@ PACKAGE_RUNTIME_COMPATIBILITY = {
         "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267",
     },
 }
-RAW_NATIVE_MANIFEST_COMPONENTS = frozenset({"cy-package-runtime", "cyrene-runtime-maintenance"})
+RAW_NATIVE_MANIFEST_COMPONENTS = frozenset({"cy-package-runtime", "cyrene-kernel", "cyrene-runtime-maintenance"})
 RAW_NATIVE_MANIFEST_TARGETS = {
     "22.04": {
         "os": "linux",
