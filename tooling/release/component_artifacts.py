@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import gzip
 import hashlib
@@ -24,7 +25,7 @@ import tarfile
 import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlparse
 
 import rfc8785
@@ -49,6 +50,27 @@ PACKAGE_RUNTIME_COMPATIBILITY = {
         "path": "governance/package-runtime-protocols-v1.lock.json",
         "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
         "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267",
+    },
+}
+RAW_NATIVE_MANIFEST_COMPONENTS = frozenset({"cy-package-runtime", "cyrene-runtime-maintenance"})
+RAW_NATIVE_MANIFEST_TARGETS = {
+    "22.04": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd",
+    },
+    "24.04": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd",
     },
 }
 
@@ -570,6 +592,221 @@ def _read_object(path: Path) -> dict[str, Any]:
     return document
 
 
+def _native_manifest_subject_paths(
+    manifest_dir: Path,
+    *,
+    repository: str,
+    channel: str,
+    source_ref: str,
+    source_commit: str,
+) -> list[Path]:
+    """Validate and return the four required raw native manifest subjects.
+
+    Checksums bind the downloaded manifest bytes themselves, not their JCS
+    digest.  This keeps the raw-document attestation distinct from the index.
+    """
+    root = Path(manifest_dir)
+    if root.is_symlink() or not root.is_dir():
+        raise ComponentArtifactError(f"native manifest directory is missing or unsafe: {root}")
+    source_url = f"https://github.com/{repository}"
+    _source_repository_parts(source_url)
+    expected_source = {"repository": source_url, "ref": source_ref, "commit": source_commit}
+    expected_identities = {
+        (component_id, target_version)
+        for component_id in RAW_NATIVE_MANIFEST_COMPONENTS
+        for target_version in RAW_NATIVE_MANIFEST_TARGETS
+    }
+    found: dict[tuple[str, str], Path] = {}
+
+    for path in sorted(root.glob("*.manifest.json")):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ComponentArtifactError(f"native manifest directory contains an unsafe entry: {path.name}")
+        document = _read_object(path)
+        artifact = document.get("artifact")
+        if (
+            document.get("componentId") not in RAW_NATIVE_MANIFEST_COMPONENTS
+            or not isinstance(artifact, dict)
+            or artifact.get("kind") != "native-binary"
+        ):
+            continue
+
+        errors = _validate_manifest(document)
+        if errors:
+            raise ComponentArtifactError(f"invalid raw native manifest {path.name}: " + "; ".join(errors))
+        if document.get("schemaVersion") != 2:
+            raise ComponentArtifactError(f"raw native manifest is not schema v2: {path.name}")
+        if (
+            document.get("source") != expected_source
+            or document.get("channel") != channel
+            or document.get("releaseId") != f"{channel}-{source_commit}"
+        ):
+            raise ComponentArtifactError(f"raw native manifest source identity differs from this release: {path.name}")
+
+        target = document.get("target")
+        target_version = target.get("distributionVersion") if isinstance(target, dict) else None
+        expected_target = RAW_NATIVE_MANIFEST_TARGETS.get(target_version)
+        if expected_target is None or target != expected_target:
+            raise ComponentArtifactError(f"unexpected raw native manifest target: {path.name}")
+        if path.name != manifest_asset_name(document):
+            raise ComponentArtifactError(f"raw native manifest name is not canonical: {path.name}")
+
+        identity = (document["componentId"], target_version)
+        if identity not in expected_identities:
+            raise ComponentArtifactError(f"unexpected raw native manifest identity: {path.name}")
+        if identity in found:
+            raise ComponentArtifactError(f"duplicate raw native manifest subject: {identity[0]}/{target_version}")
+        found[identity] = path
+
+    missing = sorted(expected_identities - set(found))
+    if missing:
+        rendered = ", ".join(f"{component_id}/{target_version}" for component_id, target_version in missing)
+        raise ComponentArtifactError(f"missing required raw native manifest subjects: {rendered}")
+    return sorted(found.values(), key=lambda path: path.name)
+
+
+def write_native_manifest_subject_checksums(
+    manifest_dir: Path,
+    output_path: Path,
+    *,
+    repository: str,
+    channel: str,
+    source_ref: str,
+    source_commit: str,
+) -> list[Path]:
+    """Write SHA256SUMS-format subjects for the exact raw native manifests.
+
+    The output feeds actions/attest directly.  The ordinary archive and index
+    subject files remain separate and keep their existing identities.
+    """
+    subjects = _native_manifest_subject_paths(
+        manifest_dir,
+        repository=repository,
+        channel=channel,
+        source_ref=source_ref,
+        source_commit=source_commit,
+    )
+    rows = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in subjects]
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return subjects
+
+
+def write_native_manifest_attestation_assets(
+    manifest_dir: Path,
+    checksum_path: Path,
+    bundle_path: Path,
+    *,
+    repository: str,
+    channel: str,
+    source_ref: str,
+    source_commit: str,
+    gh_executable: str = "gh",
+    runner: Callable[..., Any] = subprocess.run,
+) -> list[Path]:
+    """Verify an action bundle against each raw manifest and write release sidecars.
+
+    GitHub CLI verifies the exact source identity from the detached action
+    bundle; each release sidecar contains that same single-line bundle.
+    """
+    subjects = _native_manifest_subject_paths(
+        manifest_dir,
+        repository=repository,
+        channel=channel,
+        source_ref=source_ref,
+        source_commit=source_commit,
+    )
+    expected_rows = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in subjects]
+    try:
+        actual_checksums = Path(checksum_path).read_text(encoding="utf-8")
+    except OSError as error:
+        raise ComponentArtifactError(f"cannot read native manifest subject checksums: {error}") from error
+    if actual_checksums != "\n".join(expected_rows) + "\n":
+        raise ComponentArtifactError("native manifest subject checksum list does not match current raw bytes")
+
+    bundle = Path(bundle_path)
+    bundle_info = bundle.lstat()
+    if stat.S_ISLNK(bundle_info.st_mode) or not stat.S_ISREG(bundle_info.st_mode):
+        raise ComponentArtifactError("detached native manifest bundle is missing or unsafe")
+    try:
+        bundle_document = json.loads(bundle.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ComponentArtifactError(f"cannot read detached native manifest bundle: {error}") from error
+    if not isinstance(bundle_document, dict) or not isinstance(bundle_document.get("dsseEnvelope"), dict):
+        raise ComponentArtifactError("detached native manifest bundle is not a Sigstore DSSE bundle")
+    envelope = bundle_document["dsseEnvelope"]
+    payload = envelope.get("payload")
+    if envelope.get("payloadType") != "application/vnd.in-toto+json" or not isinstance(payload, str):
+        raise ComponentArtifactError("detached native manifest bundle has an invalid DSSE payload")
+    signatures = envelope.get("signatures")
+    if not isinstance(signatures, list) or not signatures:
+        raise ComponentArtifactError("detached native manifest bundle has no DSSE signatures")
+    try:
+        statement = json.loads(base64.b64decode(payload, validate=True))
+    except (ValueError, json.JSONDecodeError) as error:
+        raise ComponentArtifactError("detached native manifest bundle payload is invalid") from error
+    if not isinstance(statement, dict) or statement.get("predicateType") != ATTESTATION_PREDICATE:
+        raise ComponentArtifactError("detached native manifest bundle has an unexpected predicate")
+    statement_subjects = statement.get("subject")
+    if not isinstance(statement_subjects, list):
+        raise ComponentArtifactError("detached native manifest bundle has no subject list")
+    actual_subjects: dict[str, str] = {}
+    for item in statement_subjects:
+        if not isinstance(item, dict) or not isinstance(item.get("digest"), dict):
+            raise ComponentArtifactError("detached native manifest bundle contains a malformed subject")
+        name = item.get("name")
+        digest = item["digest"].get("sha256")
+        if (
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or name in actual_subjects
+        ):
+            raise ComponentArtifactError("detached native manifest bundle contains an invalid or duplicate subject")
+        actual_subjects[name] = digest
+    expected_subjects = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in subjects}
+    if actual_subjects != expected_subjects:
+        raise ComponentArtifactError("detached native manifest bundle subject set differs from raw manifest bytes")
+
+    signer_workflow = f"{repository}/.github/workflows/component-release.yml"
+    for subject in subjects:
+        command = [
+            gh_executable,
+            "attestation",
+            "verify",
+            str(subject),
+            "--repo",
+            repository,
+            "--bundle",
+            str(bundle),
+            "--signer-workflow",
+            signer_workflow,
+            "--source-ref",
+            source_ref,
+            "--source-digest",
+            source_commit,
+            "--predicate-type",
+            ATTESTATION_PREDICATE,
+        ]
+        try:
+            runner(command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as error:
+            raise ComponentArtifactError(
+                f"GitHub CLI failed to verify detached native manifest bundle for {subject.name}"
+            ) from error
+
+    sidecar_bytes = json.dumps(bundle_document, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    sidecars: list[Path] = []
+    for subject in subjects:
+        sidecar = subject.with_name(subject.name + ".attestation.jsonl")
+        if sidecar.exists() or sidecar.is_symlink():
+            raise ComponentArtifactError(f"detached native manifest asset already exists: {sidecar.name}")
+        sidecar.write_bytes(sidecar_bytes)
+        sidecars.append(sidecar)
+    return sidecars
+
+
 def _verify_asset_uri(document: dict[str, Any]) -> None:
     artifact = document["artifact"]
     if artifact["kind"] == "oci-image":
@@ -775,7 +1012,9 @@ def trusted_catalog_compatibility(
             group.get(key) != PACKAGE_RUNTIME_COMPATIBILITY[key]
             for key in ("groupId", "groupVersion", "contractApiVersion", "wireApiVersion", "contractLock")
         ):
-            raise ComponentArtifactError("trusted Package Runtime compatibility does not match its frozen protocol lock")
+            raise ComponentArtifactError(
+                "trusted Package Runtime compatibility does not match its frozen protocol lock"
+            )
     elif group_id != "workspace-product-v2":
         raise ComponentArtifactError(f"unsupported trusted compatibility group: {group_id}")
     if lock.get("repository") != "DoHorizon-AI/Cyrene-Workspace":
@@ -1468,8 +1707,38 @@ def _index_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _native_manifest_subjects_command(arguments: argparse.Namespace) -> int:
+    """Write the checksums for the exact four supported raw native manifests."""
+    subjects = write_native_manifest_subject_checksums(
+        arguments.manifest_dir,
+        arguments.output,
+        repository=arguments.repository,
+        channel=arguments.channel,
+        source_ref=arguments.source_ref,
+        source_commit=arguments.source_commit,
+    )
+    print(f"created {arguments.output} ({len(subjects)} raw native manifest subjects)")
+    return 0
+
+
+def _native_manifest_attestation_assets_command(arguments: argparse.Namespace) -> int:
+    """Verify a detached multi-subject bundle and materialize named sidecars."""
+    sidecars = write_native_manifest_attestation_assets(
+        arguments.manifest_dir,
+        arguments.checksum_file,
+        arguments.bundle,
+        repository=arguments.repository,
+        channel=arguments.channel,
+        source_ref=arguments.source_ref,
+        source_commit=arguments.source_commit,
+        gh_executable=arguments.gh_executable,
+    )
+    print("created detached raw-manifest proof assets: " + ", ".join(path.name for path in sidecars))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run pack/create/verify/index commands for component releases."""
+    """Run component release packaging, validation, and proof commands."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -1508,6 +1777,30 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--attestation-uri")
     index.add_argument("--output", type=Path, required=True)
     index.set_defaults(handler=_index_command)
+
+    native_subjects = commands.add_parser(
+        "native-manifest-subjects", help="write exact raw native manifest attestation subjects"
+    )
+    native_subjects.add_argument("--manifest-dir", type=Path, required=True)
+    native_subjects.add_argument("--output", type=Path, required=True)
+    native_subjects.add_argument("--repository", required=True)
+    native_subjects.add_argument("--channel", choices=("stable", "preview"), required=True)
+    native_subjects.add_argument("--source-ref", required=True)
+    native_subjects.add_argument("--source-commit", required=True)
+    native_subjects.set_defaults(handler=_native_manifest_subjects_command)
+
+    native_proofs = commands.add_parser(
+        "native-manifest-proof-assets", help="verify and name detached raw native manifest proof bundles"
+    )
+    native_proofs.add_argument("--manifest-dir", type=Path, required=True)
+    native_proofs.add_argument("--checksum-file", type=Path, required=True)
+    native_proofs.add_argument("--bundle", type=Path, required=True)
+    native_proofs.add_argument("--repository", required=True)
+    native_proofs.add_argument("--channel", choices=("stable", "preview"), required=True)
+    native_proofs.add_argument("--source-ref", required=True)
+    native_proofs.add_argument("--source-commit", required=True)
+    native_proofs.add_argument("--gh-executable", default="gh")
+    native_proofs.set_defaults(handler=_native_manifest_attestation_assets_command)
 
     verify_index_parser = commands.add_parser(
         "verify-index", help="verify an index, catalog, release, run, and attestation pin"

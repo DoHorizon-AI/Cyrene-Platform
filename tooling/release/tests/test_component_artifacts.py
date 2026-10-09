@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
-import json
+import base64
 import hashlib
+import json
 import stat
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from tooling.release import component_artifacts as artifacts
 
@@ -264,9 +266,7 @@ def test_trusted_catalog_compatibility_accepts_frozen_package_runtime_lock() -> 
         ("wireApiVersion", "cyrene.workspace.product.v2"),
     ],
 )
-def test_trusted_catalog_compatibility_rejects_unpinned_package_runtime_contract(
-    field: str, value: object
-) -> None:
+def test_trusted_catalog_compatibility_rejects_unpinned_package_runtime_contract(field: str, value: object) -> None:
     """Reject a mutated Package Runtime lock or wire identity before release creation."""
     group = dict(artifacts.PACKAGE_RUNTIME_COMPATIBILITY)
     group[field] = value
@@ -339,3 +339,249 @@ def test_oci_attestation_subject_uses_repository_and_digest() -> None:
     assert "--signer-workflow" in command
     assert "--source-ref" in command
     assert "--source-digest" in command
+
+
+def _make_raw_native_manifests(root: Path) -> list[Path]:
+    """Create valid v2 raw manifests for both native components and Ubuntu targets."""
+    manifest_dir = root / "manifests"
+    manifest_dir.mkdir()
+    paths: list[Path] = []
+    for component_id in sorted(artifacts.RAW_NATIVE_MANIFEST_COMPONENTS):
+        for target_version, target in sorted(artifacts.RAW_NATIVE_MANIFEST_TARGETS.items()):
+            name = f"{component_id}-{target_version}"
+            payload = root / f"payload-{name}"
+            entrypoint = payload / "bin" / component_id
+            entrypoint.parent.mkdir(parents=True)
+            entrypoint.write_bytes(f"{name}\n".encode())
+            entrypoint.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            archive = root / f"{name}.tar.gz"
+            artifacts._write_deterministic_tar_gz(payload, archive)
+            descriptor = root / f"{name}-descriptor.json"
+            descriptor.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 2,
+                        "protocolVersion": "cyrene.test.v1",
+                        "releaseId": f"preview-{SOURCE_SHA}",
+                        "componentId": component_id,
+                        "version": "0.1.0",
+                        "channel": "preview",
+                        "target": target,
+                        "artifact": {
+                            "kind": "native-binary",
+                            "format": "tar.gz",
+                            "entrypoint": f"bin/{component_id}",
+                        },
+                        "dependencies": [],
+                        "restart": {},
+                        "source": _source(),
+                        "provenance": {
+                            "attestation": _attestation(archive.name),
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manifest_path = manifest_dir / artifacts.manifest_asset_name(
+                {"componentId": component_id, "target": target}
+            )
+            artifacts.create_manifest(descriptor, manifest_path, archive, payload)
+            paths.append(manifest_path)
+    return paths
+
+
+def test_raw_native_manifest_checksum_subjects_bind_exact_four_raw_files(tmp_path: Path) -> None:
+    """Create one exact subject row for each required native component/Ubuntu tuple."""
+    manifests = _make_raw_native_manifests(tmp_path)
+    output = tmp_path / "raw-native-checksums.txt"
+
+    subjects = artifacts.write_native_manifest_subject_checksums(
+        tmp_path / "manifests",
+        output,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        channel="preview",
+        source_ref="refs/heads/develop",
+        source_commit=SOURCE_SHA,
+    )
+
+    assert subjects == sorted(manifests, key=lambda path: path.name)
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in subjects
+    ]
+    assert len(subjects) == 4
+
+
+def test_raw_native_manifest_subjects_reject_missing_or_foreign_source(tmp_path: Path) -> None:
+    """Require the closed four-target set and exact current release source identity."""
+    manifest_dir = tmp_path / "manifests"
+    manifests = _make_raw_native_manifests(tmp_path)
+    manifests[0].unlink()
+
+    with pytest.raises(artifacts.ComponentArtifactError, match="missing required raw native manifest"):
+        artifacts.write_native_manifest_subject_checksums(
+            manifest_dir,
+            tmp_path / "missing.txt",
+            repository="DoHorizon-AI/Cyrene-Platform",
+            channel="preview",
+            source_ref="refs/heads/develop",
+            source_commit=SOURCE_SHA,
+        )
+
+    foreign_path = next(
+        path
+        for path in manifest_dir.glob("*.manifest.json")
+        if json.loads(path.read_text(encoding="utf-8"))["componentId"] == "cy-package-runtime"
+    )
+    document = json.loads(foreign_path.read_text(encoding="utf-8"))
+    document["source"]["commit"] = "2" * 40
+    document["releaseId"] = f"preview-{'2' * 40}"
+    document["manifestDigest"] = artifacts._manifest_digest(document)
+    foreign_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    with pytest.raises(artifacts.ComponentArtifactError, match="source identity differs"):
+        artifacts.write_native_manifest_subject_checksums(
+            manifest_dir,
+            tmp_path / "foreign.txt",
+            repository="DoHorizon-AI/Cyrene-Platform",
+            channel="preview",
+            source_ref="refs/heads/develop",
+            source_commit=SOURCE_SHA,
+        )
+
+
+def test_raw_native_manifest_bundle_verification_creates_detached_assets(tmp_path: Path) -> None:
+    """Bind four exact raw manifests, then request gh's signed identity verification."""
+    manifests = _make_raw_native_manifests(tmp_path)
+    manifest_dir = tmp_path / "manifests"
+    checksum_path = tmp_path / "checksums.txt"
+    subjects = artifacts.write_native_manifest_subject_checksums(
+        manifest_dir,
+        checksum_path,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        channel="preview",
+        source_ref="refs/heads/develop",
+        source_commit=SOURCE_SHA,
+    )
+    statement = {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+            {
+                "name": path.name,
+                "digest": {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
+            }
+            for path in subjects
+        ],
+        "predicateType": artifacts.ATTESTATION_PREDICATE,
+        "predicate": {},
+    }
+    bundle_document = {
+        "dsseEnvelope": {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": base64.b64encode(json.dumps(statement).encode()).decode("ascii"),
+            "signatures": [{"sig": "test-only-placeholder"}],
+        }
+    }
+    bundle_path = tmp_path / "actions-attestation-bundle.json"
+    bundle_path.write_text(json.dumps(bundle_document), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_runner(command: list[str], **_kwargs: object) -> None:
+        commands.append(command)
+
+    sidecars = artifacts.write_native_manifest_attestation_assets(
+        manifest_dir,
+        checksum_path,
+        bundle_path,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        channel="preview",
+        source_ref="refs/heads/develop",
+        source_commit=SOURCE_SHA,
+        gh_executable="gh-test-double",
+        runner=fake_runner,
+    )
+
+    assert len(commands) == len(manifests) == len(sidecars) == 4
+    for command, manifest in zip(commands, subjects, strict=True):
+        assert command[0:3] == ["gh-test-double", "attestation", "verify"]
+        assert command[3] == str(manifest)
+        for flag, value in (
+            ("--repo", "DoHorizon-AI/Cyrene-Platform"),
+            ("--signer-workflow", "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml"),
+            ("--source-ref", "refs/heads/develop"),
+            ("--source-digest", SOURCE_SHA),
+            ("--predicate-type", artifacts.ATTESTATION_PREDICATE),
+        ):
+            assert command[command.index(flag) + 1] == value
+        assert command[command.index("--bundle") + 1] == str(bundle_path)
+    assert [path.name for path in sidecars] == [path.name + ".attestation.jsonl" for path in subjects]
+    expected_bundle_bytes = json.dumps(bundle_document, separators=(",", ":")).encode() + b"\n"
+    assert all(path.read_bytes() == expected_bundle_bytes for path in sidecars)
+
+
+def test_raw_native_manifest_bundle_rejects_subject_drift_before_gh(tmp_path: Path) -> None:
+    """Do not invoke the signature verifier when a bundle names other raw bytes."""
+    _make_raw_native_manifests(tmp_path)
+    manifest_dir = tmp_path / "manifests"
+    checksum_path = tmp_path / "checksums.txt"
+    artifacts.write_native_manifest_subject_checksums(
+        manifest_dir,
+        checksum_path,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        channel="preview",
+        source_ref="refs/heads/develop",
+        source_commit=SOURCE_SHA,
+    )
+    bundle_path = tmp_path / "wrong-bundle.json"
+    statement = {
+        "subject": [{"name": "different.manifest.json", "digest": {"sha256": "0" * 64}}],
+        "predicateType": artifacts.ATTESTATION_PREDICATE,
+    }
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "dsseEnvelope": {
+                    "payloadType": "application/vnd.in-toto+json",
+                    "payload": base64.b64encode(json.dumps(statement).encode()).decode("ascii"),
+                    "signatures": [{"sig": "test-only-placeholder"}],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner_calls: list[list[str]] = []
+
+    with pytest.raises(artifacts.ComponentArtifactError, match="subject set differs"):
+        artifacts.write_native_manifest_attestation_assets(
+            manifest_dir,
+            checksum_path,
+            bundle_path,
+            repository="DoHorizon-AI/Cyrene-Platform",
+            channel="preview",
+            source_ref="refs/heads/develop",
+            source_commit=SOURCE_SHA,
+            runner=lambda command, **_kwargs: runner_calls.append(command),
+        )
+
+    assert runner_calls == []
+
+
+def test_component_release_workflow_publishes_detached_raw_manifest_proofs() -> None:
+    """Keep archive and index proofs intact while adding release assets for four raw manifests."""
+    workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/component-release.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["component-release"]["steps"]
+    by_name = {step.get("name"): step for step in steps if isinstance(step, dict)}
+
+    archive_attestation = by_name["Attest native and SDK bundle payloads"]
+    assert archive_attestation["with"]["subject-checksums"] == "${{ runner.temp }}/component-payload-checksums.txt"
+    assert by_name["Attest the exact component index bytes"]["with"]["subject-checksums"] == (
+        "${{ runner.temp }}/component-index-checksum.txt"
+    )
+    raw_attestation = by_name["Attest exact raw native manifest bytes"]
+    assert raw_attestation["uses"] == "actions/attest@v4"
+    assert raw_attestation["with"]["subject-checksums"] == "${{ runner.temp }}/native-manifest-checksums.txt"
+    assert "outputs.bundle-path" in by_name["Verify and save detached raw native manifest proof assets"]["run"]
+    asset_creation = by_name["Create the draft release with all durable assets"]["run"]
+    assert '"$OUTPUT_ROOT/native/manifests"/*.manifest.json.attestation.jsonl' in asset_creation
