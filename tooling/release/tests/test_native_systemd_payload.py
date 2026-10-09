@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -60,9 +61,7 @@ def test_unit_is_copied_into_the_component_payload_and_bound_by_file_manifest(
     copied = native._copy_systemd_unit_payload(REPOSITORY, catalog_component, payload_root)
 
     assert copied == f"systemd/{unit_name}"
-    assert (payload_root / copied).read_bytes() == (
-        REPOSITORY / "infrastructure" / "systemd" / unit_name
-    ).read_bytes()
+    assert (payload_root / copied).read_bytes() == (REPOSITORY / "infrastructure" / "systemd" / unit_name).read_bytes()
     assert copied in _payload_files(payload_root)
 
 
@@ -118,16 +117,12 @@ def test_symlinked_unit_source_is_rejected(tmp_path: Path) -> None:
 def test_kernel_state_directory_cannot_take_over_broker_acl_tree() -> None:
     """Keep Kernel StateDirectory ownership away from shared broker descendants."""
 
-    kernel_unit = (REPOSITORY / "infrastructure" / "systemd" / "cyrene-kernel.service").read_text(
+    kernel_unit = (REPOSITORY / "infrastructure" / "systemd" / "cyrene-kernel.service").read_text(encoding="utf-8")
+    broker_unit = (REPOSITORY / "infrastructure" / "systemd" / "cyrene-runtime-maintenance.service").read_text(
         encoding="utf-8"
     )
-    broker_unit = (
-        REPOSITORY / "infrastructure" / "systemd" / "cyrene-runtime-maintenance.service"
-    ).read_text(encoding="utf-8")
     kernel_state_directories = [
-        line.partition("=")[2]
-        for line in kernel_unit.splitlines()
-        if line.startswith("StateDirectory=")
+        line.partition("=")[2] for line in kernel_unit.splitlines() if line.startswith("StateDirectory=")
     ]
 
     assert kernel_state_directories == []
@@ -136,3 +131,19 @@ def test_kernel_state_directory_cannot_take_over_broker_acl_tree() -> None:
     assert "StateDirectory=cyrene/runtime-maintenance-private" in broker_unit
     assert "StateDirectoryMode=0700" in broker_unit
     assert "Group=cyrene" in broker_unit
+
+
+def test_kernel_and_maintenance_broker_share_the_activity_catalog_path() -> None:
+    """The signed units must consume the same root-managed activity catalog."""
+
+    kernel_unit = (REPOSITORY / "infrastructure/systemd/cyrene-kernel.service").read_text(encoding="utf-8")
+    broker_unit = (REPOSITORY / "infrastructure/systemd/cyrene-runtime-maintenance.service").read_text(encoding="utf-8")
+    kernel_exec = next(line.partition("=")[2] for line in kernel_unit.splitlines() if line.startswith("ExecStart="))
+    broker_exec = next(line.partition("=")[2] for line in broker_unit.splitlines() if line.startswith("ExecStart="))
+    kernel_args = shlex.split(kernel_exec)
+    broker_args = shlex.split(broker_exec)
+
+    kernel_catalog = kernel_args[kernel_args.index("--activity-catalog") + 1]
+    broker_catalog = broker_args[broker_args.index("--catalog") + 1]
+
+    assert kernel_catalog == broker_catalog == "/var/lib/cyrene/runtime/activity-sources.json"
