@@ -342,7 +342,7 @@ def test_oci_attestation_subject_uses_repository_and_digest() -> None:
 
 
 def _make_raw_native_manifests(root: Path) -> list[Path]:
-    """Create valid v2 raw manifests for both native components and Ubuntu targets."""
+    """Create valid v2 raw manifests for the closed native component and target set."""
     manifest_dir = root / "manifests"
     manifest_dir.mkdir()
     paths: list[Path] = []
@@ -392,7 +392,7 @@ def _make_raw_native_manifests(root: Path) -> list[Path]:
     return paths
 
 
-def test_raw_native_manifest_checksum_subjects_bind_exact_four_raw_files(tmp_path: Path) -> None:
+def test_raw_native_manifest_checksum_subjects_bind_exact_six_raw_files(tmp_path: Path) -> None:
     """Create one exact subject row for each required native component/Ubuntu tuple."""
     manifests = _make_raw_native_manifests(tmp_path)
     output = tmp_path / "raw-native-checksums.txt"
@@ -410,14 +410,33 @@ def test_raw_native_manifest_checksum_subjects_bind_exact_four_raw_files(tmp_pat
     assert output.read_text(encoding="utf-8").splitlines() == [
         f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in subjects
     ]
-    assert len(subjects) == 4
+    actual_identities = {
+        (document["componentId"], document["target"]["distributionVersion"])
+        for document in (json.loads(path.read_text(encoding="utf-8")) for path in subjects)
+    }
+    assert actual_identities == {
+        (component_id, target_version)
+        for component_id in {
+            "cy-package-runtime",
+            "cyrene-kernel",
+            "cyrene-runtime-maintenance",
+        }
+        for target_version in {"22.04", "24.04"}
+    }
+    assert len(subjects) == 6
 
 
 def test_raw_native_manifest_subjects_reject_missing_or_foreign_source(tmp_path: Path) -> None:
-    """Require the closed four-target set and exact current release source identity."""
+    """Require the closed six-subject set and exact current release source identity."""
     manifest_dir = tmp_path / "manifests"
-    manifests = _make_raw_native_manifests(tmp_path)
-    manifests[0].unlink()
+    _make_raw_native_manifests(tmp_path)
+    kernel_u24_manifest = next(
+        path
+        for path in manifest_dir.glob("*.manifest.json")
+        if (document := json.loads(path.read_text(encoding="utf-8"))).get("componentId") == "cyrene-kernel"
+        and document.get("target", {}).get("distributionVersion") == "24.04"
+    )
+    kernel_u24_manifest.unlink()
 
     with pytest.raises(artifacts.ComponentArtifactError, match="missing required raw native manifest"):
         artifacts.write_native_manifest_subject_checksums(
@@ -452,7 +471,7 @@ def test_raw_native_manifest_subjects_reject_missing_or_foreign_source(tmp_path:
 
 
 def test_raw_native_manifest_bundle_verification_creates_detached_assets(tmp_path: Path) -> None:
-    """Bind four exact raw manifests, then request gh's signed identity verification."""
+    """Bind all six exact raw manifests, then request gh's signed identity verification."""
     manifests = _make_raw_native_manifests(tmp_path)
     manifest_dir = tmp_path / "manifests"
     checksum_path = tmp_path / "checksums.txt"
@@ -502,7 +521,7 @@ def test_raw_native_manifest_bundle_verification_creates_detached_assets(tmp_pat
         runner=fake_runner,
     )
 
-    assert len(commands) == len(manifests) == len(sidecars) == 4
+    assert len(commands) == len(manifests) == len(sidecars) == 6
     for command, manifest in zip(commands, subjects, strict=True):
         assert command[0:3] == ["gh-test-double", "attestation", "verify"]
         assert command[3] == str(manifest)
@@ -568,7 +587,7 @@ def test_raw_native_manifest_bundle_rejects_subject_drift_before_gh(tmp_path: Pa
 
 
 def test_component_release_workflow_publishes_detached_raw_manifest_proofs() -> None:
-    """Keep archive and index proofs intact while adding release assets for four raw manifests."""
+    """Keep archive and index proofs intact while publishing all six raw manifest proofs."""
     workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/component-release.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["component-release"]["steps"]
