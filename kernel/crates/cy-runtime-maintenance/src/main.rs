@@ -239,6 +239,16 @@ fn option(options: &BTreeMap<String, Vec<String>>, key: &str, default: &str) -> 
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Opens the initialization gate, treating only a missing catalog as first-boot state.
+/// 中文：真实缺失由 RuntimeMaintenance 识别；损坏或权限异常仍保持 fail-closed。
+fn open_init_catalog_gate(
+    state_dir: PathBuf,
+    catalog_path: &Path,
+) -> Result<RuntimeMaintenance, String> {
+    RuntimeMaintenance::open_with_optional_catalog_file(state_dir, catalog_path)
+        .map_err(|error| error.to_string())
+}
+
 /// Runs the offline schema conversion while no broker or Kernel writer is active.
 fn run_migrate_state(options: BTreeMap<String, Vec<String>>) -> Result<(), String> {
     ensure_root_operator()?;
@@ -1600,20 +1610,7 @@ fn run_init_catalog(options: BTreeMap<String, Vec<String>>) -> Result<(), String
     };
     catalog.validate().map_err(|error| error.to_string())?;
     if changed {
-        let current_catalog = existing
-            .as_ref()
-            .map(|current| TrustedActivitySourceCatalog {
-                schema_version: current.schema_version,
-                generation: current.generation,
-                sources: current.sources.clone(),
-            })
-            .unwrap_or_else(|| TrustedActivitySourceCatalog {
-                schema_version: 1,
-                generation: 0,
-                sources: Vec::new(),
-            });
-        let gate = RuntimeMaintenance::open(state_dir, current_catalog)
-            .map_err(|error| error.to_string())?;
+        let gate = open_init_catalog_gate(state_dir, &catalog_path)?;
         gate.commit_activity_source_catalog(
             expected_generation,
             catalog.clone(),
@@ -1735,6 +1732,185 @@ fn load_maintenance_proof(path: &str) -> Result<MaintenanceProofInput, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root_file_test_enabled() -> bool {
+        let effective_uid = Uid::effective().as_raw();
+        if effective_uid == 0 {
+            return true;
+        }
+        eprintln!(
+            "skipping root-only init-catalog test: effective uid is {effective_uid} (requires uid 0)"
+        );
+        false
+    }
+
+    fn init_catalog_options(directory: &Path) -> BTreeMap<String, Vec<String>> {
+        BTreeMap::from([
+            (
+                "state-dir".to_string(),
+                vec![directory.join("state").display().to_string()],
+            ),
+            (
+                "catalog".to_string(),
+                vec![directory
+                    .join("etc/activity-sources.json")
+                    .display()
+                    .to_string()],
+            ),
+            (
+                "token-dir".to_string(),
+                vec![directory.join("tokens").display().to_string()],
+            ),
+            (
+                "source".to_string(),
+                vec!["cyrene-catalogs=1001:1000".to_string()],
+            ),
+        ])
+    }
+
+    fn test_catalog(generation: u64, source_id: &str) -> TrustedActivitySourceCatalog {
+        TrustedActivitySourceCatalog {
+            schema_version: 1,
+            generation,
+            sources: vec![TrustedActivitySource {
+                source_id: source_id.to_string(),
+                uid: 1001,
+                gid: Some(1000),
+                source_token_sha256: format!("{:x}", Sha256::digest(b"test-source-token")),
+                binding_scopes: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn init_catalog_provisions_generation_one_when_catalog_is_missing_and_is_idempotent() {
+        if !root_file_test_enabled() {
+            return;
+        }
+        let directory = tempfile::TempDir::new().unwrap();
+        let options = init_catalog_options(directory.path());
+        let catalog_path = PathBuf::from(option(&options, "catalog", ""));
+        let token_path =
+            PathBuf::from(option(&options, "token-dir", "")).join("cyrene-catalogs.token");
+
+        run_init_catalog(options.clone()).unwrap();
+        let first_catalog_bytes = fs::read(&catalog_path).unwrap();
+        let first_token = fs::read(&token_path).unwrap();
+        let installed: TrustedActivitySourceCatalog =
+            serde_json::from_slice(&first_catalog_bytes).unwrap();
+        assert_eq!(installed.generation, 1);
+        assert_eq!(installed.sources.len(), 1);
+        assert_eq!(installed.sources[0].source_id, "cyrene-catalogs");
+        assert_eq!(
+            installed.sources[0].source_token_sha256,
+            format!(
+                "{:x}",
+                Sha256::digest(first_token.strip_suffix(b"\n").unwrap())
+            )
+        );
+        assert_eq!(
+            fs::symlink_metadata(&token_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+
+        run_init_catalog(options).unwrap();
+        assert_eq!(fs::read(&catalog_path).unwrap(), first_catalog_bytes);
+        assert_eq!(fs::read(token_path).unwrap(), first_token);
+    }
+
+    #[test]
+    fn init_catalog_rejects_corrupt_existing_catalog_without_rewriting_it() {
+        if !root_file_test_enabled() {
+            return;
+        }
+        let directory = tempfile::TempDir::new().unwrap();
+        let options = init_catalog_options(directory.path());
+        let catalog_path = PathBuf::from(option(&options, "catalog", ""));
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        let corrupt = b"{not-json";
+        fs::write(&catalog_path, corrupt).unwrap();
+        fs::set_permissions(&catalog_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = run_init_catalog(options).unwrap_err();
+        assert!(error.contains("existing catalog is invalid"), "{error}");
+        assert_eq!(fs::read(catalog_path).unwrap(), corrupt);
+    }
+
+    #[test]
+    fn init_catalog_rejects_unsafe_existing_catalog_without_rewriting_target() {
+        if !root_file_test_enabled() {
+            return;
+        }
+        let directory = tempfile::TempDir::new().unwrap();
+        let options = init_catalog_options(directory.path());
+        let catalog_path = PathBuf::from(option(&options, "catalog", ""));
+        let target_path = directory.path().join("target-catalog.json");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        let valid = serde_json::to_vec(&test_catalog(1, "cyrene-catalogs")).unwrap();
+        fs::write(&target_path, &valid).unwrap();
+        std::os::unix::fs::symlink(&target_path, &catalog_path).unwrap();
+
+        let error = run_init_catalog(options).unwrap_err();
+        assert!(error.contains("existing activity catalog must be a root-owned"));
+        assert!(fs::symlink_metadata(&catalog_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(target_path).unwrap(), valid);
+    }
+
+    #[test]
+    fn init_catalog_rejects_group_writable_existing_catalog() {
+        if !root_file_test_enabled() {
+            return;
+        }
+        let directory = tempfile::TempDir::new().unwrap();
+        let options = init_catalog_options(directory.path());
+        let catalog_path = PathBuf::from(option(&options, "catalog", ""));
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&test_catalog(1, "cyrene-catalogs")).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&catalog_path, fs::Permissions::from_mode(0o664)).unwrap();
+
+        let error = run_init_catalog(options).unwrap_err();
+        assert!(error.contains("existing activity catalog must be a root-owned"));
+    }
+
+    #[test]
+    fn init_catalog_stale_generation_cas_does_not_overwrite_a_competing_catalog() {
+        if !root_file_test_enabled() {
+            return;
+        }
+        let directory = tempfile::TempDir::new().unwrap();
+        let state_dir = directory.path().join("state");
+        let catalog_path = directory.path().join("activity-sources.json");
+        let gate = open_init_catalog_gate(state_dir, &catalog_path).unwrap();
+        assert_eq!(gate.catalog_generation(), 0);
+
+        let competing = test_catalog(1, "cyrene-catalogs");
+        let competing_bytes = serde_json::to_vec(&competing).unwrap();
+        fs::write(&catalog_path, &competing_bytes).unwrap();
+        fs::set_permissions(&catalog_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let attempted = test_catalog(1, "cyrene-yield");
+        let mut writer_called = false;
+        let error = gate
+            .commit_activity_source_catalog(0, attempted, None, || {
+                writer_called = true;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, MaintenanceError::CatalogUnavailable(_)));
+        assert!(!writer_called);
+        assert_eq!(fs::read(catalog_path).unwrap(), competing_bytes);
+    }
 
     #[test]
     fn broker_operator_authority_requires_root_peer() {
