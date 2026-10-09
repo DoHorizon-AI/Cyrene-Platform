@@ -594,6 +594,36 @@ jobs:
             --document "$OUTPUT_ROOT/component-release-index-v1.json" \
             --schema-dir workspace-catalog/governance
 
+      - name: Generate checksum subjects for exact raw native manifests
+        run: |
+          set -euo pipefail
+          python tooling/release/component_artifacts.py native-manifest-subjects \
+            --manifest-dir "$OUTPUT_ROOT/native/manifests" \
+            --output "$RUNNER_TEMP/native-manifest-checksums.txt" \
+            --repository "$SOURCE_REPOSITORY" \
+            --channel "$CHANNEL" \
+            --source-ref "$SOURCE_REF" \
+            --source-commit "$SOURCE_COMMIT"
+
+      - name: Attest exact raw native manifest bytes
+        id: native-manifest-attestation
+        uses: actions/attest@v4
+        with:
+          subject-checksums: ${{ runner.temp }}/native-manifest-checksums.txt
+          github-token: ${{ github.token }}
+
+      - name: Verify and save detached raw native manifest proof assets
+        run: |
+          set -euo pipefail
+          python tooling/release/component_artifacts.py native-manifest-proof-assets \
+            --manifest-dir "$OUTPUT_ROOT/native/manifests" \
+            --checksum-file "$RUNNER_TEMP/native-manifest-checksums.txt" \
+            --bundle "${{ steps.native-manifest-attestation.outputs.bundle-path }}" \
+            --repository "$SOURCE_REPOSITORY" \
+            --channel "$CHANNEL" \
+            --source-ref "$SOURCE_REF" \
+            --source-commit "$SOURCE_COMMIT"
+
       - name: Generate the exact component index checksum subject
         run: |
           set -euo pipefail
@@ -644,6 +674,7 @@ jobs:
           asset_paths=(
             "$OUTPUT_ROOT/native/artifacts"/*.tar.gz
             "$OUTPUT_ROOT/native/manifests"/*.manifest.json
+            "$OUTPUT_ROOT/native/manifests"/*.manifest.json.attestation.jsonl
             "$OUTPUT_ROOT/component-release-index-v1.json"
           )
           release_args=(
