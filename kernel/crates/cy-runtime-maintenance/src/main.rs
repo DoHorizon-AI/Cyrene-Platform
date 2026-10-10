@@ -23,16 +23,18 @@ use std::{
 };
 
 use cy_proto::core_v2::{
-    kernel_authority_service_client::KernelAuthorityServiceClient, BeginMaintenanceRequest,
-    EndMaintenanceRequest, MaintenanceOutcome as ProtoOutcome, MaintenanceTargetKind,
-    UpdateReadinessRequest, UpdateReadinessStatus, WorkspaceTaskActivityState,
+    kernel_authority_service_client::KernelAuthorityServiceClient,
+    BeginInitialSourceActivationRequest, BeginMaintenanceRequest, EndMaintenanceRequest,
+    MaintenanceOutcome as ProtoOutcome, MaintenanceTargetKind, UpdateReadinessRequest,
+    UpdateReadinessStatus, WorkspaceTaskActivityState,
 };
 use cy_runtime_maintenance::{
     migrate_state_schema1, rollback_state_schema1, BindingOperationCaller, BindingOperationKind,
-    BindingOperationScope, LegacyStateProfile, MaintenanceError, MaintenanceHoldProof,
-    MaintenanceOutcome, MaintenancePlan, ReadinessRequest, RuntimeMaintenance, RuntimeUsage,
-    StateMigrationProof, TaskActivityRecord, TaskActivityState, TrustedActivitySource,
-    TrustedActivitySourceCatalog, TrustedBindingScope, UpdateTargetKind, STATE_PROTOCOL_VERSION,
+    BindingOperationScope, InitialSourceArtifactRef, LegacyStateProfile, MaintenanceError,
+    MaintenanceHoldProof, MaintenanceOutcome, MaintenancePlan, ReadinessRequest,
+    RuntimeMaintenance, RuntimeUsage, StateMigrationProof, TaskActivityRecord, TaskActivityState,
+    TrustedActivitySource, TrustedActivitySourceCatalog, TrustedBindingScope, UpdateTargetKind,
+    STATE_PROTOCOL_VERSION,
 };
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::{chown, getegid, Gid, Uid};
@@ -53,6 +55,8 @@ const DEFAULT_KERNEL_SOCKET: &str = "/run/cyrene/kernel.sock";
 const BROKER_PROTOCOL_VERSION: &str = "cyrene.runtime-maintenance.broker.v1";
 const BINDING_OPERATIONS_PROTOCOL_VERSION: &str =
     "cyrene.runtime-maintenance.binding-operations.v1";
+const INITIAL_SOURCE_ACTIVATION_PROTOCOL_VERSION: &str =
+    "cyrene.runtime-maintenance.initial-source-activation.v1";
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone)]
@@ -508,7 +512,7 @@ fn dispatch(
         "Health" => Ok(json!({
             "status": "SERVING",
             "protocol_version": BROKER_PROTOCOL_VERSION,
-            "capabilities": [BINDING_OPERATIONS_PROTOCOL_VERSION, STATE_PROTOCOL_VERSION],
+            "capabilities": [BINDING_OPERATIONS_PROTOCOL_VERSION, INITIAL_SOURCE_ACTIVATION_PROTOCOL_VERSION, STATE_PROTOCOL_VERSION],
             "core_bootstrap_eligible": broker.gate.core_bootstrap_eligible().map_err(ApiError::from_maintenance)?,
             "catalog_generation": broker.gate.catalog_generation(),
             "gate_generation": broker.gate.current_gate_generation().map_err(ApiError::from_maintenance)?,
@@ -593,14 +597,16 @@ fn dispatch(
             let plan = maintenance_plan(&request.params)?;
             let expected_gate_generation =
                 required_u64(&request.params, "expected_gate_generation")?;
+            let initial_source_artifact_ref = parse_initial_source_artifact_ref(&request.params)?;
             let result = broker
                 .gate
-                .begin_core_bootstrap(
+                .begin_core_bootstrap_with_source_ref(
                     &transaction_id,
                     &plan,
                     &readiness,
                     expected_gate_generation,
                     true,
+                    initial_source_artifact_ref,
                 )
                 .map_err(ApiError::from_maintenance)?;
             let maintenance_token = result
@@ -621,6 +627,42 @@ fn dispatch(
                 "readiness_claimed": false,
                 "held": true,
             }))
+        }
+        "BeginInitialSourceActivation" => {
+            authorize_operator(&broker.gate, peer, &request.auth)?;
+            let transaction_id = required_string(&request.params, "request_id")?;
+            if transaction_id != request.request_id {
+                return Err(ApiError::new(
+                    "INVALID_ARGUMENT",
+                    "envelope request_id must equal params.request_id",
+                ));
+            }
+            let readiness = readiness_request(&request.params)?;
+            if readiness.target_kind != UpdateTargetKind::CoreRuntime
+                || !readiness.requires_restart
+                || !optional_bool(&request.params, "user_confirmed_restart", false)?
+            {
+                return Err(ApiError::new(
+                    "INVALID_ARGUMENT",
+                    "BeginInitialSourceActivation requires CORE_RUNTIME restart confirmation",
+                ));
+            }
+            let parent_request_id = required_string(&request.params, "parent_request_id")?;
+            let source_id = required_string(&request.params, "source_id")?;
+            let plan = maintenance_plan(&request.params)?;
+            let expected_gate_generation =
+                required_u64(&request.params, "expected_gate_generation")?;
+            kernel_begin_initial_source_activation(
+                &broker.kernel_socket,
+                &transaction_id,
+                &parent_request_id,
+                &source_id,
+                &plan,
+                &readiness,
+                expected_gate_generation,
+                true,
+                request.auth.operator_token.as_deref().unwrap_or_default(),
+            )
         }
         "EndMaintenance" => {
             authorize_operator(&broker.gate, peer, &request.auth)?;
@@ -1015,6 +1057,22 @@ fn maintenance_plan(params: &Value) -> Result<MaintenancePlan, ApiError> {
     })
 }
 
+fn parse_initial_source_artifact_ref(
+    params: &Value,
+) -> Result<Option<InitialSourceArtifactRef>, ApiError> {
+    let Some(value) = params.get("initial_source_artifact_ref") else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| {
+            ApiError::new(
+                "INVALID_ARGUMENT",
+                format!("initial_source_artifact_ref is invalid: {error}"),
+            )
+        })
+}
+
 fn parse_target_kind(value: &str) -> Result<UpdateTargetKind, ApiError> {
     match value {
         "PACKAGE_ONLY" => Ok(UpdateTargetKind::PackageOnly),
@@ -1139,6 +1197,49 @@ fn kernel_begin(
     let response = run_kernel(socket, async move |mut client| {
         client
             .begin_maintenance(request)
+            .await
+            .map(|response| response.into_inner())
+    })?;
+    Ok(json!({
+        "status": parse_proto_status(response.status),
+        "maintenance_token": if response.maintenance_token.is_empty() { Value::Null } else { json!(response.maintenance_token) },
+        "gate_generation": response.gate_generation,
+        "blocker_codes": response.blocker_codes,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn kernel_begin_initial_source_activation(
+    socket: &Path,
+    request_id: &str,
+    parent_request_id: &str,
+    source_id: &str,
+    plan: &MaintenancePlan,
+    readiness: &ReadinessRequest,
+    expected_gate_generation: u64,
+    user_confirmed_restart: bool,
+    operator_token: &str,
+) -> Result<Value, ApiError> {
+    let request = BeginInitialSourceActivationRequest {
+        request_id: request_id.to_string(),
+        parent_request_id: parent_request_id.to_string(),
+        source_id: source_id.to_string(),
+        expected_gate_generation,
+        user_confirmed_restart,
+        expected_activity_sources: readiness.expected_activity_sources.clone(),
+        expected_catalog_generation: readiness.expected_catalog_generation,
+        operator_token: operator_token.to_string(),
+        plan_id: plan.plan_id.clone(),
+        plan_digest: plan.plan_digest.clone(),
+        component_artifact_digests: plan
+            .component_artifact_digests
+            .clone()
+            .into_iter()
+            .collect(),
+    };
+    let response = run_kernel(socket, async move |mut client| {
+        client
+            .begin_initial_source_activation(request)
             .await
             .map(|response| response.into_inner())
     })?;
@@ -1307,6 +1408,7 @@ fn inject_operator_token(request: &mut Value, token: String) -> Result<(), Strin
             "GetUpdateReadiness"
                 | "BeginMaintenance"
                 | "BeginCoreBootstrap"
+                | "BeginInitialSourceActivation"
                 | "EndMaintenance"
                 | "ValidateMaintenanceHold"
         )
@@ -1936,6 +2038,17 @@ mod tests {
         inject_operator_token(&mut request, "private-token".to_string()).unwrap();
         assert_eq!(request["auth"]["operator_token"], "private-token");
 
+        let mut initial_activation = json!({
+            "request_id": "first-product-install",
+            "method": "BeginInitialSourceActivation",
+            "auth": {}
+        });
+        inject_operator_token(&mut initial_activation, "private-token".to_string()).unwrap();
+        assert_eq!(
+            initial_activation["auth"]["operator_token"],
+            "private-token"
+        );
+
         let mut source_request = json!({
             "request_id": "task",
             "method": "AdmitTask",
@@ -1951,6 +2064,35 @@ mod tests {
         });
         inject_operator_token(&mut validate_request, "private-token".to_string()).unwrap();
         assert_eq!(validate_request["auth"]["operator_token"], "private-token");
+    }
+
+    #[test]
+    fn bootstrap_source_artifact_context_has_a_strict_generic_shape() {
+        let parsed = parse_initial_source_artifact_ref(&json!({
+            "initial_source_artifact_ref": {
+                "source_id": "cyrene-catalogs",
+                "component_id": "cyrene-catalyst",
+                "artifact_digest": format!("sha256:{}", "a".repeat(64)),
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Some(InitialSourceArtifactRef {
+                source_id: "cyrene-catalogs".to_string(),
+                component_id: "cyrene-catalyst".to_string(),
+                artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            })
+        );
+        assert!(parse_initial_source_artifact_ref(&json!({
+            "initial_source_artifact_ref": {
+                "source_id": "cyrene-catalogs",
+                "component_id": "cyrene-catalyst",
+                "artifact_digest": format!("sha256:{}", "a".repeat(64)),
+                "product_name": "must-not-be-accepted"
+            }
+        }))
+        .is_err());
     }
 
     #[test]
