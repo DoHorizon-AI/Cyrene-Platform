@@ -133,6 +133,28 @@ def test_kernel_state_directory_cannot_take_over_broker_acl_tree() -> None:
     assert "Group=cyrene" in broker_unit
 
 
+def test_kernel_unit_sandbox_peer_arguments_match_unsigned_parser_contract() -> None:
+    """Keep the shipped Kernel unit's sandbox identities compatible with Args parsing."""
+
+    kernel_unit = (REPOSITORY / "infrastructure/systemd/cyrene-kernel.service").read_text(encoding="utf-8")
+    exec_start = next(line.partition("=")[2] for line in kernel_unit.splitlines() if line.startswith("ExecStart="))
+    command = shlex.split(exec_start)
+    kernel_args = command[command.index("--") + 1 :]
+
+    sandbox_uid = kernel_args[kernel_args.index("--sandbox-adapter-peer-uid") + 1]
+    sandbox_gid = kernel_args[kernel_args.index("--sandbox-adapter-peer-gid") + 1]
+    assert sandbox_uid == "0"
+    assert sandbox_gid == "992"
+    assert all(value.isdecimal() and int(value) <= 2**32 - 1 for value in (sandbox_uid, sandbox_gid))
+    for flag, expected in (
+        ("--system-adapter-peer-uid", "linux-system=0"),
+        ("--system-adapter-peer-gid", "linux-system=992"),
+        ("--hardware-adapter-peer-uid", "nvidia=0"),
+        ("--hardware-adapter-peer-gid", "nvidia=992"),
+    ):
+        assert kernel_args[kernel_args.index(flag) + 1] == expected
+
+
 def test_kernel_and_maintenance_broker_share_the_activity_catalog_path() -> None:
     """The signed units must consume the same root-managed activity catalog."""
 

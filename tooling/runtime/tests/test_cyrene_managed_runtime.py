@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,9 +34,21 @@ def test_prepare_uses_live_ids_and_never_controls_units(tmp_path: Path, monkeypa
     assert result["cyreneGid"] == 2764
     assert calls == []
     kernel = (tmp_path / "etc/systemd/system/cyrene-kernel.service.d/10-cyrene-managed-runtime.conf").read_text()
-    assert "sandboxd=2764" in kernel
-    assert "linux-system=2764" in kernel
-    assert "nvidia=2764" in kernel
+    exec_start = next(line.partition("=")[2] for line in kernel.splitlines() if line.startswith("ExecStart=/"))
+    kernel_args = shlex.split(exec_start)
+    kernel_args = kernel_args[kernel_args.index("--") + 1 :]
+    sandbox_uid = kernel_args[kernel_args.index("--sandbox-adapter-peer-uid") + 1]
+    sandbox_gid = kernel_args[kernel_args.index("--sandbox-adapter-peer-gid") + 1]
+    assert sandbox_uid == "0"
+    assert sandbox_gid == "2764"
+    assert all(value.isdecimal() and int(value) <= 2**32 - 1 for value in (sandbox_uid, sandbox_gid))
+    for flag, expected in (
+        ("--system-adapter-peer-uid", "linux-system=0"),
+        ("--system-adapter-peer-gid", "linux-system=2764"),
+        ("--hardware-adapter-peer-uid", "nvidia=0"),
+        ("--hardware-adapter-peer-gid", "nvidia=2764"),
+    ):
+        assert kernel_args[kernel_args.index(flag) + 1] == expected
     assert ownership and all(uid == 0 for _, uid, _ in ownership)
     for unit in ("cyrene-sandboxd", "cyrene-linux-sys-adapter", "cyrene-nvidia-adapter"):
         text = (tmp_path / f"etc/systemd/system/{unit}.service.d/10-cyrene-managed-runtime.conf").read_text()

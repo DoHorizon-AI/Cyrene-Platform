@@ -31,8 +31,8 @@ Kernel 是租约、fence token、已批准设备绑定、实例状态与心跳�
 #   * unit 中 cyrene-sandboxd / cyrene-nvidia-adapter 以 root（uid 0）运行
 cyrene-kernel \
   --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
-  --sandbox-adapter-peer-uid sandboxd=0 \
-  --sandbox-adapter-peer-gid sandboxd=992 \
+  --sandbox-adapter-peer-uid 0 \
+  --sandbox-adapter-peer-gid 992 \
   --system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock \
   --system-adapter-peer-uid linux-system=0 \
   --system-adapter-peer-gid linux-system=992 \
@@ -74,7 +74,7 @@ System/Hardware Adapter 执行 Linux `SO_PEERCRED` 校验；单例 sandbox Adapt
 `cyrene-kernel` 账户 uid = 991、专用组 `cyrene` gid = 992，`cyrene-sandboxd`、
 `cyrene-linux-sys-adapter` 与 `cyrene-nvidia-adapter` 在单元中以 `root` 运行（uid 0）、同属
 `cyrene` 组，则：Kernel 传
-`--sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd=992` 与
+`--sandbox-adapter-peer-uid 0 --sandbox-adapter-peer-gid 992` 与
 `--system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system=992` 与
 `--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`；三个 Adapter
 各传 `--allowed-client-uid 991 --allowed-client-gid 992`。具体数值以部署主机的
