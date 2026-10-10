@@ -2015,6 +2015,7 @@ impl RuntimeMaintenance {
     /// successful CoreBootstrap and only for its never-active sole source. It
     /// does not report ordinary readiness; a real authenticated heartbeat must
     /// arrive before the matching hold can be ended successfully.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_initial_source_activation_with(
         &self,
         request_id: &str,
@@ -5520,7 +5521,7 @@ mod tests {
         assert_eq!(begun.status, ReadinessStatus::MaintenanceActive);
 
         let readiness = gate
-            .get_update_readiness_with(&request, || package_usage())
+            .get_update_readiness_with(&request, package_usage)
             .unwrap();
         assert_eq!(readiness.status, ReadinessStatus::Unknown);
         assert!(readiness
@@ -5631,7 +5632,7 @@ mod tests {
         assert_eq!(replayed, ended);
         assert_eq!(
             reopened
-                .get_update_readiness_with(&request, || package_usage())
+                .get_update_readiness_with(&request, package_usage)
                 .unwrap()
                 .status,
             ReadinessStatus::Ready
