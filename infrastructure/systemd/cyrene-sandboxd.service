@@ -11,12 +11,12 @@ Type=simple
 User=root
 Group=cyrene
 # Fail-closed UDS admission: sandboxd refuses to start without at least one
-# trusted Kernel peer identity. The values must equal the cyrene-kernel service
-# account (example uid 991 / cyrene gid 992 -> `id -u cyrene-kernel`,
-# `getent group cyrene`). The Kernel, in turn, asserts THIS process via
-# `--sandbox-adapter-peer-uid 0 --sandbox-adapter-peer-gid 992`
+# trusted Kernel peer identity. The selectors resolve the installed
+# cyrene-kernel account and cyrene group. The Kernel, in turn, asserts THIS
+# process via
+# `--sandbox-adapter-peer-uid root --sandbox-adapter-peer-gid cyrene`
 # in cyrene-kernel.service (see docs/operations/kernel-runtime.md).
-ExecStart=/usr/bin/cyrene component-run cyrene-sandboxd -- --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock --allowed-client-uid 991 --allowed-client-gid 992
+ExecStart=/usr/bin/cyrene component-run cyrene-sandboxd -- --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock --allowed-client-uid cyrene-kernel --allowed-client-gid cyrene
 Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene

@@ -11,6 +11,7 @@ cy-proto = { path = "../../../contracts/rust/cy-proto" }
 prost = "0.13"
 prost-types = "0.13"
 libc = "0.2"
+cyrene-runtime-identity = { path = "../../../runtime/cyrene-runtime-identity" }
 
 [dev-dependencies]
 tempfile = "3"

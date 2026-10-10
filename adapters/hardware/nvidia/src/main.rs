@@ -115,24 +115,16 @@ fn main() -> std::io::Result<()> {
                 "--nvidia-smi" => nvidia_smi = PathBuf::from(value()?),
                 "--wsl-shared-device" => wsl_shared_device = true,
                 "--allowed-client-uid" => {
-                    allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "--allowed-client-uid must be an unsigned integer",
-                        )
-                    })?)
+                    allowed_client_uid =
+                        Some(cyrene_runtime_identity::resolve_uid_selector(&value()?)?)
                 }
                 "--allowed-client-gid" => {
-                    allowed_client_gid = Some(value()?.parse::<u32>().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "--allowed-client-gid must be an unsigned integer",
-                        )
-                    })?)
+                    allowed_client_gid =
+                        Some(cyrene_runtime_identity::resolve_gid_selector(&value()?)?)
                 }
                 "--help" | "-h" => {
                     return Err(std::io::Error::other(
-                        "usage: cyrene-nvidia-adapter [--socket PATH] [--allowed-client-uid UID] [--allowed-client-gid GID] [--nvidia-smi PATH] [--wsl-shared-device]",
+                        "usage: cyrene-nvidia-adapter [--socket PATH] [--allowed-client-uid UID_OR_ACCOUNT] [--allowed-client-gid GID_OR_GROUP] [--nvidia-smi PATH] [--wsl-shared-device]",
                     ));
                 }
                 _ => {

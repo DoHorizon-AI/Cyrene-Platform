@@ -20,25 +20,20 @@ Kernel 是租约、fence token、已批准设备绑定、实例状态与心跳�
 
 ```text
 # Kernel asserts each Adapter's identity; the Adapters assert the Kernel's
-# identity back. Numbers below match the shipped systemd units:
-#   * cyrene-kernel service account = uid 991, group cyrene = gid 992
-#     (replace with `id -u cyrene-kernel` / `getent group cyrene`)
-#   * cyrene-sandboxd / cyrene-nvidia-adapter run as root (uid 0) in the units
+# identity back. Numeric selectors remain supported; names resolve through NSS.
+# The shipped units use account/group names so host-assigned IDs need no edits.
 # 中文：Kernel 校验每个 Adapter 的 identity；Adapter 也反向校验 Kernel 的 identity。
-# 中文：下方数值与随仓库交付的 systemd unit 一致：
-#   * cyrene-kernel 服务账户 uid=991，组 cyrene 的 gid=992
-#     （部署时替换为 id -u cyrene-kernel / getent group cyrene 的实际结果）
-#   * unit 中 cyrene-sandboxd / cyrene-nvidia-adapter 以 root（uid 0）运行
+# 中文：仍支持数值选择器；账户/组名称通过 NSS 解析。交付的 unit 使用名称，因而无需修改宿主分配的 ID。
 cyrene-kernel \
   --sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock \
-  --sandbox-adapter-peer-uid 0 \
-  --sandbox-adapter-peer-gid 992 \
+  --sandbox-adapter-peer-uid root \
+  --sandbox-adapter-peer-gid cyrene \
   --system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock \
-  --system-adapter-peer-uid linux-system=0 \
-  --system-adapter-peer-gid linux-system=992 \
+  --system-adapter-peer-uid linux-system=root \
+  --system-adapter-peer-gid linux-system=cyrene \
   --hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock \
-  --hardware-adapter-peer-uid nvidia=0 \
-  --hardware-adapter-peer-gid nvidia=992
+  --hardware-adapter-peer-uid nvidia=root \
+  --hardware-adapter-peer-gid nvidia=cyrene
 ```
 
 The matching reverse flags live on the Adapter units:
@@ -47,11 +42,11 @@ The matching reverse flags live on the Adapter units:
 
 ```text
 cyrene-sandboxd --adapter-id sandboxd --socket /run/cyrene/sandboxd.sock \
-  --allowed-client-uid 991 --allowed-client-gid 992
+  --allowed-client-uid cyrene-kernel --allowed-client-gid cyrene
 cyrene-nvidia-adapter --socket /run/cyrene/nvidia-adapter.sock \
-  --allowed-client-uid 991 --allowed-client-gid 992
+  --allowed-client-uid cyrene-kernel --allowed-client-gid cyrene
 cyrene-linux-sys-adapter --socket /run/cyrene/linux-sys-adapter.sock \
-  --adapter-id linux-system --allowed-client-uid 991 --allowed-client-gid 992
+  --adapter-id linux-system --allowed-client-uid cyrene-kernel --allowed-client-gid cyrene
 ```
 
 - sandboxd UDS 连接、协议版本与 adapter identity 均匹配；
@@ -63,22 +58,18 @@ cyrene-linux-sys-adapter --socket /run/cyrene/linux-sys-adapter.sock \
 
 UDS 文件权限与 peer credential 共同构成本地身份边界：服务 socket 设置为 `0660`，必须由
 受信任的 Kernel/Adapter 服务账户及专用组拥有，绝不能让不受信任 Worker 可写。Kernel 可用
-`--system-adapter-peer-uid ID=UID` / `--system-adapter-peer-gid ID=GID` 与
-`--hardware-adapter-peer-uid ID=UID` / `--hardware-adapter-peer-gid ID=GID` 分别对已连接
+`--system-adapter-peer-uid ID=UID_OR_ACCOUNT` / `--system-adapter-peer-gid ID=GID_OR_GROUP` 与
+`--hardware-adapter-peer-uid ID=UID_OR_ACCOUNT` / `--hardware-adapter-peer-gid ID=GID_OR_GROUP` 分别对已连接
 System/Hardware Adapter 执行 Linux `SO_PEERCRED` 校验；单例 sandbox Adapter 因无路由 ID 歧义，使用裸
-`--sandbox-adapter-peer-uid UID` / `--sandbox-adapter-peer-gid GID`。反向地，sandboxd 与
-各 System/Hardware Adapter 用 `--allowed-client-uid UID` / `--allowed-client-gid GID` 对 Kernel 做
+`--sandbox-adapter-peer-uid UID_OR_ACCOUNT` / `--sandbox-adapter-peer-gid GID_OR_GROUP`。反向地，sandboxd 与
+各 System/Hardware Adapter 用 `--allowed-client-uid UID_OR_ACCOUNT` / `--allowed-client-gid GID_OR_GROUP` 对 Kernel 做
 `SO_PEERCRED` 校验。任一已配置校验失败都会在发送协议帧前拒绝。
+数值 selector 继续兼容；名称分别按系统账户数据库和组数据库解析为 u32，未知名称、负数和越界数字都会拒绝启动。
 
-**服务账户与 UID/GID 部署示例**：推荐把三个进程做成独立 systemd 服务账户。假设
-`cyrene-kernel` 账户 uid = 991、专用组 `cyrene` gid = 992，`cyrene-sandboxd`、
-`cyrene-linux-sys-adapter` 与 `cyrene-nvidia-adapter` 在单元中以 `root` 运行（uid 0）、同属
-`cyrene` 组，则：Kernel 传
-`--sandbox-adapter-peer-uid 0 --sandbox-adapter-peer-gid 992` 与
-`--system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system=992` 与
-`--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`；三个 Adapter
-各传 `--allowed-client-uid 991 --allowed-client-gid 992`。具体数值以部署主机的
-`id -u cyrene-kernel` / `getent group cyrene` 为准，由打包脚本写入单元文件。
+**服务账户与 UID/GID 部署示例**：Kernel 使用 `User=cyrene-kernel`、`Group=cyrene`；
+sandboxd、Linux System Adapter 与 NVIDIA Adapter 使用 `User=root`、`Group=cyrene`。签名单元使用
+`root`、`cyrene-kernel` 和 `cyrene` 名称，并在各进程启动时解析；managed-runtime drop-in 也可继续传递
+已解析的数字 UID/GID。两种配置都会进入同一数值 `SO_PEERCRED` 精确比较。
 
 **fail-closed 启动**：sandboxd 与 NVIDIA Adapter 在启动参数解析阶段要求至少配置一个可信
 peer UID/GID。Linux system Adapter 当前允许省略这两个可选参数，并在该配置下依赖受保护的

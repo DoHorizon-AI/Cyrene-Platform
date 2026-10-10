@@ -126,21 +126,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         adapter_id = args.next().ok_or("missing --adapter-id argument")?;
                     }
                     "--allowed-client-uid" => {
-                        allowed_client_uid = Some(
-                            args.next()
-                                .ok_or("missing --allowed-client-uid argument")?
-                                .parse()?,
-                        );
+                        let selector =
+                            args.next().ok_or("missing --allowed-client-uid argument")?;
+                        allowed_client_uid =
+                            Some(cyrene_runtime_identity::resolve_uid_selector(&selector)?);
                     }
                     "--allowed-client-gid" => {
-                        allowed_client_gid = Some(
-                            args.next()
-                                .ok_or("missing --allowed-client-gid argument")?
-                                .parse()?,
-                        );
+                        let selector =
+                            args.next().ok_or("missing --allowed-client-gid argument")?;
+                        allowed_client_gid =
+                            Some(cyrene_runtime_identity::resolve_gid_selector(&selector)?);
                     }
                     "--help" | "-h" => {
-                        println!("Usage: cyrene-linux-sys-adapter [--socket PATH] [--adapter-id ID] [--allowed-client-uid UID] [--allowed-client-gid GID]");
+                        println!("Usage: cyrene-linux-sys-adapter [--socket PATH] [--adapter-id ID] [--allowed-client-uid UID_OR_ACCOUNT] [--allowed-client-gid GID_OR_GROUP]");
                         std::process::exit(0);
                     }
                     other => {

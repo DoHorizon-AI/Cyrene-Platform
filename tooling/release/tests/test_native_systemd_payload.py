@@ -133,8 +133,8 @@ def test_kernel_state_directory_cannot_take_over_broker_acl_tree() -> None:
     assert "Group=cyrene" in broker_unit
 
 
-def test_kernel_unit_sandbox_peer_arguments_match_unsigned_parser_contract() -> None:
-    """Keep the shipped Kernel unit's sandbox identities compatible with Args parsing."""
+def test_kernel_unit_peer_arguments_use_host_resolvable_identity_selectors() -> None:
+    """Keep signed Kernel peer selectors aligned with native account names."""
 
     kernel_unit = (REPOSITORY / "infrastructure/systemd/cyrene-kernel.service").read_text(encoding="utf-8")
     exec_start = next(line.partition("=")[2] for line in kernel_unit.splitlines() if line.startswith("ExecStart="))
@@ -143,16 +143,38 @@ def test_kernel_unit_sandbox_peer_arguments_match_unsigned_parser_contract() -> 
 
     sandbox_uid = kernel_args[kernel_args.index("--sandbox-adapter-peer-uid") + 1]
     sandbox_gid = kernel_args[kernel_args.index("--sandbox-adapter-peer-gid") + 1]
-    assert sandbox_uid == "0"
-    assert sandbox_gid == "992"
-    assert all(value.isdecimal() and int(value) <= 2**32 - 1 for value in (sandbox_uid, sandbox_gid))
+    assert sandbox_uid == "root"
+    assert sandbox_gid == "cyrene"
     for flag, expected in (
-        ("--system-adapter-peer-uid", "linux-system=0"),
-        ("--system-adapter-peer-gid", "linux-system=992"),
-        ("--hardware-adapter-peer-uid", "nvidia=0"),
-        ("--hardware-adapter-peer-gid", "nvidia=992"),
+        ("--system-adapter-peer-uid", "linux-system=root"),
+        ("--system-adapter-peer-gid", "linux-system=cyrene"),
+        ("--hardware-adapter-peer-uid", "nvidia=root"),
+        ("--hardware-adapter-peer-gid", "nvidia=cyrene"),
     ):
         assert kernel_args[kernel_args.index(flag) + 1] == expected
+
+
+def test_native_adapter_units_select_kernel_account_and_cyrene_group() -> None:
+    """Keep both ends of each strict UDS check on the same installed identities."""
+
+    expected_units = (
+        "cyrene-sandboxd.service",
+        "cyrene-linux-sys-adapter.service",
+        "cyrene-nvidia-adapter.service",
+    )
+    for unit_name in expected_units:
+        unit = (REPOSITORY / "infrastructure/systemd" / unit_name).read_text(encoding="utf-8")
+        exec_start = next(line.partition("=")[2] for line in unit.splitlines() if line.startswith("ExecStart="))
+        command = shlex.split(exec_start)
+        unit_args = command[command.index("--") + 1 :]
+
+        assert unit_args[unit_args.index("--allowed-client-uid") + 1] == "cyrene-kernel"
+        assert unit_args[unit_args.index("--allowed-client-gid") + 1] == "cyrene"
+        assert "Group=cyrene" in unit
+
+    kernel = (REPOSITORY / "infrastructure/systemd/cyrene-kernel.service").read_text(encoding="utf-8")
+    assert "User=cyrene-kernel" in kernel
+    assert "Group=cyrene" in kernel
 
 
 def test_kernel_and_maintenance_broker_share_the_activity_catalog_path() -> None:

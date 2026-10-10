@@ -7,12 +7,12 @@ Type=simple
 User=root
 Group=cyrene
 # Fail-closed UDS admission: the adapter refuses to start without at least one
-# trusted Kernel peer identity. The values must equal the cyrene-kernel service
-# account (example uid 991 / cyrene gid 992 -> `id -u cyrene-kernel`,
-# `getent group cyrene`). The Kernel, in turn, asserts THIS process via
-# `--hardware-adapter-peer-uid nvidia=0 --hardware-adapter-peer-gid nvidia=992`
+# trusted Kernel peer identity. The selectors resolve the installed
+# cyrene-kernel account and cyrene group. The Kernel, in turn, asserts THIS
+# process via
+# `--hardware-adapter-peer-uid nvidia=root --hardware-adapter-peer-gid nvidia=cyrene`
 # in cyrene-kernel.service (see docs/operations/kernel-runtime.md).
-ExecStart=/usr/bin/cyrene component-run cyrene-nvidia-adapter -- --socket /run/cyrene/nvidia-adapter.sock --allowed-client-uid 991 --allowed-client-gid 992
+ExecStart=/usr/bin/cyrene component-run cyrene-nvidia-adapter -- --socket /run/cyrene/nvidia-adapter.sock --allowed-client-uid cyrene-kernel --allowed-client-gid cyrene
 Restart=on-failure
 RestartSec=2s
 
