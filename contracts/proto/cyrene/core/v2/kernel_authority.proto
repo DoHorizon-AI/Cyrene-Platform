@@ -52,6 +52,11 @@ service KernelAuthorityService {
       returns (UpdateReadinessResponse);
   rpc BeginMaintenance(BeginMaintenanceRequest)
       returns (BeginMaintenanceResponse);
+  // Starts the one-time CORE_RUNTIME hold that activates a never-active
+  // source from an exact successful CoreBootstrap. Ordinary readiness is unchanged.
+  // 仅为首次激活从未活动来源建立 CORE_RUNTIME 门禁，不改变普通就绪判断。
+  rpc BeginInitialSourceActivation(BeginInitialSourceActivationRequest)
+      returns (BeginMaintenanceResponse);
   rpc EndMaintenance(EndMaintenanceRequest)
       returns (EndMaintenanceResponse);
   rpc AdmitTask(AdmitTaskRequest) returns (AdmitTaskResponse);
@@ -252,6 +257,22 @@ message BeginMaintenanceRequest {
   string plan_id = 8;
   string plan_digest = 9;
   map<string, string> component_artifact_digests = 10;
+}
+
+// Exact continuation identity for first activation of a trusted activity source.
+// 首次激活受信活动来源时使用，父事务与目标组件摘要都必须精确匹配。
+message BeginInitialSourceActivationRequest {
+  string request_id = 1;
+  string parent_request_id = 2;
+  string source_id = 3;
+  uint64 expected_gate_generation = 4;
+  bool user_confirmed_restart = 5;
+  repeated string expected_activity_sources = 6;
+  uint64 expected_catalog_generation = 7;
+  string operator_token = 8;
+  string plan_id = 9;
+  string plan_digest = 10;
+  map<string, string> component_artifact_digests = 11;
 }
 
 message BeginMaintenanceResponse {

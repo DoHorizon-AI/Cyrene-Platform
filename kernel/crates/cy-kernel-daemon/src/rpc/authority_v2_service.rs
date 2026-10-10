@@ -644,6 +644,45 @@ impl core_v2::kernel_authority_service_server::KernelAuthorityService for Kernel
         }))
     }
 
+    async fn begin_initial_source_activation(
+        &self,
+        request: Request<core_v2::BeginInitialSourceActivationRequest>,
+    ) -> Result<Response<core_v2::BeginMaintenanceResponse>, Status> {
+        require_kernel_operator(self, &request, &request.get_ref().operator_token)?;
+        let request = request.into_inner();
+        let readiness_request = ReadinessRequest {
+            target_kind: UpdateTargetKind::CoreRuntime,
+            requires_restart: true,
+            expected_catalog_generation: request.expected_catalog_generation,
+            expected_activity_sources: request.expected_activity_sources,
+        };
+        let plan = MaintenancePlan {
+            plan_id: request.plan_id,
+            plan_digest: request.plan_digest,
+            component_artifact_digests: request.component_artifact_digests.into_iter().collect(),
+        };
+        let gate = self.runtime_maintenance()?;
+        gate.refresh_catalog().map_err(maintenance_status)?;
+        let result = gate
+            .begin_initial_source_activation_with(
+                &request.request_id,
+                &request.parent_request_id,
+                &request.source_id,
+                &plan,
+                &readiness_request,
+                request.expected_gate_generation,
+                request.user_confirmed_restart,
+                || self.runtime_usage(),
+            )
+            .map_err(maintenance_status)?;
+        Ok(Response::new(core_v2::BeginMaintenanceResponse {
+            status: readiness_status_to_proto(result.status),
+            maintenance_token: result.maintenance_token.unwrap_or_default(),
+            gate_generation: result.gate_generation,
+            blocker_codes: result.blocker_codes,
+        }))
+    }
+
     async fn end_maintenance(
         &self,
         request: Request<core_v2::EndMaintenanceRequest>,
