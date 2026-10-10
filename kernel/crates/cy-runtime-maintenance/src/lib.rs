@@ -1007,6 +1007,29 @@ impl RuntimeMaintenance {
                 }
             }
 
+            if let Some(active) = state.maintenance.as_ref() {
+                if active.origin == MaintenanceOrigin::CoreBootstrap
+                    && active.expected_catalog_generation == 0
+                {
+                    if let Some(source_ref) = active.initial_source_artifact_ref.as_ref() {
+                        if expected_generation != 0
+                            || current.generation != 0
+                            || !current.sources.is_empty()
+                            || !active.expected_activity_sources.is_empty()
+                            || catalog.generation != 1
+                            || catalog.sources.len() != 1
+                            || catalog
+                                .source(&source_ref.source_id)
+                                .is_none_or(|source| !source.binding_scopes.is_empty())
+                        {
+                            return Err(MaintenanceError::AdmissionDenied(
+                                "INITIAL_SOURCE_BOOTSTRAP_CATALOG_MISMATCH".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+
             write_catalog()?;
             append_and_apply(
                 &self.inner.directory,
@@ -1961,13 +1984,16 @@ impl RuntimeMaintenance {
                 ));
             }
             if let Some(source_ref) = &initial_source_artifact_ref {
-                if catalog.sources.len() != 1
-                    || expected_sources.len() != 1
-                    || expected_sources.first() != Some(&source_ref.source_id)
-                    || catalog
+                let existing_source_owner = catalog.sources.len() == 1
+                    && expected_sources.len() == 1
+                    && expected_sources.first() == Some(&source_ref.source_id)
+                    && catalog
                         .source(&source_ref.source_id)
-                        .is_none_or(|source| !source.binding_scopes.is_empty())
-                {
+                        .is_some_and(|source| source.binding_scopes.is_empty());
+                let first_catalog_owner = catalog.generation == 0
+                    && catalog.sources.is_empty()
+                    && expected_sources.is_empty();
+                if !existing_source_owner && !first_catalog_owner {
                     return Err(MaintenanceError::AdmissionDenied(
                         "CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED".to_string(),
                     ));
@@ -2072,6 +2098,13 @@ impl RuntimeMaintenance {
                     )
                 })?;
             validate_initial_source_artifact_ref(source_ref)?;
+            let parent_catalog_matches_current = (parent.maintenance.expected_catalog_generation
+                == catalog.generation
+                && parent.maintenance.expected_activity_sources == current_sources)
+                || (parent.maintenance.expected_catalog_generation == 0
+                    && parent.maintenance.expected_activity_sources.is_empty()
+                    && catalog.generation == 1
+                    && current_sources == vec![source_ref.source_id.clone()]);
             if parent.maintenance.origin != MaintenanceOrigin::CoreBootstrap
                 || parent.maintenance.request_id != parent_request_id
                 || parent.maintenance.target_kind != UpdateTargetKind::CoreRuntime
@@ -2081,8 +2114,7 @@ impl RuntimeMaintenance {
                 || parent.outcome != MaintenanceOutcome::Success
                 || !parent.healthy
                 || !parent.unlocked
-                || parent.maintenance.expected_catalog_generation != catalog.generation
-                || parent.maintenance.expected_activity_sources != current_sources
+                || !parent_catalog_matches_current
                 || source_ref.source_id != source_id
             {
                 return Err(MaintenanceError::AdmissionDenied(
@@ -5219,6 +5251,39 @@ mod tests {
         (dir, maintenance, request)
     }
 
+    fn empty_bootstrap_setup() -> (TempDir, RuntimeMaintenance, ReadinessRequest) {
+        let dir = TempDir::new().unwrap();
+        let maintenance = RuntimeMaintenance::open_inner(
+            dir.path().to_path_buf(),
+            TrustedActivitySourceCatalog::unprovisioned(),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        let request = ReadinessRequest {
+            target_kind: UpdateTargetKind::CoreRuntime,
+            requires_restart: true,
+            expected_catalog_generation: 0,
+            expected_activity_sources: Vec::new(),
+        };
+        (dir, maintenance, request)
+    }
+
+    fn first_source_catalog(generation: u64) -> TrustedActivitySourceCatalog {
+        TrustedActivitySourceCatalog {
+            schema_version: ACTIVITY_SOURCE_CATALOG_SCHEMA_VERSION,
+            generation,
+            sources: vec![TrustedActivitySource {
+                source_id: "cyrene-catalogs".to_string(),
+                uid: 1001,
+                gid: Some(1000),
+                source_token_sha256: format!("{:x}", Sha256::digest(b"test-source-token")),
+                binding_scopes: Vec::new(),
+            }],
+        }
+    }
+
     fn bootstrap_source_ref() -> InitialSourceArtifactRef {
         InitialSourceArtifactRef {
             source_id: "cyrene-catalogs".to_string(),
@@ -5460,6 +5525,217 @@ mod tests {
         assert!(reopened
             .begin_core_bootstrap("first-kernel", &changed_plan, &request, 0, true)
             .is_err());
+    }
+
+    #[test]
+    fn empty_catalog_bootstrap_registers_and_activates_its_exact_source() {
+        let (dir, gate, bootstrap_request) = empty_bootstrap_setup();
+        let begun = gate
+            .begin_core_bootstrap_with_source_ref(
+                "empty-catalog-bootstrap",
+                &package_plan(),
+                &bootstrap_request,
+                0,
+                true,
+                Some(bootstrap_source_ref()),
+            )
+            .unwrap();
+        let bootstrap_token = begun.maintenance_token.unwrap();
+        assert_eq!(gate.catalog_generation(), 0);
+        assert!(gate.heartbeat_activity_source("cyrene-catalogs").is_err());
+
+        let proof = MaintenanceHoldProof {
+            request_id: "empty-catalog-bootstrap".to_string(),
+            maintenance_token: bootstrap_token.clone(),
+            plan: package_plan(),
+        };
+        let wrong_proof = MaintenanceHoldProof {
+            maintenance_token: "forged-maintenance-token".to_string(),
+            ..proof.clone()
+        };
+        let mut wrong_proof_writer_called = false;
+        assert!(matches!(
+            gate.commit_activity_source_catalog(
+                0,
+                first_source_catalog(1),
+                Some(&wrong_proof),
+                || {
+                    wrong_proof_writer_called = true;
+                    Ok(())
+                }
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "MAINTENANCE_HOLD_PROOF_MISMATCH"
+        ));
+        assert!(!wrong_proof_writer_called);
+
+        let mut changed_ref = bootstrap_source_ref();
+        changed_ref.artifact_digest = format!("sha256:{}", "e".repeat(64));
+        assert!(matches!(
+            gate.begin_core_bootstrap_with_source_ref(
+                "empty-catalog-bootstrap",
+                &package_plan(),
+                &bootstrap_request,
+                0,
+                true,
+                Some(changed_ref),
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "REQUEST_ID_PLAN_MISMATCH"
+        ));
+
+        let mut wrong_source = first_source_catalog(1);
+        wrong_source.sources[0].source_id = "cyrene-other".to_string();
+        let mut multiple_sources = first_source_catalog(1);
+        let mut other_source = multiple_sources.sources[0].clone();
+        other_source.source_id = "cyrene-other".to_string();
+        other_source.source_token_sha256 = format!("{:x}", Sha256::digest(b"other-token"));
+        multiple_sources.sources.push(other_source);
+        let mut bound_source = first_source_catalog(1);
+        bound_source.sources[0]
+            .binding_scopes
+            .push(TrustedBindingScope {
+                binding_id: "binding-1".to_string(),
+                package_id: "llf.trainer".to_string(),
+                installation_ids: vec!["llf.install.2026".to_string()],
+                operations: vec![BindingOperationKind::Activate],
+            });
+
+        for (name, catalog) in [
+            ("wrong source", wrong_source),
+            ("multiple sources", multiple_sources),
+            ("bound source", bound_source),
+        ] {
+            catalog.validate().unwrap();
+            let mut writer_called = false;
+            let result = gate.commit_activity_source_catalog(0, catalog, Some(&proof), || {
+                writer_called = true;
+                Ok(())
+            });
+            assert!(
+                matches!(
+                    result,
+                    Err(MaintenanceError::AdmissionDenied(code))
+                        if code == "INITIAL_SOURCE_BOOTSTRAP_CATALOG_MISMATCH"
+                ),
+                "{name} must be rejected"
+            );
+            assert!(!writer_called, "{name} must not reach the catalog writer");
+            assert_eq!(gate.catalog_generation(), 0);
+        }
+
+        let source_catalog = first_source_catalog(1);
+        let mut writer_called = false;
+        gate.commit_activity_source_catalog(0, source_catalog.clone(), Some(&proof), || {
+            writer_called = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(writer_called);
+        assert_eq!(gate.catalog_generation(), 1);
+
+        let mut repeated_catalog = source_catalog.clone();
+        repeated_catalog.generation = 2;
+        assert!(matches!(
+            gate.commit_activity_source_catalog(1, repeated_catalog, Some(&proof), || {
+                panic!("a repeated first-source catalog update must not run")
+            }),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "INITIAL_SOURCE_BOOTSTRAP_CATALOG_MISMATCH"
+        ));
+
+        drop(gate);
+        let gate = RuntimeMaintenance::open(dir.path(), source_catalog).unwrap();
+        let core_end = gate
+            .end_maintenance(
+                "empty-catalog-bootstrap",
+                &bootstrap_token,
+                MaintenanceOutcome::Success,
+                true,
+            )
+            .unwrap();
+        assert!(core_end.unlocked);
+
+        let activation_request = ReadinessRequest {
+            target_kind: UpdateTargetKind::CoreRuntime,
+            requires_restart: true,
+            expected_catalog_generation: 1,
+            expected_activity_sources: vec!["cyrene-catalogs".to_string()],
+        };
+        let gate_generation = gate.current_gate_generation().unwrap();
+        let mut wrong_owner_plan = initial_product_plan();
+        wrong_owner_plan.component_artifact_digests.insert(
+            "cyrene-catalyst".to_string(),
+            format!("sha256:{}", "e".repeat(64)),
+        );
+        assert!(matches!(
+            gate.begin_initial_source_activation_with(
+                "wrong-owner-install",
+                "empty-catalog-bootstrap",
+                "cyrene-catalogs",
+                &wrong_owner_plan,
+                &activation_request,
+                gate_generation,
+                true,
+                package_usage,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "INITIAL_SOURCE_ARTIFACT_MISMATCH"
+        ));
+        assert!(matches!(
+            gate.begin_initial_source_activation_with(
+                "first-product-install",
+                "empty-catalog-bootstrap",
+                "cyrene-other",
+                &initial_product_plan(),
+                &activation_request,
+                gate_generation,
+                true,
+                package_usage,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "INITIAL_SOURCE_PARENT_BOOTSTRAP_MISMATCH"
+        ));
+        let activation = gate
+            .begin_initial_source_activation_with(
+                "first-product-install",
+                "empty-catalog-bootstrap",
+                "cyrene-catalogs",
+                &initial_product_plan(),
+                &activation_request,
+                gate_generation,
+                true,
+                package_usage,
+            )
+            .unwrap();
+        let activation_token = activation.maintenance_token.unwrap();
+        assert!(matches!(
+            gate.end_maintenance(
+                "first-product-install",
+                &activation_token,
+                MaintenanceOutcome::Success,
+                true,
+            ),
+            Err(MaintenanceError::AdmissionDenied(code))
+                if code == "ACTIVITY_SOURCE_NOT_READY"
+        ));
+
+        gate.heartbeat_activity_source("cyrene-catalogs").unwrap();
+        let activation_end = gate
+            .end_maintenance(
+                "first-product-install",
+                &activation_token,
+                MaintenanceOutcome::Success,
+                true,
+            )
+            .unwrap();
+        assert!(activation_end.unlocked);
+        assert_eq!(
+            gate.get_update_readiness_with(&activation_request, package_usage)
+                .unwrap()
+                .status,
+            ReadinessStatus::Ready
+        );
     }
 
     #[test]
