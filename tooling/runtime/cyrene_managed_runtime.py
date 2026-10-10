@@ -51,7 +51,7 @@ DROPINS = {
         "ExecStart=\n"
         "ExecStart=/usr/bin/cyrene component-run cyrene-kernel -- --socket /run/cyrene/kernel.sock "
         "--sandbox-adapter sandboxd=/run/cyrene/sandboxd.sock "
-        "--sandbox-adapter-peer-uid sandboxd=0 --sandbox-adapter-peer-gid sandboxd={cyrene_gid} "
+        "--sandbox-adapter-peer-uid 0 --sandbox-adapter-peer-gid {cyrene_gid} "
         "--system-adapter linux-system=/run/cyrene/linux-sys-adapter.sock "
         "--system-adapter-peer-uid linux-system=0 --system-adapter-peer-gid linux-system={cyrene_gid} "
         "--hardware-adapter nvidia=/run/cyrene/nvidia-adapter.sock "
@@ -286,7 +286,7 @@ def _verify_active_unit(
         raise ManagedRuntimeError(f"active unit process credentials are unavailable: {unit}")
     required_arguments = {
         UNITS["kernel"]: (
-            "--sandbox-adapter-peer-uid", "sandboxd=0", "--sandbox-adapter-peer-gid", f"sandboxd={cyrene_gid}",
+            "--sandbox-adapter-peer-uid", "0", "--sandbox-adapter-peer-gid", str(cyrene_gid),
             "--system-adapter-peer-uid", "linux-system=0", "--system-adapter-peer-gid", f"linux-system={cyrene_gid}",
             "--hardware-adapter-peer-uid", "nvidia=0", "--hardware-adapter-peer-gid", f"nvidia={cyrene_gid}",
         ),

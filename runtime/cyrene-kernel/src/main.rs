@@ -235,8 +235,16 @@ struct Args {
 #[cfg(unix)]
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::parse_from(std::env::args().skip(1))
+    }
+
+    // Keep process startup and the systemd contract test on the same parser path.
+    // 中文：进程启动和 systemd 参数回归共用同一解析路径。
+    fn parse_from(
+        values: impl IntoIterator<Item = String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         use std::{collections::BTreeMap, env, path::PathBuf, time::Duration};
-        let mut values = env::args().skip(1);
+        let mut values = values.into_iter();
         let mut node_id = env::var("CYRENE_NODE_ID").unwrap_or_else(|_| "cyrene-node".to_string());
         let mut socket = PathBuf::from("/run/cyrene/kernel.sock");
         let mut worker_control_socket = PathBuf::from("/run/cyrene/worker.sock");
@@ -553,7 +561,7 @@ fn prepare_socket_path(path: &std::path::Path) -> Result<(), std::io::Error> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::require_configured_adapter_peers;
+    use super::{require_configured_adapter_peers, Args};
     use cy_adapter_client::{HardwareAdapterEndpoint, PeerCredentialExpectation};
     use cy_sandbox_client::SandboxAdapterEndpoint;
     use std::path::PathBuf;
@@ -564,6 +572,22 @@ mod tests {
 
     fn sandbox() -> SandboxAdapterEndpoint {
         SandboxAdapterEndpoint::new("sandboxd", PathBuf::from("/run/cyrene/test-sandbox.sock"))
+    }
+
+    fn shipped_kernel_arguments() -> Vec<String> {
+        let command = include_str!("../../../infrastructure/systemd/cyrene-kernel.service")
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("the shipped Kernel unit has an ExecStart");
+        let command_arguments = command.split_whitespace().collect::<Vec<_>>();
+        let separator = command_arguments
+            .iter()
+            .position(|argument| *argument == "--")
+            .expect("the cyrene component wrapper separates daemon arguments");
+        command_arguments[separator + 1..]
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect()
     }
 
     #[test]
@@ -597,5 +621,46 @@ mod tests {
             gid: None,
         };
         assert!(require_configured_adapter_peers(&[hw], &sb).is_ok());
+    }
+
+    #[test]
+    fn shipped_kernel_unit_arguments_parse_with_the_configured_peer_identities() {
+        let args = Args::parse_from(shipped_kernel_arguments())
+            .expect("the shipped Kernel unit arguments must satisfy Args parsing");
+
+        assert_eq!(args.sandbox_adapter.peer_credentials.uid, Some(0));
+        assert_eq!(args.sandbox_adapter.peer_credentials.gid, Some(992));
+
+        let linux_system = args
+            .adapters
+            .iter()
+            .find(|adapter| adapter.adapter_id == "linux-system")
+            .expect("the unit configures the Linux System Adapter");
+        assert_eq!(linux_system.peer_credentials.uid, Some(0));
+        assert_eq!(linux_system.peer_credentials.gid, Some(992));
+
+        let nvidia = args
+            .adapters
+            .iter()
+            .find(|adapter| adapter.adapter_id == "nvidia")
+            .expect("the unit configures the NVIDIA Adapter");
+        assert_eq!(nvidia.peer_credentials.uid, Some(0));
+        assert_eq!(nvidia.peer_credentials.gid, Some(992));
+    }
+
+    #[test]
+    fn sandbox_peer_identity_rejects_adapter_named_values() {
+        let mut arguments = shipped_kernel_arguments();
+        let uid_value = arguments
+            .iter()
+            .position(|argument| argument == "--sandbox-adapter-peer-uid")
+            .expect("the unit configures the sandbox peer UID")
+            + 1;
+        arguments[uid_value] = "sandboxd=0".to_owned();
+
+        assert!(
+            Args::parse_from(arguments).is_err(),
+            "sandbox peer identity parser rejects adapter-named values"
+        );
     }
 }
