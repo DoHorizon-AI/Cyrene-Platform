@@ -28,6 +28,7 @@ core_copyleft = [
     "cy-runtime-maintenance",
     "cy-sandbox-client",
     "cyrene-kernel",
+    "cyrene-runtime-identity",
     "cyrene-sandboxd",
 ]
 

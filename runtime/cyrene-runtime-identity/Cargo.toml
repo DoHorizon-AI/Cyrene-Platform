@@ -1,0 +1,13 @@
+[package]
+name = "cyrene-runtime-identity"
+version = "0.1.0"
+edition = "2021"
+description = "Resolve native CYRENE runtime account and group selectors"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "cyrene_runtime_identity"
+path = "src/lib.rs"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["user"] }

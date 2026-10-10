@@ -18,6 +18,9 @@
 
 mod runtime_journal;
 
+#[cfg(unix)]
+use cyrene_runtime_identity::{resolve_gid_selector, resolve_uid_selector};
+
 #[cfg(not(unix))]
 fn main() {
     eprintln!("cyrene-kernel is supported only on Linux/Unix cgroup hosts");
@@ -243,6 +246,14 @@ impl Args {
     fn parse_from(
         values: impl IntoIterator<Item = String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::parse_from_with_identity_resolvers(values, resolve_uid_selector, resolve_gid_selector)
+    }
+
+    fn parse_from_with_identity_resolvers(
+        values: impl IntoIterator<Item = String>,
+        mut resolve_uid: impl FnMut(&str) -> std::io::Result<u32>,
+        mut resolve_gid: impl FnMut(&str) -> std::io::Result<u32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         use std::{collections::BTreeMap, env, path::PathBuf, time::Duration};
         let mut values = values.into_iter();
         let mut node_id = env::var("CYRENE_NODE_ID").unwrap_or_else(|_| "cyrene-node".to_string());
@@ -284,30 +295,20 @@ impl Args {
                 "--system-adapter" => system_adapters.push(parse_hardware_adapter(&value()?)?),
                 "--hardware-adapter" => hardware_adapters.push(parse_hardware_adapter(&value()?)?),
                 "--system-adapter-peer-uid" | "--hardware-adapter-peer-uid" => {
-                    let (adapter_id, uid) = parse_adapter_identity_value(&value()?)?;
+                    let selector = value()?;
+                    let (adapter_id, uid) =
+                        parse_adapter_identity_value(&selector, &mut resolve_uid)?;
                     adapter_peer_credentials.entry(adapter_id).or_default().uid = Some(uid);
                 }
                 "--system-adapter-peer-gid" | "--hardware-adapter-peer-gid" => {
-                    let (adapter_id, gid) = parse_adapter_identity_value(&value()?)?;
+                    let selector = value()?;
+                    let (adapter_id, gid) =
+                        parse_adapter_identity_value(&selector, &mut resolve_gid)?;
                     adapter_peer_credentials.entry(adapter_id).or_default().gid = Some(gid);
                 }
                 "--sandbox-adapter" => sandbox_adapter = Some(parse_sandbox_adapter(&value()?)?),
-                "--sandbox-adapter-peer-uid" => {
-                    sandbox_peer_uid = Some(value()?.parse::<u32>().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "--sandbox-adapter-peer-uid must be an unsigned integer",
-                        )
-                    })?)
-                }
-                "--sandbox-adapter-peer-gid" => {
-                    sandbox_peer_gid = Some(value()?.parse::<u32>().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "--sandbox-adapter-peer-gid must be an unsigned integer",
-                        )
-                    })?)
-                }
+                "--sandbox-adapter-peer-uid" => sandbox_peer_uid = Some(resolve_uid(&value()?)?),
+                "--sandbox-adapter-peer-gid" => sandbox_peer_gid = Some(resolve_gid(&value()?)?),
                 "--installations-root" => installations_root = PathBuf::from(value()?),
                 "--worker-transport-root" => worker_transport_root = PathBuf::from(value()?),
                 "--runtime-journal" => runtime_journal = PathBuf::from(value()?),
@@ -320,7 +321,7 @@ impl Args {
                 "--heartbeat-grace-ms" => heartbeat_grace = Duration::from_millis(value()?.parse()?),
                 "--shutdown-ack-timeout-ms" => shutdown_ack_timeout = Duration::from_millis(value()?.parse()?),
                 "--adapter-poll-interval-ms" => adapter_poll_interval = Duration::from_millis(value()?.parse()?),
-                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --system-adapter ID=/absolute/socket.sock [--system-adapter-peer-uid ID=UID] [--system-adapter-peer-gid ID=GID] [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID] [--hardware-adapter-peer-gid ID=GID] --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID] [--sandbox-adapter-peer-gid GID] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--runtime-maintenance-state PATH] [--activity-catalog PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
+                "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-kernel --system-adapter ID=/absolute/socket.sock [--system-adapter-peer-uid ID=UID_OR_ACCOUNT] [--system-adapter-peer-gid ID=GID_OR_GROUP] [--hardware-adapter ID=/absolute/socket.sock] [--hardware-adapter-peer-uid ID=UID_OR_ACCOUNT] [--hardware-adapter-peer-gid ID=GID_OR_GROUP] --sandbox-adapter ID=/absolute/socket.sock [--sandbox-adapter-peer-uid UID_OR_ACCOUNT] [--sandbox-adapter-peer-gid GID_OR_GROUP] [--node-id ID] [--socket AUTHORITY_PATH] [--worker-control-socket PATH] [--provider-socket PATH] [--installations-root PATH] [--runtime-journal PATH] [--runtime-maintenance-state PATH] [--activity-catalog PATH] [--heartbeat-interval-ms N] [--heartbeat-timeout-ms N] [--heartbeat-grace-ms N] [--shutdown-ack-timeout-ms N] [--adapter-poll-interval-ms N]").into()),
                 _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
             }
         }
@@ -379,8 +380,8 @@ impl Args {
             )
         })?;
         // The single sandbox adapter has no routing ID ambiguity, so its peer
-        // identity policy is configured as a bare UID/GID rather than ID=NUMBER.
-        // 中文：唯一的 sandbox 适配器不存在路由 ID 歧义，因此其对端身份策略配置为裸 UID/GID，而不是 ID=NUMBER 格式。
+        // identity policy is configured as bare UID/account and GID/group selectors.
+        // 中文：唯一的 sandbox 适配器不存在路由 ID 歧义，因此使用裸 UID/账户与 GID/组选择器。
         sandbox_adapter.peer_credentials = cy_adapter_client::PeerCredentialExpectation {
             uid: sandbox_peer_uid,
             gid: sandbox_peer_gid,
@@ -451,11 +452,14 @@ fn bind_socket(path: &std::path::Path) -> Result<tokio::net::UnixListener, std::
 }
 
 #[cfg(unix)]
-fn parse_adapter_identity_value(value: &str) -> Result<(String, u32), std::io::Error> {
+fn parse_adapter_identity_value(
+    value: &str,
+    resolve_identity: &mut impl FnMut(&str) -> std::io::Result<u32>,
+) -> Result<(String, u32), std::io::Error> {
     let (adapter_id, identity) = value.split_once('=').ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "adapter peer identity must use ID=NUMBER",
+            "adapter peer identity must use ID=UID_OR_ACCOUNT or ID=GID_OR_GROUP",
         )
     })?;
     if adapter_id.is_empty()
@@ -468,15 +472,7 @@ fn parse_adapter_identity_value(value: &str) -> Result<(String, u32), std::io::E
             "adapter peer identity ID must be safe",
         ));
     }
-    Ok((
-        adapter_id.to_string(),
-        identity.parse::<u32>().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "adapter peer identity must be an unsigned integer",
-            )
-        })?,
-    ))
+    Ok((adapter_id.to_string(), resolve_identity(identity)?))
 }
 
 #[cfg(unix)]
@@ -625,11 +621,21 @@ mod tests {
 
     #[test]
     fn shipped_kernel_unit_arguments_parse_with_the_configured_peer_identities() {
-        let args = Args::parse_from(shipped_kernel_arguments())
-            .expect("the shipped Kernel unit arguments must satisfy Args parsing");
+        let args = Args::parse_from_with_identity_resolvers(
+            shipped_kernel_arguments(),
+            |selector| match selector {
+                "root" => Ok(0),
+                other => other.parse::<u32>().map_err(std::io::Error::other),
+            },
+            |selector| match selector {
+                "cyrene" => Ok(2764),
+                other => other.parse::<u32>().map_err(std::io::Error::other),
+            },
+        )
+        .expect("the shipped Kernel unit arguments must satisfy Args parsing");
 
         assert_eq!(args.sandbox_adapter.peer_credentials.uid, Some(0));
-        assert_eq!(args.sandbox_adapter.peer_credentials.gid, Some(992));
+        assert_eq!(args.sandbox_adapter.peer_credentials.gid, Some(2764));
 
         let linux_system = args
             .adapters
@@ -637,7 +643,7 @@ mod tests {
             .find(|adapter| adapter.adapter_id == "linux-system")
             .expect("the unit configures the Linux System Adapter");
         assert_eq!(linux_system.peer_credentials.uid, Some(0));
-        assert_eq!(linux_system.peer_credentials.gid, Some(992));
+        assert_eq!(linux_system.peer_credentials.gid, Some(2764));
 
         let nvidia = args
             .adapters
@@ -645,7 +651,7 @@ mod tests {
             .find(|adapter| adapter.adapter_id == "nvidia")
             .expect("the unit configures the NVIDIA Adapter");
         assert_eq!(nvidia.peer_credentials.uid, Some(0));
-        assert_eq!(nvidia.peer_credentials.gid, Some(992));
+        assert_eq!(nvidia.peer_credentials.gid, Some(2764));
     }
 
     #[test]

@@ -34,6 +34,7 @@ members = [
 
     # 4. 外层节点运行时组合（不属于 Kernel crate）
     "runtime/cyrene-kernel",
+    "runtime/cyrene-runtime-identity",
     "agents/node/cy-node-agent",
     "agents/runtime/cy-runtime-agent",
 

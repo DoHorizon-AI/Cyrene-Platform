@@ -9,18 +9,124 @@
 //! Privileged local Sandbox Adapter Host process.
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct Args {
+    adapter_id: String,
+    socket: std::path::PathBuf,
+    cgroup_root: Option<std::path::PathBuf>,
+    transport_root: std::path::PathBuf,
+    disable_device_bpf: bool,
+    dev_mode: bool,
+    allowed_client_uid: Option<u32>,
+    allowed_client_gid: Option<u32>,
+}
+
+#[cfg(target_os = "linux")]
+impl Args {
+    fn parse() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self::parse_from_with_identity_resolvers(
+            std::env::args().skip(1),
+            cyrene_runtime_identity::resolve_uid_selector,
+            cyrene_runtime_identity::resolve_gid_selector,
+        )?)
+    }
+
+    fn parse_from_with_identity_resolvers(
+        values: impl IntoIterator<Item = String>,
+        mut resolve_uid: impl FnMut(&str) -> std::io::Result<u32>,
+        mut resolve_gid: impl FnMut(&str) -> std::io::Result<u32>,
+    ) -> std::io::Result<Self> {
+        use std::path::PathBuf;
+
+        let mut values = values.into_iter();
+        let mut adapter_id = "sandboxd".to_string();
+        let mut socket = PathBuf::from("/run/cyrene/sandboxd.sock");
+        let mut cgroup_root = None;
+        let mut transport_root = PathBuf::from("/run/cyrene/workers");
+        let mut disable_device_bpf = false;
+        let mut dev_mode = false;
+        let mut allowed_client_uid = None;
+        let mut allowed_client_gid = None;
+        while let Some(argument) = values.next() {
+            let mut value = || {
+                values.next().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{argument} requires a value"),
+                    )
+                })
+            };
+            match argument.as_str() {
+                "--adapter-id" => adapter_id = value()?,
+                "--socket" => socket = PathBuf::from(value()?),
+                "--cgroup-root" => cgroup_root = Some(PathBuf::from(value()?)),
+                "--transport-root" => transport_root = PathBuf::from(value()?),
+                "--disable-device-bpf" => disable_device_bpf = true,
+                "--dev-mode" => dev_mode = true,
+                "--allowed-client-uid" => allowed_client_uid = Some(resolve_uid(&value()?)?),
+                "--allowed-client-gid" => allowed_client_gid = Some(resolve_gid(&value()?)?),
+                "--help" | "-h" => {
+                    return Err(std::io::Error::other(
+                        "usage: cyrene-sandboxd [--adapter-id ID] [--socket PATH] [--cgroup-root PATH] [--disable-device-bpf] [--dev-mode] [--allowed-client-uid UID_OR_ACCOUNT] [--allowed-client-gid GID_OR_GROUP]",
+                    ));
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("unknown argument: {argument}"),
+                    ));
+                }
+            }
+        }
+        if adapter_id.is_empty()
+            || !adapter_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            || !socket.is_absolute()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "sandbox adapter ID must be safe and socket path must be absolute",
+            ));
+        }
+        // In dev mode, default allowed_client_uid to own UID if not specified.
+        // 中文：开发模式下，如果未指定 allowed_client_uid，则默认使用当前进程 UID。
+        if dev_mode && allowed_client_uid.is_none() && allowed_client_gid.is_none() {
+            allowed_client_uid = Some(unsafe { libc::getuid() });
+        }
+        // Fail closed when no trusted Kernel peer identity is configured.
+        // 中文：未配置受信任的 Kernel 对端身份时必须失败关闭。
+        if allowed_client_uid.is_none() && allowed_client_gid.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cyrene-sandboxd requires at least one of --allowed-client-uid or --allowed-client-gid to enforce UDS admission",
+            ));
+        }
+        Ok(Self {
+            adapter_id,
+            socket,
+            cgroup_root,
+            transport_root,
+            disable_device_bpf,
+            dev_mode,
+            allowed_client_uid,
+            allowed_client_gid,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cy_proto::sandbox_v1;
     use cyrene_sandboxd::{handle_request, verify_client_peer, CgroupV2Config, CgroupV2Runtime};
     use prost::Message;
     use std::{
-        env, fs,
+        fs,
         io::{Read, Write},
         os::unix::{
             fs::{FileTypeExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
-        path::PathBuf,
         sync::Arc,
     };
 
@@ -173,111 +279,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         writer.write_all(payload)
     }
 
-    #[derive(Debug)]
-    struct Args {
-        adapter_id: String,
-        socket: PathBuf,
-        cgroup_root: Option<PathBuf>,
-        transport_root: PathBuf,
-        disable_device_bpf: bool,
-        dev_mode: bool,
-        allowed_client_uid: Option<u32>,
-        allowed_client_gid: Option<u32>,
-    }
-
-    impl Args {
-        fn parse() -> Result<Self, Box<dyn std::error::Error>> {
-            let mut values = env::args().skip(1);
-            let mut adapter_id = "sandboxd".to_string();
-            let mut socket = PathBuf::from("/run/cyrene/sandboxd.sock");
-            let mut cgroup_root = None;
-            let mut transport_root = PathBuf::from("/run/cyrene/workers");
-            let mut disable_device_bpf = false;
-            let mut dev_mode = false;
-            let mut allowed_client_uid = None;
-            let mut allowed_client_gid = None;
-            while let Some(argument) = values.next() {
-                let mut value = || {
-                    values.next().ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("{argument} requires a value"),
-                        )
-                    })
-                };
-                match argument.as_str() {
-                    "--adapter-id" => adapter_id = value()?,
-                    "--socket" => socket = PathBuf::from(value()?),
-                    "--cgroup-root" => cgroup_root = Some(PathBuf::from(value()?)),
-                    "--transport-root" => transport_root = PathBuf::from(value()?),
-                    "--disable-device-bpf" => disable_device_bpf = true,
-                    "--dev-mode" => dev_mode = true,
-                    "--allowed-client-uid" => {
-                        allowed_client_uid = Some(value()?.parse::<u32>().map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "--allowed-client-uid must be an unsigned integer",
-                            )
-                        })?)
-                    }
-                    "--allowed-client-gid" => {
-                        allowed_client_gid = Some(value()?.parse::<u32>().map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "--allowed-client-gid must be an unsigned integer",
-                            )
-                        })?)
-                    }
-                    "--help" | "-h" => return Err(std::io::Error::other("usage: cyrene-sandboxd [--adapter-id ID] [--socket PATH] [--cgroup-root PATH] [--disable-device-bpf] [--dev-mode] [--allowed-client-uid UID] [--allowed-client-gid GID]").into()),
-                    _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown argument: {argument}")).into()),
-                }
-            }
-            if adapter_id.is_empty()
-                || !adapter_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-                || !socket.is_absolute()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "sandbox adapter ID must be safe and socket path must be absolute",
-                )
-                .into());
-            }
-            // In dev mode, default allowed_client_uid to own UID if not specified
-            // 中文：开发模式下，如果未指定 allowed_client_uid，则默认使用当前进程的 UID。
-            #[cfg(unix)]
-            if dev_mode && allowed_client_uid.is_none() && allowed_client_gid.is_none() {
-                allowed_client_uid = Some(unsafe { libc::getuid() });
-            }
-            // Fail-closed: sandboxd must be configured with at least one trusted
-            // Kernel peer UID/GID; otherwise UDS admission silently allows any
-            // local user able to reach the socket.
-            // 中文：失败关闭：sandboxd 至少必须配置一个受信任的 Kernel 对端 UID/GID；否则，任何能够访问套接字的本地用户都会被 UDS 准入检查静默放行。
-            if allowed_client_uid.is_none() && allowed_client_gid.is_none() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "cyrene-sandboxd requires at least one of --allowed-client-uid or --allowed-client-gid to enforce UDS admission",
-                )
-                    .into());
-            }
-            Ok(Self {
-                adapter_id,
-                socket,
-                cgroup_root,
-                transport_root,
-                disable_device_bpf,
-                dev_mode,
-                allowed_client_uid,
-                allowed_client_gid,
-            })
-        }
-    }
-
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("cyrene-sandboxd requires a Linux host with cgroup v2 and Unix domain sockets");
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::Args;
+
+    fn shipped_sandboxd_arguments() -> Vec<String> {
+        let command = include_str!("../../../../infrastructure/systemd/cyrene-sandboxd.service")
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("the shipped sandboxd unit has an ExecStart");
+        let command_arguments = command.split_whitespace().collect::<Vec<_>>();
+        let separator = command_arguments
+            .iter()
+            .position(|argument| *argument == "--")
+            .expect("the component runner separates daemon arguments");
+        command_arguments[separator + 1..]
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn shipped_sandboxd_unit_resolves_named_kernel_peer_with_exact_ids() {
+        let args = Args::parse_from_with_identity_resolvers(
+            shipped_sandboxd_arguments(),
+            |selector| match selector {
+                "cyrene-kernel" => Ok(1843),
+                other => other.parse::<u32>().map_err(std::io::Error::other),
+            },
+            |selector| match selector {
+                "cyrene" => Ok(2764),
+                other => other.parse::<u32>().map_err(std::io::Error::other),
+            },
+        )
+        .expect("the shipped sandboxd unit must resolve its symbolic peer selectors");
+
+        assert_eq!(args.allowed_client_uid, Some(1843));
+        assert_eq!(args.allowed_client_gid, Some(2764));
+    }
 }

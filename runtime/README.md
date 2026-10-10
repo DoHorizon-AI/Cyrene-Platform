@@ -9,6 +9,7 @@ This directory groups one boundary of the CYRENE Platform source, protocol, fixt
 
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
+| `cyrene-runtime-identity/` | Shared native UID/GID selector resolution. | 共用的原生 UID/GID 选择器解析。 |
 
 ## Suggested reading / execution order | 推荐阅读 / 执行顺序
 
@@ -20,6 +21,7 @@ Read this guide first, then the direct files above in dependency order, and fina
 | Entry | Responsibility | 一句话职责 |
 | --- | --- | --- |
 | `cyrene-kernel/` | Nested source or contract boundary; read its README next. | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `cyrene-runtime-identity/` | Shared native UID/GID selector resolution; read its README next. | 共用的原生 UID/GID 选择器解析；下一步阅读其 README。 |
 
 This snapshot is intentionally limited to direct entries; nested directories own their detailed guides.
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。
@@ -37,6 +39,7 @@ This snapshot is intentionally limited to direct entries; nested directories own
 
 | 条目 | 职责 |
 | --- | --- |
+| `cyrene-runtime-identity/` | 共用的原生 UID/GID 选择器解析。 |
 
 ## 推荐阅读 / 执行顺序
 
@@ -47,5 +50,6 @@ This snapshot is intentionally limited to direct entries; nested directories own
 | 条目 | 职责 |
 | --- | --- |
 | `cyrene-kernel/` | 嵌套源码或契约边界，下一步阅读其 README。 |
+| `cyrene-runtime-identity/` | 共用的原生 UID/GID 选择器解析，下一步阅读其 README。 |
 
 本快照只列出直接内容；嵌套目录由各自 README 负责详细说明。

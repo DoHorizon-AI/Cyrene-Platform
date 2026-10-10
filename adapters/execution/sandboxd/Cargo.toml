@@ -16,6 +16,7 @@ libc = "0.2"
 nix = { version = "0.29", features = ["socket", "user", "process"] }
 prost = "0.13"
 cy-observability = { path = "../../../framework/crates/cy-observability" }
+cyrene-runtime-identity = { path = "../../../runtime/cyrene-runtime-identity" }
 tracing = "0.1"
 
 [dev-dependencies]

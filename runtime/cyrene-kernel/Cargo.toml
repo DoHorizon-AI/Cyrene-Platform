@@ -17,6 +17,7 @@ cy-runtime-maintenance = { path = "../../kernel/crates/cy-runtime-maintenance" }
 cy-resource-manager = { path = "../../kernel/crates/cy-resource-manager" }
 cy-sandbox-client = { path = "../../kernel/crates/cy-sandbox-client" }
 cy-kernel-api = { path = "../../kernel/crates/cy-kernel-api" }
+cyrene-runtime-identity = { path = "../cyrene-runtime-identity" }
 cy-proto = { path = "../../contracts/rust/cy-proto" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
