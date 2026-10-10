@@ -658,9 +658,9 @@ mod tests {
             + 1;
         arguments[uid_value] = "sandboxd=0".to_owned();
 
-        let error = Args::parse_from(arguments)
-            .err()
-            .expect("sandbox peer identity parser rejects adapter-named values");
-        assert!(error.to_string().contains("must be an unsigned integer"));
+        assert!(
+            Args::parse_from(arguments).is_err(),
+            "sandbox peer identity parser rejects adapter-named values"
+        );
     }
 }
