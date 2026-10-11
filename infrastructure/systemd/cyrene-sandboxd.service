@@ -21,6 +21,7 @@ Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 UMask=0007
 
 # sandboxd is the sole owner of the worker process tree and cgroup subtree.
