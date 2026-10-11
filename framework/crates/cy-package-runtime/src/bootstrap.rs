@@ -681,10 +681,30 @@ pub fn ensure_runtime_daemon_stopped(runtime_uid: u32) -> Result<(), PackageRunt
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(runtime_daemon_state_error()),
     };
+    let mode = metadata.permissions().mode();
+    // The daemon's only group-writable socket is its exact runtime-owned 0660 endpoint.
+    let runtime_gid = if mode & 0o022 == 0 {
+        None
+    } else if metadata.uid() == runtime_uid && mode & 0o7777 == 0o660 {
+        Some(runtime_primary_gid(runtime_uid)?)
+    } else {
+        None
+    };
+    ensure_runtime_socket_stopped(socket, &metadata, runtime_uid, runtime_gid)
+}
+
+fn ensure_runtime_socket_stopped(
+    socket: &Path,
+    metadata: &fs::Metadata,
+    runtime_uid: u32,
+    runtime_gid: Option<u32>,
+) -> Result<(), PackageRuntimeError> {
     if metadata.file_type().is_symlink()
         || !metadata.file_type().is_socket()
         || metadata.uid() != runtime_uid
-        || metadata.permissions().mode() & 0o022 != 0
+        || (metadata.permissions().mode() & 0o022 != 0
+            && !(metadata.permissions().mode() & 0o7777 == 0o660
+                && runtime_gid == Some(metadata.gid())))
     {
         return Err(runtime_daemon_state_error());
     }
@@ -703,6 +723,13 @@ pub fn ensure_runtime_daemon_stopped(runtime_uid: u32) -> Result<(), PackageRunt
         }
         Err(_) => Err(runtime_daemon_state_error()),
     }
+}
+
+fn runtime_primary_gid(runtime_uid: u32) -> Result<u32, PackageRuntimeError> {
+    nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(runtime_uid))
+        .map_err(|_| runtime_daemon_state_error())?
+        .map(|user| user.gid.as_raw())
+        .ok_or_else(runtime_daemon_state_error)
 }
 
 /// Validates the release-provisioned adapter and pinned tools before dropping to cyrene.
@@ -1401,11 +1428,103 @@ fn broker_protocol_error() -> PackageRuntimeError {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::os::unix::net::UnixListener;
 
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn bind_test_socket(path: &Path, mode: u32) -> (UnixListener, fs::Metadata) {
+        let listener = UnixListener::bind(path).expect("bind test socket");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .expect("set test socket permissions");
+        let metadata = fs::symlink_metadata(path).expect("inspect test socket");
+        (listener, metadata)
+    }
+
+    #[test]
+    fn stale_runtime_group_socket_and_legacy_safe_socket_are_accepted() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime_uid = nix::unistd::geteuid().as_raw();
+        let runtime_gid = runtime_primary_gid(runtime_uid).expect("resolve current user group");
+
+        let group_socket = directory.path().join("group.sock");
+        let (listener, metadata) = bind_test_socket(&group_socket, 0o660);
+        assert_eq!(metadata.uid(), runtime_uid);
+        assert_eq!(metadata.gid(), runtime_gid);
+        drop(listener);
+        ensure_runtime_socket_stopped(&group_socket, &metadata, runtime_uid, Some(runtime_gid))
+            .expect("stale 0660 runtime socket is safe");
+
+        let legacy_socket = directory.path().join("legacy.sock");
+        let (listener, metadata) = bind_test_socket(&legacy_socket, 0o644);
+        drop(listener);
+        ensure_runtime_socket_stopped(&legacy_socket, &metadata, runtime_uid, None)
+            .expect("legacy safe socket mode remains accepted");
+    }
+
+    #[test]
+    fn live_runtime_group_socket_is_still_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("live.sock");
+        let runtime_uid = nix::unistd::geteuid().as_raw();
+        let runtime_gid = runtime_primary_gid(runtime_uid).expect("resolve current user group");
+        let (_listener, metadata) = bind_test_socket(&socket, 0o660);
+
+        let error =
+            ensure_runtime_socket_stopped(&socket, &metadata, runtime_uid, Some(runtime_gid))
+                .expect_err("live listener remains a hard failure");
+        assert_eq!(error.code, "PACKAGE_RUNTIME_ALREADY_RUNNING");
+    }
+
+    #[test]
+    fn stale_socket_rejects_wrong_identity_unsafe_modes_and_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime_uid = nix::unistd::geteuid().as_raw();
+        let runtime_gid = runtime_primary_gid(runtime_uid).expect("resolve current user group");
+
+        let socket = directory.path().join("identity.sock");
+        let (listener, metadata) = bind_test_socket(&socket, 0o660);
+        drop(listener);
+        let wrong_uid = if runtime_uid == u32::MAX {
+            runtime_uid - 1
+        } else {
+            runtime_uid + 1
+        };
+        let error = ensure_runtime_socket_stopped(&socket, &metadata, wrong_uid, Some(runtime_gid))
+            .expect_err("wrong socket owner is rejected");
+        assert_eq!(error.code, "PACKAGE_RUNTIME_STATE_UNSAFE");
+
+        let wrong_gid = if runtime_gid == u32::MAX {
+            runtime_gid - 1
+        } else {
+            runtime_gid + 1
+        };
+        let error = ensure_runtime_socket_stopped(&socket, &metadata, runtime_uid, Some(wrong_gid))
+            .expect_err("wrong group on the 0660 exception is rejected");
+        assert_eq!(error.code, "PACKAGE_RUNTIME_STATE_UNSAFE");
+
+        let unsafe_socket = directory.path().join("world-writable.sock");
+        let (listener, metadata) = bind_test_socket(&unsafe_socket, 0o662);
+        drop(listener);
+        let error = ensure_runtime_socket_stopped(
+            &unsafe_socket,
+            &metadata,
+            runtime_uid,
+            Some(runtime_gid),
+        )
+        .expect_err("world-writable socket mode is rejected");
+        assert_eq!(error.code, "PACKAGE_RUNTIME_STATE_UNSAFE");
+
+        let symlink = directory.path().join("socket-link");
+        std::os::unix::fs::symlink(&socket, &symlink).expect("create socket symlink");
+        let metadata = fs::symlink_metadata(&symlink).expect("inspect socket symlink");
+        let error =
+            ensure_runtime_socket_stopped(&symlink, &metadata, runtime_uid, Some(runtime_gid))
+                .expect_err("socket symlink is rejected");
+        assert_eq!(error.code, "PACKAGE_RUNTIME_STATE_UNSAFE");
+    }
 
     fn sample_installation_id() -> String {
         let identity = format!("org.cyrene.example-plugin\0{}\0{DIGEST_B}", "1.2.3");
