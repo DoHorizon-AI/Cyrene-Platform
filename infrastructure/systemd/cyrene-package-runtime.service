@@ -19,6 +19,7 @@ Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene-package-runtime
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 StateDirectory=cyrene/package-runtime
 StateDirectoryMode=0700
 UMask=0007
