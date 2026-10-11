@@ -327,6 +327,7 @@ def test_package_runtime_systemd_payload_is_bound_to_the_nonroot_daemon() -> Non
     assert "User=cyrene\n" in unit and "Group=cyrene\n" in unit
     assert "KillMode=control-group\n" in unit
     assert "RuntimeDirectory=cyrene-package-runtime\n" in unit
+    assert "RuntimeDirectoryPreserve=yes\n" in unit
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n" in unit
     assert "ProtectSystem=strict\n" in unit and "NoNewPrivileges=yes\n" in unit
     assert "ReadOnlyPaths=/etc/cyrene/runtime-package-sources.json" in unit

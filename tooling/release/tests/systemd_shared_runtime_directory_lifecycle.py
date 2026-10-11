@@ -209,7 +209,12 @@ def _run_scenario(
         _systemctl("is-active", peer_unit)
         _stop_unit(peer_unit)
         _assert_server_alive(server_unit, socket_path, server_pid)
-        print(f"PASS {scenario}: peer stop/start preserved server PID {server_pid} and its socket")
+        _stop_unit(server_unit)
+        if _systemctl("is-active", server_unit, check=False).returncode == 0:
+            raise LifecycleFailure("preserved runtime-directory owner did not stop")
+        if not socket_path.parent.is_dir() or socket_path.parent.is_symlink():
+            raise LifecycleFailure("owner stop removed the preserved runtime directory")
+        print(f"PASS {scenario}: owner stop preserved runtime directory {socket_path.parent}")
         return
 
     _systemctl("is-active", server_unit)
