@@ -413,7 +413,50 @@ impl FilesystemPackageRuntime {
         &self,
         binding_id: &BindingId,
     ) -> Result<(String, String), PackageRuntimeError> {
-        let record = self.read_activation(binding_id)?;
+        let bindings_directory = self.root.join("bindings");
+        let directory_metadata = fs::symlink_metadata(&bindings_directory)
+            .map_err(io_error("RUNTIME_STATE_UNAVAILABLE"))?;
+        if !directory_metadata.file_type().is_dir() {
+            return Err(PackageRuntimeError::new(
+                "RUNTIME_STATE_UNAVAILABLE",
+                "package runtime bindings state is unavailable",
+            ));
+        }
+
+        let activation_path = self.activation_path(binding_id);
+        match fs::symlink_metadata(&activation_path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(PackageRuntimeError::new(
+                    "BINDING_RECORD_INVALID",
+                    "binding activation record is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Check the parent again so a missing state directory is never
+                // mistaken for an unbound product after runtime startup.
+                let current_directory_metadata = fs::symlink_metadata(&bindings_directory)
+                    .map_err(io_error("RUNTIME_STATE_UNAVAILABLE"))?;
+                if !current_directory_metadata.file_type().is_dir() {
+                    return Err(PackageRuntimeError::new(
+                        "RUNTIME_STATE_UNAVAILABLE",
+                        "package runtime bindings state is unavailable",
+                    ));
+                }
+                return Err(PackageRuntimeError::new(
+                    "BINDING_NOT_FOUND",
+                    "binding activation record does not exist",
+                ));
+            }
+            Err(error) => {
+                return Err(PackageRuntimeError::new(
+                    "RUNTIME_STATE_UNAVAILABLE",
+                    format!("could not inspect binding activation record: {error}"),
+                ));
+            }
+        }
+
+        let record: ActivationRecord = read_json(&activation_path, "BINDING_RECORD_INVALID")?;
         let installation = self.get_installation(&record.installation_id)?;
         Ok((
             installation.package_id.to_string(),

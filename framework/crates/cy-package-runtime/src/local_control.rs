@@ -922,9 +922,27 @@ fn authorize_command(
             }
             Ok(())
         }
+        ControlCommand::RuntimeStatus { binding_id } => {
+            let binding = find_binding_scope(source, binding_id, operation, None)?;
+            match control.binding_package_scope(binding_id) {
+                Ok((package_id, installation_id))
+                    if package_id == binding.package_id
+                        && binding.installation_ids.contains(&installation_id) =>
+                {
+                    Ok(())
+                }
+                Err(error) if error.code == "BINDING_NOT_FOUND" => Err((
+                    "BINDING_NOT_FOUND",
+                    "binding activation record does not exist",
+                )),
+                _ => Err((
+                    "CONTROL_SCOPE_DENIED",
+                    "operation is outside the installed source scope",
+                )),
+            }
+        }
         ControlCommand::RecoverBinding { binding_id, .. }
         | ControlCommand::Deactivate { binding_id }
-        | ControlCommand::RuntimeStatus { binding_id }
         | ControlCommand::Rollback { binding_id, .. } => {
             let binding = find_binding_scope(source, binding_id, operation, None)?;
             let in_scope = control.binding_package_scope(binding_id).is_ok_and(
@@ -1637,6 +1655,74 @@ mod tests {
         json!({"source_id": SOURCE_ID, "source_token": SOURCE_TOKEN})
     }
 
+    fn seed_binding_scope_records(
+        server: &PackageRuntimeSocketServer,
+        activation_installation_id: &str,
+        record_installation_id: &str,
+        package_id: &str,
+    ) {
+        let runtime_root = server.socket_path.parent().unwrap().join("runtime");
+        let digest = |value: char| format!("sha256:{}", value.to_string().repeat(64));
+        let artifact_digest = digest('a');
+        let archive_digest = digest('b');
+        let descriptor_digest = digest('c');
+        let manifest_digest = digest('d');
+        let lock_digest = digest('e');
+        let installation_directory = runtime_root
+            .join("installations")
+            .join(record_installation_id);
+        std::fs::create_dir_all(&installation_directory).unwrap();
+        std::fs::write(
+            installation_directory.join("record.json"),
+            serde_json::to_vec(&json!({
+                "record_version": 1,
+                "installation_id": record_installation_id,
+                "package_id": package_id,
+                "package_version": "1.0.0",
+                "artifact_digest": artifact_digest,
+                "archive_digest": archive_digest,
+                "capabilities": [],
+                "state": "INSTALLED",
+                "verification": {
+                    "verifier": "test",
+                    "verified_at_unix_ms": 1,
+                    "artifact_digest": artifact_digest,
+                    "archive_digest": archive_digest,
+                    "descriptor_digest": descriptor_digest,
+                    "manifest_digest": manifest_digest,
+                    "dependency_lock_digest": lock_digest,
+                },
+                "dependencies": {
+                    "preparer": "test",
+                    "prepared_at_unix_ms": 1,
+                    "lock_digest": lock_digest,
+                    "runtime_digest": digest('f'),
+                    "runtime_executable": null,
+                },
+                "installed_at_unix_ms": 1,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            runtime_root
+                .join("bindings")
+                .join(format!("{BINDING_ID}.json")),
+            serde_json::to_vec(&json!({
+                "record_version": 1,
+                "binding_id": BINDING_ID,
+                "installation_id": activation_installation_id,
+                "previous_installation_id": null,
+                "generation": 1,
+                "desired_active": true,
+                "last_failure_code": null,
+                "last_failure_message": null,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn spawn_fake_broker(path: PathBuf, responses: Vec<Value>) -> thread::JoinHandle<Vec<Value>> {
         let listener = UnixListener::bind(path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1762,6 +1848,114 @@ mod tests {
         cross_binding["binding_id"] = json!("another-product-binding");
         let response = invoke(&server, cross_binding, peer);
         assert_eq!(response["error"]["code"], "CONTROL_SCOPE_DENIED");
+    }
+
+    #[test]
+    fn source_runtime_status_reports_a_genuinely_missing_activation() {
+        let peer = test_peer();
+        let server = server(test_policy(peer.uid, peer.gid));
+        let response = invoke(
+            &server,
+            scoped_request("runtime_status", json!(7), source_auth()),
+            peer,
+        );
+        assert_eq!(response["request_id"], "req-1");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "BINDING_NOT_FOUND");
+        assert_eq!(
+            response["error"]["message"],
+            "binding activation record does not exist"
+        );
+
+        // The same absent activation does not authorize a mutation.
+        assert_eq!(
+            invoke(
+                &server,
+                scoped_request("deactivate", json!(7), source_auth()),
+                peer,
+            )["error"]["code"],
+            "CONTROL_SCOPE_DENIED"
+        );
+    }
+
+    #[test]
+    fn source_runtime_status_fails_closed_for_invalid_binding_state() {
+        let peer = test_peer();
+        let server = server(test_policy(peer.uid, peer.gid));
+        let bindings_directory = server
+            .socket_path
+            .parent()
+            .unwrap()
+            .join("runtime/bindings");
+        let activation_path = bindings_directory.join(format!("{BINDING_ID}.json"));
+
+        std::fs::write(&activation_path, b"{broken json").unwrap();
+        let response = invoke(
+            &server,
+            scoped_request("runtime_status", json!(7), source_auth()),
+            peer,
+        );
+        assert_eq!(response["error"]["code"], "CONTROL_SCOPE_DENIED");
+
+        std::fs::remove_file(&activation_path).unwrap();
+        std::os::unix::fs::symlink("missing-target.json", &activation_path).unwrap();
+        let response = invoke(
+            &server,
+            scoped_request("runtime_status", json!(7), source_auth()),
+            peer,
+        );
+        assert_eq!(response["error"]["code"], "CONTROL_SCOPE_DENIED");
+
+        std::fs::remove_file(&activation_path).unwrap();
+        std::fs::remove_dir(&bindings_directory).unwrap();
+        let response = invoke(
+            &server,
+            scoped_request("runtime_status", json!(7), source_auth()),
+            peer,
+        );
+        assert_eq!(response["error"]["code"], "CONTROL_SCOPE_DENIED");
+    }
+
+    #[test]
+    fn source_runtime_status_keeps_existing_package_and_installation_scope_checks() {
+        let peer = test_peer();
+        let in_scope_server = server(test_policy(peer.uid, peer.gid));
+        seed_binding_scope_records(
+            &in_scope_server,
+            INSTALLATION_ID,
+            INSTALLATION_ID,
+            "com.cyrene.test",
+        );
+        let in_scope_response = invoke(
+            &in_scope_server,
+            scoped_request("runtime_status", json!(7), source_auth()),
+            peer,
+        );
+        assert_eq!(in_scope_response["request_id"], "req-1");
+        assert_eq!(in_scope_response["ok"], true);
+
+        for (activation_installation_id, record_installation_id, package_id) in [
+            (INSTALLATION_ID, INSTALLATION_ID, "com.cyrene.other"),
+            (
+                "installation-other",
+                "installation-other",
+                "com.cyrene.test",
+            ),
+        ] {
+            let server = server(test_policy(peer.uid, peer.gid));
+            seed_binding_scope_records(
+                &server,
+                activation_installation_id,
+                record_installation_id,
+                package_id,
+            );
+            let response = invoke(
+                &server,
+                scoped_request("runtime_status", json!(7), source_auth()),
+                peer,
+            );
+            assert_eq!(response["error"]["code"], "CONTROL_SCOPE_DENIED");
+        }
     }
 
     #[test]
