@@ -1529,6 +1529,22 @@ impl RuntimeMaintenance {
                     "UPDATE_MAINTENANCE_ACTIVE".to_string(),
                 ));
             }
+            if active_tasks.is_empty()
+                && state.tasks.is_empty()
+                && state.maintenance.as_ref().is_some_and(|active| {
+                    active.origin == MaintenanceOrigin::Standard
+                        && active.target_kind == UpdateTargetKind::PackageOnly
+                })
+            {
+                return append_and_apply(
+                    &self.inner.directory,
+                    state,
+                    JournalEvent::SourceHeartbeat {
+                        source_id: source_id.to_string(),
+                        at_unix_ms: now_unix_ms(),
+                    },
+                );
+            }
             let generation = state.gate_generation.saturating_add(1);
             let admissions = active_tasks
                 .into_iter()
@@ -5094,6 +5110,119 @@ mod tests {
                 format!("sha256:{}", "b".repeat(64)),
             )]),
         }
+    }
+
+    #[test]
+    fn empty_package_only_reconciliation_preserves_standard_hold_generation() {
+        let (dir, maintenance, request) = setup();
+        let plan = package_plan();
+        let readiness = maintenance
+            .get_update_readiness(&request, package_usage())
+            .unwrap();
+        let begun = maintenance
+            .begin_maintenance(
+                "package-only-reconciliation",
+                &plan,
+                &request,
+                readiness.gate_generation,
+                false,
+                package_usage(),
+            )
+            .unwrap();
+        assert_eq!(begun.status, ReadinessStatus::MaintenanceActive);
+        let token = begun.maintenance_token.clone().unwrap();
+        let before = load_state_locked(dir.path()).unwrap();
+        let heartbeat_before = before.sources["cyrene-catalogs"].last_heartbeat_unix_ms;
+
+        assert!(matches!(
+            maintenance.admit_task("cyrene-catalogs", "blocked-task", TaskActivityState::Queued),
+            Err(MaintenanceError::AdmissionDenied(code)) if code == "UPDATE_MAINTENANCE_ACTIVE"
+        ));
+        assert!(matches!(
+            maintenance.reconcile_activity_source(
+                "cyrene-catalogs",
+                vec![TaskActivityRecord {
+                    source_id: "cyrene-catalogs".to_string(),
+                    task_id: "new-task".to_string(),
+                    state: TaskActivityState::Queued,
+                }],
+            ),
+            Err(MaintenanceError::AdmissionDenied(code)) if code == "UPDATE_MAINTENANCE_ACTIVE"
+        ));
+
+        maintenance
+            .reconcile_activity_source("cyrene-catalogs", Vec::new())
+            .unwrap();
+        let after = load_state_locked(dir.path()).unwrap();
+        assert_eq!(after.gate_generation, begun.gate_generation);
+        assert_eq!(after.journal_sequence, before.journal_sequence + 1);
+        assert!(after.sources["cyrene-catalogs"].last_heartbeat_unix_ms >= heartbeat_before);
+        assert!(after.tasks.is_empty());
+        let active = after.maintenance.as_ref().unwrap();
+        assert_eq!(active.origin, MaintenanceOrigin::Standard);
+        assert_eq!(active.target_kind, UpdateTargetKind::PackageOnly);
+        assert_eq!(active.request_id, "package-only-reconciliation");
+        assert_eq!(active.token, token);
+        assert_eq!(active.plan, plan);
+
+        let last_entry: JournalEntry = serde_json::from_str(
+            fs::read_to_string(dir.path().join(JOURNAL_FILE))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            last_entry.event,
+            JournalEvent::SourceHeartbeat { ref source_id, .. } if source_id == "cyrene-catalogs"
+        ));
+
+        let proof = MaintenanceHoldProof {
+            request_id: "package-only-reconciliation".to_string(),
+            maintenance_token: token,
+            plan: plan.clone(),
+        };
+        let component_id = "cyrene-yield";
+        let artifact_digest = plan.component_artifact_digests[component_id].as_str();
+        let validation = maintenance
+            .validate_maintenance_hold(
+                &proof,
+                UpdateTargetKind::PackageOnly,
+                component_id,
+                artifact_digest,
+                begun.gate_generation,
+                request.expected_catalog_generation,
+            )
+            .unwrap();
+        assert!(validation.valid);
+    }
+
+    #[test]
+    fn empty_reconciliation_without_maintenance_still_advances_gate_generation() {
+        let (dir, maintenance, _) = setup();
+        let before = load_state_locked(dir.path()).unwrap();
+
+        maintenance
+            .reconcile_activity_source("cyrene-catalogs", Vec::new())
+            .unwrap();
+
+        let after = load_state_locked(dir.path()).unwrap();
+        assert_eq!(after.gate_generation, before.gate_generation + 1);
+        assert_eq!(after.journal_sequence, before.journal_sequence + 1);
+        let last_entry: JournalEntry = serde_json::from_str(
+            fs::read_to_string(dir.path().join(JOURNAL_FILE))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            last_entry.event,
+            JournalEvent::TasksReconciled { ref source_id, ref active_tasks, .. }
+                if source_id == "cyrene-catalogs" && active_tasks.is_empty()
+        ));
     }
 
     fn binding_test_catalog() -> TrustedActivitySourceCatalog {
