@@ -456,7 +456,7 @@ fn run_worker_process(
     let parent_auth_fd = root_channel.as_raw_fd();
     let worker_auth_fd = worker_channel.as_raw_fd();
     let lock_fd = process_lock.as_raw_fd();
-    let mut command = Command::new(executable);
+    let mut command = worker_command_in_runtime_root(Command::new(executable), root);
     command
         .arg("--root")
         .arg(root)
@@ -572,6 +572,11 @@ fn run_worker_process(
         ));
     }
     Err(worker_failed())
+}
+
+fn worker_command_in_runtime_root(mut command: Command, root: &Path) -> Command {
+    command.current_dir(root);
+    command
 }
 
 fn terminate_worker_group(child: &mut std::process::Child) {
@@ -1178,5 +1183,29 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn worker_process_uses_runtime_root_for_relative_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let caller_directory = temporary.path().join("caller");
+        let runtime_root = temporary.path().join("runtime");
+        std::fs::create_dir(&caller_directory).unwrap();
+        std::fs::create_dir(&runtime_root).unwrap();
+        std::fs::write(caller_directory.join("uv.toml"), b"caller configuration\n").unwrap();
+        std::fs::write(runtime_root.join("uv.toml"), b"runtime configuration\n").unwrap();
+
+        let mut command = Command::new("/bin/cat");
+        command.current_dir(caller_directory).arg("uv.toml");
+        let output = worker_command_in_runtime_root(command, &runtime_root)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "worker could not read its runtime-relative configuration: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"runtime configuration\n");
     }
 }
