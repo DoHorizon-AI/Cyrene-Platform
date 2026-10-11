@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,13 @@ from tooling.release.component_artifacts import ComponentArtifactError, _payload
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
+SHARED_RUNTIME_DIRECTORY_UNITS = {
+    "cyrene-kernel.service",
+    "cyrene-runtime-maintenance.service",
+    "cyrene-linux-sys-adapter.service",
+    "cyrene-nvidia-adapter.service",
+    "cyrene-sandboxd.service",
+}
 
 
 def _catalog_components() -> dict[str, dict[str, object]]:
@@ -79,6 +88,56 @@ def test_worker_runtime_agent_gets_no_host_unit_payload(tmp_path: Path) -> None:
 
     assert copied is None
     assert not (payload_root / "systemd").exists()
+
+
+def test_all_services_sharing_cyrene_runtime_directory_preserve_it() -> None:
+    """A service stop must not unlink sockets still owned by another live service."""
+
+    shared_runtime_units: set[str] = set()
+    for unit_path in sorted((REPOSITORY / "infrastructure" / "systemd").glob("*.service")):
+        service_section = False
+        runtime_directories: list[str] = []
+        preserve_values: list[str] = []
+        for raw_line in unit_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                service_section = line == "[Service]"
+                continue
+            if not service_section:
+                continue
+            key, separator, value = line.partition("=")
+            if not separator:
+                continue
+            if key == "RuntimeDirectory":
+                runtime_directories.append(value)
+            elif key == "RuntimeDirectoryPreserve":
+                preserve_values.append(value)
+
+        if "cyrene" not in runtime_directories:
+            continue
+        shared_runtime_units.add(unit_path.name)
+        assert runtime_directories == ["cyrene"]
+        assert preserve_values == ["yes"]
+
+    assert shared_runtime_units == SHARED_RUNTIME_DIRECTORY_UNITS
+
+
+def test_shared_runtime_directory_lifecycle_with_two_isolated_services() -> None:
+    """Exercise real systemd cleanup using only uniquely named transient user units."""
+
+    lifecycle_script = REPOSITORY / "tooling" / "release" / "tests" / "systemd_shared_runtime_directory_lifecycle.py"
+    result = subprocess.run(
+        [sys.executable, str(lifecycle_script)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=90,
+    )
+    if result.returncode == 77:
+        pytest.skip(result.stdout.strip() or result.stderr.strip() or "systemd user manager unavailable")
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
 
 def test_catalog_cannot_redirect_native_unit_source(tmp_path: Path) -> None:

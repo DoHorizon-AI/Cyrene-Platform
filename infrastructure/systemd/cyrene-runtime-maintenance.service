@@ -12,6 +12,7 @@ Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=cyrene
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 StateDirectory=cyrene/runtime-maintenance-private
 StateDirectoryMode=0700
 UMask=0007
