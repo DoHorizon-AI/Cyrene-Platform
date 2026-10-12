@@ -448,6 +448,31 @@ fn a_new_catalog_operation_loads_authorizes_and_resolves_without_core_enum_chang
 }
 
 #[test]
+fn current_directory_roles_filter_user_catalog_operation_ids() {
+    let fixture = Fixture::new();
+    let (bundle, policy) = fixture.load();
+    let member_without_command =
+        VerifiedProductPrincipal::directory_user(["workspace.member".to_owned()]);
+    assert!(matches!(
+        policy.authorize_delegation(&bundle, OWNER_ID, OPERATION_ID, &member_without_command),
+        Err(AuthorizationError::MissingRole)
+    ));
+
+    let member_with_current_command_role = VerifiedProductPrincipal::directory_user([
+        "workspace.member".to_owned(),
+        "workspace.product.command.example.publish_artifact.v2".to_owned(),
+    ]);
+    assert!(policy
+        .authorize_delegation(
+            &bundle,
+            OWNER_ID,
+            OPERATION_ID,
+            &member_with_current_command_role
+        )
+        .is_ok());
+}
+
+#[test]
 fn dynamic_grants_fail_closed_for_missing_grant_unknown_operation_and_bad_pins() {
     let fixture = Fixture::new();
     let (bundle, policy) = fixture.load();

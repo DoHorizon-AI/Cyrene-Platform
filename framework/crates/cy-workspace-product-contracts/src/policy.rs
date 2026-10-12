@@ -217,6 +217,45 @@ impl TrustedProductPolicy {
             .contains_key(&(owner_id.to_owned(), operation_id.to_owned()))
     }
 
+    /// Checks whether current Directory roles may issue a delegation for one operation.
+    ///
+    /// This preflight deliberately does not authorize a Product request. Every delegated
+    /// invocation still passes through [`Self::authorize`] with its exact body and resource.
+    pub fn authorize_delegation<'a>(
+        &self,
+        bundle: &'a ProductContractBundle,
+        owner_id: &str,
+        operation_id: &str,
+        principal: &VerifiedProductPrincipal,
+    ) -> Result<&'a ProductOperation, AuthorizationError> {
+        let operation = bundle
+            .operation(owner_id, operation_id)
+            .ok_or(AuthorizationError::UnknownOperation)?;
+        let grant = self
+            .grants
+            .get(&(owner_id.to_owned(), operation_id.to_owned()))
+            .ok_or(AuthorizationError::UnapprovedOperation)?;
+        if principal.kind != ProductPrincipalKind::DirectoryUser
+            || !grant
+                .principal_kinds
+                .contains(&ProductPrincipalKind::DirectoryUser)
+        {
+            return Err(AuthorizationError::PrincipalNotAllowed);
+        }
+        if !grant
+            .required_roles
+            .iter()
+            .all(|role| principal.roles.contains(role))
+        {
+            return Err(AuthorizationError::MissingRole);
+        }
+        if !grant.requires_exact_workspace {
+            return Err(AuthorizationError::ScopeMismatch);
+        }
+        enforce_mandatory_bindings(grant, operation).map_err(AuthorizationError::Catalog)?;
+        Ok(operation)
+    }
+
     /// Checks every approved grant against the same pinned bundle used at runtime.
     /// New catalog operations remain denied until policy data explicitly grants them.
     pub fn validate_bundle(&self, bundle: &ProductContractBundle) -> Result<(), CatalogError> {

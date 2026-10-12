@@ -94,6 +94,19 @@ WebBffState::new 必须接收全部 provider 与固定来源的 v2 catalog/polic
   `POST /api/workspace/v2/workspaces/{workspaceId}/products/invocations`.
   The v1 Product route is not mounted. The existing v1 session and workspace
   discovery routes remain available to the same-origin client.
+- User-owned workload grants use `POST /api/workspace/v2/workspaces/{workspaceId}/delegations`
+  to create, `GET /api/workspace/v2/workspaces/{workspaceId}/delegations/{delegationId}`
+  to read the current user's exact grant, and `DELETE /api/workspace/v2/workspaces/{workspaceId}/delegations/{delegationId}`
+  to revoke it. Write routes require the same session-bound CSRF token as Product invocation;
+  all three require the verified bearer and exact HTTPS origin. Create requests contain only the fixed workload audience, exact owner
+  and operation IDs, exact resource IDs, and an optional lifetime capped at seven days. The
+  Platform Authority derives the grant owner from its verified identity and current Directory
+  and policy state; the BFF never accepts a principal or role in the request body.
+  用户所有的 workload 授权通过 `POST /api/workspace/v2/workspaces/{workspaceId}/delegations` 创建、通过
+  `GET /api/workspace/v2/workspaces/{workspaceId}/delegations/{delegationId}` 读取自己的完整 grant，并通过
+  `DELETE /api/workspace/v2/workspaces/{workspaceId}/delegations/{delegationId}` 撤销。写入路由要求 session-bound CSRF token，三个路由都要求已验证 bearer 和精确
+  HTTPS Origin。创建请求只包含固定 workload audience、精确 owner/operation ID、精确资源 ID 和最长七天的
+  可选期限。Platform Authority 从已验证身份以及当前 Directory 和 policy 状态推导授权用户；BFF 不接受请求正文中的 principal 或 role。
 - Each request accepts exactly one server-injected
   `Authorization: Bearer <access-token>` header. Duplicate or malformed
   Authorization values and any `X-MS-TOKEN-*` header are rejected. Ingress

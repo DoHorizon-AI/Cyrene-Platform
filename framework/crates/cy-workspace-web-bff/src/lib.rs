@@ -39,5 +39,7 @@ pub use http::{
 };
 pub use problem::ProblemCode;
 pub use product::{
-    ProductCatalogError, ProductOperationCatalog, WorkspaceGatewayError, WorkspaceProductGateway,
+    CreateDelegationInput, CreateDelegationOutput, DelegatedOperationInput, DelegationOutput,
+    ProductCatalogError, ProductOperationCatalog, RevokeDelegationOutput, WorkspaceGatewayError,
+    WorkspaceProductGateway,
 };

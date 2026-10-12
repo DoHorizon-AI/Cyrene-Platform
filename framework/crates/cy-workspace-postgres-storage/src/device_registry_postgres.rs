@@ -2187,6 +2187,33 @@ mod tests {
     }
 
     #[test]
+    fn delegation_migration_stores_a_real_authorization_source_branch() {
+        let migration =
+            include_str!("../migrations/device_registry/0012_authority_delegations.up.sql");
+        assert!(migration
+            .contains("CREATE TABLE cyrene_workspace_device_registry.authority_delegations"));
+        assert!(migration.contains("managed_workload_id VARCHAR(256) NOT NULL"));
+        assert!(migration.contains("authority_delegation_immutable"));
+        assert!(migration.contains("authority_directory_generation_current"));
+        assert!(migration.contains("authority_execution_device_current"));
+        assert!(migration.contains("lock_authority_execution_target_binding"));
+        assert!(migration.contains("TO cyrene_workspace_device_registry_app"));
+        assert!(!migration.contains(
+            "ON cyrene_workspace_directory.workspace_device_identities\n    TO cyrene_workspace_device_registry_app"
+        ));
+        assert!(migration.contains("authorization_source = 'INTERACTIVE_SESSION'"));
+        assert!(migration.contains("authorization_source = 'DELEGATION'"));
+        assert!(migration.contains("session_id IS NULL AND session_generation = 0"));
+        assert!(migration.contains("delegation_generation > 0"));
+        assert!(migration.contains("approved authority authorization source is immutable"));
+
+        let rollback =
+            include_str!("../migrations/device_registry/0012_authority_delegations.down.sql");
+        assert!(rollback.contains("delegated invocation rows prevent this rollback"));
+        assert!(rollback.contains("lock_authority_execution_target_binding"));
+    }
+
+    #[test]
     fn current_identity_reads_fail_closed_for_terminal_device_keys() {
         let source = include_str!("device_registry_postgres.rs");
         let active_query = source

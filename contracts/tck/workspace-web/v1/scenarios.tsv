@@ -19,6 +19,8 @@ discovery_response_limit	member discovery response would exceed the 4 MiB JSON l
 workspace_recheck	Product call names a Workspace not in current authoritative member discovery	REJECT_404_OR_403
 discovery_no_transport	searched discovery output for candidate URI, routing hint, enrollment credential, relay secret	OMIT_PRIVATE_CONNECTION_DATA
 operation_enum_parity	Web BFF operation keys compared with WorkspaceProductApiOperation enum and product-projections.tsv	EXACT_ONE_TO_ONE
+catalog_current_directory_roles	GetCatalogSnapshot runs with current verified member roles	RETURN_ONLY_OPERATIONS_WHOSE_POLICY_REQUIRED_ROLES_MATCH
+catalog_directory_role_changed	Directory roles change before the next GetCatalogSnapshot call	REFLECT_CHANGED_OPERATION_IDS_IMMEDIATELY
 operation_unknown	unknown or unspecified operation key	PROBLEM_422_NO_UPSTREAM_CALL
 operation_method_closed	GET or any unsupported method on Product operation route	PROBLEM_405_NO_UPSTREAM_CALL
 operation_kind_derived	operation key resolves to manifest row with owner, operationId, and READ/COMMAND kind	DERIVE_ALL_FIELDS_SERVER_SIDE
@@ -102,3 +104,44 @@ device_approval_canonical_dto_parity	Workspace Web refs resolve to device-enroll
 device_approval_private_lifecycle	Browser attempts device start, poll, delivery, or acknowledgement route	NO_BROWSER_ROUTE
 device_approval_runtime_absent	Device Authorization, Directory, membership, WebAuthn, or durable provider is unavailable	503_FIXED_PROBLEM_NO_FABRICATED_SUCCESS
 device_approval_session_changed	Verified session identity changes between begin and complete	REJECT_AND_REQUIRE_NEW_CHALLENGE
+delegation_create	POST /api/workspace/v2/workspaces/{workspaceId}/delegations with verified session, exact Origin, valid CSRF, current Directory roles and current Product policy grant	PERSIST_USER_OWNED_EXACT_SCOPE_DEFAULT_7D_MAX_7D
+delegation_body_identity	Create or revoke body supplies issuer, subject, organization, roles, workload ID, or unknown fields	REJECT_UNKNOWN_FIELDS_DERIVE_IDENTITY_SERVER_SIDE
+delegation_resource_scope	Delegation names an owner operation and exact resource ID allowlist	ENFORCE_OWNER_OPERATION_RESOURCE_ON_EVERY_INVOCATION
+delegation_audience	Delegation audience differs from the fixed configured Exchange audience	REJECT_BEFORE_PERSISTENCE
+delegation_owner_revoke	DELETE /api/workspace/v2/workspaces/{workspaceId}/delegations/{delegationId} by exact issuing user	INCREMENT_REVOCATION_GENERATION_IDEMPOTENTLY
+delegation_get_self	GET Delegation through existing bearer with same issuer+subject+organization+workspace	RETURN_EXACT_OWN_SCOPE_EXPIRY_AUDIENCE_GENERATION_AND_REVOCATION_STATE
+delegation_get_foreign	Different user or workspace requests another user's delegation	OPAQUE_404
+delegation_get_policy_recheck	GetDelegation after Directory membership or Product policy grant changes	RECHECK_CURRENT_DIRECTORY_AND_POLICY_FAIL_CLOSED
+delegation_managed_workload_binding	Configured Exchange workload ID changes while audience remains equal	REJECT_OLD_GRANT_WITHOUT_RECONSENT
+delegation_foreign_revoke	Different verified user or workspace attempts to revoke the grant	REJECT_WITHOUT_REVEALING_OTHER_SCOPE
+delegation_policy_recheck	Create, enqueue, claim, validate, acknowledge, or result occurs after current Directory role or pinned policy changes	REQUIRE_FRESH_DIRECTORY_AND_POLICY_AUTHORIZATION
+delegation_workload_mtls	ApproveAndEnqueueDelegatedInvocation arrives without an allowlisted mTLS leaf certificate	REJECT_401_NO_REQUEST_WORKLOAD_IDENTITY_TRUST
+delegation_feature_negotiation	Authenticated Exchange workload requests delegated_invocations_v1 over mTLS	ISSUE_CERTIFICATE_AND_AUDIENCE_BOUND_SIGNED_FEATURE_TOKEN_TTL_LE_300S
+delegation_missing_feature_token	Delegated enqueue omits the result of successful feature negotiation	REJECT_BEFORE_ENQUEUE
+delegation_feature_token_binding	Negotiation token is expired, has invalid signature, wrong audience, or another certificate fingerprint	REJECT_BEFORE_ENQUEUE
+delegation_invocation_scope	Delegated invocation owner, operation, resource, principal, workspace, or audience differs from active grant	REJECT_BEFORE_ENQUEUE
+delegation_revoked_queue	Grant is revoked after enqueue but before claim, validation, acknowledgement, or result	FAIL_CLOSED_NO_DISPATCH_OR_RESULT_ACCEPTANCE
+delegation_expired_queue	Grant expires while invocation is pending or claimed	FAIL_CLOSED_NO_DISPATCH_OR_RESULT_ACCEPTANCE
+delegation_execution_credential	Delegated execution credential exceeds five minutes or grant expiry	REJECT_CREDENTIAL
+delegation_outbox_schema_branch	Persist interactive and delegated approvals	REQUIRE_SESSION_FK_FOR_INTERACTIVE_AND_DELEGATION_ID_GENERATION_FOR_DELEGATED_NO_FAKE_SESSION
+delegation_idempotency_isolation	Interactive and delegated approvals reuse the same actor operation idempotency key	KEEP_AUTHORIZATION_SOURCE_AND_DELEGATION_SCOPE_SEPARATE
+delegation_runtime_absent	PostgreSQL delegation store, mTLS workload trust, Directory, or policy provider is absent	FAIL_CLOSED_NOT_IMPLEMENTED
+delegation_production_evidence	TCK source or mock-only tests pass without live configured Authority workload and provider gates	NOT_PRODUCTION_PASS
+product_workload_validate	ValidateProductExecutionAuthorization presents a valid credential over configured Product workload mTLS	RETURN_ONLY_CURRENT_SIGNED_APPROVED_INVOCATION
+product_workload_profile_identity	Product validation request supplies workload, owner, target, audience, user, or role fields	REJECT_UNKNOWN_FIELDS_DERIVE_FROM_CERTIFICATE_PROFILE
+product_workload_wrong_owner	Credential owner differs from certificate profile owner	REJECT_403_NO_APPROVED_CONTEXT
+product_workload_wrong_target	Credential target component differs from certificate profile target	REJECT_403_NO_APPROVED_CONTEXT
+product_workload_wrong_audience	Delegated grant audience differs from certificate profile audience	REJECT_403_NO_APPROVED_CONTEXT
+product_workload_org_workspace_scope	Credential organization or workspace exceeds configured certificate profile restrictions	REJECT_403_NO_APPROVED_CONTEXT
+product_workload_device_fence	Original Connector target device, generation, certificate, or binding is revoked after enqueue	REJECT_403_NO_APPROVED_CONTEXT
+product_workload_session_grant_fence	Interactive session or delegated grant is expired, revoked, or generation-mismatched	REJECT_403_NO_APPROVED_CONTEXT
+product_workload_current_policy	Interactive or delegated Product execution is checked after current Directory or policy change	REJECT_403_NO_APPROVED_CONTEXT
+connector_validate_separation	Product workload calls Connector-only ValidateExecutionAuthorization with its Product profile certificate	REJECT_UNAUTHENTICATED_CONNECTOR_PEER
+product_workload_profile_missing	Product workload profile or certificate fingerprint configuration is absent	REJECT_PRODUCT_WORKLOAD_RPC_KEEP_EXISTING_HOST_READY
+product_workload_profile_invalid	Nonempty Product workload profiles are malformed or share a certificate fingerprint	FAIL_CLOSED_HOST_STARTUP
+product_workload_profile_optional	Empty Product workload profile list on a legacy Authority host	KEEP_HOST_READY_DISABLE_PRODUCT_WORKLOAD_RPC
+product_workload_status	GetProductInvocationStatus over configured Product workload mTLS profile with invocation_id only	RETURN_SCOPED_PERSISTED_STATUS_RESULT_ERROR_DIGEST_RECEIPT_NO_CREDENTIAL
+product_workload_status_scope	Status request resolves an invocation outside profile owner/target/audience/org/workspace	OPAQUE_404
+product_workload_status_after_revocation	The same managed workload ID reads an already persisted result after its grant or session is revoked	RETURN_PERSISTED_OBSERVATION_NO_EXECUTION_AUTHORIZATION
+product_workload_status_cross_workload	Different managed workload has the same owner, target, and audience but requests another workload's result	OPAQUE_404
+product_workload_status_unknown	Profile requests an unknown or legacy-schema invocation ID	OPAQUE_404

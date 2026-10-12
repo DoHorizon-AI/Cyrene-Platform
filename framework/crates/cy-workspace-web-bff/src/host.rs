@@ -538,6 +538,7 @@ async fn authority_socket_ready(socket_path: &std::path::Path) -> bool {
                 cy_proto::cyrene::workspace::authority::v2::NegotiateVersionRequest {
                     minimum_version: 2,
                     maximum_version: 2,
+                    requested_features: Vec::new(),
                 },
             ))
             .await
