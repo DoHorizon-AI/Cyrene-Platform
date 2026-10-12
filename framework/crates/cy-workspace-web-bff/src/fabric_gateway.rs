@@ -326,6 +326,7 @@ impl crate::WorkspaceProductGateway for AuthorityWorkspaceProductGateway {
         let mut request = TonicRequest::new(authority_v2::GetDelegationRequest {
             workspace_id: workspace_id.to_owned(),
             delegation_id: delegation_id.to_owned(),
+            execution_credential: None,
         });
         request
             .metadata_mut()

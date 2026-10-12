@@ -97,6 +97,10 @@ message RevokeDelegationResponse {
 message GetDelegationRequest {
   string workspace_id = 1;
   string delegation_id = 2;
+  // Signed proof of the approved Product invocation whose actor is reading this grant. When
+  // present, the caller must use its configured Product mTLS identity and omit bearer auth.
+  // 已批准 Product invocation 的签名凭据；设置后须使用受配置的 Product mTLS 身份且不得附带 bearer。
+  optional ExecutionCredential execution_credential = 3;
 }
 
 message GetDelegationResponse {

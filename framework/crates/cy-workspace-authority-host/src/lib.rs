@@ -1412,6 +1412,7 @@ fn tcp_rpc_path_allowed(path: &str) -> bool {
         "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/NegotiateVersion"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ApproveAndEnqueueDelegatedInvocation"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ValidateProductExecutionAuthorization"
+        | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/GetDelegation"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/GetProductInvocationStatus"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ClaimInvocations"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ValidateExecutionAuthorization"
@@ -1739,7 +1740,7 @@ mod tests {
             "{prefix}ValidateProductExecutionAuthorization"
         )));
         assert!(bff_rpc_path_allowed(&format!("{prefix}GetDelegation")));
-        assert!(!tcp_rpc_path_allowed(&format!("{prefix}GetDelegation")));
+        assert!(tcp_rpc_path_allowed(&format!("{prefix}GetDelegation")));
         assert!(tcp_rpc_path_allowed(&format!(
             "{prefix}GetProductInvocationStatus"
         )));

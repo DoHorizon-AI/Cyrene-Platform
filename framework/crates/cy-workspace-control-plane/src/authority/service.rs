@@ -634,6 +634,90 @@ impl AuthorityRpcService {
             .await
     }
 
+    async fn validate_product_execution_credential<'a, T>(
+        &'a self,
+        request: &Request<T>,
+        credential: &wire::ExecutionCredential,
+    ) -> Result<
+        (
+            &'a AuthorityProductWorkloadProfile,
+            crate::authority::AuthorityInvocationRecord,
+        ),
+        Status,
+    > {
+        let profile = self.product_workload_peer(request)?;
+        self.dependencies.signer.verify(credential)?;
+        validate_credential_time(credential)?;
+        validate_product_workload_scope(credential, profile)?;
+        let snapshot = self
+            .dependencies
+            .snapshots
+            .active_snapshot()
+            .map_err(|_| Status::unavailable("active Authority snapshot is unavailable"))?;
+        if credential.contract_activation_generation != snapshot.generation {
+            return Err(Status::permission_denied(
+                "execution credential belongs to an inactive contract generation",
+            ));
+        }
+        let record = self
+            .dependencies
+            .outbox
+            .validate_product_execution_authorization(credential)
+            .await
+            .map_err(map_outbox_error)?;
+        if record.approved_invocation.credential.as_ref() != Some(credential) {
+            return Err(Status::permission_denied(
+                "execution credential is not the active approved credential",
+            ));
+        }
+        verify_approved(&record.approved_invocation)?;
+        self.revalidate_product_record(&record, &profile.workload_id)
+            .await?;
+        Ok((profile, record))
+    }
+
+    async fn revalidate_delegation_read_scopes(
+        &self,
+        delegation: &AuthorityDelegation,
+        roles: &BTreeSet<String>,
+    ) -> Result<(), Status> {
+        let snapshot = self
+            .dependencies
+            .snapshots
+            .active_snapshot()
+            .map_err(|_| Status::unavailable("active Authority snapshot is unavailable"))?;
+        let principal = VerifiedProductPrincipal::directory_user(roles.iter().cloned());
+        for scope in &delegation.operations {
+            let operation = snapshot
+                .policy
+                .authorize_delegation(
+                    &snapshot.bundle,
+                    &scope.owner_id,
+                    &scope.operation_id,
+                    &principal,
+                )
+                .map_err(map_policy_error)?;
+            for resource_id in &scope.resource_ids {
+                operation
+                    .validate_resource_id(Some(resource_id))
+                    .map_err(|_| {
+                        Status::permission_denied("delegation scope is no longer valid")
+                    })?;
+            }
+            if operation.resource_id().required && scope.resource_ids.is_empty() {
+                return Err(Status::permission_denied(
+                    "delegation scope is no longer valid",
+                ));
+            }
+            if operation.resource_id().path_parameter.is_none() && !scope.resource_ids.is_empty() {
+                return Err(Status::permission_denied(
+                    "delegation scope is no longer valid",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn validate_product_result(
         &self,
         credential: &wire::ExecutionCredential,
@@ -1206,71 +1290,116 @@ impl WorkspaceAuthorityService for AuthorityRpcService {
         request: Request<wire::GetDelegationRequest>,
     ) -> Result<Response<wire::GetDelegationResponse>, Status> {
         let workspace_id = request.get_ref().workspace_id.clone();
-        let (principal, roles, _) = self.authenticate(&request, &workspace_id).await?;
-        let delegation_id = Uuid::parse_str(&request.get_ref().delegation_id)
-            .map_err(|_| Status::invalid_argument("delegation id is invalid"))?;
-        let delegation = self
-            .dependencies
-            .delegations
-            .get(principal.organization_id(), &workspace_id, delegation_id)
-            .await
-            .map_err(map_delegation_error)?;
-        if delegation.principal_issuer != principal.identity().issuer
-            || delegation.principal_subject != principal.identity().subject
-        {
-            return Err(Status::not_found("delegation was not found"));
-        }
-        let snapshot = self
-            .dependencies
-            .snapshots
-            .active_snapshot()
-            .map_err(|_| Status::unavailable("active Authority snapshot is unavailable"))?;
-        let current_principal = VerifiedProductPrincipal::directory_user(roles);
-        for scope in &delegation.operations {
-            let operation = snapshot
-                .policy
-                .authorize_delegation(
-                    &snapshot.bundle,
-                    &scope.owner_id,
-                    &scope.operation_id,
-                    &current_principal,
-                )
-                .map_err(map_policy_error)?;
-            for resource_id in &scope.resource_ids {
-                operation
-                    .validate_resource_id(Some(resource_id))
-                    .map_err(|_| {
-                        Status::permission_denied("delegation scope is no longer valid")
-                    })?;
-            }
-            if operation.resource_id().required && scope.resource_ids.is_empty() {
-                return Err(Status::permission_denied(
-                    "delegation scope is no longer valid",
+        let delegation = if let Some(credential) = request.get_ref().execution_credential.as_ref() {
+            if request.metadata().contains_key("authorization") {
+                return Err(Status::invalid_argument(
+                    "bearer and Product execution proof cannot be combined",
                 ));
             }
-        }
-        Ok(Response::new(wire::GetDelegationResponse {
-            delegation_id: delegation.delegation_id.to_string(),
-            organization_id: delegation.organization_id,
-            workspace_id: delegation.workspace_id,
-            principal_issuer: delegation.principal_issuer,
-            principal_subject: delegation.principal_subject,
-            audience: delegation.audience,
-            operations: delegation
-                .operations
-                .into_iter()
-                .map(|scope| wire::DelegatedOperationScope {
-                    owner_id: scope.owner_id,
-                    operation_id: scope.operation_id,
-                    resource_ids: scope.resource_ids,
-                })
-                .collect(),
-            expires_at: Some(timestamp(delegation.expires_at_unix_ms)),
-            generation: delegation.generation,
-            revoked: delegation.revoked_at_unix_ms.is_some(),
-            revoked_at: delegation.revoked_at_unix_ms.map(timestamp),
-            managed_workload_id: delegation.managed_workload_id,
-        }))
+            if workspace_id.trim().is_empty() || workspace_id.len() > 256 {
+                return Err(Status::invalid_argument("workspace id is invalid"));
+            }
+            let requested_delegation_id = Uuid::parse_str(&request.get_ref().delegation_id)
+                .map_err(|_| Status::invalid_argument("delegation id is invalid"))?;
+            let (profile, record) = self
+                .validate_product_execution_credential(&request, credential)
+                .await?;
+            let approved = &record.approved_invocation;
+            let envelope = approved
+                .canonical_envelope
+                .as_ref()
+                .ok_or_else(|| Status::data_loss("approved invocation is incomplete"))?;
+            let approved_credential = approved
+                .credential
+                .as_ref()
+                .ok_or_else(|| Status::data_loss("approved invocation is incomplete"))?;
+            let authorization_source =
+                wire::InvocationAuthorizationSource::try_from(envelope.authorization_source)
+                    .map_err(|_| Status::data_loss("approved authorization source is invalid"))?;
+            if workspace_id != envelope.workspace_id {
+                return Err(Status::not_found("delegation was not found"));
+            }
+            if authorization_source == wire::InvocationAuthorizationSource::Delegation {
+                let approved_delegation_id = Uuid::parse_str(&envelope.delegation_id)
+                    .map_err(|_| Status::data_loss("approved delegation reference is invalid"))?;
+                if requested_delegation_id != approved_delegation_id {
+                    return Err(Status::not_found("delegation was not found"));
+                }
+            }
+            let delegation = self
+                .dependencies
+                .delegations
+                .get(
+                    &envelope.organization_id,
+                    &envelope.workspace_id,
+                    requested_delegation_id,
+                )
+                .await
+                .map_err(map_delegation_error)?;
+            if delegation.organization_id != envelope.organization_id
+                || delegation.workspace_id != envelope.workspace_id
+                || delegation.principal_issuer != envelope.principal_issuer
+                || delegation.principal_subject != envelope.principal_subject
+            {
+                return Err(Status::not_found("delegation was not found"));
+            }
+            if authorization_source == wire::InvocationAuthorizationSource::Delegation {
+                validate_delegation_fence(
+                    &delegation,
+                    DelegationFence {
+                        organization_id: &envelope.organization_id,
+                        workspace_id: &envelope.workspace_id,
+                        principal_issuer: &envelope.principal_issuer,
+                        principal_subject: &envelope.principal_subject,
+                        audience: &envelope.delegation_audience,
+                        managed_workload_id: &profile.workload_id,
+                        generation: Some(approved_credential.delegation_generation),
+                    },
+                    now_unix_ms(),
+                )?;
+            }
+            let roles = self
+                .dependencies
+                .directory
+                .roles_for_member(
+                    &cy_proto::workspace_v1::UserIdentityRef {
+                        issuer: envelope.principal_issuer.clone(),
+                        subject: envelope.principal_subject.clone(),
+                    },
+                    &envelope.organization_id,
+                    &envelope.workspace_id,
+                )
+                .await
+                .map_err(|_| Status::unavailable("workspace directory is unavailable"))?
+                .ok_or_else(|| {
+                    Status::permission_denied("delegation owner is no longer a member")
+                })?;
+            self.revalidate_delegation_read_scopes(&delegation, &roles)
+                .await?;
+            delegation
+        } else {
+            let (principal, roles, _) = self.authenticate(&request, &workspace_id).await?;
+            let delegation_id = Uuid::parse_str(&request.get_ref().delegation_id)
+                .map_err(|_| Status::invalid_argument("delegation id is invalid"))?;
+            let delegation = self
+                .dependencies
+                .delegations
+                .get(principal.organization_id(), &workspace_id, delegation_id)
+                .await
+                .map_err(map_delegation_error)?;
+            if delegation.organization_id != principal.organization_id()
+                || delegation.workspace_id != workspace_id
+                || delegation.principal_issuer != principal.identity().issuer
+                || delegation.principal_subject != principal.identity().subject
+            {
+                return Err(Status::not_found("delegation was not found"));
+            }
+            self.revalidate_delegation_read_scopes(&delegation, &roles)
+                .await?;
+            delegation
+        };
+
+        Ok(Response::new(project_delegation(delegation)))
     }
 
     async fn approve_and_enqueue_delegated_invocation(
@@ -1670,32 +1799,13 @@ impl WorkspaceAuthorityService for AuthorityRpcService {
         &self,
         request: Request<wire::ValidateProductExecutionAuthorizationRequest>,
     ) -> Result<Response<wire::ValidateProductExecutionAuthorizationResponse>, Status> {
-        let profile = self.product_workload_peer(&request)?;
         let credential = request
-            .into_inner()
+            .get_ref()
             .credential
+            .as_ref()
             .ok_or_else(|| Status::invalid_argument("credential is required"))?;
-        self.dependencies.signer.verify(&credential)?;
-        validate_credential_time(&credential)?;
-        validate_product_workload_scope(&credential, profile)?;
-        let snapshot = self
-            .dependencies
-            .snapshots
-            .active_snapshot()
-            .map_err(|_| Status::unavailable("active Authority snapshot is unavailable"))?;
-        if credential.contract_activation_generation != snapshot.generation {
-            return Err(Status::permission_denied(
-                "execution credential belongs to an inactive contract generation",
-            ));
-        }
-        let record = self
-            .dependencies
-            .outbox
-            .validate_product_execution_authorization(&credential)
-            .await
-            .map_err(map_outbox_error)?;
-        verify_approved(&record.approved_invocation)?;
-        self.revalidate_product_record(&record, &profile.workload_id)
+        let (_, record) = self
+            .validate_product_execution_credential(&request, credential)
             .await?;
         Ok(Response::new(
             wire::ValidateProductExecutionAuthorizationResponse {
@@ -2375,6 +2485,31 @@ fn map_outbox_error(error: AuthorityOutboxError) -> Status {
     }
 }
 
+fn project_delegation(delegation: AuthorityDelegation) -> wire::GetDelegationResponse {
+    wire::GetDelegationResponse {
+        delegation_id: delegation.delegation_id.to_string(),
+        organization_id: delegation.organization_id,
+        workspace_id: delegation.workspace_id,
+        principal_issuer: delegation.principal_issuer,
+        principal_subject: delegation.principal_subject,
+        audience: delegation.audience,
+        operations: delegation
+            .operations
+            .into_iter()
+            .map(|scope| wire::DelegatedOperationScope {
+                owner_id: scope.owner_id,
+                operation_id: scope.operation_id,
+                resource_ids: scope.resource_ids,
+            })
+            .collect(),
+        expires_at: Some(timestamp(delegation.expires_at_unix_ms)),
+        generation: delegation.generation,
+        revoked: delegation.revoked_at_unix_ms.is_some(),
+        revoked_at: delegation.revoked_at_unix_ms.map(timestamp),
+        managed_workload_id: delegation.managed_workload_id,
+    }
+}
+
 fn map_delegation_error(error: AuthorityDelegationError) -> Status {
     match error {
         AuthorityDelegationError::NotFound => Status::not_found("delegation was not found"),
@@ -2878,5 +3013,980 @@ mod workload_feature_token_tests {
         assert!(signer
             .verify_workload_feature_token(&changed_certificate)
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod get_delegation_identity_tests {
+    //! Real mTLS RPC tests for Product-proof and legacy bearer delegation reads.
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    use async_trait::async_trait;
+    use cy_proto::{
+        cyrene::workspace::authority::v2::workspace_authority_service_client::WorkspaceAuthorityServiceClient,
+        cyrene::workspace::authority::v2::workspace_authority_service_server::WorkspaceAuthorityServiceServer,
+        workspace_v1::UserIdentityRef,
+    };
+    use cy_workspace_product_contracts::{
+        ProductBundlePins, ProductContractBundle, TrustedProductPolicy,
+    };
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use tempfile::TempDir;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{
+        transport::{Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig},
+        Code, Request,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        authority::{
+            snapshot::{ContractSnapshot, SnapshotIdentity, VerifiedContractSnapshot},
+            AuthorityInvocationRecord, AuthorityOutboxError, AuthorityOutboxStore,
+            AuthorityTargetBinding, AuthorityWebSession, EnqueueOutcome, ExecutionDevicePeer,
+            InvocationWaitScope, MemoryAuthorityDelegationStore, NewAuthorityInvocation,
+            PersistedInvocationResult, SubmitResultOutcome,
+        },
+        device_registry::{
+            ApprovedWorkspaceDeviceCertificate, CurrentRelayPeerRevocationEvidence,
+            RelayPeerRevocationCheckError, WorkspaceDeviceCertificateIdentity,
+            WorkspaceDeviceDispatchFence, WorkspaceDeviceKey,
+            WorkspaceDevicePeerCertificateStatusChecker, WorkspaceDeviceRecord,
+            WorkspaceDeviceRegistry,
+        },
+        directory::{InMemoryWorkspaceDirectory, WorkspaceDirectoryError, WorkspaceMembership},
+        web_identity::{
+            test_principal, VerifiedWebPrincipal, WebIdentityError, WebPrincipalVerifier,
+        },
+    };
+
+    const ORGANIZATION_ID: &str = "org-1";
+    const WORKSPACE_ID: &str = "workspace-1";
+    const PRINCIPAL_ISSUER: &str = "https://issuer.example/tenant-a";
+    const PRINCIPAL_SUBJECT: &str = "actor-1";
+    const PRODUCT_WORKLOAD_ID: &str = "example-product-workload-v1";
+    const OWNER_ID: &str = "example";
+    const OPERATION_ID: &str = "listWorkspaceItems";
+    const TARGET_COMPONENT: &str = "cy-workspace-example";
+    // These self-signed keys are test-only and have no production trust relationship.
+    const CLIENT_CERTIFICATE_DER: &[u8] =
+        include_bytes!("../../testdata/product-identity/client.der");
+    const CLIENT_CERTIFICATE_PEM: &[u8] =
+        include_bytes!("../../testdata/product-identity/client.pem");
+    const CLIENT_PRIVATE_KEY_PEM: &[u8] =
+        include_bytes!("../../testdata/product-identity/client-key.pem");
+    const AUTHORITY_CA_PEM: &[u8] = include_bytes!("../../testdata/product-identity/ca.pem");
+    const AUTHORITY_CERTIFICATE_PEM: &[u8] =
+        include_bytes!("../../testdata/product-identity/server.pem");
+    const AUTHORITY_PRIVATE_KEY_PEM: &[u8] =
+        include_bytes!("../../testdata/product-identity/server-key.pem");
+
+    struct TestOutbox {
+        record: AuthorityInvocationRecord,
+        active_claim: bool,
+        validations: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AuthorityOutboxStore for TestOutbox {
+        async fn enqueue_authorized(
+            &self,
+            _invocation: NewAuthorityInvocation,
+        ) -> Result<EnqueueOutcome, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+
+        async fn claim_for_execution_device(
+            &self,
+            _peer: &ExecutionDevicePeer,
+            _max_batch_size: usize,
+        ) -> Result<Vec<AuthorityInvocationRecord>, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+
+        async fn validate_execution_credential(
+            &self,
+            _peer: &ExecutionDevicePeer,
+            _credential: &wire::ExecutionCredential,
+        ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+
+        async fn validate_product_execution_authorization(
+            &self,
+            credential: &wire::ExecutionCredential,
+        ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError> {
+            self.validations.fetch_add(1, Ordering::Relaxed);
+            if !self.active_claim {
+                return Err(AuthorityOutboxError::NotFound);
+            }
+            if self.record.approved_invocation.credential.as_ref() != Some(credential) {
+                return Err(AuthorityOutboxError::AuthorizationRevoked);
+            }
+            Ok(self.record.clone())
+        }
+
+        async fn get_product_invocation_status(
+            &self,
+            _invocation_id: &str,
+        ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+
+        async fn acknowledge_delivery(
+            &self,
+            _peer: &ExecutionDevicePeer,
+            _invocation_id: &str,
+            _credential: &wire::ExecutionCredential,
+            _delivery_receipt: &[u8],
+        ) -> Result<bool, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+
+        async fn submit_result(
+            &self,
+            _peer: &ExecutionDevicePeer,
+            _result: PersistedInvocationResult,
+        ) -> Result<SubmitResultOutcome, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+
+        async fn wait_for_result(
+            &self,
+            _invocation_id: &str,
+            _scope: &InvocationWaitScope,
+            _timeout: Duration,
+        ) -> Result<Option<AuthorityInvocationRecord>, AuthorityOutboxError> {
+            Err(AuthorityOutboxError::Unavailable)
+        }
+    }
+
+    struct TestVerifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl WebPrincipalVerifier for TestVerifier {
+        async fn verify_access_token(
+            &self,
+            access_token: &str,
+        ) -> Result<VerifiedWebPrincipal, WebIdentityError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let subject = match access_token {
+                "self" => PRINCIPAL_SUBJECT,
+                "other" => "actor-2",
+                _ => return Err(WebIdentityError::InvalidToken),
+            };
+            Ok(test_principal(
+                UserIdentityRef {
+                    issuer: PRINCIPAL_ISSUER.to_owned(),
+                    subject: subject.to_owned(),
+                },
+                ORGANIZATION_ID,
+                now_unix_ms() as i64 + 60_000,
+            ))
+        }
+    }
+
+    struct TestSessions {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AuthorityWebSessionStore for TestSessions {
+        async fn resolve_verified_bearer(
+            &self,
+            principal: &VerifiedWebPrincipal,
+            workspace_id: &str,
+            _bearer_token: &str,
+            now: u64,
+        ) -> Result<AuthorityWebSession, tonic::Status> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(AuthorityWebSession {
+                session_id: Uuid::from_bytes([12; 16]),
+                organization_id: principal.organization_id().to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                principal_issuer: principal.identity().issuer.clone(),
+                principal_subject: principal.identity().subject.clone(),
+                session_generation: 1,
+                issued_at_unix_ms: now,
+                expires_at_unix_ms: principal.expires_at_unix_ms() as u64,
+            })
+        }
+    }
+
+    struct TestTargets;
+
+    #[async_trait]
+    impl AuthorityExecutionTargetStore for TestTargets {
+        async fn resolve(
+            &self,
+            _organization_id: &str,
+            _workspace_id: &str,
+            _owner_id: &str,
+            _operation_id: &str,
+        ) -> Result<Option<AuthorityTargetBinding>, tonic::Status> {
+            Ok(None)
+        }
+    }
+
+    struct UnusedDeviceRegistry;
+
+    impl WorkspaceDeviceRegistry for UnusedDeviceRegistry {
+        fn import_approved_device_certificate(
+            &self,
+            _certificate: ApprovedWorkspaceDeviceCertificate,
+        ) -> Result<WorkspaceDeviceRecord, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn revoke_device(
+            &self,
+            _key: &WorkspaceDeviceKey,
+        ) -> Result<WorkspaceDeviceRecord, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn find_device(
+            &self,
+            _key: &WorkspaceDeviceKey,
+        ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn find_device_by_certificate_fingerprint(
+            &self,
+            _fingerprint_sha256: &str,
+        ) -> Result<Option<WorkspaceDeviceRecord>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn find_current_device_certificate_identity(
+            &self,
+            _fingerprint_sha256: &str,
+        ) -> Result<Option<WorkspaceDeviceCertificateIdentity>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+
+        fn acquire_relay_dispatch_fence(
+            &self,
+            _expected: &WorkspaceDeviceCertificateIdentity,
+        ) -> Result<Box<dyn WorkspaceDeviceDispatchFence>, WorkspaceDirectoryError> {
+            Err(WorkspaceDirectoryError::Storage(
+                "unused test method".into(),
+            ))
+        }
+    }
+
+    struct UnusedDeviceCertificateStatus;
+
+    impl WorkspaceDevicePeerCertificateStatusChecker for UnusedDeviceCertificateStatus {
+        fn require_current_good_status_for_peer_chain(
+            &self,
+            _leaf_certificate_der: &[u8],
+            _intermediate_chain_der: &[Vec<u8>],
+            _checked_at_unix_ms: u64,
+        ) -> Result<CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError> {
+            Err(RelayPeerRevocationCheckError::Unknown)
+        }
+    }
+
+    struct FixtureOptions {
+        active_claim: bool,
+        grant_subject: &'static str,
+        expired_credential: bool,
+        wrong_profile: bool,
+        authorization_source: wire::InvocationAuthorizationSource,
+    }
+
+    impl Default for FixtureOptions {
+        fn default() -> Self {
+            Self {
+                active_claim: true,
+                grant_subject: PRINCIPAL_SUBJECT,
+                expired_credential: false,
+                wrong_profile: false,
+                authorization_source: wire::InvocationAuthorizationSource::Delegation,
+            }
+        }
+    }
+
+    struct ServiceFixture {
+        service: AuthorityRpcService,
+        delegation: AuthorityDelegation,
+        delegation_id: Uuid,
+        credential: wire::ExecutionCredential,
+        validations: Arc<AtomicUsize>,
+        verifier_calls: Arc<AtomicUsize>,
+        session_calls: Arc<AtomicUsize>,
+        _temporary: TempDir,
+    }
+
+    impl ServiceFixture {
+        async fn new(options: FixtureOptions) -> Self {
+            let temporary = TempDir::new().expect("temporary fixture directory is available");
+            let snapshots = Arc::new(test_snapshot(&temporary));
+            let signer = AuthorityCredentialSigner::new(
+                "product-identity-test-key",
+                SigningKey::from_bytes(&[7; 32]),
+                Duration::from_secs(180),
+            )
+            .expect("test signer configuration is valid");
+            let delegation_id = Uuid::from_bytes([42; 16]);
+            let approved = approved_invocation(
+                &signer,
+                delegation_id,
+                options.expired_credential,
+                options.authorization_source,
+            );
+            let credential = approved
+                .credential
+                .as_ref()
+                .expect("test invocation has its signed credential")
+                .clone();
+            let record = AuthorityInvocationRecord {
+                approved_invocation: approved,
+                state: wire::InvocationState::Claimed,
+                result: None,
+            };
+            let validations = Arc::new(AtomicUsize::new(0));
+            let outbox = Arc::new(TestOutbox {
+                record,
+                active_claim: options.active_claim,
+                validations: validations.clone(),
+            });
+            let delegation = AuthorityDelegation {
+                delegation_id,
+                generation: 7,
+                organization_id: ORGANIZATION_ID.to_owned(),
+                workspace_id: WORKSPACE_ID.to_owned(),
+                principal_issuer: PRINCIPAL_ISSUER.to_owned(),
+                principal_subject: options.grant_subject.to_owned(),
+                audience: "example".to_owned(),
+                managed_workload_id: PRODUCT_WORKLOAD_ID.to_owned(),
+                operations: vec![DelegatedOperationScope {
+                    owner_id: OWNER_ID.to_owned(),
+                    operation_id: OPERATION_ID.to_owned(),
+                    resource_ids: Vec::new(),
+                }],
+                expires_at_unix_ms: now_unix_ms().saturating_add(3_600_000),
+                revoked_at_unix_ms: None,
+            };
+            let delegations = Arc::new(MemoryAuthorityDelegationStore::default());
+            delegations
+                .create(delegation.clone())
+                .await
+                .expect("test delegation is stored");
+
+            let directory = Arc::new(
+                InMemoryWorkspaceDirectory::new(
+                    [PRINCIPAL_SUBJECT, "actor-2"]
+                        .into_iter()
+                        .map(|subject| WorkspaceMembership {
+                            user: UserIdentityRef {
+                                issuer: PRINCIPAL_ISSUER.to_owned(),
+                                subject: subject.to_owned(),
+                            },
+                            organization_id: ORGANIZATION_ID.to_owned(),
+                            workspace_id: WORKSPACE_ID.to_owned(),
+                            roles: BTreeSet::from(["workspace.member".to_owned()]),
+                        })
+                        .collect(),
+                    Vec::new(),
+                )
+                .expect("test Directory is valid"),
+            );
+            let certificate_fingerprint: [u8; 32] = Sha256::digest(CLIENT_CERTIFICATE_DER).into();
+            let profile_fingerprint = if options.wrong_profile {
+                [0xff; 32]
+            } else {
+                certificate_fingerprint
+            };
+            let verifier_calls = Arc::new(AtomicUsize::new(0));
+            let session_calls = Arc::new(AtomicUsize::new(0));
+            let service = AuthorityRpcService::new(AuthorityServiceDependencies {
+                organization_id: ORGANIZATION_ID.to_owned(),
+                workspace_id: WORKSPACE_ID.to_owned(),
+                authority_instance_id: "authority-test".to_owned(),
+                snapshots,
+                web_verifier: Arc::new(TestVerifier {
+                    calls: verifier_calls.clone(),
+                }),
+                directory,
+                sessions: Arc::new(TestSessions {
+                    calls: session_calls.clone(),
+                }),
+                delegations,
+                exchange_workload: AuthorityManagedWorkload {
+                    workload_id: PRODUCT_WORKLOAD_ID.to_owned(),
+                    audience: "example".to_owned(),
+                    certificate_fingerprints_sha256: Vec::new(),
+                },
+                product_workload_profiles: vec![AuthorityProductWorkloadProfile {
+                    workload_id: PRODUCT_WORKLOAD_ID.to_owned(),
+                    owner_id: OWNER_ID.to_owned(),
+                    target_component: TARGET_COMPONENT.to_owned(),
+                    audience: "example".to_owned(),
+                    organization_id: Some(ORGANIZATION_ID.to_owned()),
+                    workspace_id: Some(WORKSPACE_ID.to_owned()),
+                    certificate_fingerprints_sha256: vec![profile_fingerprint],
+                }],
+                targets: Arc::new(TestTargets),
+                device_registry: Arc::new(UnusedDeviceRegistry),
+                device_certificate_status: Arc::new(UnusedDeviceCertificateStatus),
+                outbox,
+                signer,
+            });
+
+            Self {
+                service,
+                delegation,
+                delegation_id,
+                credential,
+                validations,
+                verifier_calls,
+                session_calls,
+                _temporary: temporary,
+            }
+        }
+
+        fn proof_request(&self) -> wire::GetDelegationRequest {
+            wire::GetDelegationRequest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                delegation_id: self.delegation_id.to_string(),
+                execution_credential: Some(self.credential.clone()),
+            }
+        }
+    }
+
+    fn test_snapshot(temporary: &TempDir) -> crate::authority::ContractSnapshotManager {
+        let bundle_root = temporary.path().join("bundle");
+        fs::create_dir_all(&bundle_root).expect("create Product bundle root");
+        let source_commit = "a".repeat(40);
+        let catalog_path = "Cyrene-Example/contracts/product/v2/catalog.json";
+        let openapi_path = "Cyrene-Example/contracts/product/v2/openapi.json";
+        let catalog = json!({
+            "schemaVersion": "cyrene.product.operation-catalog.v2",
+            "catalogVersion": "2.0.0",
+            "ownerId": OWNER_ID,
+            "operations": [{
+                "operationId": OPERATION_ID,
+                "routeId": OPERATION_ID,
+                "openapiPath": "contracts/product/v2/openapi.json",
+                "kind": "READ",
+                "requestSchemaPointer": null,
+                "responseSchemaPointers": [],
+                "resourceId": {
+                    "required": false,
+                    "pathParameter": null,
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": null
+                },
+                "idempotency": {
+                    "required": false,
+                    "header": null,
+                    "minLength": 8,
+                    "maxLength": 128
+                },
+                "scope": {
+                    "organizationPathParameter": null,
+                    "workspacePathParameter": null,
+                    "requestBindings": [],
+                    "responseBindings": []
+                }
+            }]
+        });
+        let openapi = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "Example Product test", "version": "2.0.0"},
+            "paths": {
+                "/v2/workspaces": {
+                    "get": {
+                        "operationId": OPERATION_ID,
+                        "responses": {"200": {"description": "OK"}}
+                    }
+                }
+            }
+        });
+        let policy = json!({
+            "schemaVersion": "cyrene.workspace.product.authorization-policy.v2",
+            "policyVersion": "2.0.0",
+            "grants": [{
+                "ownerId": OWNER_ID,
+                "operationId": OPERATION_ID,
+                "principalKinds": ["DIRECTORY_USER"],
+                "requiredRoles": ["workspace.member"],
+                "requiresExactWorkspace": true,
+                "requiredRequestBindings": [],
+                "requiredResponseBindings": []
+            }]
+        });
+        let catalog_bytes = serde_json::to_vec(&catalog).expect("serialize test catalog");
+        let openapi_bytes = serde_json::to_vec(&openapi).expect("serialize test OpenAPI");
+        let policy_bytes = serde_json::to_vec(&policy).expect("serialize test policy");
+        let files = BTreeMap::from([
+            (catalog_path.to_owned(), catalog_bytes.clone()),
+            (openapi_path.to_owned(), openapi_bytes),
+            (
+                "workspace-product-policy-v2.json".to_owned(),
+                policy_bytes.clone(),
+            ),
+        ]);
+        for (relative_path, bytes) in &files {
+            let path = bundle_root.join(relative_path);
+            fs::create_dir_all(path.parent().expect("bundle file has a parent"))
+                .expect("create bundle file parent");
+            fs::write(path, bytes).expect("write test bundle file");
+        }
+        let catalog_digest = sha256_hex(&catalog_bytes);
+        let policy_digest = sha256_hex(&policy_bytes);
+        let manifest = json!({
+            "formatVersion": 2,
+            "wireApiVersion": "cyrene.workspace.product.v2",
+            "owners": [{
+                "ownerId": OWNER_ID,
+                "repository": "Cyrene-Example",
+                "sourceSha": source_commit.clone(),
+                "catalogPath": catalog_path,
+                "catalogSha256": catalog_digest
+            }],
+            "files": files.iter().map(|(path, bytes)| json!({
+                "path": path,
+                "sha256": sha256_hex(bytes)
+            })).collect::<Vec<_>>()
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize test manifest");
+        let manifest_digest = sha256_hex(&manifest_bytes);
+        fs::write(
+            bundle_root.join("product-contract-bundle.json"),
+            &manifest_bytes,
+        )
+        .expect("write test manifest");
+        let pins = ProductBundlePins::new(
+            "cyrene.workspace.product.v2",
+            manifest_digest.clone(),
+            BTreeMap::from([(OWNER_ID.to_owned(), source_commit.clone())]),
+            "cyrene.workspace.product.authorization-policy.v2",
+            policy_digest.clone(),
+        );
+        let bundle = ProductContractBundle::load(&bundle_root, &pins)
+            .expect("load pinned test Product bundle");
+        let policy =
+            TrustedProductPolicy::load(bundle_root.join("workspace-product-policy-v2.json"), &pins)
+                .expect("load test Platform policy");
+        policy
+            .validate_bundle(&bundle)
+            .expect("test policy matches the Product bundle");
+        let content_digest = format!("sha256:{}", sha256_hex(b"test snapshot artifact"));
+        let snapshot = ContractSnapshot {
+            generation: 1,
+            activation_epoch: 1,
+            bundle: Arc::new(bundle),
+            policy: Arc::new(policy),
+            pins,
+            identity: SnapshotIdentity {
+                wire_api_version: "cyrene.workspace.product.v2".to_owned(),
+                bundle_manifest_sha256: manifest_digest,
+                policy_sha256: policy_digest,
+                content_digest: content_digest.clone(),
+                policy_source_commit: source_commit.clone(),
+                source_commits: BTreeMap::from([(OWNER_ID.to_owned(), source_commit)]),
+                owner_catalog_digests: BTreeMap::from([(OWNER_ID.to_owned(), catalog_digest)]),
+            },
+            artifact_id: content_digest,
+            activated_at_unix_ms: now_unix_ms(),
+        };
+        crate::authority::ContractSnapshotManager::open(
+            temporary.path().join("state"),
+            VerifiedContractSnapshot::from_verified(snapshot),
+        )
+        .expect("open test active snapshot")
+    }
+
+    fn approved_invocation(
+        signer: &AuthorityCredentialSigner,
+        delegation_id: Uuid,
+        expired: bool,
+        authorization_source: wire::InvocationAuthorizationSource,
+    ) -> wire::ApprovedInvocation {
+        let invocation_id = Uuid::from_bytes([99; 16]).to_string();
+        let invocation = cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2 {
+            owner_id: OWNER_ID.to_owned(),
+            operation_id: OPERATION_ID.to_owned(),
+            ..Default::default()
+        };
+        let target = wire::ExecutionTarget {
+            target_component: TARGET_COMPONENT.to_owned(),
+            http_method: "GET".to_owned(),
+            endpoint: "https://example.test/v2/workspaces".to_owned(),
+            resource_id: String::new(),
+            scope: "org-1/workspace-1".to_owned(),
+            idempotency_key: String::new(),
+            idempotency_semantics: wire::IdempotencySemantics::NotSupported as i32,
+            execution_device_id: "connector-1".to_owned(),
+            execution_device_generation: 4,
+            execution_authorization_id: vec![3; 16],
+            execution_device_certificate_sha256: vec![4; 32],
+        };
+        let now = now_unix_ms();
+        let issued_at = if expired {
+            now.saturating_sub(120_000)
+        } else {
+            now.saturating_sub(1_000)
+        };
+        let expires_at = if expired {
+            now.saturating_sub(1)
+        } else {
+            now.saturating_add(120_000)
+        };
+        let is_delegated = authorization_source == wire::InvocationAuthorizationSource::Delegation;
+        let session_id = if is_delegated {
+            String::new()
+        } else {
+            Uuid::from_bytes([13; 16]).to_string()
+        };
+        let session_generation = if is_delegated { 0 } else { 1 };
+        let approved_delegation_id = if is_delegated {
+            delegation_id.to_string()
+        } else {
+            String::new()
+        };
+        let delegation_generation = if is_delegated { 7 } else { 0 };
+        let delegation_audience = if is_delegated { "example" } else { "" };
+        let envelope = wire::CanonicalInvocationEnvelope {
+            invocation_id: invocation_id.clone(),
+            invocation: Some(invocation.clone()),
+            target: Some(target.clone()),
+            organization_id: ORGANIZATION_ID.to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            principal_issuer: PRINCIPAL_ISSUER.to_owned(),
+            principal_subject: PRINCIPAL_SUBJECT.to_owned(),
+            execution_device_id: target.execution_device_id.clone(),
+            execution_device_generation: target.execution_device_generation,
+            execution_authorization_id: target.execution_authorization_id.clone(),
+            execution_device_certificate_sha256: target.execution_device_certificate_sha256.clone(),
+            session_id: session_id.clone(),
+            session_generation,
+            contract_activation_generation: 1,
+            issued_at: Some(timestamp(issued_at)),
+            expires_at: Some(timestamp(expires_at)),
+            authorization_source: authorization_source as i32,
+            delegation_id: approved_delegation_id.clone(),
+            delegation_generation,
+            delegation_audience: delegation_audience.to_owned(),
+        };
+        let request_digest = Sha256::digest(envelope.encode_to_vec()).to_vec();
+        let invocation_digest = Sha256::digest(invocation.encode_to_vec()).to_vec();
+        let mut credential = wire::ExecutionCredential {
+            invocation_id: invocation_id.clone(),
+            invocation_digest_sha256: invocation_digest,
+            request_digest_sha256: request_digest,
+            organization_id: ORGANIZATION_ID.to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            principal_issuer: PRINCIPAL_ISSUER.to_owned(),
+            principal_subject: PRINCIPAL_SUBJECT.to_owned(),
+            operation_owner_id: OWNER_ID.to_owned(),
+            operation_id: OPERATION_ID.to_owned(),
+            scope: target.scope.clone(),
+            resource_id: target.resource_id.clone(),
+            target_component: target.target_component.clone(),
+            http_method: target.http_method.clone(),
+            endpoint: target.endpoint.clone(),
+            execution_device_id: target.execution_device_id.clone(),
+            execution_device_generation: target.execution_device_generation,
+            execution_authorization_id: target.execution_authorization_id.clone(),
+            execution_device_certificate_sha256: target.execution_device_certificate_sha256.clone(),
+            session_id,
+            session_generation,
+            contract_activation_generation: 1,
+            idempotency_key: target.idempotency_key.clone(),
+            idempotency_semantics: target.idempotency_semantics,
+            signing_key_id: String::new(),
+            issued_at: Some(timestamp(issued_at)),
+            expires_at: Some(timestamp(expires_at)),
+            authority_signature: Vec::new(),
+            authorization_source: authorization_source as i32,
+            delegation_id: approved_delegation_id,
+            delegation_generation,
+            delegation_audience: delegation_audience.to_owned(),
+        };
+        signer
+            .sign(&mut credential)
+            .expect("test execution credential signs");
+        wire::ApprovedInvocation {
+            invocation_id,
+            canonical_envelope: Some(envelope),
+            credential: Some(credential),
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    async fn call_over_product_mtls(
+        service: AuthorityRpcService,
+        request: wire::GetDelegationRequest,
+    ) -> Result<wire::GetDelegationResponse, tonic::Status> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local test Authority listener");
+        let address = listener.local_addr().expect("test listener has address");
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                AUTHORITY_CERTIFICATE_PEM,
+                AUTHORITY_PRIVATE_KEY_PEM,
+            ))
+            .client_ca_root(Certificate::from_pem(AUTHORITY_CA_PEM));
+        let mut server = Server::builder()
+            .tls_config(tls)
+            .expect("test Authority TLS configuration is valid");
+        let server_task = tokio::spawn(async move {
+            server
+                .add_service(WorkspaceAuthorityServiceServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+
+        let client_tls = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(AUTHORITY_CA_PEM))
+            .domain_name("authority.test")
+            .identity(Identity::from_pem(
+                CLIENT_CERTIFICATE_PEM,
+                CLIENT_PRIVATE_KEY_PEM,
+            ));
+        let endpoint = Endpoint::from_shared(format!("https://{address}"))
+            .expect("test Authority endpoint is valid")
+            .tls_config(client_tls)
+            .expect("test client TLS configuration is valid");
+        let result = match endpoint.connect().await {
+            Ok(channel) => WorkspaceAuthorityServiceClient::new(channel)
+                .get_delegation(Request::new(request))
+                .await
+                .map(|response| response.into_inner()),
+            Err(error) => Err(tonic::Status::unavailable(format!(
+                "test mTLS client connection failed: {error}"
+            ))),
+        };
+        server_task.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn approved_product_mtls_proof_returns_the_same_self_metadata_as_bearer() {
+        let fixture = ServiceFixture::new(FixtureOptions::default()).await;
+        let proof_response =
+            call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+                .await
+                .expect("current approved Product proof reads its own delegation");
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
+        assert_eq!(proof_response.principal_issuer, PRINCIPAL_ISSUER);
+        assert_eq!(proof_response.principal_subject, PRINCIPAL_SUBJECT);
+        assert_eq!(proof_response.workspace_id, WORKSPACE_ID);
+
+        let mut bearer_request = Request::new(wire::GetDelegationRequest {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            delegation_id: fixture.delegation_id.to_string(),
+            execution_credential: None,
+        });
+        bearer_request.metadata_mut().insert(
+            "authorization",
+            "Bearer self"
+                .parse()
+                .expect("static bearer metadata is valid"),
+        );
+        let bearer_response =
+            WorkspaceAuthorityService::get_delegation(&fixture.service, bearer_request)
+                .await
+                .expect("legacy self bearer read remains supported")
+                .into_inner();
+        assert_eq!(proof_response, bearer_response);
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            project_delegation(fixture.delegation.clone()),
+            proof_response
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_session_and_legacy_interactive_proofs_read_only_self_grants() {
+        for authorization_source in [
+            wire::InvocationAuthorizationSource::InteractiveSession,
+            wire::InvocationAuthorizationSource::Unspecified,
+        ] {
+            let fixture = ServiceFixture::new(FixtureOptions {
+                authorization_source,
+                ..FixtureOptions::default()
+            })
+            .await;
+            let response = call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+                .await
+                .expect("validated interactive Product proof reads its own grant");
+
+            assert_eq!(response.principal_issuer, PRINCIPAL_ISSUER);
+            assert_eq!(response.principal_subject, PRINCIPAL_SUBJECT);
+            assert_eq!(response.workspace_id, WORKSPACE_ID);
+            assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
+            assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn interactive_session_proof_cannot_read_another_actors_grant() {
+        let fixture = ServiceFixture::new(FixtureOptions {
+            grant_subject: "actor-2",
+            authorization_source: wire::InvocationAuthorizationSource::InteractiveSession,
+            ..FixtureOptions::default()
+        })
+        .await;
+        let status = call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+            .await
+            .expect_err("interactive proof cannot read another actor's grant");
+        assert_eq!(status.code(), Code::NotFound);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn product_proof_rejects_an_unconfigured_mtls_profile() {
+        let fixture = ServiceFixture::new(FixtureOptions {
+            wrong_profile: true,
+            ..FixtureOptions::default()
+        })
+        .await;
+        let status = call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+            .await
+            .expect_err("unconfigured Product certificate is denied");
+        assert_eq!(status.code(), Code::Unauthenticated);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn product_proof_cannot_read_a_delegation_owned_by_another_actor() {
+        let fixture = ServiceFixture::new(FixtureOptions {
+            grant_subject: "actor-2",
+            ..FixtureOptions::default()
+        })
+        .await;
+        let status = call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+            .await
+            .expect_err("an approved invocation cannot read another actor's grant");
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn product_proof_rejects_expiry_before_reading_the_outbox_claim() {
+        let fixture = ServiceFixture::new(FixtureOptions {
+            expired_credential: true,
+            ..FixtureOptions::default()
+        })
+        .await;
+        let status = call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+            .await
+            .expect_err("expired approved invocation proof is denied");
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn product_proof_rejects_tampering_and_never_combines_bearer_auth() {
+        let fixture = ServiceFixture::new(FixtureOptions::default()).await;
+        let mut tampered = fixture.proof_request();
+        tampered
+            .execution_credential
+            .as_mut()
+            .expect("proof is present")
+            .request_digest_sha256[0] ^= 1;
+        let status = call_over_product_mtls(fixture.service.clone(), tampered)
+            .await
+            .expect_err("tampered signed proof is denied");
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 0);
+
+        let mut mixed_request = Request::new(fixture.proof_request());
+        mixed_request.metadata_mut().insert(
+            "authorization",
+            "Bearer self"
+                .parse()
+                .expect("static bearer metadata is valid"),
+        );
+        let status = WorkspaceAuthorityService::get_delegation(&fixture.service, mixed_request)
+            .await
+            .expect_err("proof and bearer authentication are mutually exclusive");
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn product_proof_requires_the_outbox_active_claim() {
+        let fixture = ServiceFixture::new(FixtureOptions {
+            active_claim: false,
+            ..FixtureOptions::default()
+        })
+        .await;
+        let status = call_over_product_mtls(fixture.service.clone(), fixture.proof_request())
+            .await
+            .expect_err("invocation without an active claim is denied");
+        assert_eq!(status.code(), Code::NotFound);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_bearer_read_remains_self_only() {
+        let fixture = ServiceFixture::new(FixtureOptions::default()).await;
+        let mut request = Request::new(wire::GetDelegationRequest {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            delegation_id: fixture.delegation_id.to_string(),
+            execution_credential: None,
+        });
+        request.metadata_mut().insert(
+            "authorization",
+            "Bearer other".parse().expect("valid metadata"),
+        );
+        let status = WorkspaceAuthorityService::get_delegation(&fixture.service, request)
+            .await
+            .expect_err("another authenticated actor cannot read the grant");
+        assert_eq!(status.code(), Code::NotFound);
+        assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.validations.load(Ordering::Relaxed), 0);
     }
 }
