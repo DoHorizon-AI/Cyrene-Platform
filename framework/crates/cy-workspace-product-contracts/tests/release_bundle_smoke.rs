@@ -7,8 +7,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use cy_proto::cyrene::workspace::product::v2::ProductApiInvocationV2;
 use cy_workspace_product_contracts::{
-    ProductBundlePins, ProductContractBundle, TrustedProductPolicy, CONTRACT_API_VERSION,
+    AuthorizationError, ProductBundlePins, ProductContractBundle, TrustedProductPolicy,
+    TrustedWorkspaceScope, VerifiedProductPrincipal, CONTRACT_API_VERSION,
 };
 use serde_json::Value;
 
@@ -74,6 +76,108 @@ fn generated_six_owner_bundle_loads_with_the_tracked_platform_lock() {
         .validate_bundle(&bundle)
         .expect("approved policy selectors exist in owner catalogs");
 
+    let member_reads = [
+        "accountBeginLink",
+        "accountListLinks",
+        "accountConfirmWeComLink",
+        "accountUnlink",
+        "integrationAttachActorBinding",
+        "integrationListActorBindings",
+        "integrationGetIssue",
+        "integrationQueryIssue",
+        "integrationGetOperation",
+        "integrationReconcile",
+        "integrationExecuteIssueQuery",
+    ];
+    for operation_id in member_reads {
+        assert!(
+            policy.has_grant("exchange", operation_id),
+            "missing grant: {operation_id}"
+        );
+        assert_exchange_policy_rejects_roles(
+            &bundle,
+            &policy,
+            operation_id,
+            std::iter::empty::<String>(),
+            AuthorizationError::MissingRole,
+        );
+    }
+
+    let configure_operations = [
+        "integrationListConnections",
+        "integrationCreateConnection",
+        "integrationListBindings",
+        "integrationCreateBinding",
+    ];
+    for operation_id in configure_operations {
+        assert!(
+            policy.has_grant("exchange", operation_id),
+            "missing grant: {operation_id}"
+        );
+        assert_exchange_policy_rejects_roles(
+            &bundle,
+            &policy,
+            operation_id,
+            ["workspace.member"],
+            AuthorizationError::MissingRole,
+        );
+        assert_exchange_policy_rejects_roles(
+            &bundle,
+            &policy,
+            operation_id,
+            ["workspace.product.command.exchange.integration.configure.v1"],
+            AuthorizationError::MissingRole,
+        );
+    }
+
+    for operation_id in [
+        "integrationCreateIssueComment",
+        "integrationExecuteIssueComment",
+    ] {
+        assert!(
+            policy.has_grant("exchange", operation_id),
+            "missing grant: {operation_id}"
+        );
+        assert_exchange_policy_rejects_roles(
+            &bundle,
+            &policy,
+            operation_id,
+            ["workspace.member"],
+            AuthorizationError::MissingRole,
+        );
+    }
+    for operation_id in [
+        "integrationUpdateIssueState",
+        "integrationExecuteIssueState",
+    ] {
+        assert!(
+            policy.has_grant("exchange", operation_id),
+            "missing grant: {operation_id}"
+        );
+        assert_exchange_policy_rejects_roles(
+            &bundle,
+            &policy,
+            operation_id,
+            ["workspace.member"],
+            AuthorizationError::MissingRole,
+        );
+    }
+
+    assert!(!policy.has_grant("exchange", "accountCompleteGitHubLink"));
+    assert!(!policy.has_grant("exchange", "integrationReceiveGitHubWebhook"));
+    let trusted_workload = VerifiedProductPrincipal::trusted_navigator_workload();
+    let account_link_request = ProductApiInvocationV2 {
+        owner_id: "exchange".to_owned(),
+        operation_id: "accountBeginLink".to_owned(),
+        ..ProductApiInvocationV2::default()
+    };
+    let scope = TrustedWorkspaceScope::new("organization-release-smoke", "workspace-release-smoke")
+        .expect("test Workspace scope is valid");
+    assert!(matches!(
+        policy.authorize(&bundle, account_link_request, &trusted_workload, scope),
+        Err(AuthorizationError::PrincipalNotAllowed)
+    ));
+
     assert_eq!(
         bundle.owner_ids().count(),
         lock["owners"].as_array().unwrap().len()
@@ -85,4 +189,26 @@ fn generated_six_owner_bundle_loads_with_the_tracked_platform_lock() {
         "navigator",
         "append_events_api_v1_harness_workspaces__workspace_id__sessions__session_id__append_post"
     ));
+}
+
+fn assert_exchange_policy_rejects_roles(
+    bundle: &ProductContractBundle,
+    policy: &TrustedProductPolicy,
+    operation_id: &str,
+    roles: impl IntoIterator<Item = impl Into<String>>,
+    expected: AuthorizationError,
+) {
+    let request = ProductApiInvocationV2 {
+        owner_id: "exchange".to_owned(),
+        operation_id: operation_id.to_owned(),
+        ..ProductApiInvocationV2::default()
+    };
+    let principal = VerifiedProductPrincipal::directory_user(roles.into_iter().map(Into::into));
+    let scope = TrustedWorkspaceScope::new("organization-release-smoke", "workspace-release-smoke")
+        .expect("test Workspace scope is valid");
+    let result = policy.authorize(bundle, request, &principal, scope);
+    assert!(
+        matches!(result, Err(error) if error == expected),
+        "expected {expected:?} for Exchange operation {operation_id}, got {result:?}"
+    );
 }

@@ -136,7 +136,9 @@
       "requiredRoles": ["workspace.member"],
       "requiresExactWorkspace": true,
       "requiredRequestBindings": [],
-      "requiredResponseBindings": []
+      "requiredResponseBindings": [
+        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
     },
     {
       "ownerId": "exchange",
@@ -145,6 +147,211 @@
       "requiredRoles": [
         "workspace.member",
         "workspace.product.command.exchange.create_route_draft.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "accountBeginLink",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "accountListLinks",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "accountConfirmWeComLink",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "accountUnlink",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationAttachActorBinding",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationListActorBindings",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationGetIssue",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationQueryIssue",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationGetOperation",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationReconcile",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationExecuteIssueQuery",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationListConnections",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationCreateConnection",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationListBindings",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationCreateBinding",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": [
+        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
+      ]
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationCreateIssueComment",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.comment.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationExecuteIssueComment",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.comment.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationUpdateIssueState",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.state.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationExecuteIssueState",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.state.v1"
       ],
       "requiresExactWorkspace": true,
       "requiredRequestBindings": [],
