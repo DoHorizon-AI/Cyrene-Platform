@@ -1,23 +1,24 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     net::TcpStream,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::Path,
     sync::{
-        Arc, Barrier,
+        Arc, Barrier, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
 };
 
+use cy_manifest::PluginManifest;
 use cy_package_runtime::{
     ActivationRequest, ArtifactDigest, BindingId, DependencyPreparationEvidence,
-    DependencyPreparer, FilesystemPackageRuntime, InstallationState, PackageId,
-    PackageRuntimeError, PackageSource, PackageVersion, ProcessPluginServiceSupervisor,
-    RuntimeState, ServiceActivationOptions,
+    DependencyPreparer, FilesystemPackageRuntime, InstallationId, InstallationState, PackageId,
+    PackageRuntimeError, PackageSource, PackageVersion, PluginServiceSupervisor,
+    ProcessPluginServiceSupervisor, RuntimeGeneration, RuntimeState, ServiceActivationOptions,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -132,6 +133,78 @@ fn open_runtime(root: &Path, preparer: FixtureDependencyPreparer) -> FilesystemP
         root,
         Arc::new(preparer),
         Box::new(ProcessPluginServiceSupervisor::default()),
+        service_options(),
+    )
+    .unwrap()
+}
+
+#[derive(Clone, Default)]
+struct RecordingSupervisor {
+    environments: Arc<Mutex<BTreeMap<BindingId, BTreeMap<String, String>>>>,
+}
+
+impl RecordingSupervisor {
+    fn environment(&self, binding_id: &BindingId) -> Option<BTreeMap<String, String>> {
+        self.environments.lock().unwrap().get(binding_id).cloned()
+    }
+}
+
+impl PluginServiceSupervisor for RecordingSupervisor {
+    fn activate(
+        &mut self,
+        binding_id: &BindingId,
+        _installation_id: &InstallationId,
+        _manifest: &PluginManifest,
+        options: ServiceActivationOptions,
+        _generation: RuntimeGeneration,
+    ) -> Result<String, PackageRuntimeError> {
+        self.environments.lock().unwrap().insert(
+            binding_id.clone(),
+            options.environment.into_iter().collect(),
+        );
+        Ok(format!("recording://{binding_id}"))
+    }
+
+    fn deactivate(&mut self, binding_id: &BindingId) -> Result<(), PackageRuntimeError> {
+        self.environments.lock().unwrap().remove(binding_id);
+        Ok(())
+    }
+
+    fn status(&mut self, binding_id: &BindingId) -> Result<RuntimeState, PackageRuntimeError> {
+        Ok(
+            if self.environments.lock().unwrap().contains_key(binding_id) {
+                RuntimeState::Running
+            } else {
+                RuntimeState::Stopped
+            },
+        )
+    }
+
+    fn connection_ref(
+        &mut self,
+        binding_id: &BindingId,
+    ) -> Result<Option<String>, PackageRuntimeError> {
+        Ok(self
+            .environments
+            .lock()
+            .unwrap()
+            .contains_key(binding_id)
+            .then(|| format!("recording://{binding_id}")))
+    }
+
+    fn active_bindings(&mut self) -> Result<BTreeSet<BindingId>, PackageRuntimeError> {
+        Ok(self.environments.lock().unwrap().keys().cloned().collect())
+    }
+}
+
+fn open_recording_runtime(
+    root: &Path,
+    supervisor: RecordingSupervisor,
+) -> FilesystemPackageRuntime {
+    FilesystemPackageRuntime::open(
+        root,
+        Arc::new(FixtureDependencyPreparer::successful()),
+        Box::new(supervisor),
         service_options(),
     )
     .unwrap()
@@ -266,6 +339,148 @@ fn build_package_with_entry(
         descriptor_path,
         archive_path,
     }
+}
+
+#[test]
+fn binding_private_data_is_isolated_and_survives_binding_and_package_removal() {
+    let temp = TempDir::new().unwrap();
+    let runtime_root = temp.path().join("runtime");
+    let package = build_package(&temp.path().join("candidate"), "1.0.0");
+    let outside_path = temp.path().join("outside");
+    fs::create_dir(&outside_path).unwrap();
+    let supervisor = RecordingSupervisor::default();
+    let runtime = open_recording_runtime(&runtime_root, supervisor.clone());
+    let installation = runtime.install(&package).unwrap();
+    let bindings = [
+        BindingId::new("account-center-main").unwrap(),
+        BindingId::new("account-center-secondary").unwrap(),
+    ];
+    let mut private_paths = Vec::new();
+
+    for binding_id in &bindings {
+        runtime
+            .activate(ActivationRequest {
+                binding_id: binding_id.clone(),
+                installation_id: installation.installation_id.clone(),
+                environment: BTreeMap::from([(
+                    "CYRENE_PLUGIN_STORAGE_PATH".to_string(),
+                    outside_path.to_string_lossy().into_owned(),
+                )]),
+            })
+            .unwrap();
+        let fact = runtime.binding_activation_fact(binding_id).unwrap();
+        let expected = runtime_root
+            .join("binding-private")
+            .join(binding_id.as_str())
+            .join(PACKAGE_ID);
+        assert_eq!(fact.binding_id, *binding_id);
+        assert_eq!(fact.installation_id, installation.installation_id);
+        assert_eq!(fact.package_id.as_str(), PACKAGE_ID);
+        assert_eq!(fact.private_data_path, expected);
+        assert!(fact.private_data_path.is_absolute());
+        let metadata = fs::symlink_metadata(&fact.private_data_path).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
+        assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+        assert_eq!(metadata.gid(), nix::unistd::getegid().as_raw());
+        assert_eq!(
+            supervisor
+                .environment(binding_id)
+                .unwrap()
+                .get("CYRENE_PLUGIN_STORAGE_PATH")
+                .map(String::as_str),
+            Some(expected.to_str().unwrap()),
+            "activation must override a caller-selected host path"
+        );
+        fs::write(expected.join("private.marker"), binding_id.as_str()).unwrap();
+        private_paths.push(expected);
+    }
+
+    assert_ne!(private_paths[0], private_paths[1]);
+    let package_v2 = build_package(&temp.path().join("candidate-v2"), "1.1.0");
+    let installation_v2 = runtime.install(&package_v2).unwrap();
+    runtime
+        .upgrade(
+            &bindings[0],
+            &installation_v2.installation_id,
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let upgraded_fact = runtime.binding_activation_fact(&bindings[0]).unwrap();
+    assert_eq!(
+        upgraded_fact.installation_id,
+        installation_v2.installation_id
+    );
+    assert_eq!(upgraded_fact.package_id.as_str(), PACKAGE_ID);
+    assert_eq!(upgraded_fact.private_data_path, private_paths[0]);
+    assert_eq!(
+        supervisor
+            .environment(&bindings[0])
+            .unwrap()
+            .get("CYRENE_PLUGIN_STORAGE_PATH")
+            .map(String::as_str),
+        Some(private_paths[0].to_str().unwrap())
+    );
+
+    for binding_id in &bindings {
+        runtime.deactivate(binding_id).unwrap();
+        runtime.remove_binding_reference(binding_id).unwrap();
+    }
+    runtime.uninstall(&installation.installation_id).unwrap();
+    runtime.uninstall(&installation_v2.installation_id).unwrap();
+    runtime.cleanup().unwrap();
+
+    for (binding_id, private_path) in bindings.iter().zip(private_paths) {
+        assert_eq!(
+            fs::read_to_string(private_path.join("private.marker")).unwrap(),
+            binding_id.as_str()
+        );
+    }
+}
+
+#[test]
+fn binding_private_data_rejects_symlink_escape_and_path_identity_traversal() {
+    let temp = TempDir::new().unwrap();
+    let runtime_root = temp.path().join("runtime");
+    let package = build_package(&temp.path().join("candidate"), "1.0.0");
+    let outside_path = temp.path().join("outside");
+    fs::create_dir(&outside_path).unwrap();
+    fs::write(outside_path.join("sentinel"), b"unchanged").unwrap();
+    let supervisor = RecordingSupervisor::default();
+    let runtime = open_recording_runtime(&runtime_root, supervisor.clone());
+    let installation = runtime.install(&package).unwrap();
+    let binding_id = BindingId::new("account-center-symlink").unwrap();
+    symlink(
+        &outside_path,
+        runtime_root
+            .join("binding-private")
+            .join(binding_id.as_str()),
+    )
+    .unwrap();
+
+    let error = runtime
+        .activate(ActivationRequest {
+            binding_id: binding_id.clone(),
+            installation_id: installation.installation_id,
+            environment: BTreeMap::from([(
+                "CYRENE_PLUGIN_STORAGE_PATH".to_string(),
+                outside_path.to_string_lossy().into_owned(),
+            )]),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "PLUGIN_PRIVATE_DATA_UNAVAILABLE");
+    assert_eq!(
+        fs::read(outside_path.join("sentinel")).unwrap(),
+        b"unchanged"
+    );
+    assert!(supervisor.environment(&binding_id).is_none());
+    assert!(BindingId::new("..").is_err());
+    assert!(PackageId::new("..").is_err());
+    assert!(BindingId::new("../outside").is_err());
+    assert!(serde_json::from_str::<BindingId>("\"..\"").is_err());
+    assert!(serde_json::from_str::<PackageId>("\"..\"").is_err());
 }
 
 #[test]

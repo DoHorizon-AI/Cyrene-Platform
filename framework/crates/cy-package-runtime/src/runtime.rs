@@ -1,5 +1,14 @@
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │  📄 runtime.rs                                                       │
+//! │  Module: cy_package_runtime::runtime                               │
+//! │  Role: Owns verified installs, binding activation, and durable state.│
+//! │                                                                      │
+//! │  模块职责：管理已验证安装、binding 激活及 durable runtime 状态。       │
+//! └─────────────────────────────────────────────────────────────────────┘
+
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::CString,
     fs::{self, File, OpenOptions},
     io::Write,
     os::unix::{
@@ -17,11 +26,11 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 use crate::{
-    ActivationRequest, ArtifactDigest, BindingId, CleanupReport, DependencyPreparationEvidence,
-    InstallationId, InstallationRecord, InstallationState, OfflineInstallCandidateIdentity,
-    PackageId, PackageInspection, PackageRuntimeError, PackageSource, PackageVersion,
-    PluginServiceSupervisor, RuntimeGeneration, RuntimeState, RuntimeStatus,
-    ServiceActivationOptions, VerifiedPackage,
+    ActivationRequest, ArtifactDigest, BindingActivationFact, BindingId, CleanupReport,
+    DependencyPreparationEvidence, InstallationId, InstallationRecord, InstallationState,
+    OfflineInstallCandidateIdentity, PackageId, PackageInspection, PackageRuntimeError,
+    PackageSource, PackageVersion, PluginServiceSupervisor, RuntimeGeneration, RuntimeState,
+    RuntimeStatus, ServiceActivationOptions, VerifiedPackage,
     dependency::DependencyPreparer,
     descriptor::{
         digest_entries, digest_file, inspect_source, unix_ms, validate_archive_paths, verify_source,
@@ -31,6 +40,8 @@ use crate::{
 const INSTALLATION_RECORD_VERSION: u32 = 1;
 const ACTIVATION_RECORD_VERSION: u32 = 1;
 const PROCESS_LOCK_FILE: &str = ".package-runtime.lock";
+const PRIVATE_DATA_DIRECTORY: &str = "binding-private";
+const PRIVATE_DATA_ENVIRONMENT: &str = "CYRENE_PLUGIN_STORAGE_PATH";
 
 /// Cross-process ownership of one package runtime state root.
 ///
@@ -261,6 +272,9 @@ impl FilesystemPackageRuntime {
     ) -> Result<Self, PackageRuntimeError> {
         let root = root.into();
         validate_runtime_root(&root, process_lock.owner_uid, process_lock.owner_gid)?;
+        let root = fs::canonicalize(root).map_err(io_error("RUNTIME_ROOT_UNAVAILABLE"))?;
+        validate_runtime_root(&root, process_lock.owner_uid, process_lock.owner_gid)?;
+        process_lock.validate_and_lock(&root)?;
         for directory in [
             root.join("cache/archives"),
             root.join("cache/descriptors"),
@@ -276,6 +290,7 @@ impl FilesystemPackageRuntime {
                 )
             })?;
         }
+        ensure_binding_private_root(&root, process_lock.owner_uid, process_lock.owner_gid)?;
         let runtime = Self {
             root,
             dependency_preparer,
@@ -462,6 +477,37 @@ impl FilesystemPackageRuntime {
             installation.package_id.to_string(),
             record.installation_id.to_string(),
         ))
+    }
+
+    /// Resolves the package-runtime-owned activation facts for one binding.
+    ///
+    /// The package identity comes from the durable installation record. The
+    /// private data path is `${runtime-root}/binding-private/<binding>/<package>`
+    /// and is created with mode `0700` when first needed. It remains independent
+    /// of package installation versions, so upgrades and uninstall do not erase
+    /// Plugin-owned state. 中文：此查询只接受 binding ID，package 与路径均由 runtime 状态解析。
+    pub fn binding_activation_fact(
+        &self,
+        binding_id: &BindingId,
+    ) -> Result<BindingActivationFact, PackageRuntimeError> {
+        let _guard = self.lock_lifecycle()?;
+        let (package_id, installation_id) = self.binding_package_scope(binding_id)?;
+        let package_id = PackageId::new(package_id)?;
+        let installation_id = InstallationId::new(installation_id)?;
+        let record = self.read_activation(binding_id)?;
+        if record.binding_id != *binding_id || record.installation_id != installation_id {
+            return Err(PackageRuntimeError::new(
+                "BINDING_RECORD_INVALID",
+                "activation record identity changed while resolving its private data path",
+            ));
+        }
+        let private_data_path = self.private_data_path(binding_id, &package_id)?;
+        Ok(BindingActivationFact {
+            binding_id: binding_id.clone(),
+            installation_id,
+            package_id,
+            private_data_path,
+        })
     }
 
     pub fn list_installations(&self) -> Result<Vec<InstallationRecord>, PackageRuntimeError> {
@@ -1069,6 +1115,14 @@ impl FilesystemPackageRuntime {
             "CYRENE_DEPENDENCY_ROOT".to_string(),
             dependency_root.to_string_lossy().to_string(),
         );
+        let private_data_path = self.private_data_path(&request.binding_id, &record.package_id)?;
+        // This reserved environment value is always derived from durable runtime
+        // state after caller values are merged, so activation callers cannot
+        // redirect Plugin storage to an arbitrary host path.
+        options.environment.insert(
+            PRIVATE_DATA_ENVIRONMENT.to_string(),
+            private_data_path.to_string_lossy().to_string(),
+        );
         self.service_supervisor()?.activate(
             &request.binding_id,
             &request.installation_id,
@@ -1311,6 +1365,206 @@ impl FilesystemPackageRuntime {
     fn dependency_path(&self, digest: &ArtifactDigest) -> PathBuf {
         self.root.join("dependencies").join(digest.hex())
     }
+
+    fn private_data_path(
+        &self,
+        binding_id: &BindingId,
+        package_id: &PackageId,
+    ) -> Result<PathBuf, PackageRuntimeError> {
+        let binding_id = BindingId::new(binding_id.as_str().to_string())?;
+        let package_id = PackageId::new(package_id.as_str().to_string())?;
+        let root = open_runtime_directory(&self.root, "PLUGIN_PRIVATE_DATA_UNAVAILABLE")?;
+        validate_open_private_root(
+            &root,
+            self._process_lock.owner_uid,
+            self._process_lock.owner_gid,
+        )?;
+        let private_root = ensure_private_child_directory(
+            &root,
+            PRIVATE_DATA_DIRECTORY,
+            self._process_lock.owner_uid,
+            self._process_lock.owner_gid,
+        )?;
+        let binding_root = ensure_private_child_directory(
+            &private_root,
+            binding_id.as_str(),
+            self._process_lock.owner_uid,
+            self._process_lock.owner_gid,
+        )?;
+        ensure_private_child_directory(
+            &binding_root,
+            package_id.as_str(),
+            self._process_lock.owner_uid,
+            self._process_lock.owner_gid,
+        )?;
+        Ok(self
+            .root
+            .join(PRIVATE_DATA_DIRECTORY)
+            .join(binding_id.as_str())
+            .join(package_id.as_str()))
+    }
+}
+
+fn ensure_binding_private_root(
+    root: &Path,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<(), PackageRuntimeError> {
+    let root_directory = open_runtime_directory(root, "PLUGIN_PRIVATE_DATA_UNAVAILABLE")?;
+    validate_open_private_root(&root_directory, owner_uid, owner_gid)?;
+    ensure_private_child_directory(
+        &root_directory,
+        PRIVATE_DATA_DIRECTORY,
+        owner_uid,
+        owner_gid,
+    )?;
+    Ok(())
+}
+
+fn validate_open_private_root(
+    root: &File,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<(), PackageRuntimeError> {
+    let metadata = root
+        .metadata()
+        .map_err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE"))?;
+    if !metadata.is_dir()
+        || metadata.uid() != owner_uid
+        || metadata.gid() != owner_gid
+        || metadata.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+            "runtime root ownership or permissions are unsafe for private Plugin data",
+        ));
+    }
+    Ok(())
+}
+
+fn open_runtime_directory(path: &Path, code: &'static str) -> Result<File, PackageRuntimeError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+        .map_err(io_error(code))
+}
+
+fn ensure_private_child_directory(
+    parent: &File,
+    component: &str,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<File, PackageRuntimeError> {
+    if component.is_empty()
+        || matches!(component, "." | "..")
+        || component.contains('/')
+        || component.contains('\\')
+    {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+            "private data path component is not a single safe identity",
+        ));
+    }
+    let component = CString::new(component).map_err(|_| {
+        PackageRuntimeError::new(
+            "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+            "private data path component contains a NUL byte",
+        )
+    })?;
+    let mut created = false;
+    // SAFETY: `parent` is an open directory descriptor and `component` is a
+    // single NUL-terminated name with path separators rejected above.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), component.as_ptr(), 0o700) } == 0 {
+        created = true;
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(PackageRuntimeError::new(
+                "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+                format!("could not create private data directory: {error}"),
+            ));
+        }
+    }
+
+    // SAFETY: `parent` and `component` remain valid; O_NOFOLLOW and
+    // O_DIRECTORY reject symbolic links and non-directory path components.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            component.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+        )
+    };
+    if descriptor < 0 {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+            format!(
+                "private data directory is unavailable or unsafe: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor above.
+    let directory = unsafe { File::from_raw_fd(descriptor) };
+    let mut metadata = directory
+        .metadata()
+        .map_err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE"))?;
+    if !metadata.is_dir() {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+            "private data path component is not a directory",
+        ));
+    }
+    if metadata.uid() != owner_uid || metadata.gid() != owner_gid {
+        if !created || nix::unistd::geteuid().as_raw() != 0 {
+            return Err(PackageRuntimeError::new(
+                "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+                "private data directory ownership does not match the runtime account",
+            ));
+        }
+        // SAFETY: the descriptor is an open directory created beneath a
+        // validated runtime root; root may assign it to the configured owner.
+        if unsafe { libc::fchown(directory.as_raw_fd(), owner_uid, owner_gid) } != 0 {
+            return Err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE")(
+                std::io::Error::last_os_error(),
+            ));
+        }
+        metadata = directory
+            .metadata()
+            .map_err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE"))?;
+    }
+    if metadata.uid() != owner_uid || metadata.gid() != owner_gid {
+        return Err(PackageRuntimeError::new(
+            "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+            "private data directory ownership does not match the runtime account",
+        ));
+    }
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode != 0o700 {
+        if !created {
+            return Err(PackageRuntimeError::new(
+                "PLUGIN_PRIVATE_DATA_UNAVAILABLE",
+                "existing private data directory permissions must be 0700",
+            ));
+        }
+        // SAFETY: the descriptor is an open directory owned by the runtime
+        // account; set the exact private mode even under a restrictive umask.
+        if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+            return Err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE")(
+                std::io::Error::last_os_error(),
+            ));
+        }
+    }
+    if created {
+        directory
+            .sync_all()
+            .map_err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE"))?;
+        parent
+            .sync_all()
+            .map_err(io_error("PLUGIN_PRIVATE_DATA_UNAVAILABLE"))?;
+    }
+    Ok(directory)
 }
 
 fn create_private_runtime_root(root: &Path) -> Result<(), PackageRuntimeError> {

@@ -1,3 +1,11 @@
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │  📄 types.rs                                                         │
+//! │  Module: cy_package_runtime::types                                  │
+//! │  Role: Defines validated package identities and runtime facts.      │
+//! │                                                                      │
+//! │  模块职责：定义 package 身份类型与 runtime 生命周期事实。             │
+//! └─────────────────────────────────────────────────────────────────────┘
+
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -5,7 +13,7 @@ use thiserror::Error;
 
 macro_rules! identity_type {
     ($name:ident, $label:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -23,6 +31,16 @@ macro_rules! identity_type {
 
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
             }
         }
 
@@ -227,6 +245,19 @@ pub struct RuntimeStatus {
     pub connection_ref: Option<String>,
 }
 
+/// Activation facts resolved by the package runtime from durable binding state.
+///
+/// The private data path is derived from the binding and the installed package
+/// identity; callers cannot select an arbitrary filesystem location.
+/// 中文：私有数据路径由 durable binding 与已安装 package 身份解析，不接受调用方指定路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingActivationFact {
+    pub binding_id: BindingId,
+    pub installation_id: InstallationId,
+    pub package_id: PackageId,
+    pub private_data_path: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupReport {
     pub staging_entries_removed: usize,
@@ -262,7 +293,8 @@ pub(crate) fn valid_sha256(value: &str) -> bool {
 
 fn valid_identity(value: &str) -> bool {
     let bytes = value.as_bytes();
-    (2..=128).contains(&bytes.len())
+    !matches!(value, "." | "..")
+        && (2..=128).contains(&bytes.len())
         && bytes[0].is_ascii_alphanumeric()
         && bytes.iter().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
