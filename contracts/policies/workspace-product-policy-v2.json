@@ -311,6 +311,30 @@
     },
     {
       "ownerId": "exchange",
+      "operationId": "integrationGetConnectionHealth",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationListJobs",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
       "operationId": "integrationCreateIssueComment",
       "principalKinds": ["DIRECTORY_USER"],
       "requiredRoles": [

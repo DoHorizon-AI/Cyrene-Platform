@@ -108,6 +108,8 @@ fn generated_six_owner_bundle_loads_with_the_tracked_platform_lock() {
         "integrationCreateConnection",
         "integrationListBindings",
         "integrationCreateBinding",
+        "integrationGetConnectionHealth",
+        "integrationListJobs",
     ];
     for operation_id in configure_operations {
         assert!(
