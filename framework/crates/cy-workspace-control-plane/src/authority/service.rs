@@ -250,7 +250,7 @@ pub struct AuthorityServiceDependencies {
     pub sessions: Arc<dyn AuthorityWebSessionStore>,
     /// Durable, revocable user-to-workload grants.
     pub delegations: Arc<dyn AuthorityDelegationStore>,
-    /// Authenticated Exchange workload identity and its fixed grant audience.
+    /// Authenticated managed workload identity and its fixed grant audience.
     pub exchange_workload: AuthorityManagedWorkload,
     /// Certificate-derived Product workload identities with narrow owner and target scopes.
     pub product_workload_profiles: Vec<AuthorityProductWorkloadProfile>,
@@ -1058,7 +1058,7 @@ impl WorkspaceAuthorityService for AuthorityRpcService {
                 .is_empty()
         {
             return Err(Status::failed_precondition(
-                "Exchange workload delegation is not configured",
+                "managed workload delegation is not configured",
             ));
         }
         if request.audience != self.dependencies.exchange_workload.audience {
