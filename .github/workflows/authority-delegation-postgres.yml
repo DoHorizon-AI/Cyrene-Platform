@@ -1,0 +1,51 @@
+name: Authority Delegation PostgreSQL
+
+on:
+  push:
+    branches: [develop, main, release]
+    paths:
+      - '.github/workflows/authority-delegation-postgres.yml'
+      - 'framework/crates/cy-workspace-control-plane/**'
+      - 'framework/crates/cy-workspace-postgres-storage/**'
+      - 'contracts/proto/cyrene/workspace/authority/v2/**'
+      - 'contracts/proto/cyrene/workspace/product/v2/**'
+      - 'contracts/rust/cy-proto/**'
+      - 'Cargo.lock'
+      - 'tooling/ci/run-authority-delegation-postgres.sh'
+  pull_request:
+    branches: [develop, main, release]
+    paths:
+      - '.github/workflows/authority-delegation-postgres.yml'
+      - 'framework/crates/cy-workspace-control-plane/**'
+      - 'framework/crates/cy-workspace-postgres-storage/**'
+      - 'contracts/proto/cyrene/workspace/authority/v2/**'
+      - 'contracts/proto/cyrene/workspace/product/v2/**'
+      - 'contracts/rust/cy-proto/**'
+      - 'Cargo.lock'
+      - 'tooling/ci/run-authority-delegation-postgres.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-postgres-delegation:
+    name: Authority delegation lifecycle (isolated PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Rust 1.96.1
+        uses: dtolnay/rust-toolchain@1.96.1
+      - name: Run the dedicated isolated PostgreSQL gate
+        env:
+          CYRENE_AUTHORITY_DELEGATION_ARTIFACT_DIR: ${{ runner.temp }}/authority-delegation-postgres
+        run: bash tooling/ci/run-authority-delegation-postgres.sh
+      - name: Upload isolated PostgreSQL validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-delegation-postgres-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/authority-delegation-postgres/authority-delegation-postgres.log
+          if-no-files-found: ignore
+          retention-days: 7

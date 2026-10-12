@@ -39,5 +39,30 @@ runtime is deployed or has passed. The Platform app crate now supplies an
 injectable router, but production provider composition, ingress isolation, and
 the complete TCK remain deployment gates.
 
+The delegation scenarios cover user-owned create/revoke routes, exact operation
+and resource scopes, current Directory and policy checks at every execution
+phase, configured Exchange mTLS trust, signed certificate-bound feature
+negotiation, seven-day grant expiry, short execution credentials, explicit
+interactive/delegated outbox schema branches, and fail-closed revocation of
+queued work. Product execution validation also checks the certificate-derived
+owner/target/audience profile and re-locks the original Connector target fence.
+Delegation read-back returns the exact managed workload ID and is self-only
+under the current user bearer. Invocation
+status is a persisted observation scoped by the Product workload profile and
+never acts as execution authorization. Empty Product profiles disable only the
+new Product workload RPC and do not block legacy Authority startup.
+Catalog operation IDs are filtered by the current Directory roles on each
+snapshot request, so a member never receives global command/admin grants.
+Passing source or mock-only scenarios does not count as production workload,
+database, Directory, or policy evidence.
+
 此矩阵定义所需证据，不代表生产 runtime 已部署或通过。Platform app crate 已提供可注入 router，但生产 provider 接线、
 ingress 网络隔离与完整 TCK 仍是部署门槛。
+
+delegation 场景覆盖用户创建和撤销路由、精确 operation/resource scope、每个执行阶段重新检查 Directory 与 policy、配置的 Exchange mTLS
+信任、绑定证书的签名 feature negotiation、七天授权期限、短时执行凭据、interactive/delegated outbox schema 分支，以及队列任务撤销后的
+fail-closed 行为。仅源码或 mock 场景通过不构成生产 workload、数据库、Directory 或 policy 的运行证据。
+Product 执行验证还会检查由证书推导的 owner/target/audience profile，并重新锁定原 Connector target fence。
+delegation 读取会返回精确 managed workload ID，且只允许当前 bearer 用户读取自己的 grant。调用状态读取是由 Product workload profile 限定的持久观察，不构成执行授权。Product
+profile 为空时只禁用新的 Product workload RPC，不阻止旧版 Authority 启动。
+每次获取 catalog 时都会使用最新 Directory role 过滤 operation ID，不会把全局 command/admin grant 返回给普通成员。

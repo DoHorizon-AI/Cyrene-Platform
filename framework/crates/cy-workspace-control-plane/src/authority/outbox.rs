@@ -163,6 +163,24 @@ pub trait AuthorityOutboxStore: Send + Sync {
         credential: &ExecutionCredential,
     ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError>;
 
+    /// Validate an invocation for a certificate-profiled Product workload.
+    ///
+    /// Implementations must recheck the signed credential, immutable target binding, original
+    /// Connector device fence, active claim, and interactive session or delegation generation.
+    /// The service layer separately constrains the caller's configured owner/target profile and
+    /// reruns current Directory and Product policy checks.
+    async fn validate_product_execution_authorization(
+        &self,
+        credential: &ExecutionCredential,
+    ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError>;
+
+    /// Read a persisted invocation for a profile-scoped Product workload status projection.
+    /// This is observation only and must never issue or refresh execution authorization.
+    async fn get_product_invocation_status(
+        &self,
+        invocation_id: &str,
+    ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError>;
+
     /// Acknowledges one persisted delivery attempt for its exact authenticated Connector.
     async fn acknowledge_delivery(
         &self,

@@ -34,14 +34,96 @@ enum IdempotencySemantics {
   IDEMPOTENCY_SEMANTICS_OPTIONAL = 3;
 }
 
+// Distinguishes interactive approvals from bounded workload delegations.
+enum InvocationAuthorizationSource {
+  INVOCATION_AUTHORIZATION_SOURCE_UNSPECIFIED = 0;
+  INVOCATION_AUTHORIZATION_SOURCE_INTERACTIVE_SESSION = 1;
+  INVOCATION_AUTHORIZATION_SOURCE_DELEGATION = 2;
+}
+
 message NegotiateVersionRequest {
   uint32 minimum_version = 1;
   uint32 maximum_version = 2;
+  repeated string requested_features = 3;
 }
 
 message NegotiateVersionResponse {
   uint32 selected_version = 1;
   repeated uint32 supported_versions = 2;
+  repeated string selected_features = 3;
+  repeated string supported_features = 4;
+  bytes managed_workload_feature_token = 5;
+}
+
+message ManagedWorkloadFeatureToken {
+  string audience = 1;
+  bytes client_certificate_sha256 = 2;
+  string signing_key_id = 3;
+  google.protobuf.Timestamp issued_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  bytes authority_signature = 6;
+}
+
+message DelegatedOperationScope {
+  string owner_id = 1;
+  string operation_id = 2;
+  // Empty means the operation has no resource selector; otherwise each value is exact.
+  repeated string resource_ids = 3;
+}
+
+message CreateDelegationRequest {
+  string workspace_id = 1;
+  string audience = 2;
+  repeated DelegatedOperationScope operations = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message CreateDelegationResponse {
+  string delegation_id = 1;
+  uint64 generation = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message RevokeDelegationRequest {
+  string workspace_id = 1;
+  string delegation_id = 2;
+}
+
+message RevokeDelegationResponse {
+  bool revoked = 1;
+  uint64 generation = 2;
+}
+
+message GetDelegationRequest {
+  string workspace_id = 1;
+  string delegation_id = 2;
+}
+
+message GetDelegationResponse {
+  string delegation_id = 1;
+  string organization_id = 2;
+  string workspace_id = 3;
+  string principal_issuer = 4;
+  string principal_subject = 5;
+  string audience = 6;
+  repeated DelegatedOperationScope operations = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  uint64 generation = 9;
+  bool revoked = 10;
+  google.protobuf.Timestamp revoked_at = 11;
+  string managed_workload_id = 12;
+}
+
+message ApproveAndEnqueueDelegatedInvocationRequest {
+  string workspace_id = 1;
+  string delegation_id = 2;
+  cyrene.workspace.product.v2.ProductApiInvocationV2 invocation = 3;
+  bytes managed_workload_feature_token = 4;
+}
+
+message ApproveAndEnqueueDelegatedInvocationResponse {
+  string invocation_id = 1;
+  InvocationState state = 2;
 }
 
 message VerifyIdentityRequest {
@@ -135,6 +217,10 @@ message CanonicalInvocationEnvelope {
   uint64 contract_activation_generation = 14;
   google.protobuf.Timestamp issued_at = 15;
   google.protobuf.Timestamp expires_at = 16;
+  InvocationAuthorizationSource authorization_source = 17;
+  string delegation_id = 18;
+  uint64 delegation_generation = 19;
+  string delegation_audience = 20;
 }
 
 // Signed binding over the complete canonical approved invocation envelope.
@@ -172,6 +258,10 @@ message ExecutionCredential {
   google.protobuf.Timestamp issued_at = 25;
   google.protobuf.Timestamp expires_at = 26;
   bytes authority_signature = 27;
+  InvocationAuthorizationSource authorization_source = 28;
+  string delegation_id = 29;
+  uint64 delegation_generation = 30;
+  string delegation_audience = 31;
 }
 
 message ApprovedInvocation {
@@ -194,6 +284,29 @@ message ValidateExecutionAuthorizationRequest {
 
 message ValidateExecutionAuthorizationResponse {
   ApprovedInvocation approved_invocation = 1;
+}
+
+message ValidateProductExecutionAuthorizationRequest {
+  // The workload identity and audience are derived from the authenticated mTLS peer profile.
+  ExecutionCredential credential = 1;
+}
+
+message ValidateProductExecutionAuthorizationResponse {
+  ApprovedInvocation approved_invocation = 1;
+}
+
+message GetProductInvocationStatusRequest {
+  string invocation_id = 1;
+}
+
+message GetProductInvocationStatusResponse {
+  string invocation_id = 1;
+  InvocationState state = 2;
+  cyrene.workspace.product.v2.ProductApiResponseV2 product_response = 3;
+  string error_code = 4;
+  string error_message = 5;
+  bytes result_digest_sha256 = 6;
+  bytes result_receipt = 7;
 }
 
 message AcknowledgeDeliveryRequest {
@@ -259,8 +372,14 @@ service WorkspaceAuthorityService {
   rpc VerifyIdentity(VerifyIdentityRequest) returns (VerifyIdentityResponse);
   rpc GetCatalogSnapshot(CatalogSnapshotRequest) returns (CatalogSnapshotResponse);
   rpc ApproveAndEnqueueInvocation(ApproveAndEnqueueInvocationRequest) returns (ApproveAndEnqueueInvocationResponse);
+  rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
+  rpc RevokeDelegation(RevokeDelegationRequest) returns (RevokeDelegationResponse);
+  rpc GetDelegation(GetDelegationRequest) returns (GetDelegationResponse);
+  rpc ApproveAndEnqueueDelegatedInvocation(ApproveAndEnqueueDelegatedInvocationRequest) returns (ApproveAndEnqueueDelegatedInvocationResponse);
   rpc ClaimInvocations(ClaimInvocationsRequest) returns (ClaimInvocationsResponse);
   rpc ValidateExecutionAuthorization(ValidateExecutionAuthorizationRequest) returns (ValidateExecutionAuthorizationResponse);
+  rpc ValidateProductExecutionAuthorization(ValidateProductExecutionAuthorizationRequest) returns (ValidateProductExecutionAuthorizationResponse);
+  rpc GetProductInvocationStatus(GetProductInvocationStatusRequest) returns (GetProductInvocationStatusResponse);
   rpc AcknowledgeDelivery(AcknowledgeDeliveryRequest) returns (AcknowledgeDeliveryResponse);
   rpc SubmitInvocationResult(SubmitInvocationResultRequest) returns (SubmitInvocationResultResponse);
   rpc WaitInvocationResult(WaitInvocationResultRequest) returns (WaitInvocationResultResponse);
