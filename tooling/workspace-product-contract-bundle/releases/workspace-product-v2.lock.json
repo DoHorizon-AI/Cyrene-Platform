@@ -1,7 +1,7 @@
 {
   "bundle": {
     "manifestPath": "product-contract-bundle.json",
-    "manifestSha256": "2e3ef1e1531a4450591e9fb9c044753a9f94814ad741b0dbc034f7406b837a74"
+    "manifestSha256": "4ca47add277b3ec4b21553e5c5d2b6fb8308fb54cca0b3a77b4cf8595d271338"
   },
   "contractApiVersion": "0.1.0",
   "formatVersion": 2,
@@ -22,10 +22,10 @@
     },
     {
       "catalogPath": "Cyrene-Exchange/contracts/product/v2/catalog.json",
-      "catalogSha256": "73ec67b5e85e31d9262b3b896fc7c88e401ccd77f1d21e4a060d01622e2020d4",
+      "catalogSha256": "8b3234e85810d5bf09da7e1f6532423914a5e2aa3ba43b7061a241332b11d645",
       "ownerId": "exchange",
       "repository": "Cyrene-Exchange",
-      "sourceSha": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83"
+      "sourceSha": "b7f59cfebe7c817783d915b073bcf6ffee0bdc03"
     },
     {
       "catalogPath": "Cyrene-Navigator/contracts/product/v2/catalog.json",
@@ -52,7 +52,7 @@
   "policy": {
     "bundlePath": "workspace-product-policy-v2.json",
     "schemaVersion": "cyrene.workspace.product.authorization-policy.v2",
-    "sha256": "996967a3f04350cbb3fc0961260487c1163d3ac827574f403d7e3f2788b52886",
+    "sha256": "98a5a74989b7b43d0f35a09f600b54baa839cbaaaa2b446ab47e3befebd4b007",
     "sourcePath": "contracts/policies/workspace-product-policy-v2.json"
   },
   "releaseId": "workspace-product-v2-initial",
