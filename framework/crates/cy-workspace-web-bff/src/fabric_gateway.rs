@@ -195,6 +195,188 @@ impl crate::WorkspaceProductGateway for AuthorityWorkspaceProductGateway {
             )),
         })
     }
+
+    async fn create_delegation(
+        &self,
+        principal: &VerifiedWebPrincipal,
+        access_token: &str,
+        workspace_id: &str,
+        request: crate::CreateDelegationInput,
+    ) -> Result<crate::CreateDelegationOutput, WorkspaceGatewayError> {
+        if request.audience.trim().is_empty()
+            || request.audience.len() > 256
+            || request.operations.is_empty()
+            || request.operations.len() > 64
+            || request
+                .expires_in_seconds
+                .is_some_and(|seconds| seconds == 0 || seconds > 604_800)
+        {
+            return Err(WorkspaceGatewayError::InvalidRequest);
+        }
+        WorkspaceCallerContext::from_verified_web_member(
+            principal,
+            workspace_id,
+            self.directory.as_ref(),
+        )
+        .await
+        .map_err(|_| WorkspaceGatewayError::Forbidden)?;
+        let expires_at = request.expires_in_seconds.map(|seconds| {
+            let now = now_unix_ms().unwrap_or_default().max(0) as u64;
+            let expires_ms = now.saturating_add(u64::from(seconds) * 1_000);
+            prost_types::Timestamp {
+                seconds: (expires_ms / 1_000) as i64,
+                nanos: ((expires_ms % 1_000) * 1_000_000) as i32,
+            }
+        });
+        let mut rpc = self.connect().await?;
+        let mut tonic_request = TonicRequest::new(authority_v2::CreateDelegationRequest {
+            workspace_id: workspace_id.to_owned(),
+            audience: request.audience,
+            operations: request
+                .operations
+                .into_iter()
+                .map(|operation| authority_v2::DelegatedOperationScope {
+                    owner_id: operation.owner_id,
+                    operation_id: operation.operation_id,
+                    resource_ids: operation.resource_ids,
+                })
+                .collect(),
+            expires_at,
+        });
+        tonic_request
+            .metadata_mut()
+            .insert("authorization", bearer_metadata(access_token)?);
+        let result = rpc
+            .create_delegation(tonic_request)
+            .await
+            .map_err(map_authority_status)?
+            .into_inner();
+        let expires_at_unix_ms = result
+            .expires_at
+            .as_ref()
+            .filter(|value| value.seconds >= 0 && (0..1_000_000_000).contains(&value.nanos))
+            .and_then(|value| {
+                u64::try_from(value.seconds)
+                    .ok()?
+                    .checked_mul(1_000)?
+                    .checked_add(u64::try_from(value.nanos).ok()? / 1_000_000)
+            })
+            .ok_or(WorkspaceGatewayError::InvalidResponse)?;
+        if result.delegation_id.is_empty() || result.generation == 0 {
+            return Err(WorkspaceGatewayError::InvalidResponse);
+        }
+        Ok(crate::CreateDelegationOutput {
+            delegation_id: result.delegation_id,
+            generation: result.generation,
+            expires_at_unix_ms,
+        })
+    }
+
+    async fn revoke_delegation(
+        &self,
+        principal: &VerifiedWebPrincipal,
+        access_token: &str,
+        workspace_id: &str,
+        delegation_id: &str,
+    ) -> Result<crate::RevokeDelegationOutput, WorkspaceGatewayError> {
+        WorkspaceCallerContext::from_verified_web_member(
+            principal,
+            workspace_id,
+            self.directory.as_ref(),
+        )
+        .await
+        .map_err(|_| WorkspaceGatewayError::Forbidden)?;
+        let mut rpc = self.connect().await?;
+        let mut request = TonicRequest::new(authority_v2::RevokeDelegationRequest {
+            workspace_id: workspace_id.to_owned(),
+            delegation_id: delegation_id.to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", bearer_metadata(access_token)?);
+        let result = rpc
+            .revoke_delegation(request)
+            .await
+            .map_err(map_authority_status)?
+            .into_inner();
+        if result.generation == 0 {
+            return Err(WorkspaceGatewayError::InvalidResponse);
+        }
+        Ok(crate::RevokeDelegationOutput {
+            revoked: result.revoked,
+            generation: result.generation,
+        })
+    }
+
+    async fn get_delegation(
+        &self,
+        principal: &VerifiedWebPrincipal,
+        access_token: &str,
+        workspace_id: &str,
+        delegation_id: &str,
+    ) -> Result<crate::DelegationOutput, WorkspaceGatewayError> {
+        WorkspaceCallerContext::from_verified_web_member(
+            principal,
+            workspace_id,
+            self.directory.as_ref(),
+        )
+        .await
+        .map_err(|_| WorkspaceGatewayError::Forbidden)?;
+        let mut rpc = self.connect().await?;
+        let mut request = TonicRequest::new(authority_v2::GetDelegationRequest {
+            workspace_id: workspace_id.to_owned(),
+            delegation_id: delegation_id.to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", bearer_metadata(access_token)?);
+        let result = rpc
+            .get_delegation(request)
+            .await
+            .map_err(map_authority_status)?
+            .into_inner();
+        let expires_at_unix_ms = timestamp_to_unix_ms(result.expires_at.as_ref())?;
+        let revoked_at_unix_ms = result
+            .revoked_at
+            .as_ref()
+            .map(|value| timestamp_to_unix_ms(Some(value)))
+            .transpose()?;
+        if result.delegation_id != delegation_id
+            || result.organization_id != principal.organization_id()
+            || result.workspace_id != workspace_id
+            || result.principal_issuer != principal.identity().issuer
+            || result.principal_subject != principal.identity().subject
+            || result.audience.is_empty()
+            || result.managed_workload_id.is_empty()
+            || result.generation == 0
+            || result.operations.is_empty()
+            || result.revoked != revoked_at_unix_ms.is_some()
+        {
+            return Err(WorkspaceGatewayError::InvalidResponse);
+        }
+        Ok(crate::DelegationOutput {
+            delegation_id: result.delegation_id,
+            organization_id: result.organization_id,
+            workspace_id: result.workspace_id,
+            principal_issuer: result.principal_issuer,
+            principal_subject: result.principal_subject,
+            audience: result.audience,
+            managed_workload_id: result.managed_workload_id,
+            operations: result
+                .operations
+                .into_iter()
+                .map(|operation| crate::DelegatedOperationInput {
+                    owner_id: operation.owner_id,
+                    operation_id: operation.operation_id,
+                    resource_ids: operation.resource_ids,
+                })
+                .collect(),
+            expires_at_unix_ms,
+            generation: result.generation,
+            revoked: result.revoked,
+            revoked_at_unix_ms,
+        })
+    }
 }
 
 fn bearer_metadata(
@@ -581,6 +763,20 @@ fn now_unix_ms() -> Option<i64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+}
+
+fn timestamp_to_unix_ms(
+    value: Option<&prost_types::Timestamp>,
+) -> Result<u64, WorkspaceGatewayError> {
+    let value = value.ok_or(WorkspaceGatewayError::InvalidResponse)?;
+    if value.seconds < 0 || !(0..1_000_000_000).contains(&value.nanos) {
+        return Err(WorkspaceGatewayError::InvalidResponse);
+    }
+    u64::try_from(value.seconds)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .and_then(|millis| millis.checked_add(u64::try_from(value.nanos).ok()? / 1_000_000))
+        .ok_or(WorkspaceGatewayError::InvalidResponse)
 }
 
 #[cfg(test)]

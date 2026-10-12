@@ -193,6 +193,14 @@ pub fn router_with_device_approval(
             "/api/workspace/v2/workspaces/:workspace_id/products/invocations",
             any(product_route),
         )
+        .route(
+            "/api/workspace/v2/workspaces/:workspace_id/delegations",
+            any(create_delegation_route),
+        )
+        .route(
+            "/api/workspace/v2/workspaces/:workspace_id/delegations/:delegation_id",
+            any(revoke_delegation_route),
+        )
         .with_state(state.clone());
     let approval_routes = device_approval_router(device_approval).route_layer(
         middleware::from_fn_with_state(state.clone(), verified_web_session),
@@ -249,6 +257,201 @@ struct ProductInvocationEnvelope {
     json_body: Option<String>,
     resource_id: Option<String>,
     idempotency_key: Option<String>,
+}
+
+async fn create_delegation_route(
+    State(state): State<Arc<WebBffState>>,
+    Path(workspace_id): Path<String>,
+    request: Request<Body>,
+) -> http::Response<Body> {
+    if request.method() != Method::POST {
+        return method_not_allowed(None);
+    }
+    let trace = match trace_info(request.headers()) {
+        Ok(value) => value,
+        Err(()) => return invalid_request(None),
+    };
+    if request.uri().query().is_some() || !accepts_json(request.headers()) {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    if !exact_origin_matches(request.headers(), &state.client_origin) {
+        return forbidden(Some(&trace.trace_id));
+    }
+    if workspace_id.is_empty() || workspace_id.len() > 200 {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    let headers = request.headers().clone();
+    let authenticated = match authenticate(&state, &headers).await {
+        Ok(value) => value,
+        Err((status, code, title)) => {
+            return problem_response(status, code, title, Some(&trace.trace_id));
+        }
+    };
+    if !csrf_request_is_valid(&state, &headers, &authenticated) {
+        return csrf_failed(Some(&trace.trace_id));
+    }
+    let body = match read_create_delegation_request(request).await {
+        Ok(value) => value,
+        Err(failure) => return failure.response(Some(&trace.trace_id)),
+    };
+    match state
+        .workspace_api
+        .create_delegation(
+            &authenticated.principal,
+            authenticated.access_token.as_str(),
+            &workspace_id,
+            body,
+        )
+        .await
+    {
+        Ok(result) => json_response(StatusCode::CREATED, &result, Some(&trace.trace_id)),
+        Err(error) => gateway_error(error, Some(&trace.trace_id)),
+    }
+}
+
+async fn revoke_delegation_route(
+    State(state): State<Arc<WebBffState>>,
+    Path((workspace_id, delegation_id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> http::Response<Body> {
+    if request.method() == Method::GET {
+        return get_delegation_route(State(state), Path((workspace_id, delegation_id)), request)
+            .await;
+    }
+    if request.method() != Method::DELETE {
+        return method_not_allowed(None);
+    }
+    let trace = match trace_info(request.headers()) {
+        Ok(value) => value,
+        Err(()) => return invalid_request(None),
+    };
+    if request.uri().query().is_some() || !accepts_json(request.headers()) {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    if !exact_origin_matches(request.headers(), &state.client_origin) {
+        return forbidden(Some(&trace.trace_id));
+    }
+    if workspace_id.is_empty() || workspace_id.len() > 200 || delegation_id.len() > 64 {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    let headers = request.headers().clone();
+    if let Err(failure) = read_empty_get_body(request).await {
+        return failure.response(Some(&trace.trace_id));
+    }
+    let authenticated = match authenticate(&state, &headers).await {
+        Ok(value) => value,
+        Err((status, code, title)) => {
+            return problem_response(status, code, title, Some(&trace.trace_id));
+        }
+    };
+    if !csrf_request_is_valid(&state, &headers, &authenticated) {
+        return csrf_failed(Some(&trace.trace_id));
+    }
+    match state
+        .workspace_api
+        .revoke_delegation(
+            &authenticated.principal,
+            authenticated.access_token.as_str(),
+            &workspace_id,
+            &delegation_id,
+        )
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result, Some(&trace.trace_id)),
+        Err(error) => gateway_error(error, Some(&trace.trace_id)),
+    }
+}
+
+async fn get_delegation_route(
+    State(state): State<Arc<WebBffState>>,
+    Path((workspace_id, delegation_id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> http::Response<Body> {
+    if request.method() != Method::GET {
+        return method_not_allowed(None);
+    }
+    let trace = match trace_info(request.headers()) {
+        Ok(value) => value,
+        Err(()) => return invalid_request(None),
+    };
+    if request.uri().query().is_some() || !accepts_json(request.headers()) {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    if !exact_origin_matches(request.headers(), &state.client_origin) {
+        return forbidden(Some(&trace.trace_id));
+    }
+    if workspace_id.is_empty() || workspace_id.len() > 200 || delegation_id.len() > 64 {
+        return invalid_request(Some(&trace.trace_id));
+    }
+    let headers = request.headers().clone();
+    if let Err(failure) = read_empty_get_body(request).await {
+        return failure.response(Some(&trace.trace_id));
+    }
+    let authenticated = match authenticate(&state, &headers).await {
+        Ok(value) => value,
+        Err((status, code, title)) => {
+            return problem_response(status, code, title, Some(&trace.trace_id));
+        }
+    };
+    match state
+        .workspace_api
+        .get_delegation(
+            &authenticated.principal,
+            authenticated.access_token.as_str(),
+            &workspace_id,
+            &delegation_id,
+        )
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result, Some(&trace.trace_id)),
+        Err(error) => gateway_error(error, Some(&trace.trace_id)),
+    }
+}
+
+async fn read_create_delegation_request(
+    request: Request<Body>,
+) -> Result<crate::CreateDelegationInput, RequestFailure> {
+    let length = content_length(request.headers())?;
+    if length.is_some_and(|length| length > 64 * 1024) {
+        return Err(RequestFailure::PayloadTooLarge);
+    }
+    if !is_json_content_type(request.headers()) {
+        return Err(RequestFailure::UnsupportedMediaType);
+    }
+    let bytes = to_bytes(request.into_body(), 64 * 1024)
+        .await
+        .map_err(|_| RequestFailure::PayloadTooLarge)?;
+    if bytes.is_empty() {
+        return Err(RequestFailure::InvalidJson);
+    }
+    parse_json_bytes_with_limit(&bytes, 64 * 1024).map_err(|_| RequestFailure::InvalidJson)?;
+    serde_json::from_slice(&bytes).map_err(|_| RequestFailure::InvalidJson)
+}
+
+fn csrf_request_is_valid(
+    state: &WebBffState,
+    headers: &HeaderMap,
+    authenticated: &AuthenticatedRequest,
+) -> bool {
+    let Ok(header) = single_header(headers, CSRF_HEADER) else {
+        return false;
+    };
+    let Ok(cookie) = csrf_cookie_from_header(headers) else {
+        return false;
+    };
+    let Some(now) = now_unix_ms() else {
+        return false;
+    };
+    header == cookie
+        && state
+            .csrf_signer
+            .verify(
+                header,
+                CsrfPrincipalBinding::from_verified(&authenticated.principal),
+                &authenticated.access_token,
+                now,
+            )
+            .is_ok()
 }
 
 struct TraceInfo {
@@ -1399,6 +1602,7 @@ fn gateway_error(error: WorkspaceGatewayError, trace_id: Option<&str>) -> http::
         ),
         WorkspaceGatewayError::Forbidden => forbidden(trace_id),
         WorkspaceGatewayError::NotFound => workspace_not_found(trace_id),
+        WorkspaceGatewayError::InvalidRequest => invalid_request(trace_id),
         WorkspaceGatewayError::InvalidResponse => invalid_upstream_response(trace_id),
     }
 }
@@ -1502,6 +1706,17 @@ mod tests {
             cy_workspace_control_plane::workspace_v1::WorkspaceApiResponse,
             WorkspaceGatewayError,
         > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(WorkspaceGatewayError::Unavailable)
+        }
+
+        async fn get_delegation(
+            &self,
+            _principal: &VerifiedWebPrincipal,
+            _access_token: &str,
+            _workspace_id: &str,
+            _delegation_id: &str,
+        ) -> Result<crate::DelegationOutput, WorkspaceGatewayError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(WorkspaceGatewayError::Unavailable)
         }
@@ -1825,6 +2040,92 @@ mod tests {
         }
         assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
         assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn delegation_write_routes_require_exact_origin_before_authentication() {
+        let (state, verifier_calls, gateway_calls) = test_state();
+        let requests = [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/workspace/v2/workspaces/ws-1/delegations")
+                .body(Body::empty())
+                .expect("create request is valid"),
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/workspace/v2/workspaces/ws-1/delegations/00000000-0000-4000-8000-000000000001")
+                .body(Body::empty())
+                .expect("revoke request is valid"),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workspace/v2/workspaces/ws-1/delegations/00000000-0000-4000-8000-000000000001")
+                .body(Body::empty())
+                .expect("read request is valid"),
+        ];
+        for request in requests {
+            let response = router(Arc::clone(&state))
+                .oneshot(request)
+                .await
+                .expect("router responds");
+            assert_problem(response, StatusCode::FORBIDDEN, "forbidden").await;
+        }
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn delegation_read_requires_same_origin_bearer_but_not_csrf() {
+        let verifier_calls = Arc::new(AtomicUsize::new(0));
+        let gateway_calls = Arc::new(AtomicUsize::new(0));
+        let access_token = "test-access-token-for-delegation-read".to_owned();
+        let now = now_unix_ms().expect("system clock is available");
+        let principal = test_principal(
+            UserIdentityRef {
+                issuer: "https://login.example/tenant/v2.0".to_owned(),
+                subject: "web-user-1".to_owned(),
+            },
+            "org-1",
+            now + 60_000,
+        );
+        let state = Arc::new(
+            WebBffState::new(
+                WebBffConfig::new("https://client.example", [0x5a; 32]).expect("valid config"),
+                Arc::new(AcceptingVerifier {
+                    calls: Arc::clone(&verifier_calls),
+                    access_token: access_token.clone(),
+                    principal,
+                }),
+                Arc::new(EmptyWorkspaceDirectory),
+                Arc::new(CountingGateway {
+                    calls: Arc::clone(&gateway_calls),
+                }),
+                test_catalog(),
+            )
+            .expect("all runtime ports and contracts are supplied"),
+        );
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/workspace/v2/workspaces/ws-1/delegations/00000000-0000-4000-8000-000000000001")
+            .header(ORIGIN, "https://client.example")
+            .header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {access_token}"),
+            )
+            .header(ACCEPT, "application/json")
+            .body(Body::empty())
+            .expect("read request is valid");
+        let response = router(state)
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        assert_problem(
+            response,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+        )
+        .await;
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

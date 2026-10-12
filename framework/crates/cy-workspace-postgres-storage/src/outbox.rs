@@ -6,6 +6,7 @@
 //! │  模块职责：持久化 Authority 调用生命周期并栅栏设备与会话授权。          │
 //! └─────────────────────────────────────────────────────────────────────┘
 
+use cy_proto::cyrene::workspace::authority::v2 as wire;
 use cy_proto::cyrene::workspace::authority::v2::{
     ApprovedInvocation, CanonicalInvocationEnvelope, CanonicalInvocationResultEnvelope,
     ExecutionCredential, ExecutionOutcomeStatus, IdempotencySemantics, InvocationState,
@@ -26,12 +27,10 @@ use uuid::Uuid;
 
 const OUTBOX_TABLE: &str = "cyrene_workspace_device_registry.workspace_invocation_outbox";
 const SESSION_TABLE: &str = "cyrene_workspace_device_registry.authority_web_sessions";
-const REGISTRY_TABLE: &str = "cyrene_workspace_device_registry.certificate_records";
-const IDENTITY_TABLE: &str = "cyrene_workspace_directory.workspace_device_identities";
-const TARGET_TABLE: &str = "cyrene_workspace_device_registry.authority_execution_target_bindings";
 const CLAIM_LEASE_MS: u64 = 120_000;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const OUTBOX_COLUMNS: &str = "invocation_id, workspace_id, idempotency_key, request_digest_sha256, target_component, resolved_target_url, raw_invocation_json, device_generation, session_generation, contract_activation_generation, status, claimed_by_connector_id, claimed_at_unix_ms, delivery_receipt, delivery_acknowledged_at_unix_ms, outcome_status, response_status_code, response_json_body, response_content_type, error_code, error_message, created_at_unix_ms, updated_at_unix_ms, expires_at_unix_ms, record_schema_version, organization_id, principal_issuer, principal_subject, operation_owner_id, operation_id, scope, resource_id, product_invocation_proto, approved_envelope_proto, execution_credential_proto, invocation_digest_sha256, idempotency_semantics, idempotency_scope_sha256, execution_device_id, certificate_fingerprint_sha256, authorization_id, session_id, execution_target_json, signing_key_id, target_binding_manifest_sha256, bundle_manifest_sha256, owner_source_commit, credential_issued_at_unix_ms, credential_expires_at_unix_ms, claim_credential_digest_sha256, claim_lease_expires_at_unix_ms, claim_count, result_digest_sha256, result_receipt, stable_idempotency_request_digest_sha256";
+const DELEGATION_TABLE: &str = "cyrene_workspace_device_registry.authority_delegations";
+const OUTBOX_COLUMNS: &str = "invocation_id, workspace_id, idempotency_key, request_digest_sha256, target_component, resolved_target_url, raw_invocation_json, device_generation, session_generation, contract_activation_generation, status, claimed_by_connector_id, claimed_at_unix_ms, delivery_receipt, delivery_acknowledged_at_unix_ms, outcome_status, response_status_code, response_json_body, response_content_type, error_code, error_message, created_at_unix_ms, updated_at_unix_ms, expires_at_unix_ms, record_schema_version, organization_id, principal_issuer, principal_subject, operation_owner_id, operation_id, scope, resource_id, product_invocation_proto, approved_envelope_proto, execution_credential_proto, invocation_digest_sha256, idempotency_semantics, idempotency_scope_sha256, execution_device_id, certificate_fingerprint_sha256, authorization_id, session_id, authorization_source, delegation_id, delegation_generation, delegation_audience, execution_target_json, signing_key_id, target_binding_manifest_sha256, bundle_manifest_sha256, owner_source_commit, credential_issued_at_unix_ms, credential_expires_at_unix_ms, claim_credential_digest_sha256, claim_lease_expires_at_unix_ms, claim_count, result_digest_sha256, result_receipt, stable_idempotency_request_digest_sha256";
 
 /// PostgreSQL-backed durable outbox for the Authority invocation lifecycle.
 #[derive(Clone)]
@@ -83,17 +82,14 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
         )
         .await?;
         lock_target_binding_for_enqueue(&mut tx, &values).await?;
-        lock_session(
+        lock_authorization_for_envelope(
             &mut tx,
-            SessionLockFence {
-                session_id: &values.session_id,
-                organization_id: &values.organization_id,
-                workspace_id: &values.workspace_id,
-                issuer: &values.principal_issuer,
-                subject: &values.principal_subject,
-                generation: values.session_generation,
-                now_ms: values.now_unix_ms,
-            },
+            invocation
+                .approved_invocation
+                .canonical_envelope
+                .as_ref()
+                .ok_or(AuthorityOutboxError::InvalidRecord)?,
+            values.now_unix_ms,
         )
         .await?;
 
@@ -127,7 +123,8 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
                 execution_credential_proto, invocation_digest_sha256,
                 idempotency_semantics, idempotency_scope_sha256,
                 execution_device_id, certificate_fingerprint_sha256,
-                authorization_id, session_id, execution_target_json, signing_key_id,
+                authorization_id, session_id, authorization_source, delegation_id,
+                delegation_generation, delegation_audience, execution_target_json, signing_key_id,
                 target_binding_manifest_sha256, bundle_manifest_sha256,
                 owner_source_commit, credential_issued_at_unix_ms,
                 credential_expires_at_unix_ms, claim_credential_digest_sha256,
@@ -136,7 +133,7 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', $11, $11,
                 $12, 2, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34,
-                $35, $36, $37, $38
+                $35, $36, $37, $38, $39, $40, $41, $42
             )
             ON CONFLICT DO NOTHING
             RETURNING {OUTBOX_COLUMNS}"#
@@ -179,6 +176,16 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
         .bind(hex(&values.certificate_fingerprint_sha256))
         .bind(values.execution_authorization_id.as_bytes().as_slice())
         .bind(values.session_id)
+        .bind(&values.authorization_source)
+        .bind(values.delegation_id)
+        .bind(
+            values
+                .delegation_generation
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
+        )
+        .bind(values.delegation_audience.as_deref())
         .bind(&values.execution_target_json)
         .bind(&values.signing_key_id)
         .bind(&values.target_binding_manifest_sha256)
@@ -254,7 +261,7 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
             i64::try_from(peer.authorization_generation)
                 .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
         )
-        .bind(peer.certificate_fingerprint_sha256.as_slice())
+        .bind(hex(&peer.certificate_fingerprint_sha256))
         .bind(i64::try_from(now).map_err(|_| AuthorityOutboxError::InvalidRecord)?)
         .bind(i64::try_from(max_batch_size).map_err(|_| AuthorityOutboxError::InvalidRecord)?)
         .fetch_all(&mut *tx)
@@ -286,12 +293,26 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
               AND invocation.certificate_fingerprint_sha256 = $6
               AND invocation.status = 'PENDING'
               AND invocation.expires_at_unix_ms > $5
-              AND EXISTS (
-                  SELECT 1 FROM {SESSION_TABLE} AS session
-                  WHERE session.session_id = invocation.session_id
-                    AND session.session_generation = invocation.session_generation
-                    AND session.revoked_at_unix_ms IS NULL
-                    AND session.expires_at_unix_ms > $5
+              AND (
+                  (invocation.authorization_source = 'INTERACTIVE_SESSION' AND EXISTS (
+                      SELECT 1 FROM {SESSION_TABLE} AS session
+                      WHERE session.session_id = invocation.session_id
+                        AND session.session_generation = invocation.session_generation
+                        AND session.revoked_at_unix_ms IS NULL
+                        AND session.expires_at_unix_ms > $5
+                  ))
+                  OR (invocation.authorization_source = 'DELEGATION' AND EXISTS (
+                      SELECT 1 FROM {DELEGATION_TABLE} AS delegation
+                      WHERE delegation.delegation_id = invocation.delegation_id
+                        AND delegation.generation = invocation.delegation_generation
+                        AND delegation.organization_id = invocation.organization_id
+                        AND delegation.workspace_id = invocation.workspace_id
+                        AND delegation.principal_issuer = invocation.principal_issuer
+                        AND delegation.principal_subject = invocation.principal_subject
+                        AND delegation.audience = invocation.delegation_audience
+                        AND delegation.revoked_at_unix_ms IS NULL
+                        AND delegation.expires_at_unix_ms > $5
+                  ))
               )
             ORDER BY invocation.created_at_unix_ms, invocation.invocation_id
             LIMIT $7
@@ -305,7 +326,7 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
                 .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
         )
         .bind(i64::try_from(now).map_err(|_| AuthorityOutboxError::InvalidRecord)?)
-        .bind(peer.certificate_fingerprint_sha256.as_slice())
+        .bind(hex(&peer.certificate_fingerprint_sha256))
         .bind(i64::try_from(max_batch_size).map_err(|_| AuthorityOutboxError::InvalidRecord)?)
         .fetch_all(&mut *tx)
         .await
@@ -320,20 +341,7 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
                 .canonical_envelope
                 .as_ref()
                 .ok_or(AuthorityOutboxError::InvalidRecord)?;
-            let session_id = parse_uuid(&approved.session_id)?;
-            lock_session(
-                &mut tx,
-                SessionLockFence {
-                    session_id: &session_id,
-                    organization_id: &approved.organization_id,
-                    workspace_id: &approved.workspace_id,
-                    issuer: &approved.principal_issuer,
-                    subject: &approved.principal_subject,
-                    generation: approved.session_generation,
-                    now_ms: now,
-                },
-            )
-            .await?;
+            lock_authorization_for_envelope(&mut tx, approved, now).await?;
             let expires_at = credential_expiry_ms(
                 record
                     .approved_invocation
@@ -399,24 +407,57 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
             .canonical_envelope
             .as_ref()
             .ok_or(AuthorityOutboxError::InvalidRecord)?;
-        let session_id = parse_uuid(&envelope.session_id)?;
-        lock_session(
-            &mut tx,
-            SessionLockFence {
-                session_id: &session_id,
-                organization_id: &envelope.organization_id,
-                workspace_id: &envelope.workspace_id,
-                issuer: &envelope.principal_issuer,
-                subject: &envelope.principal_subject,
-                generation: envelope.session_generation,
-                now_ms: now_unix_ms(),
-            },
-        )
-        .await?;
+        lock_authorization_for_envelope(&mut tx, envelope, now_unix_ms()).await?;
         tx.commit()
             .await
             .map_err(|_| AuthorityOutboxError::Unavailable)?;
         Ok(record)
+    }
+
+    async fn validate_product_execution_authorization(
+        &self,
+        credential: &ExecutionCredential,
+    ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError> {
+        let now = now_unix_ms();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AuthorityOutboxError::Unavailable)?;
+        let row = sqlx::query(&format!(
+            "SELECT {OUTBOX_COLUMNS} FROM {OUTBOX_TABLE} WHERE invocation_id = $1 FOR UPDATE"
+        ))
+        .bind(&credential.invocation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AuthorityOutboxError::Unavailable)?
+        .ok_or(AuthorityOutboxError::NotFound)?;
+        let record = row_to_invocation_record(row)?;
+        ensure_credential_matches(credential, &record)?;
+        if record.state != InvocationState::Claimed {
+            return Err(AuthorityOutboxError::InvalidState);
+        }
+        ensure_active_claim(&mut tx, &credential.invocation_id, now).await?;
+        lock_record_authorizations(&mut tx, &record, now).await?;
+        tx.commit()
+            .await
+            .map_err(|_| AuthorityOutboxError::Unavailable)?;
+        Ok(record)
+    }
+
+    async fn get_product_invocation_status(
+        &self,
+        invocation_id: &str,
+    ) -> Result<AuthorityInvocationRecord, AuthorityOutboxError> {
+        let row = sqlx::query(&format!(
+            "SELECT {OUTBOX_COLUMNS} FROM {OUTBOX_TABLE} WHERE invocation_id = $1 AND record_schema_version = 2"
+        ))
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AuthorityOutboxError::Unavailable)?
+        .ok_or(AuthorityOutboxError::NotFound)?;
+        row_to_invocation_record(row)
     }
 
     async fn acknowledge_delivery(
@@ -453,20 +494,7 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
             .canonical_envelope
             .as_ref()
             .ok_or(AuthorityOutboxError::InvalidRecord)?;
-        let session_id = parse_uuid(&envelope.session_id)?;
-        lock_session(
-            &mut tx,
-            SessionLockFence {
-                session_id: &session_id,
-                organization_id: &envelope.organization_id,
-                workspace_id: &envelope.workspace_id,
-                issuer: &envelope.principal_issuer,
-                subject: &envelope.principal_subject,
-                generation: envelope.session_generation,
-                now_ms: now,
-            },
-        )
-        .await?;
+        lock_authorization_for_envelope(&mut tx, envelope, now).await?;
 
         if record.state == InvocationState::Acknowledged
             || matches!(
@@ -555,20 +583,7 @@ impl AuthorityOutboxStore for PostgresWorkspaceOutbox {
             .canonical_envelope
             .as_ref()
             .ok_or(AuthorityOutboxError::InvalidRecord)?;
-        let session_id = parse_uuid(&envelope.session_id)?;
-        lock_session(
-            &mut tx,
-            SessionLockFence {
-                session_id: &session_id,
-                organization_id: &envelope.organization_id,
-                workspace_id: &envelope.workspace_id,
-                issuer: &envelope.principal_issuer,
-                subject: &envelope.principal_subject,
-                generation: envelope.session_generation,
-                now_ms: now,
-            },
-        )
-        .await?;
+        lock_authorization_for_envelope(&mut tx, envelope, now).await?;
         let mut response_bytes = None;
         let mut response_status = None;
         let mut response_content_type = None;
@@ -773,8 +788,12 @@ struct ValidatedInvocation {
     execution_device_generation: u64,
     execution_authorization_id: Uuid,
     certificate_fingerprint_sha256: Vec<u8>,
-    session_id: Uuid,
+    session_id: Option<Uuid>,
     session_generation: u64,
+    authorization_source: String,
+    delegation_id: Option<Uuid>,
+    delegation_generation: Option<u64>,
+    delegation_audience: Option<String>,
     contract_activation_generation: u64,
     signing_key_id: String,
     issued_at_unix_ms: u64,
@@ -814,6 +833,42 @@ fn validate_new_invocation(
         .target
         .as_ref()
         .ok_or(AuthorityOutboxError::InvalidRecord)?;
+    let authorization_source =
+        match wire::InvocationAuthorizationSource::try_from(envelope.authorization_source)
+            .map_err(|_| AuthorityOutboxError::InvalidRecord)?
+        {
+            wire::InvocationAuthorizationSource::Unspecified
+            | wire::InvocationAuthorizationSource::InteractiveSession => "INTERACTIVE_SESSION",
+            wire::InvocationAuthorizationSource::Delegation => "DELEGATION",
+        };
+    let (session_id, delegation_id, delegation_generation, delegation_audience) =
+        if authorization_source == "INTERACTIVE_SESSION" {
+            if envelope.session_generation == 0
+                || !envelope.delegation_id.is_empty()
+                || envelope.delegation_generation != 0
+                || !envelope.delegation_audience.is_empty()
+            {
+                return Err(AuthorityOutboxError::InvalidRecord);
+            }
+            (Some(parse_uuid(&envelope.session_id)?), None, None, None)
+        } else {
+            if !envelope.session_id.is_empty()
+                || envelope.session_generation != 0
+                || envelope.delegation_generation == 0
+                || envelope.delegation_audience.trim().is_empty()
+            {
+                return Err(AuthorityOutboxError::InvalidRecord);
+            }
+            (
+                None,
+                Some(
+                    Uuid::parse_str(&envelope.delegation_id)
+                        .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
+                ),
+                Some(envelope.delegation_generation),
+                Some(envelope.delegation_audience.clone()),
+            )
+        };
     if envelope.encode_to_vec() != new.canonical_envelope_proto
         || approved.invocation_id != envelope.invocation_id
         || credential.invocation_id != envelope.invocation_id
@@ -829,7 +884,6 @@ fn validate_new_invocation(
         || target.execution_device_generation == 0
         || target.execution_authorization_id.len() != 16
         || target.execution_device_certificate_sha256.len() != 32
-        || envelope.session_generation == 0
         || envelope.contract_activation_generation == 0
         || credential.authority_signature.is_empty()
         || credential.signing_key_id.trim().is_empty()
@@ -852,6 +906,10 @@ fn validate_new_invocation(
             != target.execution_device_certificate_sha256
         || credential.session_id != envelope.session_id
         || credential.session_generation != envelope.session_generation
+        || credential.authorization_source != envelope.authorization_source
+        || credential.delegation_id != envelope.delegation_id
+        || credential.delegation_generation != envelope.delegation_generation
+        || credential.delegation_audience != envelope.delegation_audience
         || credential.contract_activation_generation != envelope.contract_activation_generation
         || credential.idempotency_key != target.idempotency_key
         || credential.idempotency_semantics != target.idempotency_semantics
@@ -881,8 +939,6 @@ fn validate_new_invocation(
     }
     let device_authorization_id = Uuid::from_slice(&envelope.execution_authorization_id)
         .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let session_id =
-        Uuid::parse_str(&envelope.session_id).map_err(|_| AuthorityOutboxError::InvalidRecord)?;
     let semantics = IdempotencySemantics::try_from(target.idempotency_semantics)
         .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
     if semantics == IdempotencySemantics::Unspecified
@@ -890,16 +946,39 @@ fn validate_new_invocation(
     {
         return Err(AuthorityOutboxError::InvalidRecord);
     }
-    let idempotency_scope_sha256 = hex(&Sha256::digest(canonical_idempotency_scope(&[
-        &envelope.organization_id,
-        &envelope.workspace_id,
-        &envelope.principal_issuer,
-        &envelope.principal_subject,
-        &invocation.owner_id,
-        &invocation.operation_id,
-        &target.scope,
-        &target.resource_id,
-    ])));
+    let idempotency_scope_sha256 = if authorization_source == "INTERACTIVE_SESSION" {
+        // Preserve the stable idempotency digest used by already persisted interactive rows.
+        hex(&Sha256::digest(canonical_idempotency_scope(&[
+            &envelope.organization_id,
+            &envelope.workspace_id,
+            &envelope.principal_issuer,
+            &envelope.principal_subject,
+            &invocation.owner_id,
+            &invocation.operation_id,
+            &target.scope,
+            &target.resource_id,
+        ])))
+    } else {
+        let delegation_id_scope = delegation_id.map(|id| id.to_string()).unwrap_or_default();
+        let delegation_generation_scope = delegation_generation
+            .map(|generation| generation.to_string())
+            .unwrap_or_default();
+        let delegation_audience_scope = delegation_audience.as_deref().unwrap_or_default();
+        hex(&Sha256::digest(canonical_idempotency_scope(&[
+            &envelope.organization_id,
+            &envelope.workspace_id,
+            &envelope.principal_issuer,
+            &envelope.principal_subject,
+            authorization_source,
+            &delegation_id_scope,
+            &delegation_generation_scope,
+            delegation_audience_scope,
+            &invocation.owner_id,
+            &invocation.operation_id,
+            &target.scope,
+            &target.resource_id,
+        ])))
+    };
     let stable_idempotency_request_digest_sha256 =
         stable_idempotency_request_digest(&invocation_bytes, &idempotency_scope_sha256)?;
     let execution_target_json = json!({
@@ -936,6 +1015,10 @@ fn validate_new_invocation(
         certificate_fingerprint_sha256: target.execution_device_certificate_sha256.clone(),
         session_id,
         session_generation: envelope.session_generation,
+        authorization_source: authorization_source.to_owned(),
+        delegation_id,
+        delegation_generation,
+        delegation_audience,
         contract_activation_generation: envelope.contract_activation_generation,
         signing_key_id: credential.signing_key_id.clone(),
         issued_at_unix_ms: issued_at,
@@ -1054,33 +1137,19 @@ async fn lock_execution_device(
     authorization_id: &Uuid,
     fingerprint: &[u8],
 ) -> Result<(), AuthorityOutboxError> {
-    let row = sqlx::query(&format!(
-        r#"SELECT identity.current_authorization_generation
-        FROM {IDENTITY_TABLE} AS identity
-        JOIN {REGISTRY_TABLE} AS certificate
-          ON certificate.organization_id = identity.organization_id
-         AND certificate.workspace_id = identity.workspace_id
-         AND certificate.device_id = identity.device_id
-         AND certificate.authorization_generation = identity.current_authorization_generation
-        WHERE identity.organization_id = $1
-          AND identity.workspace_id = $2
-          AND identity.device_id = $3
-          AND identity.current_authorization_generation = $4
-          AND certificate.authorization_id = $5
-          AND certificate.certificate_sha256 = $6
-          AND certificate.state = 'active'
-        FOR SHARE OF identity, certificate"#
-    ))
+    let current: bool = sqlx::query_scalar(
+        "SELECT cyrene_workspace_device_registry.authority_execution_device_current($1, $2, $3, $4, $5, $6)",
+    )
     .bind(organization_id)
     .bind(workspace_id)
     .bind(device_id)
-    .bind(i64::try_from(generation).map_err(|_| AuthorityOutboxError::InvalidRecord)?)
     .bind(authorization_id.as_bytes().as_slice())
     .bind(fingerprint)
-    .fetch_optional(&mut **tx)
+    .bind(i64::try_from(generation).map_err(|_| AuthorityOutboxError::InvalidRecord)?)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|_| AuthorityOutboxError::Unavailable)?;
-    if row.is_none() {
+    if !current {
         return Err(AuthorityOutboxError::AuthorizationRevoked);
     }
     Ok(())
@@ -1128,56 +1197,34 @@ async fn lock_target_binding_for_enqueue(
     tx: &mut Transaction<'_, sqlx::Postgres>,
     values: &ValidatedInvocation,
 ) -> Result<(), AuthorityOutboxError> {
-    let row = sqlx::query(&format!(
-        r#"SELECT target_component, execution_device_id, execution_device_generation,
-                  execution_authorization_id, certificate_fingerprint_sha256,
-                  target_binding_manifest_sha256, bundle_manifest_sha256,
-                  contract_activation_generation, owner_source_commit, endpoint_base
-           FROM {TARGET_TABLE}
-           WHERE organization_id = $1 AND workspace_id = $2
-             AND operation_owner_id = $3 AND operation_id = $4 AND active = TRUE
-           FOR SHARE"#
-    ))
+    let endpoint_base: Option<String> = sqlx::query_scalar(
+        "SELECT cyrene_workspace_device_registry.lock_authority_execution_target_binding(\
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+        )",
+    )
     .bind(&values.organization_id)
     .bind(&values.workspace_id)
     .bind(&values.operation_owner_id)
     .bind(&values.operation_id)
-    .fetch_optional(&mut **tx)
+    .bind(&values.target_component)
+    .bind(&values.execution_device_id)
+    .bind(
+        i64::try_from(values.execution_device_generation)
+            .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
+    )
+    .bind(values.execution_authorization_id.as_bytes().as_slice())
+    .bind(values.certificate_fingerprint_sha256.as_slice())
+    .bind(&values.target_binding_manifest_sha256)
+    .bind(&values.bundle_manifest_sha256)
+    .bind(
+        i64::try_from(values.contract_activation_generation)
+            .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
+    )
+    .bind(&values.owner_source_commit)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|_| AuthorityOutboxError::Unavailable)?
-    .ok_or(AuthorityOutboxError::AuthorizationRevoked)?;
-
-    let target_component: String = row
-        .try_get("target_component")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let execution_device_id: String = row
-        .try_get("execution_device_id")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let execution_device_generation: i64 = row
-        .try_get("execution_device_generation")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let execution_authorization_id: Vec<u8> = row
-        .try_get("execution_authorization_id")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let fingerprint: Vec<u8> = row
-        .try_get("certificate_fingerprint_sha256")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let target_manifest: Vec<u8> = row
-        .try_get("target_binding_manifest_sha256")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let bundle_manifest: Vec<u8> = row
-        .try_get("bundle_manifest_sha256")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let activation_generation: i64 = row
-        .try_get("contract_activation_generation")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let owner_source_commit: String = row
-        .try_get("owner_source_commit")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let endpoint_base: String = row
-        .try_get("endpoint_base")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-
+    .map_err(|_| AuthorityOutboxError::Unavailable)?;
+    let endpoint_base = endpoint_base.ok_or(AuthorityOutboxError::AuthorizationRevoked)?;
     let endpoint_matches_binding = values.endpoint == endpoint_base
         || values
             .endpoint
@@ -1185,19 +1232,7 @@ async fn lock_target_binding_for_enqueue(
             .is_some_and(|suffix| {
                 endpoint_base.ends_with('/') || suffix.starts_with('/') || suffix.starts_with('?')
             });
-    let generation_matches = u64::try_from(execution_device_generation).ok()
-        == Some(values.execution_device_generation)
-        && u64::try_from(activation_generation).ok() == Some(values.contract_activation_generation);
-    if target_component != values.target_component
-        || execution_device_id != values.execution_device_id
-        || !generation_matches
-        || execution_authorization_id != values.execution_authorization_id.as_bytes()
-        || fingerprint != values.certificate_fingerprint_sha256
-        || hex(&target_manifest) != values.target_binding_manifest_sha256
-        || hex(&bundle_manifest) != values.bundle_manifest_sha256
-        || owner_source_commit != values.owner_source_commit
-        || !endpoint_matches_binding
-    {
+    if !endpoint_matches_binding {
         return Err(AuthorityOutboxError::AuthorizationRevoked);
     }
     Ok(())
@@ -1213,20 +1248,123 @@ async fn lock_record_session(
         .canonical_envelope
         .as_ref()
         .ok_or(AuthorityOutboxError::InvalidRecord)?;
-    let session_id = parse_uuid(&envelope.session_id)?;
-    lock_session(
-        tx,
-        SessionLockFence {
-            session_id: &session_id,
-            organization_id: &envelope.organization_id,
-            workspace_id: &envelope.workspace_id,
-            issuer: &envelope.principal_issuer,
-            subject: &envelope.principal_subject,
-            generation: envelope.session_generation,
-            now_ms: now_unix_ms,
-        },
-    )
-    .await
+    lock_authorization_for_envelope(tx, envelope, now_unix_ms).await
+}
+
+async fn lock_authorization_for_envelope(
+    tx: &mut Transaction<'_, sqlx::Postgres>,
+    envelope: &CanonicalInvocationEnvelope,
+    now_ms: u64,
+) -> Result<(), AuthorityOutboxError> {
+    let source = wire::InvocationAuthorizationSource::try_from(envelope.authorization_source)
+        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+    match source {
+        wire::InvocationAuthorizationSource::Unspecified
+        | wire::InvocationAuthorizationSource::InteractiveSession => {
+            if envelope.session_generation == 0
+                || !envelope.delegation_id.is_empty()
+                || envelope.delegation_generation != 0
+                || !envelope.delegation_audience.is_empty()
+            {
+                return Err(AuthorityOutboxError::InvalidRecord);
+            }
+            let session_id = parse_uuid(&envelope.session_id)?;
+            lock_session(
+                tx,
+                SessionLockFence {
+                    session_id: &session_id,
+                    organization_id: &envelope.organization_id,
+                    workspace_id: &envelope.workspace_id,
+                    issuer: &envelope.principal_issuer,
+                    subject: &envelope.principal_subject,
+                    generation: envelope.session_generation,
+                    now_ms,
+                },
+            )
+            .await
+        }
+        wire::InvocationAuthorizationSource::Delegation => {
+            if !envelope.session_id.is_empty() || envelope.session_generation != 0 {
+                return Err(AuthorityOutboxError::InvalidRecord);
+            }
+            let delegation_id = Uuid::parse_str(&envelope.delegation_id)
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let invocation = envelope
+                .invocation
+                .as_ref()
+                .ok_or(AuthorityOutboxError::InvalidRecord)?;
+            let target = envelope
+                .target
+                .as_ref()
+                .ok_or(AuthorityOutboxError::InvalidRecord)?;
+            let row = sqlx::query(&format!(
+                r#"SELECT generation, organization_id, workspace_id, principal_issuer,
+                          principal_subject, audience, operations, expires_at_unix_ms,
+                          revoked_at_unix_ms
+                   FROM {DELEGATION_TABLE}
+                   WHERE delegation_id = $1
+                   FOR SHARE"#
+            ))
+            .bind(delegation_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| AuthorityOutboxError::Unavailable)?
+            .ok_or(AuthorityOutboxError::AuthorizationRevoked)?;
+            let generation: i64 = row
+                .try_get("generation")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let organization_id: String = row
+                .try_get("organization_id")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let workspace_id: String = row
+                .try_get("workspace_id")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let principal_issuer: String = row
+                .try_get("principal_issuer")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let principal_subject: String = row
+                .try_get("principal_subject")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let audience: String = row
+                .try_get("audience")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let operations: serde_json::Value = row
+                .try_get("operations")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let expires_at: i64 = row
+                .try_get("expires_at_unix_ms")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            let revoked_at: Option<i64> = row
+                .try_get("revoked_at_unix_ms")
+                .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            if u64::try_from(generation).ok() != Some(envelope.delegation_generation)
+                || organization_id != envelope.organization_id
+                || workspace_id != envelope.workspace_id
+                || principal_issuer != envelope.principal_issuer
+                || principal_subject != envelope.principal_subject
+                || audience != envelope.delegation_audience
+                || revoked_at.is_some()
+                || u64::try_from(expires_at).map_or(true, |expires| expires <= now_ms)
+            {
+                return Err(AuthorityOutboxError::AuthorizationRevoked);
+            }
+            let scopes: Vec<cy_workspace_control_plane::authority::DelegatedOperationScope> =
+                serde_json::from_value(operations)
+                    .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+            if !scopes.iter().any(|scope| {
+                scope.owner_id == invocation.owner_id
+                    && scope.operation_id == invocation.operation_id
+                    && (scope.resource_ids.is_empty() && target.resource_id.is_empty()
+                        || scope
+                            .resource_ids
+                            .iter()
+                            .any(|id| id == &target.resource_id))
+            }) {
+                return Err(AuthorityOutboxError::AuthorizationRevoked);
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn lock_target_binding_for_record(
@@ -1267,55 +1405,34 @@ async fn lock_target_binding_for_record(
         .try_get("owner_source_commit")
         .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
 
-    let row = sqlx::query(&format!(
-        r#"SELECT target_component, execution_device_id, execution_device_generation,
-                  execution_authorization_id, certificate_fingerprint_sha256,
-                  target_binding_manifest_sha256, bundle_manifest_sha256,
-                  contract_activation_generation, owner_source_commit, endpoint_base
-           FROM {TARGET_TABLE}
-           WHERE organization_id = $1 AND workspace_id = $2
-             AND operation_owner_id = $3 AND operation_id = $4 AND active = TRUE
-           FOR SHARE"#
-    ))
+    let endpoint_base: Option<String> = sqlx::query_scalar(
+        "SELECT cyrene_workspace_device_registry.lock_authority_execution_target_binding(\
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+        )",
+    )
     .bind(&envelope.organization_id)
     .bind(&envelope.workspace_id)
     .bind(&invocation.owner_id)
     .bind(&invocation.operation_id)
-    .fetch_optional(&mut **tx)
+    .bind(&target.target_component)
+    .bind(&target.execution_device_id)
+    .bind(
+        i64::try_from(target.execution_device_generation)
+            .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
+    )
+    .bind(target.execution_authorization_id.as_slice())
+    .bind(target.execution_device_certificate_sha256.as_slice())
+    .bind(&target_manifest)
+    .bind(&bundle_manifest)
+    .bind(
+        i64::try_from(envelope.contract_activation_generation)
+            .map_err(|_| AuthorityOutboxError::InvalidRecord)?,
+    )
+    .bind(&owner_source_commit)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|_| AuthorityOutboxError::Unavailable)?
-    .ok_or(AuthorityOutboxError::AuthorizationRevoked)?;
-
-    let target_component: String = row
-        .try_get("target_component")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let execution_device_id: String = row
-        .try_get("execution_device_id")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let execution_device_generation: i64 = row
-        .try_get("execution_device_generation")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let execution_authorization_id: Vec<u8> = row
-        .try_get("execution_authorization_id")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let fingerprint: Vec<u8> = row
-        .try_get("certificate_fingerprint_sha256")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let current_target_manifest: Vec<u8> = row
-        .try_get("target_binding_manifest_sha256")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let current_bundle_manifest: Vec<u8> = row
-        .try_get("bundle_manifest_sha256")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let activation_generation: i64 = row
-        .try_get("contract_activation_generation")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let current_owner_source_commit: String = row
-        .try_get("owner_source_commit")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
-    let endpoint_base: String = row
-        .try_get("endpoint_base")
-        .map_err(|_| AuthorityOutboxError::InvalidRecord)?;
+    .map_err(|_| AuthorityOutboxError::Unavailable)?;
+    let endpoint_base = endpoint_base.ok_or(AuthorityOutboxError::AuthorizationRevoked)?;
     let endpoint_matches_binding = target.endpoint == endpoint_base
         || target
             .endpoint
@@ -1323,19 +1440,7 @@ async fn lock_target_binding_for_record(
             .is_some_and(|suffix| {
                 endpoint_base.ends_with('/') || suffix.starts_with('/') || suffix.starts_with('?')
             });
-    if target_component != target.target_component
-        || execution_device_id != target.execution_device_id
-        || u64::try_from(execution_device_generation).ok()
-            != Some(target.execution_device_generation)
-        || execution_authorization_id != target.execution_authorization_id
-        || fingerprint != target.execution_device_certificate_sha256
-        || hex(&current_target_manifest) != target_manifest
-        || hex(&current_bundle_manifest) != bundle_manifest
-        || current_owner_source_commit != owner_source_commit
-        || u64::try_from(activation_generation).ok()
-            != Some(envelope.contract_activation_generation)
-        || !endpoint_matches_binding
-    {
+    if !endpoint_matches_binding {
         return Err(AuthorityOutboxError::AuthorizationRevoked);
     }
     Ok(())
@@ -1522,6 +1627,10 @@ fn row_to_invocation_record(row: PgRow) -> Result<AuthorityInvocationRecord, Aut
             != target.execution_device_certificate_sha256
         || credential.session_id != canonical_envelope.session_id
         || credential.session_generation != canonical_envelope.session_generation
+        || credential.authorization_source != canonical_envelope.authorization_source
+        || credential.delegation_id != canonical_envelope.delegation_id
+        || credential.delegation_generation != canonical_envelope.delegation_generation
+        || credential.delegation_audience != canonical_envelope.delegation_audience
         || credential.contract_activation_generation
             != canonical_envelope.contract_activation_generation
         || credential.idempotency_key != target.idempotency_key

@@ -415,7 +415,7 @@ if [ -n "$hardcoded_workspace_product_dispatch" ]; then
 fi
 
 # Keep the current BFF routes explicit; a new endpoint requires a boundary review.
-# BFF 路由固定为当前 identity、Directory、审批、health 与闭合 Product operation 面。
+# BFF 路由固定为当前 identity、Directory、审批、delegation lifecycle、health 与闭合 Product operation 面。
 expected_workspace_bff_routes=(
   "/api/workspace/v1/session"
   "/api/workspace/v1/workspaces"
@@ -423,6 +423,8 @@ expected_workspace_bff_routes=(
   "/api/workspace/v1/device-authorizations/approval-challenges"
   "/api/workspace/v1/device-authorizations/approval-challenges/:approval_id/complete"
   "/api/workspace/v1/device-authorizations/denials"
+  "/api/workspace/v2/workspaces/:workspace_id/delegations"
+  "/api/workspace/v2/workspaces/:workspace_id/delegations/:delegation_id"
   "/credential-registration"
   "/healthz"
   "/readyz"

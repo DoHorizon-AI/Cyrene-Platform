@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod authority_delegation;
 pub mod authority_execution_target;
 pub mod authority_web_session;
 pub mod device_authorization;
@@ -26,6 +27,7 @@ pub mod webauthn_http_binding_postgres;
 pub mod webauthn_postgres_store;
 pub mod webauthn_verifier;
 
+pub use authority_delegation::PostgresAuthorityDelegationStore;
 pub use authority_execution_target::{
     AuthorityExecutionTargetBinding, AuthorityExecutionTargetError, AuthorityExecutionTargetImport,
     PostgresAuthorityExecutionTargetAdmin, PostgresAuthorityExecutionTargetStore,

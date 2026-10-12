@@ -24,9 +24,10 @@ use axum::{routing::get, Json, Router};
 use cy_proto::cyrene::workspace::authority::v2::workspace_authority_service_server::WorkspaceAuthorityServiceServer;
 use cy_workspace_control_plane::{
     authority::{
-        AuthorityCredentialSigner, AuthorityExecutionTargetStore, AuthorityRpcService,
-        AuthorityServiceDependencies, AuthorityWebSessionStore, ContractSnapshotManager,
-        SnapshotArtifactInput, SnapshotTrust, VerifiedContractSnapshot,
+        AuthorityCredentialSigner, AuthorityExecutionTargetStore, AuthorityManagedWorkload,
+        AuthorityProductWorkloadProfile, AuthorityRpcService, AuthorityServiceDependencies,
+        AuthorityWebSessionStore, ContractSnapshotManager, SnapshotArtifactInput, SnapshotTrust,
+        VerifiedContractSnapshot,
     },
     AdmissionHealthEvidence, AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier,
     DeploymentAdmission, DeploymentIdentity, WebIdentityDirectory, WebIdentityDirectoryError,
@@ -34,9 +35,9 @@ use cy_workspace_control_plane::{
 };
 use cy_workspace_postgres_storage::{
     AuthorityExecutionTargetBinding as PgTarget, DurableDirectoryError,
-    PostgresAuthorityExecutionTargetStore, PostgresAuthorityWebSessionStore,
-    PostgresRelayPeerSignedCrlChecker, PostgresWorkspaceDeviceRegistry, PostgresWorkspaceDirectory,
-    PostgresWorkspaceOutbox,
+    PostgresAuthorityDelegationStore, PostgresAuthorityExecutionTargetStore,
+    PostgresAuthorityWebSessionStore, PostgresRelayPeerSignedCrlChecker,
+    PostgresWorkspaceDeviceRegistry, PostgresWorkspaceDirectory, PostgresWorkspaceOutbox,
 };
 use ed25519_dalek::SigningKey;
 use http::StatusCode;
@@ -230,6 +231,7 @@ pub async fn run_host() -> Result<(), HostError> {
     let sessions: Arc<dyn AuthorityWebSessionStore> = Arc::new(SessionAdapter {
         store: PostgresAuthorityWebSessionStore::new(pool.clone()),
     });
+    let delegations = Arc::new(PostgresAuthorityDelegationStore::new(pool.clone()));
     let targets: Arc<dyn AuthorityExecutionTargetStore> = Arc::new(TargetAdapter {
         store: PostgresAuthorityExecutionTargetStore::new(pool.clone()),
     });
@@ -291,6 +293,13 @@ pub async fn run_host() -> Result<(), HostError> {
         web_verifier: verifier.clone(),
         directory: directory.clone(),
         sessions,
+        delegations,
+        exchange_workload: AuthorityManagedWorkload {
+            workload_id: settings.exchange_workload_id.clone(),
+            audience: settings.exchange_workload_audience.clone(),
+            certificate_fingerprints_sha256: settings.exchange_workload_fingerprints_sha256.clone(),
+        },
+        product_workload_profiles: settings.product_workload_profiles.clone(),
         targets,
         device_registry: registry.clone(),
         device_certificate_status,
@@ -404,8 +413,10 @@ fn report_task(
 }
 
 async fn verify_authority_schema(pool: &sqlx::PgPool) -> Result<(), HostError> {
-    const REQUIRED_QUERIES: [&str; 3] = [
+    const REQUIRED_QUERIES: [&str; 5] = [
         "SELECT invocation_id, workspace_id, status, execution_credential_proto, approved_envelope_proto, result_digest_sha256 FROM cyrene_workspace_device_registry.workspace_invocation_outbox LIMIT 0",
+        "SELECT authorization_source, delegation_id, delegation_generation, delegation_audience FROM cyrene_workspace_device_registry.workspace_invocation_outbox LIMIT 0",
+        "SELECT delegation_id, generation, organization_id, workspace_id, principal_issuer, principal_subject, audience, managed_workload_id, operations, expires_at_unix_ms, revoked_at_unix_ms FROM cyrene_workspace_device_registry.authority_delegations LIMIT 0",
         "SELECT session_id, organization_id, workspace_id, principal_issuer, principal_subject, bearer_token_sha256, session_generation, expires_at_unix_ms FROM cyrene_workspace_device_registry.authority_web_sessions LIMIT 0",
         "SELECT organization_id, workspace_id, operation_owner_id, operation_id, execution_device_id, execution_authorization_id, certificate_fingerprint_sha256, endpoint_base, contract_activation_generation FROM cyrene_workspace_device_registry.authority_execution_target_bindings LIMIT 0",
     ];
@@ -440,6 +451,24 @@ struct Settings {
     organization_id: String,
     workspace_id: String,
     authority_instance_id: String,
+    exchange_workload_id: String,
+    exchange_workload_audience: String,
+    exchange_workload_fingerprints_sha256: Vec<[u8; 32]>,
+    product_workload_profiles: Vec<AuthorityProductWorkloadProfile>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductWorkloadProfileConfig {
+    workload_id: String,
+    owner_id: String,
+    target_component: String,
+    audience: String,
+    #[serde(default)]
+    organization_id: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    certificate_fingerprints_sha256: Vec<String>,
 }
 
 impl Settings {
@@ -514,6 +543,19 @@ impl Settings {
             organization_id: deployment_identity.organization_id,
             workspace_id: deployment_identity.workspace_id,
             authority_instance_id: deployment_identity.authority_instance_id,
+            exchange_workload_id: env_value("CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_ID", "")?,
+            exchange_workload_audience: env_value(
+                "CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_AUDIENCE",
+                "exchange",
+            )?,
+            exchange_workload_fingerprints_sha256: parse_sha256_fingerprints(&env_value(
+                "CYRENE_AUTHORITY_EXCHANGE_MTLS_SHA256",
+                "",
+            )?)?,
+            product_workload_profiles: parse_product_workload_profiles(&env_value(
+                "CYRENE_AUTHORITY_PRODUCT_WORKLOAD_PROFILES_JSON",
+                "[]",
+            )?)?,
         })
     }
 
@@ -524,6 +566,81 @@ impl Settings {
             authority_instance_id: self.authority_instance_id.clone(),
         }
     }
+}
+
+fn parse_sha256_fingerprints(value: &str) -> Result<Vec<[u8; 32]>, HostError> {
+    let mut fingerprints = Vec::new();
+    for item in value.split(',').filter(|item| !item.trim().is_empty()) {
+        let item = item.trim();
+        if item.len() != 64 || !item.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(HostError::Configuration);
+        }
+        let mut fingerprint = [0_u8; 32];
+        for (index, pair) in item.as_bytes().chunks_exact(2).enumerate() {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or(HostError::Configuration)?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or(HostError::Configuration)?;
+            fingerprint[index] = ((high << 4) | low) as u8;
+        }
+        if fingerprints.contains(&fingerprint) {
+            return Err(HostError::Configuration);
+        }
+        fingerprints.push(fingerprint);
+    }
+    Ok(fingerprints)
+}
+
+fn parse_product_workload_profiles(
+    value: &str,
+) -> Result<Vec<AuthorityProductWorkloadProfile>, HostError> {
+    let profiles: Vec<ProductWorkloadProfileConfig> =
+        serde_json::from_str(value).map_err(|_| HostError::Configuration)?;
+    if profiles.len() > 128 {
+        return Err(HostError::Configuration);
+    }
+    let mut all_fingerprints = Vec::new();
+    profiles
+        .into_iter()
+        .map(|profile| {
+            if profile.workload_id.trim().is_empty()
+                || profile.owner_id.trim().is_empty()
+                || profile.target_component.trim().is_empty()
+                || profile.audience.trim().is_empty()
+                || profile.certificate_fingerprints_sha256.is_empty()
+                || profile
+                    .organization_id
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                || profile
+                    .workspace_id
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(HostError::Configuration);
+            }
+            let fingerprints =
+                parse_sha256_fingerprints(&profile.certificate_fingerprints_sha256.join(","))?;
+            if fingerprints
+                .iter()
+                .any(|fingerprint| all_fingerprints.contains(fingerprint))
+            {
+                return Err(HostError::Configuration);
+            }
+            all_fingerprints.extend(fingerprints.iter().copied());
+            Ok(AuthorityProductWorkloadProfile {
+                workload_id: profile.workload_id,
+                owner_id: profile.owner_id,
+                target_component: profile.target_component,
+                audience: profile.audience,
+                organization_id: profile.organization_id,
+                workspace_id: profile.workspace_id,
+                certificate_fingerprints_sha256: fingerprints,
+            })
+        })
+        .collect()
 }
 
 impl Drop for Settings {
@@ -1293,6 +1410,9 @@ where
 fn tcp_rpc_path_allowed(path: &str) -> bool {
     matches!(path,
         "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/NegotiateVersion"
+        | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ApproveAndEnqueueDelegatedInvocation"
+        | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ValidateProductExecutionAuthorization"
+        | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/GetProductInvocationStatus"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ClaimInvocations"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ValidateExecutionAuthorization"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/AcknowledgeDelivery"
@@ -1307,6 +1427,9 @@ fn bff_rpc_path_allowed(path: &str) -> bool {
             | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/VerifyIdentity"
             | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/GetCatalogSnapshot"
             | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ApproveAndEnqueueInvocation"
+            | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/CreateDelegation"
+            | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/RevokeDelegation"
+            | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/GetDelegation"
             | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/WaitInvocationResult"
     )
 }
@@ -1574,6 +1697,31 @@ mod tests {
     }
 
     #[test]
+    fn product_workload_profiles_require_unique_pinned_certificate_scopes() {
+        let fingerprint = "ab".repeat(32);
+        let profile = json!([{
+            "workloadId": "exchange",
+            "ownerId": "exchange",
+            "targetComponent": "cy-workspace-exchange",
+            "audience": "exchange",
+            "organizationId": "org-1",
+            "workspaceId": "workspace-1",
+            "certificateFingerprintsSha256": [fingerprint]
+        }]);
+        let parsed = super::parse_product_workload_profiles(&profile.to_string())
+            .expect("valid pinned profile parses");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].owner_id, "exchange");
+        assert_eq!(parsed[0].target_component, "cy-workspace-exchange");
+
+        let duplicate = json!([profile[0].clone(), profile[0].clone()]);
+        assert!(super::parse_product_workload_profiles(&duplicate.to_string()).is_err());
+        assert!(super::parse_product_workload_profiles("[]")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn tcp_and_bff_rpc_routes_are_disjoint_except_version_negotiation() {
         let prefix = "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/";
         assert!(tcp_rpc_path_allowed(&format!("{prefix}ClaimInvocations")));
@@ -1584,6 +1732,20 @@ mod tests {
             "{prefix}ApproveAndEnqueueInvocation"
         )));
         assert!(!bff_rpc_path_allowed(&format!("{prefix}ClaimInvocations")));
+        assert!(tcp_rpc_path_allowed(&format!(
+            "{prefix}ValidateProductExecutionAuthorization"
+        )));
+        assert!(!bff_rpc_path_allowed(&format!(
+            "{prefix}ValidateProductExecutionAuthorization"
+        )));
+        assert!(bff_rpc_path_allowed(&format!("{prefix}GetDelegation")));
+        assert!(!tcp_rpc_path_allowed(&format!("{prefix}GetDelegation")));
+        assert!(tcp_rpc_path_allowed(&format!(
+            "{prefix}GetProductInvocationStatus"
+        )));
+        assert!(!bff_rpc_path_allowed(&format!(
+            "{prefix}GetProductInvocationStatus"
+        )));
         assert!(tcp_rpc_path_allowed(&format!("{prefix}NegotiateVersion")));
         assert!(bff_rpc_path_allowed(&format!("{prefix}NegotiateVersion")));
     }

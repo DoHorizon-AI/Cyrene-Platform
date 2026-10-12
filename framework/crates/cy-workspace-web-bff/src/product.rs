@@ -136,6 +136,116 @@ pub trait WorkspaceProductGateway: Send + Sync + 'static {
         access_token: &str,
         request: WorkspaceApiRequest,
     ) -> Result<WorkspaceApiResponse, WorkspaceGatewayError>;
+
+    /// Create a user-owned workload delegation through the Platform Authority.
+    async fn create_delegation(
+        &self,
+        _principal: &cy_workspace_control_plane::VerifiedWebPrincipal,
+        _access_token: &str,
+        _workspace_id: &str,
+        _request: CreateDelegationInput,
+    ) -> Result<CreateDelegationOutput, WorkspaceGatewayError> {
+        Err(WorkspaceGatewayError::Unavailable)
+    }
+
+    /// Revoke one delegation owned by the authenticated user.
+    async fn revoke_delegation(
+        &self,
+        _principal: &cy_workspace_control_plane::VerifiedWebPrincipal,
+        _access_token: &str,
+        _workspace_id: &str,
+        _delegation_id: &str,
+    ) -> Result<RevokeDelegationOutput, WorkspaceGatewayError> {
+        Err(WorkspaceGatewayError::Unavailable)
+    }
+
+    /// Read one delegation owned by the verified principal in the exact Workspace.
+    async fn get_delegation(
+        &self,
+        _principal: &cy_workspace_control_plane::VerifiedWebPrincipal,
+        _access_token: &str,
+        _workspace_id: &str,
+        _delegation_id: &str,
+    ) -> Result<DelegationOutput, WorkspaceGatewayError> {
+        Err(WorkspaceGatewayError::Unavailable)
+    }
+}
+
+/// User request to grant one workload a narrow set of Product operations.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateDelegationInput {
+    /// Authenticated workload audience.
+    pub audience: String,
+    /// Operations and exact resource scopes to grant.
+    pub operations: Vec<DelegatedOperationInput>,
+    /// Optional lifetime; Authority caps it at seven days and defaults to seven days.
+    pub expires_in_seconds: Option<u32>,
+}
+
+/// One operation scope in the BFF request.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DelegatedOperationInput {
+    /// Catalog owner.
+    pub owner_id: String,
+    /// Stable operation identifier.
+    pub operation_id: String,
+    /// Exact Product resource IDs.
+    #[serde(default)]
+    pub resource_ids: Vec<String>,
+}
+
+/// Persisted delegation projection returned by Authority.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDelegationOutput {
+    /// Opaque delegation ID.
+    pub delegation_id: String,
+    /// Current revocation fence generation.
+    pub generation: u64,
+    /// Absolute expiration in Unix milliseconds.
+    pub expires_at_unix_ms: u64,
+}
+
+/// Revocation outcome returned by Authority.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeDelegationOutput {
+    /// Whether the grant is revoked after this call.
+    pub revoked: bool,
+    /// Current revocation fence generation.
+    pub generation: u64,
+}
+
+/// Exact self-owned delegation projection for a first-party binding client.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationOutput {
+    /// Opaque delegation ID.
+    pub delegation_id: String,
+    /// Directory organization and workspace scope.
+    pub organization_id: String,
+    /// Exact workspace scope.
+    pub workspace_id: String,
+    /// Verified human anchor. This is returned only after Authority self-owner checks.
+    pub principal_issuer: String,
+    /// Verified human anchor. This is returned only after Authority self-owner checks.
+    pub principal_subject: String,
+    /// Fixed workload audience.
+    pub audience: String,
+    /// Server-configured workload identity bound to the original consent.
+    pub managed_workload_id: String,
+    /// Owner, operation, and exact resource allowlist.
+    pub operations: Vec<DelegatedOperationInput>,
+    /// Expiration in Unix milliseconds.
+    pub expires_at_unix_ms: u64,
+    /// Monotonic revocation generation.
+    pub generation: u64,
+    /// Whether the grant has been revoked.
+    pub revoked: bool,
+    /// Revocation time in Unix milliseconds when revoked.
+    pub revoked_at_unix_ms: Option<u64>,
 }
 
 /// Stable failure categories from the Workspace transport adapter.
@@ -151,6 +261,8 @@ pub enum WorkspaceGatewayError {
     Forbidden,
     /// Workspace could not find this authorized Workspace resource.
     NotFound,
+    /// The delegation request is malformed.
+    InvalidRequest,
     /// Workspace returned an invalid or unexpected API response.
     InvalidResponse,
 }
