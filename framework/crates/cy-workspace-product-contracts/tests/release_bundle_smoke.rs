@@ -211,6 +211,6 @@ fn assert_exchange_policy_rejects_roles(
     let result = policy.authorize(bundle, request, &principal, scope);
     assert!(
         matches!(result, Err(error) if error == expected),
-        "expected {expected:?} for Exchange operation {operation_id}, got {result:?}"
+        "expected {expected:?} for owner operation {operation_id}, got {result:?}"
     );
 }
