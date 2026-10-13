@@ -557,6 +557,54 @@ fn dynamic_grants_fail_closed_for_missing_grant_unknown_operation_and_bad_pins()
 }
 
 #[test]
+fn directory_roles_and_workspace_bindings_fail_closed() {
+    let fixture = Fixture::new();
+    let (bundle, policy) = fixture.load();
+    let scope = TrustedWorkspaceScope::new("organization-7", WORKSPACE_ID).unwrap();
+    let request_body = br#"{"workspaceId":"workspace-42","name":"model card"}"#;
+    let member_only = VerifiedProductPrincipal::directory_user(["workspace.member".to_owned()]);
+    assert!(matches!(
+        policy.authorize(
+            &bundle,
+            fixture.invocation(request_body, OPERATION_ID),
+            &member_only,
+            scope.clone(),
+        ),
+        Err(AuthorizationError::MissingRole)
+    ));
+
+    let command_without_membership = VerifiedProductPrincipal::directory_user([
+        "workspace.product.command.example.publish_artifact.v2".to_owned(),
+    ]);
+    assert!(matches!(
+        policy.authorize(
+            &bundle,
+            fixture.invocation(request_body, OPERATION_ID),
+            &command_without_membership,
+            scope.clone(),
+        ),
+        Err(AuthorizationError::MissingRole)
+    ));
+
+    let authorized = VerifiedProductPrincipal::directory_user([
+        "workspace.member".to_owned(),
+        "workspace.product.command.example.publish_artifact.v2".to_owned(),
+    ]);
+    assert!(matches!(
+        policy.authorize(
+            &bundle,
+            fixture.invocation(
+                br#"{"workspaceId":"workspace-other","name":"model card"}"#,
+                OPERATION_ID,
+            ),
+            &authorized,
+            scope,
+        ),
+        Err(AuthorizationError::InvalidRequest)
+    ));
+}
+
+#[test]
 fn catalog_tampering_is_rejected_even_when_a_different_core_operation_is_requested() {
     let fixture = Fixture::new();
     let catalog_path = fixture

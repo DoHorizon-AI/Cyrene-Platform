@@ -12,14 +12,17 @@ goals, and verified installation evidence.
 | `../architecture/sandbox-adapter.md` | Sandbox Adapter backend boundary. | Sandbox Adapter 后端边界 |
 | `node-agent.md` | Node Agent operation and ownership. | Node Agent 操作与归属 |
 | `kernel-execution-goals.md` | Execution safety goals. | 执行安全目标 |
+| `workspace-product-policy-v2.md` | Workspace Product v2 policy release and Directory role activation. | Workspace Product v2 policy 发布与 Directory role 激活 |
 | `verified-installation-record.md` | Installation evidence record. | 安装证据记录 |
 
 ## Suggested reading | 推荐顺序
 
 Read `kernel-runtime.md`, then `node-agent.md`, and use the installation record
 when investigating deployment provenance.
+Use `workspace-product-policy-v2.md` when reviewing Product command role activation.
 
 先读 `kernel-runtime.md`，再读 `node-agent.md`；排查部署来源时参考安装记录。
+审查 Product command role 激活时，参考 `workspace-product-policy-v2.md`。
 
 System 与 Sandbox Adapter 的中文镜像见 [`../zh-CN/operations/`](../zh-CN/operations/README.md)
 以及 [`../zh-CN/architecture/`](../zh-CN/architecture/README.md)。
@@ -38,6 +41,7 @@ System 与 Sandbox Adapter 的中文镜像见 [`../zh-CN/operations/`](../zh-CN/
 | `../architecture/sandbox-adapter.md` | Sandbox Adapter 后端边界。 |
 | `node-agent.md` | Node Agent 操作与归属。 |
 | `kernel-execution-goals.md` | 执行安全目标。 |
+| `workspace-product-policy-v2.md` | Workspace Product v2 policy 发布与 Directory role 激活。 |
 | `verified-installation-record.md` | 安装证据记录。 |
 
 ## 推荐顺序
