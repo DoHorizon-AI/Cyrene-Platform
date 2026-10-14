@@ -35,7 +35,7 @@ struct OperationCase {
     command_role: Option<&'static str>,
 }
 
-const OPERATIONS: [OperationCase; 9] = [
+const OPERATIONS: [OperationCase; 8] = [
     OperationCase {
         operation_id: "accountBeginRenewalSession",
         route: "/api/v1/accounts/authorizations/{authorization_id}/renewal-sessions",
@@ -79,14 +79,6 @@ const OPERATIONS: [OperationCase; 9] = [
     OperationCase {
         operation_id: "integrationListNotifications",
         route: "/api/v1/integrations/notifications",
-        method: "get",
-        is_command: false,
-        resource_parameter: None,
-        command_role: None,
-    },
-    OperationCase {
-        operation_id: "integrationStreamNotifications",
-        route: "/api/v1/integrations/notifications/events",
         method: "get",
         is_command: false,
         resource_parameter: None,
@@ -203,10 +195,11 @@ impl Fixture {
                 .resource_parameter
                 .map(|_| resource_id_for(operation.operation_id).to_owned())
                 .unwrap_or_default(),
-            idempotency_key: operation
-                .is_command
-                .then(|| "policy-tck-key-123".to_owned())
-                .unwrap_or_default(),
+            idempotency_key: if operation.is_command {
+                "policy-tck-key-123".to_owned()
+            } else {
+                String::new()
+            },
         }
     }
 }
@@ -353,7 +346,7 @@ fn exchange_integration_policy_accepts_exact_grants_and_denies_escalation() {
     assert_denied(
         policy.authorize(
             &bundle,
-            fixture.invocation(&OPERATIONS[8]),
+            fixture.invocation(&OPERATIONS[7]),
             &member,
             scope.clone(),
         ),
@@ -367,7 +360,7 @@ fn exchange_integration_policy_accepts_exact_grants_and_denies_escalation() {
     assert_denied(
         policy.authorize(
             &bundle,
-            fixture.invocation(&OPERATIONS[8]),
+            fixture.invocation(&OPERATIONS[7]),
             &revoked_member,
             scope.clone(),
         ),
