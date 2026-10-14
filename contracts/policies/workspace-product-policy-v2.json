@@ -1,6 +1,6 @@
 {
   "schemaVersion": "cyrene.workspace.product.authorization-policy.v2",
-  "policyVersion": "2.0.0",
+  "policyVersion": "2.1.0",
   "grants": [
     {
       "ownerId": "catalyst",
@@ -165,7 +165,28 @@
     },
     {
       "ownerId": "exchange",
+      "operationId": "accountBeginRenewalSession",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.renewal.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
       "operationId": "accountListLinks",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "accountGetRenewalSession",
       "principalKinds": ["DIRECTORY_USER"],
       "requiredRoles": ["workspace.member"],
       "requiresExactWorkspace": true,
@@ -263,9 +284,7 @@
       ],
       "requiresExactWorkspace": true,
       "requiredRequestBindings": [],
-      "requiredResponseBindings": [
-        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
-      ]
+      "requiredResponseBindings": []
     },
     {
       "ownerId": "exchange",
@@ -277,9 +296,7 @@
       ],
       "requiresExactWorkspace": true,
       "requiredRequestBindings": [],
-      "requiredResponseBindings": [
-        { "jsonPointer": "/*/workspaceId", "matches": "WORKSPACE_ID" }
-      ]
+      "requiredResponseBindings": []
     },
     {
       "ownerId": "exchange",
@@ -328,6 +345,78 @@
       "requiredRoles": [
         "workspace.member",
         "workspace.product.command.exchange.integration.configure.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationGetAuthorizationHealth",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationListConnectionResources",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationRefreshConnectionResources",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.integration.refresh.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationListNotifications",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationStreamNotifications",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": ["workspace.member"],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationAcknowledgeNotification",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.notification.ack.v1"
+      ],
+      "requiresExactWorkspace": true,
+      "requiredRequestBindings": [],
+      "requiredResponseBindings": []
+    },
+    {
+      "ownerId": "exchange",
+      "operationId": "integrationDeliverNotification",
+      "principalKinds": ["DIRECTORY_USER"],
+      "requiredRoles": [
+        "workspace.member",
+        "workspace.product.command.exchange.notification.v1"
       ],
       "requiresExactWorkspace": true,
       "requiredRequestBindings": [],
