@@ -31,6 +31,9 @@ Exchange operation IDs. Run it with:
 cargo test --locked -p cy-workspace-product-contracts --test exchange_integration_policy_tck
 ```
 
+The test also carries a colon-bearing provider-native authorization reference
+through the route binding unchanged, uses UUID-shaped session/connection/
+notification resources, and leaves notification feeds unscoped by resource ID.
 This scoped TCK proves policy accept/deny behavior; the release bundle/source
 lock still requires validation against the final Exchange source commit.
 

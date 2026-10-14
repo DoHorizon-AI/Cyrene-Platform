@@ -20,6 +20,10 @@ const OWNER_ID: &str = "exchange";
 const OWNER_REPOSITORY: &str = "Cyrene-Exchange";
 const POLICY_SCHEMA_VERSION: &str = "cyrene.workspace.product.authorization-policy.v2";
 const WORKSPACE_MEMBER: &str = "workspace.member";
+const NATIVE_AUTHORIZATION_REF: &str = "wecom-cli:corp-a:authorization-a";
+const SESSION_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const CONNECTION_UUID: &str = "550e8400-e29b-41d4-a716-446655440001";
+const NOTIFICATION_UUID: &str = "550e8400-e29b-41d4-a716-446655440002";
 
 #[derive(Clone, Copy)]
 struct OperationCase {
@@ -197,7 +201,7 @@ impl Fixture {
             json_body: Vec::new(),
             resource_id: operation
                 .resource_parameter
-                .map(|_| "resource-123".to_owned())
+                .map(|_| resource_id_for(operation.operation_id).to_owned())
                 .unwrap_or_default(),
             idempotency_key: operation
                 .is_command
@@ -236,6 +240,41 @@ fn exchange_integration_policy_accepts_exact_grants_and_denies_escalation() {
             operation.operation_id
         );
     }
+
+    let renewal_operator = VerifiedProductPrincipal::directory_user([
+        WORKSPACE_MEMBER.to_owned(),
+        "workspace.product.command.exchange.integration.renewal.v1".to_owned(),
+    ]);
+    let renewal_call = policy
+        .authorize(
+            &bundle,
+            fixture.invocation(&OPERATIONS[0]),
+            &renewal_operator,
+            scope.clone(),
+        )
+        .expect("opaque provider authorization reference remains a valid resource ID");
+    assert_eq!(renewal_call.resource_id(), Some(NATIVE_AUTHORIZATION_REF));
+    assert_eq!(
+        renewal_call
+            .route()
+            .path_parameters()
+            .get("authorization_id")
+            .map(String::as_str),
+        Some(NATIVE_AUTHORIZATION_REF),
+        "the generic route binding must preserve the provider-native opaque reference"
+    );
+    let mut unsafe_opaque_reference = fixture.invocation(&OPERATIONS[0]);
+    unsafe_opaque_reference.resource_id = "wecom-cli:corp-a/authorization-a".to_owned();
+    assert_denied(
+        policy.authorize(
+            &bundle,
+            unsafe_opaque_reference,
+            &renewal_operator,
+            scope.clone(),
+        ),
+        AuthorizationError::InvalidRequest,
+        "opaque references cannot escape their single route segment",
+    );
 
     let no_roles = VerifiedProductPrincipal::directory_user(std::iter::empty::<String>());
     for operation in &OPERATIONS {
@@ -448,6 +487,20 @@ fn operation_catalog_entry(operation: &OperationCase) -> Value {
             "responseBindings": []
         }
     })
+}
+
+fn resource_id_for(operation_id: &str) -> &'static str {
+    match operation_id {
+        "accountBeginRenewalSession" => NATIVE_AUTHORIZATION_REF,
+        "accountGetRenewalSession" => SESSION_UUID,
+        "integrationGetAuthorizationHealth"
+        | "integrationListConnectionResources"
+        | "integrationRefreshConnectionResources" => CONNECTION_UUID,
+        "integrationAcknowledgeNotification" | "integrationDeliverNotification" => {
+            NOTIFICATION_UUID
+        }
+        _ => "",
+    }
 }
 
 fn build_openapi() -> Value {
