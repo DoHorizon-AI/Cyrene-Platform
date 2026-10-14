@@ -22,13 +22,13 @@ The owner catalog, bundle manifest, policy, and lock shapes are published in
 `contracts/schemas/`.
 
 Exchange integration grant behavior also has an executable Rust policy TCK in
-`framework/crates/cy-workspace-product-contracts/tests/exchange_integration_policy_tck.rs`.
+`framework/crates/cy-workspace-product-contracts/tests/workspace_integration_policy_tck.rs`.
 It loads the tracked Platform policy bytes and exercises the production policy
 evaluator against a digest-pinned synthetic catalog containing the eight
 Exchange operation IDs. Run it with:
 
 ```sh
-cargo test --locked -p cy-workspace-product-contracts --test exchange_integration_policy_tck
+cargo test --locked -p cy-workspace-product-contracts --test workspace_integration_policy_tck
 ```
 
 The test also carries a colon-bearing provider-native authorization reference

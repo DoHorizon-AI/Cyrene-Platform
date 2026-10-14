@@ -1,4 +1,4 @@
-//! Exchange integration authorization-policy TCK.
+//! Workspace integration authorization-policy TCK.
 //!
 //! Loads the tracked Platform policy and exercises its grants through the
 //! production policy evaluator using a digest-pinned owner-catalog fixture.
@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 const OWNER_ID: &str = "exchange";
-const OWNER_REPOSITORY: &str = "Cyrene-Exchange";
+const OWNER_REPOSITORY: &str = "Cyrene-IntegrationFixture";
 const POLICY_SCHEMA_VERSION: &str = "cyrene.workspace.product.authorization-policy.v2";
 const WORKSPACE_MEMBER: &str = "workspace.member";
 const NATIVE_AUTHORIZATION_REF: &str = "wecom-cli:corp-a:authorization-a";
@@ -211,7 +211,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn exchange_integration_policy_accepts_exact_grants_and_denies_escalation() {
+fn workspace_integration_policy_accepts_exact_grants_and_denies_escalation() {
     let fixture = Fixture::new();
     let (bundle, policy) = fixture.load();
     assert_eq!(policy.policy_version(), "2.1.0");
@@ -377,7 +377,7 @@ fn exchange_integration_policy_accepts_exact_grants_and_denies_escalation() {
             scope.clone(),
         ),
         AuthorizationError::PrincipalNotAllowed,
-        "the new Exchange integration grants are Directory-user only",
+        "the new integration grants are Directory-user only",
     );
 
     assert!(
@@ -543,7 +543,7 @@ fn build_openapi() -> Value {
     }
     json!({
         "openapi": "3.1.0",
-        "info": {"title": "Exchange authorization TCK", "version": "1.0.0"},
+        "info": {"title": "Workspace authorization TCK", "version": "1.0.0"},
         "paths": paths
     })
 }
