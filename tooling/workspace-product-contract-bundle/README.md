@@ -18,30 +18,54 @@ separate Platform policy schema and digest. BFF `build.rs` embeds these pins
 and checks a supplied BuildKit context against them. Runtime requests and
 environment variables cannot override the pins.
 
-The initial v2 release uses six owner commits and has manifest SHA-256
-`f241fae23c8dec0fdc88a146452b83e84009c2e57db8c3f8516c746ced1deefd`.
-Reproduce and verify its build context from the Cyrene umbrella checkout with:
+The tracked lock is the source of truth for all six owner commits and the
+bundle manifest digest. Build from the canonical repository roots without
+checking out those commits. The builder reads exact blobs with `git cat-file`,
+so dirty or independently active canonical checkouts do not change the release
+input. If an exact commit object is missing, fetch that full SHA into its
+canonical repository object store with `git fetch origin <full-sha>`; do not
+move the checkout branch.
+
+Reproduce and verify the tracked lock from the Cyrene umbrella checkout with:
 
 ```sh
-PLATFORM=/path/to/Cyrene-Platform
-SERVICES=/path/to/Cyrene-Services
-python3 "$PLATFORM/tooling/workspace-product-contract-bundle/build_v2_bundle.py" \
-  --source catalyst="$SERVICES/Cyrene-Catalyst" --commit catalyst=75ad5ded966f66609f2b016fb96c62be1511ef02 \
-  --source echo="$SERVICES/Cyrene-Echo" --commit echo=4de40bd9e50f3048491b00e868f7767911237b63 \
-  --source exchange="$SERVICES/Cyrene-Exchange" --commit exchange=8a6258e656d90bc8fcc22ce570b61917fad7763a \
-  --source navigator="$SERVICES/Cyrene-Navigator" --commit navigator=8224a47551533c1d17857d418ff63dc1857b8b2d \
-  --source reactor="$SERVICES/Cyrene-Reactor" --commit reactor=c8f11c09b4f873bf1a550e83a528c5ea05c0b446 \
-  --source yield="$SERVICES/Cyrene-Yield" --commit yield=4fc49155786e594ec5f67e5c8f42ec5b35cdd9ab \
-  --output /tmp/workspace-product-v2-bundle \
-  --verify-lock "$PLATFORM/tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
+WORKSPACE_ROOT=/path/to/Cyrene
+PLATFORM_ROOT="$WORKSPACE_ROOT/Cyrene-Platform"
+SERVICES_ROOT="$WORKSPACE_ROOT/Cyrene-Services"
+OUTPUT=/tmp/workspace-product-v2-bundle
+
+python3 - "$PLATFORM_ROOT" "$SERVICES_ROOT" "$OUTPUT" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+platform, services, output = map(Path, sys.argv[1:])
+lock_path = platform / "tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json"
+lock = json.loads(lock_path.read_text(encoding="utf-8"))
+command = [sys.executable, str(platform / "tooling/workspace-product-contract-bundle/build_v2_bundle.py")]
+for owner in lock["owners"]:
+    owner_id = owner["ownerId"]
+    source = services / owner["repository"]
+    command.extend(["--source", f"{owner_id}={source}", "--commit", f"{owner_id}={owner['sourceSha']}"])
+command.extend(["--output", str(output), "--verify-lock", str(lock_path)])
+subprocess.run(command, check=True)
+PY
 ```
 
-To propose a reviewed lock update, use the same command with a new external
-output path and `--write-lock /tmp/workspace-product-v2.lock.json`, review the
-resulting lock, then update the tracked lock in a Platform change. The builder
-never self-pins its bundle context. Generic catalog, policy, lock, and
-cross-language invocation scenarios are specified under
-`contracts/schemas/` and `contracts/tck/workspace-product/v2/`.
+To propose a lock update, use a fresh output path and replace
+`--verify-lock "$lock_path"` with
+`--write-lock /tmp/workspace-product-v2-lock.json`. Review the new lock and
+run the runtime loader against the generated bundle before updating the
+tracked lock in a Platform change. The builder never self-pins its bundle
+context. Generic catalog, policy, lock, and cross-language invocation
+scenarios are specified under `contracts/schemas/` and
+`contracts/tck/workspace-product/v2/`.
+
+本地构建使用 `Cyrene-Workspace/repositories.yaml` 指定的规范仓库根目录。构建器直接读取
+lock 中固定提交的 Git 对象，不切换规范仓库的分支；缺少提交对象时，仅将完整 SHA
+fetch 到该仓库对象库。输出目录应位于 Platform worktree 和所有产品仓库之外。更新锁时，先
+生成到新的外部输出目录和临时锁文件，并通过运行时 loader 检查后再更新受跟踪的 lock。
 
 Run the Rust dynamic-operation TCK and the optional exact-release loader smoke
 from the Platform workspace. The second command uses a generated external

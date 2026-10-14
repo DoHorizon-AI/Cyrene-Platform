@@ -24,3 +24,18 @@ response_scope	Product response selector differs from authorized organization, w
 operation_addition	a source-pinned catalog adds an operation without a separately reviewed policy grant	DENY_NEW_OPERATION
 dynamic_owner_addition	a reviewed lock, bundle, catalog, policy, and API-compatible owner is added without editing core operation enums	LOAD_AND_AUTHORIZE_FROM_DATA
 endpoint_binding	Product endpoint base URL or credential is provided by caller input	REJECT_UNKNOWN_WIRE_FIELD
+exchange_integration_setup_grants	Existing account begin/list/confirm/unlink and connection/binding/health/jobs grants retain their b294 role behavior	ALLOW_OWNER_CALL
+exchange_integration_member_reads	accountGetRenewalSession, integrationGetAuthorizationHealth, integrationListConnectionResources, and integrationListNotifications use DIRECTORY_USER plus workspace.member and exact Workspace; required resource IDs come from the pinned catalog	ALLOW_OWNER_CALL
+exchange_integration_read_without_member	A Directory principal invokes any new Exchange integration read with exact Workspace but without workspace.member	DENY_NO_OWNER_CALL
+exchange_begin_renewal_role	accountBeginRenewalSession has workspace.member plus workspace.product.command.exchange.integration.renewal.v1 and the catalog authorization_id resource selector	ALLOW_OWNER_CALL
+exchange_refresh_role	integrationRefreshConnectionResources has workspace.member plus workspace.product.command.exchange.integration.refresh.v1 and the catalog connection_id resource selector	ALLOW_OWNER_CALL
+exchange_notification_ack_role	integrationAcknowledgeNotification has workspace.member plus workspace.product.command.exchange.notification.ack.v1 and the catalog notification_id resource selector	ALLOW_OWNER_CALL
+exchange_notification_delivery_role	integrationDeliverNotification has workspace.member plus workspace.product.command.exchange.notification.v1 and the catalog notification_id resource selector	ALLOW_OWNER_CALL
+exchange_command_role_substitution	A renewal, refresh, acknowledgment, or delivery command has workspace.member but only another Exchange command role	DENY_NO_OWNER_CALL
+exchange_service_principal_denied	A non-DIRECTORY_USER principal invokes a new Exchange integration read or command	DENY_NO_OWNER_CALL
+exchange_integration_exact_workspace	A new Exchange integration operation has no exact verified organization/workspace scope	DENY_NO_OWNER_CALL
+exchange_renewal_start_actor_scope	A Directory user in the same Workspace supplies another actor's authorization_id to begin renewal	DENY_OWNER_MISMATCH_NO_DATA
+exchange_renewal_session_actor_scope	A Directory user in the same Workspace supplies another actor's session_id to read renewal status	DENY_OWNER_MISMATCH_NO_DATA
+exchange_notification_actor_scope	A Directory user supplies another actor's notification ID to acknowledge or deliver it	DENY_OWNER_MISMATCH_NO_DATA
+exchange_notification_feed_actor_scope	The generic JSON notification list is evaluated with the verified Directory actor; SSE remains on the existing Control-specific HTTP stream outside Product v2	RETURN_ONLY_VERIFIED_ACTOR_EVENTS
+exchange_safe_connection_projection	integrationListConnections and integrationCreateConnection use the safe response projection without workspaceId while exact Workspace authorization and existing configure roles remain required	ALLOW_OWNER_CALL

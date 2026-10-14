@@ -21,6 +21,24 @@ authority used by build.rs; the build context cannot supply or redefine pins.
 The owner catalog, bundle manifest, policy, and lock shapes are published in
 `contracts/schemas/`.
 
+Exchange integration grant behavior also has an executable Rust policy TCK in
+`framework/crates/cy-workspace-product-contracts/tests/workspace_integration_policy_tck.rs`.
+It loads the tracked Platform policy bytes and exercises the production policy
+evaluator against a digest-pinned synthetic catalog containing the eight
+Exchange operation IDs. Run it with:
+
+```sh
+cargo test --locked -p cy-workspace-product-contracts --test workspace_integration_policy_tck
+```
+
+The test also carries a colon-bearing provider-native authorization reference
+through the route binding unchanged, uses UUID-shaped session/connection/
+notification resources, and leaves notification feeds unscoped by resource ID.
+Generic Product v2 keeps the JSON notification list; the SSE route stays on the
+existing Control-specific HTTP stream and is not exposed as a generic query.
+This scoped TCK proves policy accept/deny behavior; the release bundle/source
+lock still requires validation against the final Exchange source commit.
+
 Run the bundle source and lock checks from the Platform repository:
 
 ```sh
