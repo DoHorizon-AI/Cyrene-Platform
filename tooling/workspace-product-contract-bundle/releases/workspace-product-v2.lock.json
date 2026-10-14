@@ -1,7 +1,7 @@
 {
   "bundle": {
     "manifestPath": "product-contract-bundle.json",
-    "manifestSha256": "3faa796a65812ea88332732923bfd25dc89b364d59d823f061143e37527ea99c"
+    "manifestSha256": "dd330d5b9e32e4bdbba04fdde7f4c63e5a0bde3ef559f0bea1c4761f43e148bf"
   },
   "contractApiVersion": "0.1.0",
   "formatVersion": 2,
@@ -25,14 +25,14 @@
       "catalogSha256": "2e2b32c3c3b12d0c5804a7ee396d12276cb03bf5c2310f047f85b3eba61ccfe4",
       "ownerId": "exchange",
       "repository": "Cyrene-Exchange",
-      "sourceSha": "28ee1124c90abd8bb6095502d3f0d0c3d9c30d5a"
+      "sourceSha": "ffe430f81b3b84dbf478770922e25fa20459ae28"
     },
     {
       "catalogPath": "Cyrene-Navigator/contracts/product/v2/catalog.json",
       "catalogSha256": "1471bd90fd0c36015103d5b3dcbd10f02e39103bde775b0a4b2f964ac0e8d6d0",
       "ownerId": "navigator",
       "repository": "Cyrene-Navigator",
-      "sourceSha": "b4f060f754fe8e04b34aa9f4b4c14639c603309f"
+      "sourceSha": "683b36451db0de55e8f01d707b391dd940128d15"
     },
     {
       "catalogPath": "Cyrene-Reactor/contracts/product/v2/catalog.json",
