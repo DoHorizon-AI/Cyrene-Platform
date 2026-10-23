@@ -24,7 +24,10 @@ The closed action catalog is
 [`../../contracts/policies/workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json).
 Unknown operation IDs and provider mismatches fail closed. Provider CLI actions
 use a fixed provider executable and an argument vector; this policy does not
-authorize shell command strings.
+authorize shell command strings. GitHub and Hugging Face CLI calls use the
+provider-bound `github.vendor.cli.execute` and
+`huggingface.vendor.cli.execute` operation IDs; cloud profiles use
+`cloud.vendor.cli.execute`.
 
 ## Connector-only Authority host
 
@@ -91,7 +94,7 @@ arguments digest 和原始 request ID。Exchange 必须逐字段校验且每次�
 复用 grant；role 撤销会影响下一次 Authority 查询。
 
 封闭 operation catalog 见
-[`workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json)。未知 operation 或 provider 不匹配都会拒绝。Provider CLI 只接受固定可执行文件和参数数组；此 policy 不授权 shell 命令字符串。
+[`workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json)。未知 operation 或 provider 不匹配都会拒绝。GitHub 与 Hugging Face CLI 分别使用 provider-bound 的 `github.vendor.cli.execute` 与 `huggingface.vendor.cli.execute`；cloud profile 使用 `cloud.vendor.cli.execute`。Provider CLI 只接受固定可执行文件和参数数组；此 policy 不授权 shell 命令字符串。
 
 ## Connector-only Authority host | 仅 Connector 授权的 Authority host
 

@@ -23,7 +23,7 @@ pub const CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION: &str =
 pub const CONNECTOR_OPERATION_GRANT_TTL_MS: u64 = 15_000;
 
 /// Closed operation identifiers accepted by the connector authorization boundary.
-pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 31] = [
+pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 33] = [
     "cloud.operation.cancel",
     "cloud.operation.logs.read",
     "cloud.operation.status.read",
@@ -48,12 +48,14 @@ pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 31] = [
     "github.pull_requests.list",
     "github.repository.get",
     "github.repository.list",
+    "github.vendor.cli.execute",
     "huggingface.datasets.list",
     "huggingface.file.download",
     "huggingface.file.upload",
     "huggingface.models.list",
     "huggingface.repo.get",
     "huggingface.spaces.list",
+    "huggingface.vendor.cli.execute",
     "msteams.message.reply",
 ];
 
@@ -596,5 +598,25 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn provider_cli_operations_are_bound_to_their_provider() {
+        assert!(is_supported_connector_operation(
+            "github",
+            "github.vendor.cli.execute"
+        ));
+        assert!(!is_supported_connector_operation(
+            "huggingface",
+            "github.vendor.cli.execute"
+        ));
+        assert!(is_supported_connector_operation(
+            "huggingface",
+            "huggingface.vendor.cli.execute"
+        ));
+        assert!(!is_supported_connector_operation(
+            "github",
+            "huggingface.vendor.cli.execute"
+        ));
     }
 }

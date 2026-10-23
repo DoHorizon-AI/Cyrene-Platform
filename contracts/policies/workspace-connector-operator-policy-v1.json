@@ -52,12 +52,14 @@
     { "operationId": "github.pull_requests.list", "providerIds": ["github"] },
     { "operationId": "github.repository.get", "providerIds": ["github"] },
     { "operationId": "github.repository.list", "providerIds": ["github"] },
+    { "operationId": "github.vendor.cli.execute", "providerIds": ["github"] },
     { "operationId": "huggingface.datasets.list", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.file.download", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.file.upload", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.models.list", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.repo.get", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.spaces.list", "providerIds": ["huggingface"] },
+    { "operationId": "huggingface.vendor.cli.execute", "providerIds": ["huggingface"] },
     { "operationId": "msteams.message.reply", "providerIds": ["msteams"] }
   ]
 }
