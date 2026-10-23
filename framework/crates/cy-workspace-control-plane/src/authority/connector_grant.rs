@@ -183,7 +183,7 @@ pub fn verify_connector_operation_grant(
         .map_err(|_| ConnectorOperationGrantError::SignatureInvalid)
 }
 
-/// Build the domain-separated signature input used by Authority and Exchange verifiers.
+/// Build the domain-separated signature input used by Authority and connector verifiers.
 pub fn connector_operation_grant_signature_message(
     key_id: &str,
     digest: &[u8],
