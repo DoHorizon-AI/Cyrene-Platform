@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/authority-delegation-postgres.yml'
       - 'framework/crates/cy-workspace-control-plane/**'
+      - 'framework/crates/cy-workspace-authority-host/**'
       - 'framework/crates/cy-workspace-postgres-storage/**'
       - 'contracts/proto/cyrene/workspace/authority/v2/**'
       - 'contracts/proto/cyrene/workspace/product/v2/**'
@@ -17,6 +18,7 @@ on:
     paths:
       - '.github/workflows/authority-delegation-postgres.yml'
       - 'framework/crates/cy-workspace-control-plane/**'
+      - 'framework/crates/cy-workspace-authority-host/**'
       - 'framework/crates/cy-workspace-postgres-storage/**'
       - 'contracts/proto/cyrene/workspace/authority/v2/**'
       - 'contracts/proto/cyrene/workspace/product/v2/**'

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "cyrene.workspace.directory.operator-role-catalog.v1",
+  "roles": [
+    "workspace.product.command.catalyst.create_dataset.v1",
+    "workspace.product.command.echo.create_evaluation_suite.v1",
+    "workspace.product.command.exchange.create_route_draft.v1",
+    "workspace.product.command.reactor.create_model_import.v1",
+    "workspace.product.command.yield.start_training_run.v1",
+    "navigator.connector.operator.v1"
+  ]
+}

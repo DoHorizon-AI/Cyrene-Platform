@@ -102,3 +102,24 @@ cargo run --locked -p cy-workspace-postgres-storage --bin cy-workspace-storage-m
 printf 'postgres_test_gate=authority-delegation\n'
 cargo test --locked -p cy-workspace-postgres-storage --test authority_delegation_postgres -- --ignored --nocapture
 printf 'authority_delegation_postgres=PASS\n'
+
+directory_operator_password="$(openssl rand -hex 24)"
+directory_reader_password="$(openssl rand -hex 24)"
+docker exec "${container_id}" psql \
+    --username postgres \
+    --dbname "${database_name}" \
+    --set ON_ERROR_STOP=1 \
+    --command "CREATE ROLE cyrene_test_operator LOGIN PASSWORD '${directory_operator_password}'" \
+    --command "GRANT cyrene_workspace_directory_operator TO cyrene_test_operator" \
+    --command "CREATE ROLE cyrene_test_reader LOGIN PASSWORD '${directory_reader_password}'" \
+    --command "GRANT cyrene_workspace_directory_reader TO cyrene_test_reader"
+
+directory_operator_url="postgres://cyrene_test_operator:${directory_operator_password}@localhost:${host_port}/${database_name}?sslmode=verify-full&sslrootcert=${fixture_dir}/server.crt"
+directory_reader_url="postgres://cyrene_test_reader:${directory_reader_password}@localhost:${host_port}/${database_name}?sslmode=verify-full&sslrootcert=${fixture_dir}/server.crt"
+export CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL="${directory_operator_url}"
+export CYRENE_WORKSPACE_DIRECTORY_TEST_DATABASE_URL="${directory_reader_url}"
+export CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID="directory-connector-integration-test"
+
+printf 'postgres_test_gate=directory-connector-maintainer-and-signed-grant\n'
+cargo test --locked -p cy-workspace-postgres-storage --test directory_connector_operator -- --ignored --nocapture
+printf 'directory_connector_operator_postgres=PASS\n'

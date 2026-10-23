@@ -5,12 +5,14 @@
 //! │  模块职责：Platform Authority RPC 实现与持久调用端口。                │
 //! └─────────────────────────────────────────────────────────────────────┘
 
+pub mod connector_grant;
 pub mod delegation;
 pub mod outbox;
 pub mod service;
 pub mod snapshot;
 pub mod trust;
 
+pub use connector_grant::*;
 pub use delegation::*;
 pub use outbox::*;
 pub use service::*;

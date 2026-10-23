@@ -8,6 +8,8 @@ wire schemas and language libraries are projections of that authority.
 - the remaining `proto/` packages define transport-specific Platform control
   messages that import or map to that vocabulary.
 - `schemas/` defines manifests and canonical resources.
+- `policies/workspace-directory-operator-roles-v1.json` is the closed allowlist for audited Directory operator role grants.
+- `policies/workspace-connector-operator-policy-v1.json` defines the exact-scope, short-lived Workspace connector grant catalog.
 - `workspace-web/v1/` defines the versioned, same-origin HTTP/JSON contract for
   authenticated browser access to Workspaces and the closed Product API
   projection. It does not claim an implemented BFF runtime.
@@ -51,6 +53,8 @@ protocols remain outside Platform and are not part of Core RPC.
 - `proto/cyrene/semantic/v1/` 定义与语言无关的 Kernel 词汇。
 - 其余 `proto/` package 定义特定传输方式的 Platform control message，这些消息会导入或映射到上述词汇。
 - `schemas/` 定义 manifest 和规范资源。
+- `policies/workspace-directory-operator-roles-v1.json` 是 Directory 管理员授予 role 的封闭 allowlist。
+- `policies/workspace-connector-operator-policy-v1.json` 定义精确 scope、短期有效的 Workspace connector grant 操作目录。
 - `workspace-web/v1/` 定义浏览器通过同源 HTTP/JSON 访问 Workspace 与封闭 Product API projection 的版本化契约；该目录不代表
   BFF runtime 已实现。
 - `rust/` 包含 Rust 镜像和生成的绑定。
