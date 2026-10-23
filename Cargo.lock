@@ -913,6 +913,7 @@ dependencies = [
  "base64 0.22.1",
  "cy-proto",
  "cy-workspace-control-plane",
+ "ed25519-dalek",
  "getrandom 0.2.17",
  "hmac",
  "openssl",

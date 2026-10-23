@@ -38,3 +38,7 @@ path = "src/main.rs"
 [[bin]]
 name = "cy-workspace-authority-admin"
 path = "src/admin.rs"
+
+[[bin]]
+name = "cy-workspace-connector-authority-host"
+path = "src/connector_authorization_main.rs"

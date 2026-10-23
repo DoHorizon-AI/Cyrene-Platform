@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.ai/schemas/workspace-connector-operator-policy.v1.schema.json",
+  "title": "Cyrene Workspace Connector Operator Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "operatorRole",
+    "identity",
+    "grant",
+    "requiredScopeFields",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "cyrene.workspace.connector-operator-policy.v1"
+    },
+    "operatorRole": {
+      "const": "navigator.connector.operator.v1"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "subjectClaim", "subjectFormat"],
+      "properties": {
+        "issuer": { "type": "string", "minLength": 1 },
+        "subjectClaim": { "const": "aadObjectId" },
+        "subjectFormat": { "const": "lowercase-uuid" }
+      }
+    },
+    "grant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rpc",
+        "audience",
+        "maximumTtlSeconds",
+        "signatureAlgorithm",
+        "signatureDomain",
+        "canonicalization"
+      ],
+      "properties": {
+        "rpc": { "type": "string", "minLength": 1 },
+        "audience": { "const": "exchange" },
+        "maximumTtlSeconds": { "const": 15 },
+        "signatureAlgorithm": { "const": "Ed25519" },
+        "signatureDomain": {
+          "const": "cyrene.workspace.authority.v2/connector-operation-grant"
+        },
+        "canonicalization": {
+          "const": "deterministic-protobuf-with-grant-ref-and-signature-cleared"
+        }
+      }
+    },
+    "requiredScopeFields": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "providerIds"],
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+          },
+          "providerIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

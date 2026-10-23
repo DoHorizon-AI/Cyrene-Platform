@@ -21,13 +21,19 @@ use std::{
 
 use async_trait::async_trait;
 use axum::{routing::get, Json, Router};
-use cy_proto::cyrene::workspace::authority::v2::workspace_authority_service_server::WorkspaceAuthorityServiceServer;
+use cy_proto::cyrene::workspace::authority::v2::{
+    workspace_authority_service_server::WorkspaceAuthorityServiceServer,
+    workspace_connector_authorization_service_server::{
+        WorkspaceConnectorAuthorizationService, WorkspaceConnectorAuthorizationServiceServer,
+    },
+    AuthorizeConnectorOperationRequest, AuthorizeConnectorOperationResponse,
+};
 use cy_workspace_control_plane::{
     authority::{
-        AuthorityCredentialSigner, AuthorityExecutionTargetStore, AuthorityManagedWorkload,
-        AuthorityProductWorkloadProfile, AuthorityRpcService, AuthorityServiceDependencies,
-        AuthorityWebSessionStore, ContractSnapshotManager, SnapshotArtifactInput, SnapshotTrust,
-        VerifiedContractSnapshot,
+        issue_connector_operation_grant, AuthorityCredentialSigner, AuthorityExecutionTargetStore,
+        AuthorityManagedWorkload, AuthorityProductWorkloadProfile, AuthorityRpcService,
+        AuthorityServiceDependencies, AuthorityWebSessionStore, ContractSnapshotManager,
+        SnapshotArtifactInput, SnapshotTrust, VerifiedContractSnapshot,
     },
     AdmissionHealthEvidence, AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier,
     DeploymentAdmission, DeploymentIdentity, WebIdentityDirectory, WebIdentityDirectoryError,
@@ -51,6 +57,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::{Request, Response, Status};
 use tower::{Layer, Service};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -288,6 +295,10 @@ pub async fn run_host() -> Result<(), HostError> {
     let rpc = AuthorityRpcService::new(AuthorityServiceDependencies {
         organization_id: settings.organization_id.clone(),
         workspace_id: settings.workspace_id.clone(),
+        connector_identity_issuer: format!(
+            "https://login.microsoftonline.com/{}/v2.0",
+            settings.tenant_id
+        ),
         authority_instance_id: settings.authority_instance_id.clone(),
         snapshots: state.manager.clone(),
         web_verifier: verifier.clone(),
@@ -396,6 +407,244 @@ pub async fn run_host() -> Result<(), HostError> {
         result = readiness_task => { error!(?result, "Authority readiness monitor stopped"); Err(HostError::Configuration) },
         _ = tokio::signal::ctrl_c() => Ok(()),
     }
+}
+
+/// Run the minimal production profile for Teams connector authorization.
+///
+/// This explicit binary shares Authority's signer, Directory adapter and grant issuer. It does
+/// not load Product artifacts, Device Registry state, delegations, sessions or the Product
+/// admission receipt, and serves only the connector-authorization RPC plus a bounded health route.
+pub async fn run_connector_authorization_host() -> Result<(), HostError> {
+    let settings = ConnectorAuthorizationOnlySettings::load()?;
+    let directory = Arc::new(
+        PostgresWorkspaceDirectory::connect(&settings.directory_database_url)
+            .await
+            .map_err(|_| HostError::Database)?,
+    );
+    directory
+        .health_check()
+        .await
+        .map_err(|_| HostError::Database)?;
+
+    let mut signing_seed_bytes = Zeroizing::new(read_secret_file(&settings.signing_key_file, 32)?);
+    let signing_seed: [u8; 32] = signing_seed_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| HostError::Signer)?;
+    signing_seed_bytes.zeroize();
+    let signing_key = SigningKey::from_bytes(&signing_seed);
+    let mut signing_seed = signing_seed;
+    signing_seed.zeroize();
+    let signer = AuthorityCredentialSigner::new(
+        settings.signing_key_id.clone(),
+        signing_key,
+        Duration::from_secs(180),
+    )
+    .map_err(|_| HostError::Signer)?;
+
+    let rpc = ConnectorAuthorizationOnlyRpcService {
+        directory: directory.clone(),
+        signer,
+        organization_id: settings.organization_id.clone(),
+        workspace_id: settings.workspace_id.clone(),
+        connector_identity_issuer: format!(
+            "https://login.microsoftonline.com/{}/v2.0",
+            settings.tenant_id
+        ),
+        exchange_workload: settings.exchange_workload.clone(),
+    };
+    let tls_cert = read_secret_file(&settings.tls_cert_file, 1024 * 1024)?;
+    let mut tls_key = Zeroizing::new(read_secret_file(&settings.tls_key_file, 1024 * 1024)?);
+    let client_ca = read_secret_file(&settings.client_ca_file, 1024 * 1024)?;
+    let tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(&tls_cert, &tls_key))
+        .client_ca_root(Certificate::from_pem(&client_ca));
+    tls_key.zeroize();
+
+    let tcp = TcpListener::bind(&settings.listen).await?;
+    let health = TcpListener::bind(&settings.health_addr).await?;
+    let health_directory = directory.clone();
+    let health_router = Router::new().route(
+        "/health",
+        get(move || {
+            let directory = health_directory.clone();
+            async move {
+                let ready = directory.health_check().await.is_ok();
+                let response = ConnectorAuthorizationHealthResponse {
+                    status: if ready { "ready" } else { "not_ready" },
+                    profile: "connector-authorization-only",
+                };
+                let status = if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                (status, Json(response))
+            }
+        }),
+    );
+    let mut connector_rpc_server = Server::builder()
+        .tls_config(tls)
+        .map_err(|_| HostError::Tls)?;
+    let rpc_task = tokio::spawn(async move {
+        connector_rpc_server
+            .add_service(WorkspaceConnectorAuthorizationServiceServer::new(rpc))
+            .serve_with_incoming(TcpListenerStream::new(tcp))
+            .await
+    });
+    let health_task = tokio::spawn(async move { axum::serve(health, health_router).await });
+    drop(settings);
+    info!("Workspace connector authorization-only Authority is ready");
+    tokio::select! {
+        result = rpc_task => report_task("connector authorization mTLS RPC", result),
+        result = health_task => report_task("connector authorization health HTTP", result),
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+#[derive(Clone)]
+struct ConnectorAuthorizationOnlyRpcService {
+    directory: Arc<PostgresWorkspaceDirectory>,
+    signer: AuthorityCredentialSigner,
+    organization_id: String,
+    workspace_id: String,
+    connector_identity_issuer: String,
+    exchange_workload: AuthorityManagedWorkload,
+}
+
+#[tonic::async_trait]
+impl WorkspaceConnectorAuthorizationService for ConnectorAuthorizationOnlyRpcService {
+    async fn authorize_connector_operation(
+        &self,
+        request: Request<AuthorizeConnectorOperationRequest>,
+    ) -> Result<Response<AuthorizeConnectorOperationResponse>, Status> {
+        let certificate = request
+            .peer_certs()
+            .and_then(|chain| chain.first().cloned())
+            .ok_or_else(|| Status::unauthenticated("registered client certificate is required"))?;
+        let fingerprint: [u8; 32] = Sha256::digest(certificate.as_ref()).into();
+        if !self
+            .exchange_workload
+            .certificate_fingerprints_sha256
+            .contains(&fingerprint)
+        {
+            return Err(Status::unauthenticated(
+                "connector authorization caller is not configured",
+            ));
+        }
+        let grant = issue_connector_operation_grant(
+            self.directory.as_ref(),
+            &self.signer,
+            &self.organization_id,
+            &self.workspace_id,
+            &self.connector_identity_issuer,
+            &self.exchange_workload,
+            request.get_ref(),
+        )
+        .await?;
+        Ok(Response::new(AuthorizeConnectorOperationResponse {
+            grant: Some(grant),
+        }))
+    }
+}
+
+#[derive(Serialize)]
+struct ConnectorAuthorizationHealthResponse {
+    status: &'static str,
+    profile: &'static str,
+}
+
+struct ConnectorAuthorizationOnlySettings {
+    listen: String,
+    health_addr: String,
+    organization_id: String,
+    workspace_id: String,
+    tenant_id: Uuid,
+    directory_database_url: Zeroizing<String>,
+    signing_key_file: PathBuf,
+    signing_key_id: String,
+    tls_cert_file: PathBuf,
+    tls_key_file: PathBuf,
+    client_ca_file: PathBuf,
+    exchange_workload: AuthorityManagedWorkload,
+}
+
+impl ConnectorAuthorizationOnlySettings {
+    fn load() -> Result<Self, HostError> {
+        let organization_id = env_value("CYRENE_ORGANIZATION_ID", "")?;
+        let workspace_id = env_value("CYRENE_WORKSPACE_ID", "")?;
+        if !valid_connector_host_identity(&organization_id)
+            || !valid_connector_host_identity(&workspace_id)
+        {
+            return Err(HostError::Configuration);
+        }
+        let tenant_id: Uuid = env::var("CYRENE_AUTHORITY_AAD_TENANT_ID")
+            .map_err(|_| HostError::Configuration)?
+            .parse()
+            .map_err(|_| HostError::Configuration)?;
+        let directory_database_url = connector_directory_database_url()?;
+        let exchange_workload_id = env_value("CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_ID", "")?;
+        let exchange_workload_audience =
+            env_value("CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_AUDIENCE", "exchange")?;
+        let exchange_workload_fingerprints_sha256 =
+            parse_sha256_fingerprints(&env_value("CYRENE_AUTHORITY_EXCHANGE_MTLS_SHA256", "")?)?;
+        if exchange_workload_id.trim().is_empty()
+            || exchange_workload_audience.trim().is_empty()
+            || exchange_workload_fingerprints_sha256.is_empty()
+        {
+            return Err(HostError::Configuration);
+        }
+        Ok(Self {
+            listen: env_value(
+                "CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_LISTEN",
+                "0.0.0.0:50051",
+            )?,
+            health_addr: loopback_addr(env_value(
+                "CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_HEALTH_ADDR",
+                "127.0.0.1:8080",
+            )?)?,
+            organization_id,
+            workspace_id,
+            tenant_id,
+            directory_database_url,
+            signing_key_file: path_env("CYRENE_AUTHORITY_SIGNING_KEY_FILE")?,
+            signing_key_id: env_value("CYRENE_AUTHORITY_SIGNING_KEY_ID", "")?,
+            tls_cert_file: path_env("CYRENE_AUTHORITY_TLS_CERT_FILE")?,
+            tls_key_file: path_env("CYRENE_AUTHORITY_TLS_KEY_FILE")?,
+            client_ca_file: path_env("CYRENE_AUTHORITY_TLS_CLIENT_CA_FILE")?,
+            exchange_workload: AuthorityManagedWorkload {
+                workload_id: exchange_workload_id,
+                audience: exchange_workload_audience,
+                certificate_fingerprints_sha256: exchange_workload_fingerprints_sha256,
+            },
+        })
+    }
+}
+
+fn connector_directory_database_url() -> Result<Zeroizing<String>, HostError> {
+    let mut bytes = if let Some(path) = env::var_os("CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL_FILE")
+    {
+        read_secret_file(Path::new(&path), 8192)?
+    } else {
+        env::var("CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL")
+            .map_err(|_| HostError::Configuration)?
+            .into_bytes()
+    };
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    let database_url = String::from_utf8(bytes).map_err(|_| HostError::Configuration)?;
+    if !database_url.starts_with("postgres://") && !database_url.starts_with("postgresql://") {
+        return Err(HostError::Configuration);
+    }
+    Ok(Zeroizing::new(database_url))
+}
+
+fn valid_connector_host_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn report_task(
@@ -1410,6 +1659,7 @@ where
 fn tcp_rpc_path_allowed(path: &str) -> bool {
     matches!(path,
         "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/NegotiateVersion"
+        | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/AuthorizeConnectorOperation"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ApproveAndEnqueueDelegatedInvocation"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/ValidateProductExecutionAuthorization"
         | "/cyrene.workspace.authority.v2.WorkspaceAuthorityService/GetDelegation"
@@ -1749,6 +1999,12 @@ mod tests {
         )));
         assert!(tcp_rpc_path_allowed(&format!("{prefix}NegotiateVersion")));
         assert!(bff_rpc_path_allowed(&format!("{prefix}NegotiateVersion")));
+        assert!(tcp_rpc_path_allowed(&format!(
+            "{prefix}AuthorizeConnectorOperation"
+        )));
+        assert!(!bff_rpc_path_allowed(&format!(
+            "{prefix}AuthorizeConnectorOperation"
+        )));
     }
 
     #[test]

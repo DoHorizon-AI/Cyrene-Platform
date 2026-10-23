@@ -14,6 +14,8 @@ Product 清单、组件目录和 Plugin 仓库清单由其实现仓库拥有。
 | `manifests/portable_directory_manifest.schema.json` | Cross-language portable directory index. |
 | `plugin-set.schema.json` | Generic capability requirements and deterministic resolution locks. |
 | `verified-installation-record.schema.json` | Digest-bound installer evidence consumed by Platform. |
+| `workspace-directory-operator-roles.v1.schema.json` | Closed allowlist for Directory operator-assigned user roles. |
+| `workspace-connector-operator-policy.v1.schema.json` | Exact-scope connector operation grant and closed action catalog. |
 ---
 
 <!-- Chinese Translation / 中文翻译 -->
@@ -29,3 +31,5 @@ Product 清单、组件目录和 Plugin 仓库清单由其实现仓库拥有。
 | `manifests/portable_directory_manifest.schema.json` | 跨语言 portable directory index。 |
 | `plugin-set.schema.json` | 通用 capability requirement 和确定性 resolution lock。 |
 | `verified-installation-record.schema.json` | Platform 使用的、与 digest 绑定的 installer 证据。 |
+| `workspace-directory-operator-roles.v1.schema.json` | Directory operator 可授予用户的封闭 role allowlist。 |
+| `workspace-connector-operator-policy.v1.schema.json` | 精确 scope connector grant 和封闭操作目录。 |

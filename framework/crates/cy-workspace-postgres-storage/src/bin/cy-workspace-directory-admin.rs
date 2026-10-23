@@ -13,6 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use cy_proto::workspace_v1::{UserIdentityRef, WorkspaceConnectionDescriptor};
+use cy_workspace_control_plane::authority::NAVIGATOR_CONNECTOR_OPERATOR_ROLE;
 use cy_workspace_postgres_storage::{
     DirectoryMutation, DirectoryOperatorProvisioner, DurableDirectoryError,
 };
@@ -33,6 +34,7 @@ async fn run() -> Result<(), CliError> {
     let Some(command) = arguments.next() else {
         return Err(CliError::Usage);
     };
+    let command = expand_command(command, &mut arguments)?;
     if command == "migrate" {
         if arguments.next().is_some() {
             return Err(CliError::Usage);
@@ -125,6 +127,36 @@ async fn run() -> Result<(), CliError> {
                 )
                 .await?
         }
+        "maintainer-add" => {
+            require_options(
+                &options,
+                &["issuer", "subject", "organization", "workspace", "reason"],
+            )?;
+            operator
+                .grant_membership(
+                    &user(&options)?,
+                    required(&options, "organization")?,
+                    required(&options, "workspace")?,
+                    &BTreeSet::from([NAVIGATOR_CONNECTOR_OPERATOR_ROLE.to_owned()]),
+                    required(&options, "reason")?,
+                )
+                .await?
+        }
+        "maintainer-revoke" => {
+            require_options(
+                &options,
+                &["issuer", "subject", "organization", "workspace", "reason"],
+            )?;
+            operator
+                .revoke_role(
+                    &user(&options)?,
+                    required(&options, "organization")?,
+                    required(&options, "workspace")?,
+                    NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+                    required(&options, "reason")?,
+                )
+                .await?
+        }
         "publish-descriptor" => {
             require_options(&options, &["file", "reason"])?;
             let descriptor = read_descriptor(required(&options, "file")?)?;
@@ -150,6 +182,20 @@ async fn run() -> Result<(), CliError> {
         DirectoryMutation::Unchanged => println!("workspace-directory already in requested state"),
     }
     Ok(())
+}
+
+fn expand_command(
+    command: String,
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<String, CliError> {
+    if command != "maintainer" {
+        return Ok(command);
+    }
+    match arguments.next().as_deref() {
+        Some("add") => Ok("maintainer-add".to_owned()),
+        Some("revoke") => Ok("maintainer-revoke".to_owned()),
+        _ => Err(CliError::Usage),
+    }
 }
 
 fn parse_options(
@@ -256,7 +302,7 @@ impl From<DurableDirectoryError> for CliError {
     }
 }
 
-const USAGE: &str = "Usage:\n  cy-workspace-directory-admin migrate\n  cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID [--role ROLE]... --reason TEXT\n  cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin grant-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin revoke-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin publish-descriptor --file PROTO_BIN --reason TEXT\n  cy-workspace-directory-admin revoke-descriptor --organization ORG --workspace ID --reason TEXT\n\nThe operator actor and database URLs are read from trusted environment configuration, never from a client request.";
+const USAGE: &str = "Usage:\n  cy-workspace-directory-admin migrate\n  cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID [--role ROLE]... --reason TEXT\n  cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin grant-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin revoke-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin maintainer add --issuer ISSUER --subject AAD_OID --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin maintainer revoke --issuer ISSUER --subject AAD_OID --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin publish-descriptor --file PROTO_BIN --reason TEXT\n  cy-workspace-directory-admin revoke-descriptor --organization ORG --workspace ID --reason TEXT\n\nThe operator actor and database URLs are read from trusted environment configuration, never from a client request.";
 
 #[cfg(test)]
 mod tests {
@@ -303,6 +349,29 @@ mod tests {
             )
             .unwrap_err(),
             CliError::Usage
+        );
+    }
+
+    #[test]
+    fn maintainer_subcommands_are_closed_and_have_no_role_override() {
+        let mut add_arguments = ["add", "--role", "administrator"]
+            .into_iter()
+            .map(str::to_string);
+        assert_eq!(
+            expand_command("maintainer".to_owned(), &mut add_arguments),
+            Ok("maintainer-add".to_owned())
+        );
+        let options = parse_options(add_arguments).unwrap();
+        assert!(require_options(
+            &options,
+            &["issuer", "subject", "organization", "workspace", "reason"]
+        )
+        .is_err());
+
+        let mut unknown_arguments = ["grant"].into_iter().map(str::to_string);
+        assert_eq!(
+            expand_command("maintainer".to_owned(), &mut unknown_arguments),
+            Err(CliError::Usage)
         );
     }
 }

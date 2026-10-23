@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/platform/workspace-directory-operator-roles.v1.schema.json",
+  "title": "Cyrene Workspace Directory operator roles v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "roles"],
+  "properties": {
+    "schemaVersion": {
+      "const": "cyrene.workspace.directory.operator-role-catalog.v1"
+    },
+    "roles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "workspace.product.command.catalyst.create_dataset.v1",
+          "workspace.product.command.echo.create_evaluation_suite.v1",
+          "workspace.product.command.exchange.create_route_draft.v1",
+          "workspace.product.command.reactor.create_model_import.v1",
+          "workspace.product.command.yield.start_training_run.v1",
+          "navigator.connector.operator.v1"
+        ]
+      }
+    }
+  }
+}

@@ -146,6 +146,60 @@ message VerifyIdentityResponse {
   repeated string directory_roles = 9;
 }
 
+// Exact one-operation authorization issued only after a fresh Directory lookup.
+// The grant is a short-lived bearer proof for one authorized connector call, not a role claim.
+// Canonical bytes are deterministic protobuf serialization after clearing `grant_ref`
+// and `authority_signature`; `grant_ref` is `sha256:` plus the lowercase hex digest.
+// `authority_signature` is Ed25519 over the digest using the domain-separated message
+// `cyrene.workspace.authority.v2/connector-operation-grant\0`, a 4-byte big-endian
+// UTF-8 key-id length, key-id bytes, and the 32 digest bytes. The key id and all scope,
+// identity, request, audience and time fields are included in the canonical bytes.
+message ConnectorOperationGrantV1 {
+  string schema_version = 1;
+  string grant_ref = 2;
+  string audience = 3;
+  string organization_id = 4;
+  string workspace_id = 5;
+  string principal_issuer = 6;
+  string principal_subject = 7;
+  string connection_ref = 8;
+  string provider_id = 9;
+  string profile_ref = 10;
+  string operation_id = 11;
+  string resource_ref = 12;
+  bytes arguments_digest_sha256 = 13;
+  string request_id = 14;
+  google.protobuf.Timestamp issued_at = 15;
+  google.protobuf.Timestamp expires_at = 16;
+  string signing_key_id = 17;
+  bytes authority_signature = 18;
+}
+
+message AuthorizeConnectorOperationRequest {
+  // The caller must be the registered connector authorization workload over Authority mTLS.
+  // Organization is host-configured; workspace must equal the Authority deployment.
+  // The principal issuer and subject come from the verified Teams identity envelope.
+  // Authority requires the exact configured Entra v2 issuer and canonical AAD object UUID,
+  // then reloads current Directory membership and navigator.connector.operator.v1.
+  string workspace_id = 1;
+  string principal_issuer = 2;
+  string principal_subject = 3;
+  string connection_ref = 4;
+  string provider_id = 5;
+  string profile_ref = 6;
+  string operation_id = 7;
+  // Canonical target or collection identifier. Empty resource scope is not permitted.
+  string resource_ref = 8;
+  // Raw SHA-256 bytes over the provider's canonical argument serialization.
+  bytes arguments_digest_sha256 = 9;
+  // Original activity/action ID; signed into the grant for replay and idempotency checks.
+  string request_id = 10;
+}
+
+message AuthorizeConnectorOperationResponse {
+  ConnectorOperationGrantV1 grant = 1;
+}
+
 message CatalogSnapshotRequest {
   string workspace_id = 1;
 }
@@ -374,6 +428,7 @@ message WaitInvocationResultResponse {
 service WorkspaceAuthorityService {
   rpc NegotiateVersion(NegotiateVersionRequest) returns (NegotiateVersionResponse);
   rpc VerifyIdentity(VerifyIdentityRequest) returns (VerifyIdentityResponse);
+  rpc AuthorizeConnectorOperation(AuthorizeConnectorOperationRequest) returns (AuthorizeConnectorOperationResponse);
   rpc GetCatalogSnapshot(CatalogSnapshotRequest) returns (CatalogSnapshotResponse);
   rpc ApproveAndEnqueueInvocation(ApproveAndEnqueueInvocationRequest) returns (ApproveAndEnqueueInvocationResponse);
   rpc CreateDelegation(CreateDelegationRequest) returns (CreateDelegationResponse);
@@ -387,4 +442,11 @@ service WorkspaceAuthorityService {
   rpc AcknowledgeDelivery(AcknowledgeDeliveryRequest) returns (AcknowledgeDeliveryResponse);
   rpc SubmitInvocationResult(SubmitInvocationResultRequest) returns (SubmitInvocationResultResponse);
   rpc WaitInvocationResult(WaitInvocationResultRequest) returns (WaitInvocationResultResponse);
+}
+
+// Explicit minimal production profile for connector-only deployments. It reuses the same
+// Directory-backed request and signed grant contract, and intentionally exposes no Product,
+// artifact, delegation, session, or execution-outbox methods.
+service WorkspaceConnectorAuthorizationService {
+  rpc AuthorizeConnectorOperation(AuthorizeConnectorOperationRequest) returns (AuthorizeConnectorOperationResponse);
 }

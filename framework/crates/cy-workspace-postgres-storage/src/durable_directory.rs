@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::device_authorization::DeviceAuthorizationScope;
 use crate::device_registry::WorkspaceDeviceKey;
 use crate::directory::{validate_descriptor, WorkspaceDirectory, WorkspaceDirectoryError};
+use cy_workspace_control_plane::authority::NAVIGATOR_CONNECTOR_OPERATOR_ROLE;
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL";
 const MIGRATION_DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL";
@@ -1331,14 +1332,17 @@ fn validate_roles(roles: &BTreeSet<String>) -> Result<(), DurableDirectoryError>
 }
 
 fn validate_role(role: &str) -> Result<(), DurableDirectoryError> {
-    if SUPPORTED_OPERATOR_ROLES.contains(&role) {
+    if role == NAVIGATOR_CONNECTOR_OPERATOR_ROLE {
+        return Ok(());
+    }
+    if SUPPORTED_PRODUCT_OPERATOR_ROLES.contains(&role) {
         return validate_product_command_role(role);
     }
     validate_device_enrollment_approval_role(role)
 }
 
 fn validate_product_command_role(role: &str) -> Result<(), DurableDirectoryError> {
-    if SUPPORTED_OPERATOR_ROLES.contains(&role) {
+    if SUPPORTED_PRODUCT_OPERATOR_ROLES.contains(&role) {
         Ok(())
     } else {
         Err(DurableDirectoryError::UnsupportedRole)
@@ -1386,11 +1390,20 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// Roles currently accepted by Product authorization policy for a user.
+/// User roles accepted by the audited Directory operator provisioning boundary.
 ///
-/// Membership itself derives `workspace.member`; workload attestations are a
-/// separate authority and are intentionally absent from this list.
-pub const SUPPORTED_OPERATOR_ROLES: [&str; 5] = [
+/// Membership itself derives `workspace.member`; workload attestations remain a
+/// separate authority. Connector grants still bind each provider operation exactly.
+pub const SUPPORTED_OPERATOR_ROLES: [&str; 6] = [
+    "workspace.product.command.catalyst.create_dataset.v1",
+    "workspace.product.command.yield.start_training_run.v1",
+    "workspace.product.command.reactor.create_model_import.v1",
+    "workspace.product.command.exchange.create_route_draft.v1",
+    "workspace.product.command.echo.create_evaluation_suite.v1",
+    NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+];
+
+const SUPPORTED_PRODUCT_OPERATOR_ROLES: [&str; 5] = [
     "workspace.product.command.catalyst.create_dataset.v1",
     "workspace.product.command.yield.start_training_run.v1",
     "workspace.product.command.reactor.create_model_import.v1",
@@ -1429,6 +1442,39 @@ mod tests {
             Err(DurableDirectoryError::UnsupportedRole)
         );
         assert!(validate_role(SUPPORTED_OPERATOR_ROLES[0]).is_ok());
+        assert!(validate_role(NAVIGATOR_CONNECTOR_OPERATOR_ROLE).is_ok());
+        assert_eq!(
+            validate_role("navigator.connector.admin.v1"),
+            Err(DurableDirectoryError::UnsupportedRole)
+        );
+    }
+
+    #[test]
+    fn connector_operator_migration_adds_only_the_closed_role() {
+        let migration = include_str!("../migrations/0005_workspace_connector_operator_role.up.sql");
+        assert!(migration.contains("'navigator.connector.operator.v1'"));
+        assert!(migration.contains("workspace_directory_roles_supported_role"));
+        assert!(migration.contains("workspace_directory_audit_supported_roles"));
+        let down = include_str!("../migrations/0005_workspace_connector_operator_role.down.sql");
+        assert!(down.contains("Connector operator role assignments or audit events still exist"));
+    }
+
+    #[test]
+    fn directory_operator_role_set_matches_the_role_catalog() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RoleCatalog {
+            roles: Vec<String>,
+        }
+        let catalog: RoleCatalog = serde_json::from_str(include_str!(
+            "../../../../contracts/policies/workspace-directory-operator-roles-v1.json"
+        ))
+        .expect("Directory operator role catalog is valid JSON");
+        let expected = SUPPORTED_OPERATOR_ROLES
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(catalog.roles.into_iter().collect::<BTreeSet<_>>(), expected);
     }
 
     #[test]

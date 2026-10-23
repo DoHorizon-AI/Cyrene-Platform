@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use cy_proto::{
     cyrene::workspace::authority::v2 as wire,
     cyrene::workspace::authority::v2::workspace_authority_service_server::WorkspaceAuthorityService,
+    workspace_v1::UserIdentityRef,
 };
 use cy_workspace_product_contracts::{
     ProductInvocationResponse, TrustedWorkspaceScope, VerifiedProductPrincipal,
@@ -26,10 +27,12 @@ use crate::deployment_admission::{
 };
 use crate::{
     authority::{
-        now_unix_ms, AuthorityDelegation, AuthorityDelegationError, AuthorityDelegationStore,
-        AuthorityOutboxError, AuthorityOutboxStore, DelegatedOperationScope, EnqueueOutcome,
-        ExecutionDevicePeer, InvocationWaitScope, NewAuthorityInvocation,
-        PersistedInvocationResult,
+        is_supported_connector_operation, now_unix_ms, AuthorityDelegation,
+        AuthorityDelegationError, AuthorityDelegationStore, AuthorityOutboxError,
+        AuthorityOutboxStore, DelegatedOperationScope, EnqueueOutcome, ExecutionDevicePeer,
+        InvocationWaitScope, NewAuthorityInvocation, PersistedInvocationResult,
+        CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION, CONNECTOR_OPERATION_GRANT_TTL_MS,
+        NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
     },
     device_registry::{
         CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError,
@@ -208,6 +211,27 @@ impl AuthorityCredentialSigner {
         Ok(())
     }
 
+    fn sign_connector_operation_grant(
+        &self,
+        grant: &mut wire::ConnectorOperationGrantV1,
+    ) -> AuthorityHelperResult<()> {
+        grant.signing_key_id = self.key_id.to_string();
+        grant.grant_ref.clear();
+        grant.authority_signature.clear();
+        let digest = crate::authority::connector_grant::grant_digest(grant);
+        grant.grant_ref = format!(
+            "sha256:{}",
+            crate::authority::connector_grant::encode_hex(&digest)
+        );
+        let mut message =
+            crate::authority::connector_grant::signature_message(&self.key_id, &digest).map_err(
+                |_| Status::failed_precondition("connector grant signing is unavailable"),
+            )?;
+        grant.authority_signature = self.key.sign(&message).to_bytes().to_vec();
+        message.zeroize();
+        Ok(())
+    }
+
     fn verify_workload_feature_token(
         &self,
         token: &wire::ManagedWorkloadFeatureToken,
@@ -238,6 +262,8 @@ pub struct AuthorityServiceDependencies {
     pub organization_id: String,
     /// Root-configured Workspace identity used by the first-adoption admission receipt.
     pub workspace_id: String,
+    /// Exact Microsoft Entra v2 issuer whose immutable AAD object IDs are Directory subjects.
+    pub connector_identity_issuer: String,
     /// Root-configured Authority instance identity used by the first-adoption receipt.
     pub authority_instance_id: String,
     /// Persistent active catalog/policy manager.
@@ -436,6 +462,23 @@ impl AuthorityRpcService {
             return Err(Status::unauthenticated("managed workload is not configured").into());
         }
         Ok(&self.dependencies.exchange_workload)
+    }
+
+    async fn authorize_connector_operation_scope(
+        &self,
+        input: &wire::AuthorizeConnectorOperationRequest,
+        workload: &AuthorityManagedWorkload,
+    ) -> Result<wire::ConnectorOperationGrantV1, Status> {
+        issue_connector_operation_grant(
+            self.dependencies.directory.as_ref(),
+            &self.dependencies.signer,
+            &self.dependencies.organization_id,
+            &self.dependencies.workspace_id,
+            &self.dependencies.connector_identity_issuer,
+            workload,
+            input,
+        )
+        .await
     }
 
     fn product_workload_peer<T>(
@@ -1601,6 +1644,24 @@ impl WorkspaceAuthorityService for AuthorityRpcService {
         }))
     }
 
+    async fn authorize_connector_operation(
+        &self,
+        request: Request<wire::AuthorizeConnectorOperationRequest>,
+    ) -> Result<Response<wire::AuthorizeConnectorOperationResponse>, Status> {
+        let workload = self.exchange_workload_peer(&request)?;
+        if workload.workload_id.trim().is_empty() || workload.audience.trim().is_empty() {
+            return Err(Status::failed_precondition(
+                "connector authorization caller is not configured",
+            ));
+        }
+        let grant = self
+            .authorize_connector_operation_scope(request.get_ref(), workload)
+            .await?;
+        Ok(Response::new(wire::AuthorizeConnectorOperationResponse {
+            grant: Some(grant),
+        }))
+    }
+
     async fn get_catalog_snapshot(
         &self,
         request: Request<wire::CatalogSnapshotRequest>,
@@ -2307,6 +2368,131 @@ fn resolve_endpoint(
         return Err(Status::failed_precondition("configured target URL is invalid").into());
     }
     Ok(endpoint)
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_connector_operation_request(
+    request: &wire::AuthorizeConnectorOperationRequest,
+    expected_workspace_id: &str,
+    expected_identity_issuer: &str,
+) -> Result<(), Status> {
+    if request.workspace_id != expected_workspace_id {
+        return Err(Status::permission_denied(
+            "connector grant workspace is not configured",
+        ));
+    }
+    if request.principal_issuer != expected_identity_issuer {
+        return Err(Status::permission_denied(
+            "connector identity issuer is not configured",
+        ));
+    }
+    let parsed_subject = Uuid::parse_str(&request.principal_subject)
+        .map_err(|_| Status::invalid_argument("connector identity subject is invalid"))?;
+    if parsed_subject.to_string() != request.principal_subject {
+        return Err(Status::invalid_argument(
+            "connector identity subject is not canonical",
+        ));
+    }
+    if request.arguments_digest_sha256.len() != 32
+        || !is_supported_connector_operation(&request.provider_id, &request.operation_id)
+        || !valid_connector_scope_value(&request.connection_ref, 256)
+        || !valid_connector_scope_value(&request.provider_id, 64)
+        || !valid_connector_scope_value(&request.profile_ref, 256)
+        || !valid_connector_scope_value(&request.operation_id, 256)
+        || !valid_connector_scope_value(&request.resource_ref, 2048)
+        || !valid_connector_scope_value(&request.request_id, 256)
+    {
+        return Err(Status::invalid_argument(
+            "connector operation scope is invalid",
+        ));
+    }
+    Ok(())
+}
+
+/// Reload the authoritative Directory role and mint one exact-scope grant.
+///
+/// The network RPC invokes this only after validating the registered connector authorization
+/// caller's mTLS peer. The
+/// organization, workspace, issuer and workload audience arguments must come from that Authority
+/// host's protected configuration; request identity and operation values are checked against them.
+pub async fn issue_connector_operation_grant(
+    directory: &dyn WorkspaceDirectory,
+    signer: &AuthorityCredentialSigner,
+    organization_id: &str,
+    workspace_id: &str,
+    expected_identity_issuer: &str,
+    workload: &AuthorityManagedWorkload,
+    input: &wire::AuthorizeConnectorOperationRequest,
+) -> Result<wire::ConnectorOperationGrantV1, Status> {
+    validate_connector_operation_request(input, workspace_id, expected_identity_issuer)?;
+    if workload.workload_id.trim().is_empty() || workload.audience.trim().is_empty() {
+        return Err(Status::failed_precondition(
+            "connector authorization caller is not configured",
+        ));
+    }
+    let identity = UserIdentityRef {
+        issuer: input.principal_issuer.clone(),
+        subject: input.principal_subject.clone(),
+    };
+    require_directory_connector_operator_role(
+        directory,
+        &identity,
+        organization_id,
+        &input.workspace_id,
+    )
+    .await?;
+
+    let issued_at_unix_ms = now_unix_ms();
+    let expires_at_unix_ms = issued_at_unix_ms.saturating_add(CONNECTOR_OPERATION_GRANT_TTL_MS);
+    let mut grant = wire::ConnectorOperationGrantV1 {
+        schema_version: CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION.to_owned(),
+        grant_ref: String::new(),
+        audience: workload.audience.clone(),
+        organization_id: organization_id.to_owned(),
+        workspace_id: input.workspace_id.clone(),
+        principal_issuer: input.principal_issuer.clone(),
+        principal_subject: input.principal_subject.clone(),
+        connection_ref: input.connection_ref.clone(),
+        provider_id: input.provider_id.clone(),
+        profile_ref: input.profile_ref.clone(),
+        operation_id: input.operation_id.clone(),
+        resource_ref: input.resource_ref.clone(),
+        arguments_digest_sha256: input.arguments_digest_sha256.clone(),
+        request_id: input.request_id.clone(),
+        issued_at: Some(timestamp(issued_at_unix_ms)),
+        expires_at: Some(timestamp(expires_at_unix_ms)),
+        signing_key_id: String::new(),
+        authority_signature: Vec::new(),
+    };
+    signer.sign_connector_operation_grant(&mut grant)?;
+    Ok(grant)
+}
+
+#[allow(clippy::result_large_err)]
+pub(super) async fn require_directory_connector_operator_role(
+    directory: &dyn WorkspaceDirectory,
+    identity: &UserIdentityRef,
+    organization_id: &str,
+    workspace_id: &str,
+) -> Result<(), Status> {
+    let roles = directory
+        .roles_for_member(identity, organization_id, workspace_id)
+        .await
+        .map_err(|_| Status::unavailable("workspace directory is unavailable"))?
+        .ok_or_else(|| Status::permission_denied("workspace membership is required"))?;
+    if !roles.contains(NAVIGATOR_CONNECTOR_OPERATOR_ROLE) {
+        return Err(Status::permission_denied(
+            "connector operator role is required",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_connector_scope_value(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn validate_credential_time(credential: &wire::ExecutionCredential) -> AuthorityHelperResult<()> {
@@ -3428,6 +3614,7 @@ mod get_delegation_identity_tests {
             let service = AuthorityRpcService::new(AuthorityServiceDependencies {
                 organization_id: ORGANIZATION_ID.to_owned(),
                 workspace_id: WORKSPACE_ID.to_owned(),
+                connector_identity_issuer: format!("{PRINCIPAL_ISSUER}/v2.0"),
                 authority_instance_id: "authority-test".to_owned(),
                 snapshots,
                 web_verifier: Arc::new(TestVerifier {
@@ -3988,5 +4175,93 @@ mod get_delegation_identity_tests {
         assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 1);
         assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 1);
         assert_eq!(fixture.validations.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod connector_operation_request_tests {
+    use tonic::Code;
+
+    use super::*;
+
+    const ISSUER: &str =
+        "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0";
+    const SUBJECT: &str = "d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec";
+
+    fn request() -> wire::AuthorizeConnectorOperationRequest {
+        wire::AuthorizeConnectorOperationRequest {
+            workspace_id: "workspace-1".to_owned(),
+            principal_issuer: ISSUER.to_owned(),
+            principal_subject: SUBJECT.to_owned(),
+            connection_ref: "github-connection".to_owned(),
+            provider_id: "github".to_owned(),
+            profile_ref: "github-profile".to_owned(),
+            operation_id: "github.repository.list".to_owned(),
+            resource_ref: "repositories".to_owned(),
+            arguments_digest_sha256: vec![0x5a; 32],
+            request_id: "teams-activity-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn connector_request_requires_exact_deployment_workspace_and_verified_aad_identity() {
+        assert!(validate_connector_operation_request(&request(), "workspace-1", ISSUER).is_ok());
+
+        let mut altered = request();
+        altered.workspace_id = "workspace-2".to_owned();
+        assert_eq!(
+            validate_connector_operation_request(&altered, "workspace-1", ISSUER)
+                .expect_err("a caller cannot choose another Authority workspace")
+                .code(),
+            Code::PermissionDenied
+        );
+
+        let mut altered = request();
+        altered.principal_issuer = "https://attacker.example/tenant/v2.0".to_owned();
+        assert_eq!(
+            validate_connector_operation_request(&altered, "workspace-1", ISSUER)
+                .expect_err("issuer must match the configured tenant")
+                .code(),
+            Code::PermissionDenied
+        );
+
+        let mut altered = request();
+        altered.principal_subject = SUBJECT.to_ascii_uppercase();
+        assert_eq!(
+            validate_connector_operation_request(&altered, "workspace-1", ISSUER)
+                .expect_err("AAD object id must use canonical lowercase UUID encoding")
+                .code(),
+            Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn connector_request_rejects_unlisted_or_mismatched_provider_operations() {
+        let mut altered = request();
+        altered.operation_id = "shell.execute".to_owned();
+        assert_eq!(
+            validate_connector_operation_request(&altered, "workspace-1", ISSUER)
+                .expect_err("arbitrary shell operations are outside the catalog")
+                .code(),
+            Code::InvalidArgument
+        );
+
+        let mut altered = request();
+        altered.provider_id = "azure".to_owned();
+        assert_eq!(
+            validate_connector_operation_request(&altered, "workspace-1", ISSUER)
+                .expect_err("provider must match the catalog operation")
+                .code(),
+            Code::InvalidArgument
+        );
+
+        let mut altered = request();
+        altered.arguments_digest_sha256.pop();
+        assert_eq!(
+            validate_connector_operation_request(&altered, "workspace-1", ISSUER)
+                .expect_err("argument digest must be a raw SHA-256 value")
+                .code(),
+            Code::InvalidArgument
+        );
     }
 }
