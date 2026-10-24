@@ -60,14 +60,14 @@ role and leaves the person's membership and other roles intact.
 ```text
 cy-workspace-directory-admin maintainer add \
   --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
-  --subject d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec \
+  --subject 11111111-1111-4111-8111-111111111111 \
   --organization <organization-id> \
   --workspace <workspace-id> \
   --reason "Teams connector maintainer"
 
 cy-workspace-directory-admin maintainer revoke \
   --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
-  --subject d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec \
+  --subject 11111111-1111-4111-8111-111111111111 \
   --organization <organization-id> \
   --workspace <workspace-id> \
   --reason "Teams connector maintainer access removed"

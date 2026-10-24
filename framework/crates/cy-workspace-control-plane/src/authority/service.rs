@@ -4186,7 +4186,7 @@ mod connector_operation_request_tests {
 
     const ISSUER: &str =
         "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0";
-    const SUBJECT: &str = "d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec";
+    const SUBJECT: &str = "11111111-1111-4111-8111-111111111111";
 
     fn request() -> wire::AuthorizeConnectorOperationRequest {
         wire::AuthorizeConnectorOperationRequest {
@@ -4226,7 +4226,7 @@ mod connector_operation_request_tests {
         );
 
         let mut altered = request();
-        altered.principal_subject = SUBJECT.to_ascii_uppercase();
+        altered.principal_subject = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".to_owned();
         assert_eq!(
             validate_connector_operation_request(&altered, "workspace-1", ISSUER)
                 .expect_err("AAD object id must use canonical lowercase UUID encoding")

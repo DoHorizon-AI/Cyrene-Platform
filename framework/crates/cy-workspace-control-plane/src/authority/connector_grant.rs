@@ -266,7 +266,7 @@ mod tests {
             workspace_id: "workspace-1",
             principal_issuer:
                 "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0",
-            principal_subject: "d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec",
+            principal_subject: "11111111-1111-4111-8111-111111111111",
             connection_ref: "connection-1",
             provider_id: "github",
             profile_ref: "github-main",
@@ -287,7 +287,7 @@ mod tests {
             principal_issuer:
                 "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0"
                     .to_owned(),
-            principal_subject: "d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec".to_owned(),
+            principal_subject: "11111111-1111-4111-8111-111111111111".to_owned(),
             connection_ref: "connection-1".to_owned(),
             provider_id: "github".to_owned(),
             profile_ref: "github-main".to_owned(),
@@ -365,7 +365,7 @@ mod tests {
         let identity = UserIdentityRef {
             issuer: "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0"
                 .to_owned(),
-            subject: "d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec".to_owned(),
+            subject: "11111111-1111-4111-8111-111111111111".to_owned(),
         };
         let directory = MutableRoleDirectory {
             identity: identity.clone(),
