@@ -23,7 +23,7 @@ pub const CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION: &str =
 pub const CONNECTOR_OPERATION_GRANT_TTL_MS: u64 = 15_000;
 
 /// Closed operation identifiers accepted by the connector authorization boundary.
-pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 33] = [
+pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 48] = [
     "cloud.operation.cancel",
     "cloud.operation.logs.read",
     "cloud.operation.status.read",
@@ -38,12 +38,27 @@ pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 33] = [
     "cloud.resource.update",
     "cloud.resources.list",
     "cloud.vendor.cli.execute",
+    "computer.command.execute",
+    "computer.directory.list",
+    "computer.file.read",
+    "computer.file.write",
+    "github.actions.job.logs.read",
+    "github.actions.jobs.list",
+    "github.actions.rerun_failed",
     "github.actions.runs.list",
+    "github.branch.create",
+    "github.branch.delete",
+    "github.branch.get",
     "github.branches.list",
     "github.ci.status",
+    "github.file.commit",
+    "github.file.get",
     "github.issue.comment.create",
     "github.issue.get",
     "github.issue.state.update",
+    "github.issues.search",
+    "github.pull_request.draft.create",
+    "github.pull_request.draft.find",
     "github.pull_request.get",
     "github.pull_requests.list",
     "github.repository.get",
@@ -116,6 +131,7 @@ pub fn is_supported_connector_operation(provider_id: &str, operation_id: &str) -
         Some(("github", _)) => provider_id == "github",
         Some(("huggingface", _)) => provider_id == "huggingface",
         Some(("msteams", _)) => provider_id == "msteams",
+        Some(("computer", _)) => provider_id == "computer",
         Some(("cloud", _)) if operation_id == "cloud.resource.restart" => provider_id == "runpod",
         Some(("cloud", _)) => matches!(provider_id, "azure" | "gcp" | "runpod"),
         _ => false,
@@ -246,18 +262,32 @@ mod tests {
     use std::{collections::BTreeSet, sync::Mutex};
 
     use async_trait::async_trait;
+    use cy_proto::cyrene::workspace::authority::v2::AuthorizeConnectorOperationRequest;
     use cy_proto::workspace_v1::{UserIdentityRef, WorkspaceConnectionDescriptor};
     use ed25519_dalek::{Signer, SigningKey};
     use tonic::Code;
 
     use super::*;
     use crate::{
-        authority::service::require_directory_connector_operator_role,
+        authority::service::{
+            issue_connector_operation_grant, require_directory_connector_operator_role,
+            AuthorityCredentialSigner, AuthorityManagedWorkload,
+        },
         directory::{WorkspaceDirectory, WorkspaceDirectoryError},
     };
 
     const KEY_ID: &str = "authority-test-key";
     const NOW_MS: u64 = 1_800_000_000_000;
+
+    #[derive(Clone, Copy)]
+    struct TestConnectorScope<'a> {
+        connection_ref: &'a str,
+        provider_id: &'a str,
+        profile_ref: &'a str,
+        operation_id: &'a str,
+        resource_ref: &'a str,
+        request_id: &'a str,
+    }
 
     fn expected<'a>(digest: &'a [u8]) -> ConnectorOperationGrantExpectation<'a> {
         ConnectorOperationGrantExpectation {
@@ -278,6 +308,27 @@ mod tests {
     }
 
     fn signed_grant(key: &SigningKey, now_ms: u64, digest: Vec<u8>) -> ConnectorOperationGrantV1 {
+        signed_grant_for(
+            key,
+            now_ms,
+            digest,
+            TestConnectorScope {
+                connection_ref: "connection-1",
+                provider_id: "github",
+                profile_ref: "github-main",
+                operation_id: "github.repository.list",
+                resource_ref: "repositories",
+                request_id: "activity-1",
+            },
+        )
+    }
+
+    fn signed_grant_for(
+        key: &SigningKey,
+        now_ms: u64,
+        digest: Vec<u8>,
+        scope: TestConnectorScope<'_>,
+    ) -> ConnectorOperationGrantV1 {
         let mut grant = ConnectorOperationGrantV1 {
             schema_version: CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION.to_owned(),
             grant_ref: String::new(),
@@ -288,13 +339,13 @@ mod tests {
                 "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0"
                     .to_owned(),
             principal_subject: "11111111-1111-4111-8111-111111111111".to_owned(),
-            connection_ref: "connection-1".to_owned(),
-            provider_id: "github".to_owned(),
-            profile_ref: "github-main".to_owned(),
-            operation_id: "github.repository.list".to_owned(),
-            resource_ref: "repositories".to_owned(),
+            connection_ref: scope.connection_ref.to_owned(),
+            provider_id: scope.provider_id.to_owned(),
+            profile_ref: scope.profile_ref.to_owned(),
+            operation_id: scope.operation_id.to_owned(),
+            resource_ref: scope.resource_ref.to_owned(),
             arguments_digest_sha256: digest,
-            request_id: "activity-1".to_owned(),
+            request_id: scope.request_id.to_owned(),
             issued_at: Some(timestamp_for_test(now_ms)),
             expires_at: Some(timestamp_for_test(
                 now_ms + CONNECTOR_OPERATION_GRANT_TTL_MS,
@@ -410,6 +461,120 @@ mod tests {
             )
             .await
             .expect_err("another workspace must remain denied")
+            .code(),
+            Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_operator_role_issues_signed_github_and_computer_operation_grants() {
+        let identity = UserIdentityRef {
+            issuer: "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0"
+                .to_owned(),
+            subject: "11111111-1111-4111-8111-111111111111".to_owned(),
+        };
+        let directory = MutableRoleDirectory {
+            identity: identity.clone(),
+            organization_id: "org-1".to_owned(),
+            workspace_id: "workspace-1".to_owned(),
+            roles: Mutex::new(BTreeSet::from([
+                NAVIGATOR_CONNECTOR_OPERATOR_ROLE.to_owned()
+            ])),
+        };
+        let signer = AuthorityCredentialSigner::new(
+            KEY_ID,
+            SigningKey::from_bytes(&[5; 32]),
+            std::time::Duration::from_secs(30),
+        )
+        .expect("Authority signing key is valid");
+        let workload = AuthorityManagedWorkload {
+            workload_id: "exchange-test".into(),
+            audience: "exchange".into(),
+            certificate_fingerprints_sha256: Vec::new(),
+        };
+        let requests = [
+            AuthorizeConnectorOperationRequest {
+                workspace_id: "workspace-1".into(),
+                principal_issuer: identity.issuer.clone(),
+                principal_subject: identity.subject.clone(),
+                connection_ref: "github-connection".into(),
+                provider_id: "github".into(),
+                profile_ref: "github-main".into(),
+                operation_id: "github.actions.rerun_failed".into(),
+                resource_ref: "repository:123/run:45".into(),
+                arguments_digest_sha256: vec![7; 32],
+                request_id: "github-rerun-request".into(),
+            },
+            AuthorizeConnectorOperationRequest {
+                workspace_id: "workspace-1".into(),
+                principal_issuer: identity.issuer.clone(),
+                principal_subject: identity.subject.clone(),
+                connection_ref: "computer-connection".into(),
+                provider_id: "computer".into(),
+                profile_ref: "computer-workspace".into(),
+                operation_id: "computer.command.execute".into(),
+                resource_ref: "workspace:workspace-1".into(),
+                arguments_digest_sha256: vec![8; 32],
+                request_id: "computer-command-request".into(),
+            },
+        ];
+
+        for request in &requests {
+            let grant = issue_connector_operation_grant(
+                &directory,
+                &signer,
+                "org-1",
+                "workspace-1",
+                &identity.issuer,
+                &workload,
+                request,
+            )
+            .await
+            .expect("current Directory connector operator can receive the exact grant");
+            let now_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after Unix epoch")
+                .as_millis() as u64;
+            verify_connector_operation_grant(
+                &grant,
+                &signer.verifying_key(),
+                KEY_ID,
+                ConnectorOperationGrantExpectation {
+                    audience: "exchange",
+                    organization_id: "org-1",
+                    workspace_id: "workspace-1",
+                    principal_issuer: &identity.issuer,
+                    principal_subject: &identity.subject,
+                    connection_ref: &request.connection_ref,
+                    provider_id: &request.provider_id,
+                    profile_ref: &request.profile_ref,
+                    operation_id: &request.operation_id,
+                    resource_ref: &request.resource_ref,
+                    arguments_digest_sha256: &request.arguments_digest_sha256,
+                    request_id: &request.request_id,
+                },
+                now_unix_ms,
+            )
+            .expect("signature and exact provider/operation scope verify");
+        }
+
+        directory
+            .roles
+            .lock()
+            .expect("roles lock is healthy")
+            .remove(NAVIGATOR_CONNECTOR_OPERATOR_ROLE);
+        assert_eq!(
+            issue_connector_operation_grant(
+                &directory,
+                &signer,
+                "org-1",
+                "workspace-1",
+                &identity.issuer,
+                &workload,
+                &requests[1],
+            )
+            .await
+            .expect_err("revoked Directory role cannot receive another operation grant")
             .code(),
             Code::PermissionDenied
         );
@@ -618,5 +783,88 @@ mod tests {
             "github",
             "huggingface.vendor.cli.execute"
         ));
+    }
+
+    #[test]
+    fn expanded_github_and_computer_operations_remain_provider_bound() {
+        for operation_id in [
+            "github.actions.job.logs.read",
+            "github.actions.jobs.list",
+            "github.actions.rerun_failed",
+            "github.branch.create",
+            "github.branch.delete",
+            "github.branch.get",
+            "github.file.commit",
+            "github.file.get",
+            "github.issues.search",
+            "github.pull_request.draft.create",
+            "github.pull_request.draft.find",
+        ] {
+            assert!(is_supported_connector_operation("github", operation_id));
+            assert!(!is_supported_connector_operation("computer", operation_id));
+        }
+        for operation_id in [
+            "computer.command.execute",
+            "computer.directory.list",
+            "computer.file.read",
+            "computer.file.write",
+        ] {
+            assert!(is_supported_connector_operation("computer", operation_id));
+            assert!(!is_supported_connector_operation("github", operation_id));
+        }
+        assert!(!is_supported_connector_operation(
+            "computer",
+            "computer.shell.execute"
+        ));
+        assert!(!is_supported_connector_operation(
+            "github",
+            "github.actions.run.get"
+        ));
+    }
+
+    #[test]
+    fn newly_cataloged_github_and_computer_grants_verify_with_exact_provider_scope() {
+        let key = SigningKey::from_bytes(&[6; 32]);
+        let digest = [0x5a; 32];
+        let scopes = [
+            TestConnectorScope {
+                connection_ref: "github-connection",
+                provider_id: "github",
+                profile_ref: "github-main",
+                operation_id: "github.actions.rerun_failed",
+                resource_ref: "repository:123/run:45",
+                request_id: "github-rerun-1",
+            },
+            TestConnectorScope {
+                connection_ref: "computer-connection",
+                provider_id: "computer",
+                profile_ref: "computer-workspace",
+                operation_id: "computer.command.execute",
+                resource_ref: "workspace:workspace-1",
+                request_id: "computer-command-1",
+            },
+        ];
+
+        for scope in scopes {
+            let grant = signed_grant_for(&key, NOW_MS, digest.to_vec(), scope);
+            let exact_scope = ConnectorOperationGrantExpectation {
+                connection_ref: scope.connection_ref,
+                provider_id: scope.provider_id,
+                profile_ref: scope.profile_ref,
+                operation_id: scope.operation_id,
+                resource_ref: scope.resource_ref,
+                request_id: scope.request_id,
+                ..expected(&digest)
+            };
+
+            verify_connector_operation_grant(
+                &grant,
+                &key.verifying_key(),
+                KEY_ID,
+                exact_scope,
+                NOW_MS + 1,
+            )
+            .expect("new operation IDs receive only exact provider-bound signatures");
+        }
     }
 }
