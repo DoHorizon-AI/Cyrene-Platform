@@ -4264,4 +4264,39 @@ mod connector_operation_request_tests {
             Code::InvalidArgument
         );
     }
+
+    #[test]
+    fn connector_request_accepts_new_catalog_operations_and_rejects_cross_provider_pairs() {
+        let mut github_rerun = request();
+        github_rerun.operation_id = "github.actions.rerun_failed".into();
+        assert!(validate_connector_operation_request(&github_rerun, "workspace-1", ISSUER).is_ok());
+
+        let mut computer_command = request();
+        computer_command.connection_ref = "computer-connection".into();
+        computer_command.provider_id = "computer".into();
+        computer_command.profile_ref = "computer-workspace".into();
+        computer_command.operation_id = "computer.command.execute".into();
+        computer_command.resource_ref = "workspace:workspace-1".into();
+        assert!(
+            validate_connector_operation_request(&computer_command, "workspace-1", ISSUER).is_ok()
+        );
+
+        let mut wrong_provider = computer_command.clone();
+        wrong_provider.provider_id = "github".into();
+        assert_eq!(
+            validate_connector_operation_request(&wrong_provider, "workspace-1", ISSUER)
+                .expect_err("computer operation must not be granted under github provider")
+                .code(),
+            Code::InvalidArgument
+        );
+
+        let mut unknown_operation = computer_command;
+        unknown_operation.operation_id = "computer.shell.execute".into();
+        assert_eq!(
+            validate_connector_operation_request(&unknown_operation, "workspace-1", ISSUER)
+                .expect_err("unlisted computer operations must remain denied")
+                .code(),
+            Code::InvalidArgument
+        );
+    }
 }

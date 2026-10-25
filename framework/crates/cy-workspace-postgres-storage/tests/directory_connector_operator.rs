@@ -140,6 +140,61 @@ async fn maintainer_role_grant_and_revoke_are_immediately_visible_to_directory_r
     )
     .expect("grant verifies against its exact operation binding");
 
+    let github_mutating_request = AuthorizeConnectorOperationRequest {
+        connection_ref: "github-test-connection".to_owned(),
+        provider_id: "github".to_owned(),
+        profile_ref: "github-test-profile".to_owned(),
+        operation_id: "github.actions.rerun_failed".to_owned(),
+        resource_ref: "repository:123/run:45".to_owned(),
+        arguments_digest_sha256: vec![8; 32],
+        request_id: format!("test-github-rerun-{}", Uuid::new_v4()),
+        ..request.clone()
+    };
+    let computer_request = AuthorizeConnectorOperationRequest {
+        connection_ref: "computer-test-connection".to_owned(),
+        provider_id: "computer".to_owned(),
+        profile_ref: "computer-test-profile".to_owned(),
+        operation_id: "computer.command.execute".to_owned(),
+        resource_ref: "workspace:workspace-1".to_owned(),
+        arguments_digest_sha256: vec![9; 32],
+        request_id: format!("test-computer-command-{}", Uuid::new_v4()),
+        ..request.clone()
+    };
+    for scoped_request in [&github_mutating_request, &computer_request] {
+        let scoped_grant = issue_connector_operation_grant(
+            &directory,
+            &signer,
+            &organization_id,
+            &workspace_id,
+            &identity.issuer,
+            &exchange,
+            scoped_request,
+        )
+        .await
+        .expect("current Directory operator role can receive each newly cataloged grant");
+        verify_connector_operation_grant(
+            &scoped_grant,
+            &signer.verifying_key(),
+            "directory-integration-test-key",
+            ConnectorOperationGrantExpectation {
+                audience: "exchange",
+                organization_id: &organization_id,
+                workspace_id: &workspace_id,
+                principal_issuer: &identity.issuer,
+                principal_subject: &identity.subject,
+                connection_ref: &scoped_request.connection_ref,
+                provider_id: &scoped_request.provider_id,
+                profile_ref: &scoped_request.profile_ref,
+                operation_id: &scoped_request.operation_id,
+                resource_ref: &scoped_request.resource_ref,
+                arguments_digest_sha256: &scoped_request.arguments_digest_sha256,
+                request_id: &scoped_request.request_id,
+            },
+            now_unix_ms,
+        )
+        .expect("new GitHub and computer grants verify against exact signed scope");
+    }
+
     let revoke_status = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
         .args([
             "maintainer",
