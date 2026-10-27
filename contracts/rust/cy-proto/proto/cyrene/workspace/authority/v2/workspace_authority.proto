@@ -179,8 +179,10 @@ message AuthorizeConnectorOperationRequest {
   // The caller must be the registered connector authorization workload over Authority mTLS.
   // Organization is host-configured; workspace must equal the Authority deployment.
   // The principal issuer and subject come from the verified Teams identity envelope.
-  // Authority requires the exact configured Entra v2 issuer and canonical AAD object UUID,
-  // then reloads current Directory membership and navigator.connector.operator.v1.
+  // Authority requires the configured Entra v2 issuer and canonical AAD object UUID, then
+  // reloads Directory membership. The operator role retains its catalog; the automation viewer
+  // is limited to six Graph reads and the task writer to eight Graph operations. Provider-side
+  // same-actor/source and OAuth-scope checks remain required.
   string workspace_id = 1;
   string principal_issuer = 2;
   string principal_subject = 3;

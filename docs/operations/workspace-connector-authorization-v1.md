@@ -1,11 +1,17 @@
 # Workspace connector authorization v1
 
 Workspace Authority issues one short-lived, signed grant for one operation after
-it reloads the caller's current Directory membership and
-`navigator.connector.operator.v1` role. Exchange requests the grant through its
-authenticated mTLS connection; Navigator reaches Exchange through the separate
-HMAC-authenticated internal grant facade. Neither request payloads nor Teams
-display names can assign roles.
+it reloads the caller's current Directory membership and checks the role allowed
+for that operation. `navigator.connector.operator.v1` retains its existing
+catalog behavior. `navigator.automation.viewer.v1` can request only the six
+Microsoft Graph read operations listed in the policy; it does not grant Graph
+writes, other providers, vendor CLI, computer access, or credential export.
+Pilot members receive this viewer role by default. The owner may later grant
+`navigator.office.task_writer.v1` explicitly; it is limited to the eight Graph
+operations in policy and does not grant OAuth scopes or other provider access.
+Exchange requests the grant through its authenticated mTLS connection; Navigator
+reaches Exchange through the separate HMAC-authenticated internal grant facade.
+Neither request payloads nor Teams display names can assign roles.
 At the Authority boundary, the transport identity is described as the registered connector
 authorization workload; deployment configuration binds it to the internal caller by its mTLS
 certificate pin and audience.
@@ -22,12 +28,39 @@ lookup.
 
 The closed action catalog is
 [`../../contracts/policies/workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json).
-Unknown operation IDs and provider mismatches fail closed. Provider CLI actions
-use a fixed provider executable and an argument vector; this policy does not
-authorize shell command strings. GitHub and Hugging Face CLI calls use the
-provider-bound `github.vendor.cli.execute` and
+Unknown operation IDs and provider mismatches fail closed. The viewer's exact
+Graph read set is `microsoft_graph.planner.plan.get`,
+`microsoft_graph.planner.tasks.list`, `microsoft_graph.planner.task.get`,
+`microsoft_graph.sharepoint.site.get`, `microsoft_graph.sharepoint.list.get`,
+and `microsoft_graph.sharepoint.list.items.delta`. The remaining two Graph
+operations, `microsoft_graph.planner.task.create` and
+`microsoft_graph.planner.task.update`, remain denied to viewers and are allowed
+to the existing operator or task writer role. The task writer's full set is
+those two writes plus the six viewer reads. `azure_devops.observations.poll` is in the canonical operation
+catalog but is denied to viewers until the provider pins and enforces the
+original caller for its source profile.
+
+Directory role membership is not proof that a user can read an arbitrary
+provider source or target. Authority binds each signed grant to the exact actor,
+Workspace, connection, provider, profile, operation, resource, argument digest,
+and request ID, but it does not query provider profile ownership or source ACLs.
+The Graph provider path must use the requesting actor's Account Center lease and
+validate `/me` with that same delegated token before reading or writing. Task
+create and update also require that actor's explicit `Tasks.ReadWrite` consent;
+the task writer role does not grant the OAuth scope. This Authority change does
+not implement or observe those provider checks. Until they are deployed and
+verified, keep Graph sources unavailable to pilot members. If a same-actor
+profile lease, source authorization check, or required OAuth scope is missing,
+the provider must reject the call; it must not use an owner's shared credential
+or treat a Directory role as source access. ADO viewer reads remain disabled
+pending an equivalent caller binding. The viewer and task writer roles grant no
+existing cloud service-identity or computer read path.
+
+Provider CLI actions use a fixed provider executable and an argument vector;
+this policy does not authorize shell command strings. GitHub and Hugging Face
+CLI calls use the provider-bound `github.vendor.cli.execute` and
 `huggingface.vendor.cli.execute` operation IDs; cloud profiles use
-`cloud.vendor.cli.execute`.
+`cloud.vendor.cli.execute`. These remain outside the viewer role.
 
 ## Connector-only Authority host
 
@@ -53,9 +86,10 @@ or the Exchange workload pin is missing.
 
 Run these commands through the restricted Directory admin environment. The
 operator actor, database URL and audit reason are required; they are never
-accepted from a Teams request. Adding a maintainer creates membership if needed
-and grants only the connector operator role. Revoking a maintainer removes that
-role and leaves the person's membership and other roles intact.
+accepted from a Teams request. The fixed `maintainer add` and `maintainer
+revoke` commands continue to manage only the connector operator role. Use the
+generic role commands for the automation viewer and Office task writer roles;
+granting or revoking one role leaves membership and other roles intact.
 
 ```text
 cy-workspace-directory-admin maintainer add \
@@ -71,16 +105,72 @@ cy-workspace-directory-admin maintainer revoke \
   --organization <organization-id> \
   --workspace <workspace-id> \
   --reason "Teams connector maintainer access removed"
+
+cy-workspace-directory-admin grant-membership \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --subject 11111111-1111-4111-8111-111111111111 \
+  --organization <organization-id> \
+  --workspace <workspace-id> \
+  --role navigator.automation.viewer.v1 \
+  --reason "automation pilot viewer"
+
+cy-workspace-directory-admin grant-role \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --subject 11111111-1111-4111-8111-111111111111 \
+  --organization <organization-id> \
+  --workspace <workspace-id> \
+  --role navigator.automation.viewer.v1 \
+  --reason "automation pilot viewer"
+
+cy-workspace-directory-admin grant-role \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --subject 11111111-1111-4111-8111-111111111111 \
+  --organization <organization-id> \
+  --workspace <workspace-id> \
+  --role navigator.office.task_writer.v1 \
+  --reason "Office task writer approved"
+
+cy-workspace-directory-admin revoke-role \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --subject 11111111-1111-4111-8111-111111111111 \
+  --organization <organization-id> \
+  --workspace <workspace-id> \
+  --role navigator.automation.viewer.v1 \
+  --reason "automation pilot viewer access removed"
+
+cy-workspace-directory-admin revoke-role \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --subject 11111111-1111-4111-8111-111111111111 \
+  --organization <organization-id> \
+  --workspace <workspace-id> \
+  --role navigator.office.task_writer.v1 \
+  --reason "Office task writer access removed"
+
+cy-workspace-directory-admin membership get \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --subject 11111111-1111-4111-8111-111111111111 \
+  --organization <organization-id> \
+  --workspace <workspace-id>
 ```
 
 The commands are idempotent and append Directory audit events. `maintainer add`
 must use the tenant issuer configured in Authority and the immutable AAD object
 ID; a display name, email address or client-provided role is not an identity.
+Use `grant-membership` when adding a new pilot member; pass only
+`navigator.automation.viewer.v1` to this scoped helper. Use `grant-role` when the
+membership already exists. Grant `navigator.office.task_writer.v1` only after
+owner approval and the same actor's Account Center `Tasks.ReadWrite` consent;
+the Directory command does not grant OAuth consent.
+`membership get` uses the configured read-only Directory URL and emits one JSON
+object containing the exact requested scope, `isMember`, and the explicit role
+array. An absent membership returns `isMember: false` and `roles: []`; a present
+membership with no assigned roles returns `isMember: true` and `roles: []`.
 
 ## Workspace connector authorization v1 | Workspace connector 授权 v1
 
-Workspace Authority 每次签发 grant 前都会重新读取当前 Directory membership 与
-`navigator.connector.operator.v1` role。grant 只允许一个具体操作，且只有 15 秒有效。
+Workspace Authority 每次签发 grant 前都会重新读取当前 Directory membership，并按操作检查 role。
+`navigator.connector.operator.v1` 保留原有操作目录；新 pilot 成员默认只授予 `navigator.automation.viewer.v1`，仅可请求 policy 中列出的六个 Graph 只读操作。owner 可稍后显式授予 `navigator.office.task_writer.v1`，该角色只允许完整的八个 Graph operation，不开放其他 provider、vendor CLI、computer 或凭据导出。
+grant 只允许一个具体操作，且只有 15 秒有效。
 Navigator 通过 HMAC-authenticated Exchange 内部 grant facade 请求授权；Exchange 再通过
 mTLS 调用 Authority。Teams 显示名、用户消息字段和请求体中的 role 都不是授权来源。
 在 Authority 边界，传输身份统一称为已注册的 connector authorization workload；部署配置通过 mTLS
@@ -94,7 +184,11 @@ arguments digest 和原始 request ID。Exchange 必须逐字段校验且每次�
 复用 grant；role 撤销会影响下一次 Authority 查询。
 
 封闭 operation catalog 见
-[`workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json)。未知 operation 或 provider 不匹配都会拒绝。GitHub 与 Hugging Face CLI 分别使用 provider-bound 的 `github.vendor.cli.execute` 与 `huggingface.vendor.cli.execute`；cloud profile 使用 `cloud.vendor.cli.execute`。Provider CLI 只接受固定可执行文件和参数数组；此 policy 不授权 shell 命令字符串。
+[`workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json)。viewer 的 Graph 只读集合为 `microsoft_graph.planner.plan.get`、`microsoft_graph.planner.tasks.list`、`microsoft_graph.planner.task.get`、`microsoft_graph.sharepoint.site.get`、`microsoft_graph.sharepoint.list.get` 和 `microsoft_graph.sharepoint.list.items.delta`。`navigator.office.task_writer.v1` 的完整集合是这六个读取 operation 加上 `microsoft_graph.planner.task.create` 和 `microsoft_graph.planner.task.update`；viewer 不可执行这两个写操作，operator 与 task writer 可以。`azure_devops.observations.poll` 已进入 canonical operation catalog，但在 provider 绑定并强制校验原始调用者的 source profile 前，viewer 请求仍会拒绝。
+
+Directory role membership 不代表用户可读取任意 provider source 或 target。Authority 会把 grant 精确绑定到 actor、Workspace、connection、provider、profile、operation、resource、arguments digest 与 request ID，但不会查询 provider profile owner 或 source ACL。Graph provider 必须使用请求 actor 自己的 Account Center lease，并以同一个 delegated token 校验 `/me` 后才读取或写入；Planner create/update 还要求该 actor 显式同意 `Tasks.ReadWrite`，Directory role 本身不授予 OAuth scope。此 Authority 改动不实现或观测这些 provider 检查。在这些检查部署并验证前，pilot viewer 与 task writer 均不得访问 Graph source。缺少 same-actor profile lease、source 授权检查或所需 OAuth scope 时，provider 必须拒绝调用，不能使用 owner 共享 credential，也不能把 Directory role 当作 source access。ADO viewer 读取在有等效调用者绑定前保持关闭。viewer 与 task writer role 不会开放既有 cloud service-identity 或 computer 读取路径。
+
+Provider CLI 使用固定 executable 和 argument vector；policy 不授权 shell 命令字符串。GitHub、Hugging Face 和 cloud 的 vendor CLI operation 均不属于 viewer role。
 
 ## Connector-only Authority host | 仅 Connector 授权的 Authority host
 
@@ -112,6 +206,7 @@ mTLS 文件，以及 Exchange workload ID/audience/证书指纹配置。RPC 默�
 
 ## 增删维护者
 
-通过受限的 Directory admin 环境运行上述 `maintainer add` 或 `maintainer revoke` 命令。管理员 actor、数据库 URL 与审计原因来自可信服务配置，不从 Teams 请求读取。添加时如无 membership 会先创建 membership，然后仅授予连接器操作 role；撤销时只移除此 role，保留用户 membership 和其他 roles。
+通过受限的 Directory admin 环境运行这些命令。管理员 actor、数据库 URL 与审计原因来自可信服务配置，不从 Teams 请求读取。固定的 `maintainer add` 与 `maintainer revoke` 仍只管理 connector operator role。使用通用 `grant-role` 和 `revoke-role` 管理 automation viewer 与 Office task writer；撤销一个 role 只移除该 role，保留用户 membership 和其他 roles。
 
-命令可安全重复执行，并会追加 Directory audit event。`--issuer` 必须匹配 Authority 配置的 tenant issuer，`--subject` 必须是不可变 AAD object ID；显示名、邮箱或客户端自报 role 都不能代替身份。
+命令可安全重复执行，并会追加 Directory audit event。`--issuer` 必须匹配 Authority 配置的 tenant issuer，`--subject` 必须是不可变 AAD object ID；显示名、邮箱或客户端自报 role 都不能代替身份。`membership get` 使用配置的只读 Directory URL，输出包含请求 scope、`isMember` 与明确的 role 数组的单个 JSON object。membership 不存在时返回 `isMember: false`、`roles: []`；membership 存在但没有显式 role 时返回 `isMember: true`、`roles: []`。
+新 pilot 用户通过 `grant-membership` 只获得 viewer role。仅在 owner 显式批准且同一用户完成 Account Center `Tasks.ReadWrite` consent 后，才用 `grant-role` 授予 task writer；该 Directory 命令不会授予 OAuth consent。

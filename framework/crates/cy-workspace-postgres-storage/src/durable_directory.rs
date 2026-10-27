@@ -23,7 +23,10 @@ use uuid::Uuid;
 use crate::device_authorization::DeviceAuthorizationScope;
 use crate::device_registry::WorkspaceDeviceKey;
 use crate::directory::{validate_descriptor, WorkspaceDirectory, WorkspaceDirectoryError};
-use cy_workspace_control_plane::authority::NAVIGATOR_CONNECTOR_OPERATOR_ROLE;
+use cy_workspace_control_plane::authority::{
+    NAVIGATOR_AUTOMATION_VIEWER_ROLE, NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+    NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
+};
 
 const DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL";
 const MIGRATION_DATABASE_URL_ENV: &str = "CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL";
@@ -1332,7 +1335,10 @@ fn validate_roles(roles: &BTreeSet<String>) -> Result<(), DurableDirectoryError>
 }
 
 fn validate_role(role: &str) -> Result<(), DurableDirectoryError> {
-    if role == NAVIGATOR_CONNECTOR_OPERATOR_ROLE {
+    if role == NAVIGATOR_CONNECTOR_OPERATOR_ROLE
+        || role == NAVIGATOR_AUTOMATION_VIEWER_ROLE
+        || role == NAVIGATOR_OFFICE_TASK_WRITER_ROLE
+    {
         return Ok(());
     }
     if SUPPORTED_PRODUCT_OPERATOR_ROLES.contains(&role) {
@@ -1394,13 +1400,15 @@ fn now_unix_ms() -> u64 {
 ///
 /// Membership itself derives `workspace.member`; workload attestations remain a
 /// separate authority. Connector grants still bind each provider operation exactly.
-pub const SUPPORTED_OPERATOR_ROLES: [&str; 6] = [
+pub const SUPPORTED_OPERATOR_ROLES: [&str; 8] = [
     "workspace.product.command.catalyst.create_dataset.v1",
     "workspace.product.command.yield.start_training_run.v1",
     "workspace.product.command.reactor.create_model_import.v1",
     "workspace.product.command.exchange.create_route_draft.v1",
     "workspace.product.command.echo.create_evaluation_suite.v1",
+    NAVIGATOR_AUTOMATION_VIEWER_ROLE,
     NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+    NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
 ];
 
 const SUPPORTED_PRODUCT_OPERATOR_ROLES: [&str; 5] = [
@@ -1443,6 +1451,8 @@ mod tests {
         );
         assert!(validate_role(SUPPORTED_OPERATOR_ROLES[0]).is_ok());
         assert!(validate_role(NAVIGATOR_CONNECTOR_OPERATOR_ROLE).is_ok());
+        assert!(validate_role(NAVIGATOR_AUTOMATION_VIEWER_ROLE).is_ok());
+        assert!(validate_role(NAVIGATOR_OFFICE_TASK_WRITER_ROLE).is_ok());
         assert_eq!(
             validate_role("navigator.connector.admin.v1"),
             Err(DurableDirectoryError::UnsupportedRole)
@@ -1457,6 +1467,28 @@ mod tests {
         assert!(migration.contains("workspace_directory_audit_supported_roles"));
         let down = include_str!("../migrations/0005_workspace_connector_operator_role.down.sql");
         assert!(down.contains("Connector operator role assignments or audit events still exist"));
+    }
+
+    #[test]
+    fn automation_viewer_migration_is_reversible_only_after_assignments_are_removed() {
+        let migration = include_str!("../migrations/0006_workspace_automation_viewer_role.up.sql");
+        assert!(migration.contains("'navigator.automation.viewer.v1'"));
+        assert!(migration.contains("workspace_directory_roles_supported_role"));
+        assert!(migration.contains("workspace_directory_audit_supported_roles"));
+        let down = include_str!("../migrations/0006_workspace_automation_viewer_role.down.sql");
+        assert!(down
+            .contains("Cannot remove automation viewer role while grants or audit events remain"));
+    }
+
+    #[test]
+    fn office_task_writer_migration_is_reversible_only_after_assignments_are_removed() {
+        let migration = include_str!("../migrations/0007_workspace_office_task_writer_role.up.sql");
+        assert!(migration.contains("'navigator.office.task_writer.v1'"));
+        assert!(migration.contains("workspace_directory_roles_supported_role"));
+        assert!(migration.contains("workspace_directory_audit_supported_roles"));
+        let down = include_str!("../migrations/0007_workspace_office_task_writer_role.down.sql");
+        assert!(down
+            .contains("Cannot remove office task writer role while grants or audit events remain"));
     }
 
     #[test]

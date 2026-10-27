@@ -1,6 +1,8 @@
 {
   "schemaVersion": "cyrene.workspace.connector-operator-policy.v1",
   "operatorRole": "navigator.connector.operator.v1",
+  "readOnlyRole": "navigator.automation.viewer.v1",
+  "taskWriterRole": "navigator.office.task_writer.v1",
   "identity": {
     "issuer": "https://login.microsoftonline.com/<configured-tenant-id>/v2.0",
     "subjectClaim": "aadObjectId",
@@ -28,6 +30,7 @@
     "request_id"
   ],
   "operations": [
+    { "operationId": "azure_devops.observations.poll", "providerIds": ["azure_devops"] },
     { "operationId": "cloud.operation.cancel", "providerIds": ["azure", "gcp", "runpod"] },
     { "operationId": "cloud.operation.logs.read", "providerIds": ["azure", "gcp", "runpod"] },
     { "operationId": "cloud.operation.status.read", "providerIds": ["azure", "gcp", "runpod"] },
@@ -75,6 +78,32 @@
     { "operationId": "huggingface.repo.get", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.spaces.list", "providerIds": ["huggingface"] },
     { "operationId": "huggingface.vendor.cli.execute", "providerIds": ["huggingface"] },
-    { "operationId": "msteams.message.reply", "providerIds": ["msteams"] }
+    { "operationId": "msteams.message.reply", "providerIds": ["msteams"] },
+    { "operationId": "microsoft_graph.planner.plan.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.tasks.list", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.create", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.update", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.site.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.list.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.list.items.delta", "providerIds": ["microsoft_graph"] }
+  ],
+  "readOnlyOperations": [
+    { "operationId": "microsoft_graph.planner.plan.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.tasks.list", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.site.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.list.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.list.items.delta", "providerIds": ["microsoft_graph"] }
+  ],
+  "taskWriterOperations": [
+    { "operationId": "microsoft_graph.planner.plan.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.tasks.list", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.create", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.planner.task.update", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.site.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.list.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.sharepoint.list.items.delta", "providerIds": ["microsoft_graph"] }
   ]
 }
