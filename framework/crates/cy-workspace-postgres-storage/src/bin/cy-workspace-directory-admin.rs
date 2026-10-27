@@ -16,6 +16,7 @@ use cy_proto::workspace_v1::{UserIdentityRef, WorkspaceConnectionDescriptor};
 use cy_workspace_control_plane::authority::NAVIGATOR_CONNECTOR_OPERATOR_ROLE;
 use cy_workspace_postgres_storage::{
     DirectoryMutation, DirectoryOperatorProvisioner, DurableDirectoryError,
+    PostgresWorkspaceDirectory,
 };
 use prost::Message;
 
@@ -45,6 +46,25 @@ async fn run() -> Result<(), CliError> {
     }
 
     let options = parse_options(arguments)?;
+    if command == "membership-get" {
+        require_options(
+            &options,
+            &["issuer", "subject", "organization", "workspace"],
+        )?;
+        let identity = user(&options)?;
+        let organization = required(&options, "organization")?;
+        let workspace = required(&options, "workspace")?;
+        let directory = PostgresWorkspaceDirectory::connect_from_environment().await?;
+        let member_roles = directory
+            .roles_for_member(&identity, organization, workspace)
+            .await?;
+        println!(
+            "{}",
+            membership_readback_value(&identity, organization, workspace, member_roles)
+        );
+        return Ok(());
+    }
+
     let operator = DirectoryOperatorProvisioner::connect_from_environment().await?;
     let mutation = match command.as_str() {
         "grant-membership" => {
@@ -188,14 +208,39 @@ fn expand_command(
     command: String,
     arguments: &mut impl Iterator<Item = String>,
 ) -> Result<String, CliError> {
-    if command != "maintainer" {
-        return Ok(command);
+    match command.as_str() {
+        "maintainer" => match arguments.next().as_deref() {
+            Some("add") => Ok("maintainer-add".to_owned()),
+            Some("revoke") => Ok("maintainer-revoke".to_owned()),
+            _ => Err(CliError::Usage),
+        },
+        "membership" => match arguments.next().as_deref() {
+            Some("get") => Ok("membership-get".to_owned()),
+            _ => Err(CliError::Usage),
+        },
+        _ => Ok(command),
     }
-    match arguments.next().as_deref() {
-        Some("add") => Ok("maintainer-add".to_owned()),
-        Some("revoke") => Ok("maintainer-revoke".to_owned()),
-        _ => Err(CliError::Usage),
-    }
+}
+
+fn membership_readback_value(
+    identity: &UserIdentityRef,
+    organization: &str,
+    workspace: &str,
+    member_roles: Option<BTreeSet<String>>,
+) -> serde_json::Value {
+    let is_member = member_roles.is_some();
+    let roles = member_roles
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "isMember": is_member,
+        "roles": roles,
+        "issuer": identity.issuer,
+        "subject": identity.subject,
+        "organization": organization,
+        "workspace": workspace,
+    })
 }
 
 fn parse_options(
@@ -302,7 +347,7 @@ impl From<DurableDirectoryError> for CliError {
     }
 }
 
-const USAGE: &str = "Usage:\n  cy-workspace-directory-admin migrate\n  cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID [--role ROLE]... --reason TEXT\n  cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin grant-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin revoke-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin maintainer add --issuer ISSUER --subject AAD_OID --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin maintainer revoke --issuer ISSUER --subject AAD_OID --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin publish-descriptor --file PROTO_BIN --reason TEXT\n  cy-workspace-directory-admin revoke-descriptor --organization ORG --workspace ID --reason TEXT\n\nThe operator actor and database URLs are read from trusted environment configuration, never from a client request.";
+const USAGE: &str = "Usage:\n  cy-workspace-directory-admin migrate\n  cy-workspace-directory-admin membership get --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID\n  cy-workspace-directory-admin grant-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID [--role ROLE]... --reason TEXT\n  cy-workspace-directory-admin revoke-membership --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin grant-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin revoke-role --issuer ISSUER --subject SUBJECT --organization ORG --workspace ID --role ROLE --reason TEXT\n  cy-workspace-directory-admin maintainer add --issuer ISSUER --subject AAD_OID --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin maintainer revoke --issuer ISSUER --subject AAD_OID --organization ORG --workspace ID --reason TEXT\n  cy-workspace-directory-admin publish-descriptor --file PROTO_BIN --reason TEXT\n  cy-workspace-directory-admin revoke-descriptor --organization ORG --workspace ID --reason TEXT\n\nThe read command uses the Directory reader URL; mutation actor and database URLs are read from trusted environment configuration, never from a client request.";
 
 #[cfg(test)]
 mod tests {
@@ -373,5 +418,51 @@ mod tests {
             expand_command("maintainer".to_owned(), &mut unknown_arguments),
             Err(CliError::Usage)
         );
+    }
+
+    #[test]
+    fn membership_read_command_is_scoped_and_accepts_no_mutation_options() {
+        let mut arguments = ["get", "--issuer", "iss", "--subject", "sub"]
+            .into_iter()
+            .map(str::to_string);
+        assert_eq!(
+            expand_command("membership".to_owned(), &mut arguments),
+            Ok("membership-get".to_owned())
+        );
+        let options = parse_options(arguments).unwrap();
+        assert!(require_options(
+            &options,
+            &["issuer", "subject", "organization", "workspace"]
+        )
+        .is_ok());
+        assert!(required(&options, "organization").is_err());
+
+        let mut unknown_arguments = ["list"].into_iter().map(str::to_string);
+        assert_eq!(
+            expand_command("membership".to_owned(), &mut unknown_arguments),
+            Err(CliError::Usage)
+        );
+    }
+
+    #[test]
+    fn membership_readback_distinguishes_absent_membership_from_empty_roles() {
+        let identity = UserIdentityRef {
+            issuer: "https://issuer.example/tenant".to_owned(),
+            subject: "actor-1".to_owned(),
+        };
+        let no_roles = membership_readback_value(
+            &identity,
+            "organization-1",
+            "workspace-1",
+            Some(BTreeSet::new()),
+        );
+        assert_eq!(no_roles["isMember"], true);
+        assert_eq!(no_roles["roles"], serde_json::json!([]));
+        assert_eq!(no_roles["organization"], "organization-1");
+        assert_eq!(no_roles["workspace"], "workspace-1");
+
+        let absent = membership_readback_value(&identity, "organization-1", "workspace-1", None);
+        assert_eq!(absent["isMember"], false);
+        assert_eq!(absent["roles"], serde_json::json!([]));
     }
 }

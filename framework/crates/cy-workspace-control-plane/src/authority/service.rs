@@ -27,12 +27,14 @@ use crate::deployment_admission::{
 };
 use crate::{
     authority::{
+        is_automation_viewer_connector_operation, is_office_task_writer_connector_operation,
         is_supported_connector_operation, now_unix_ms, AuthorityDelegation,
         AuthorityDelegationError, AuthorityDelegationStore, AuthorityOutboxError,
         AuthorityOutboxStore, DelegatedOperationScope, EnqueueOutcome, ExecutionDevicePeer,
         InvocationWaitScope, NewAuthorityInvocation, PersistedInvocationResult,
         CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION, CONNECTOR_OPERATION_GRANT_TTL_MS,
-        NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+        NAVIGATOR_AUTOMATION_VIEWER_ROLE, NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+        NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
     },
     device_registry::{
         CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError,
@@ -2434,11 +2436,13 @@ pub async fn issue_connector_operation_grant(
         issuer: input.principal_issuer.clone(),
         subject: input.principal_subject.clone(),
     };
-    require_directory_connector_operator_role(
+    require_directory_connector_operation_role(
         directory,
         &identity,
         organization_id,
         &input.workspace_id,
+        &input.provider_id,
+        &input.operation_id,
     )
     .await?;
 
@@ -2469,23 +2473,30 @@ pub async fn issue_connector_operation_grant(
 }
 
 #[allow(clippy::result_large_err)]
-pub(super) async fn require_directory_connector_operator_role(
+pub(super) async fn require_directory_connector_operation_role(
     directory: &dyn WorkspaceDirectory,
     identity: &UserIdentityRef,
     organization_id: &str,
     workspace_id: &str,
+    provider_id: &str,
+    operation_id: &str,
 ) -> Result<(), Status> {
     let roles = directory
         .roles_for_member(identity, organization_id, workspace_id)
         .await
         .map_err(|_| Status::unavailable("workspace directory is unavailable"))?
         .ok_or_else(|| Status::permission_denied("workspace membership is required"))?;
-    if !roles.contains(NAVIGATOR_CONNECTOR_OPERATOR_ROLE) {
-        return Err(Status::permission_denied(
-            "connector operator role is required",
-        ));
+    if roles.contains(NAVIGATOR_CONNECTOR_OPERATOR_ROLE)
+        || (is_automation_viewer_connector_operation(provider_id, operation_id)
+            && roles.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE))
+        || (is_office_task_writer_connector_operation(provider_id, operation_id)
+            && roles.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE))
+    {
+        return Ok(());
     }
-    Ok(())
+    Err(Status::permission_denied(
+        "connector operation role is required",
+    ))
 }
 
 fn valid_connector_scope_value(value: &str, max_bytes: usize) -> bool {

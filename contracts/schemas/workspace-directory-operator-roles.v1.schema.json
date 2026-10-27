@@ -19,7 +19,9 @@
           "workspace.product.command.exchange.create_route_draft.v1",
           "workspace.product.command.reactor.create_model_import.v1",
           "workspace.product.command.yield.start_training_run.v1",
-          "navigator.connector.operator.v1"
+          "navigator.automation.viewer.v1",
+          "navigator.connector.operator.v1",
+          "navigator.office.task_writer.v1"
         ]
       }
     }

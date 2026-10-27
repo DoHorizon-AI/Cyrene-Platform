@@ -16,8 +16,8 @@ use cy_proto::cyrene::workspace::authority::v2::AuthorizeConnectorOperationReque
 use cy_proto::workspace_v1::UserIdentityRef;
 use cy_workspace_control_plane::authority::{
     issue_connector_operation_grant, verify_connector_operation_grant, AuthorityCredentialSigner,
-    AuthorityManagedWorkload, ConnectorOperationGrantExpectation,
-    NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
+    AuthorityManagedWorkload, ConnectorOperationGrantExpectation, NAVIGATOR_AUTOMATION_VIEWER_ROLE,
+    NAVIGATOR_CONNECTOR_OPERATOR_ROLE, NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
 };
 use cy_workspace_postgres_storage::{DirectoryOperatorProvisioner, PostgresWorkspaceDirectory};
 use ed25519_dalek::SigningKey;
@@ -79,6 +79,31 @@ async fn maintainer_role_grant_and_revoke_are_immediately_visible_to_directory_r
 
     let add_status = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
         .args([
+            "grant-membership",
+            "--issuer",
+            &identity.issuer,
+            "--subject",
+            &identity.subject,
+            "--organization",
+            &organization_id,
+            "--workspace",
+            &workspace_id,
+            "--role",
+            NAVIGATOR_AUTOMATION_VIEWER_ROLE,
+            "--reason",
+            "automation viewer integration grant",
+        ])
+        .env(OPERATOR_DATABASE_URL_ENV, &operator_url)
+        .env(OPERATOR_ID_ENV, "directory-connector-integration-test")
+        .status()
+        .expect("generic membership grant CLI starts");
+    assert!(
+        add_status.success(),
+        "generic viewer membership grant succeeds"
+    );
+
+    let operator_grant_status = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+        .args([
             "maintainer",
             "add",
             "--issuer",
@@ -96,13 +121,77 @@ async fn maintainer_role_grant_and_revoke_are_immediately_visible_to_directory_r
         .env(OPERATOR_ID_ENV, "directory-connector-integration-test")
         .status()
         .expect("maintainer add CLI starts");
-    assert!(add_status.success(), "maintainer add CLI succeeds");
+    assert!(
+        operator_grant_status.success(),
+        "maintainer add CLI succeeds"
+    );
+
     let after_grant = directory
         .roles_for_member(&identity, &organization_id, &workspace_id)
         .await
         .expect("Directory query succeeds")
         .expect("new membership is visible");
     assert!(after_grant.contains(NAVIGATOR_CONNECTOR_OPERATOR_ROLE));
+    assert!(after_grant.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE));
+
+    let readback = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+        .args([
+            "membership",
+            "get",
+            "--issuer",
+            &identity.issuer,
+            "--subject",
+            &identity.subject,
+            "--organization",
+            &organization_id,
+            "--workspace",
+            &workspace_id,
+        ])
+        .env("CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL", &reader_url)
+        .output()
+        .expect("read-only Directory membership CLI starts");
+    assert!(readback.status.success(), "membership readback succeeds");
+    let readback: serde_json::Value =
+        serde_json::from_slice(&readback.stdout).expect("membership readback is one JSON object");
+    assert_eq!(readback["isMember"], true);
+    assert_eq!(readback["issuer"], identity.issuer);
+    assert_eq!(readback["subject"], identity.subject);
+    assert_eq!(readback["organization"], organization_id);
+    assert_eq!(readback["workspace"], workspace_id);
+    assert!(readback["roles"]
+        .as_array()
+        .expect("roles is an explicit array")
+        .iter()
+        .any(|role| role == NAVIGATOR_AUTOMATION_VIEWER_ROLE));
+
+    let writer_grant_status = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+        .args([
+            "grant-role",
+            "--issuer",
+            &identity.issuer,
+            "--subject",
+            &identity.subject,
+            "--organization",
+            &organization_id,
+            "--workspace",
+            &workspace_id,
+            "--role",
+            NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
+            "--reason",
+            "Office task writer integration grant",
+        ])
+        .env(OPERATOR_DATABASE_URL_ENV, &operator_url)
+        .env(OPERATOR_ID_ENV, "directory-connector-integration-test")
+        .status()
+        .expect("generic Office task writer role grant CLI starts");
+    assert!(writer_grant_status.success());
+    let after_writer_grant = directory
+        .roles_for_member(&identity, &organization_id, &workspace_id)
+        .await
+        .expect("Directory query succeeds after writer role grant")
+        .expect("membership remains visible after writer role grant");
+    assert!(after_writer_grant.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE));
+
     let grant = issue_connector_operation_grant(
         &directory,
         &signer,
@@ -215,12 +304,85 @@ async fn maintainer_role_grant_and_revoke_are_immediately_visible_to_directory_r
         .status()
         .expect("maintainer revoke CLI starts");
     assert!(revoke_status.success(), "maintainer revoke CLI succeeds");
+
+    let writer_revoke_status = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+        .args([
+            "revoke-role",
+            "--issuer",
+            &identity.issuer,
+            "--subject",
+            &identity.subject,
+            "--organization",
+            &organization_id,
+            "--workspace",
+            &workspace_id,
+            "--role",
+            NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
+            "--reason",
+            "Office task writer integration revoke",
+        ])
+        .env(OPERATOR_DATABASE_URL_ENV, &operator_url)
+        .env(OPERATOR_ID_ENV, "directory-connector-integration-test")
+        .status()
+        .expect("generic Office task writer role revoke CLI starts");
+    assert!(writer_revoke_status.success());
+
+    let viewer_revoke_status = Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+        .args([
+            "revoke-role",
+            "--issuer",
+            &identity.issuer,
+            "--subject",
+            &identity.subject,
+            "--organization",
+            &organization_id,
+            "--workspace",
+            &workspace_id,
+            "--role",
+            NAVIGATOR_AUTOMATION_VIEWER_ROLE,
+            "--reason",
+            "automation viewer integration revoke",
+        ])
+        .env(OPERATOR_DATABASE_URL_ENV, &operator_url)
+        .env(OPERATOR_ID_ENV, "directory-connector-integration-test")
+        .status()
+        .expect("generic role revoke CLI starts");
+    assert!(
+        viewer_revoke_status.success(),
+        "generic viewer role revoke succeeds"
+    );
+
     let after_revoke = directory
         .roles_for_member(&identity, &organization_id, &workspace_id)
         .await
         .expect("Directory query succeeds after revoke")
         .expect("membership remains after role revoke");
     assert!(!after_revoke.contains(NAVIGATOR_CONNECTOR_OPERATOR_ROLE));
+    assert!(!after_revoke.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE));
+    assert!(!after_revoke.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE));
+    let retained_membership_readback =
+        Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+            .args([
+                "membership",
+                "get",
+                "--issuer",
+                &identity.issuer,
+                "--subject",
+                &identity.subject,
+                "--organization",
+                &organization_id,
+                "--workspace",
+                &workspace_id,
+            ])
+            .env("CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL", &reader_url)
+            .output()
+            .expect("membership remains readable after role revokes");
+    assert!(retained_membership_readback.status.success());
+    let retained_membership_readback: serde_json::Value =
+        serde_json::from_slice(&retained_membership_readback.stdout)
+            .expect("membership readback is JSON");
+    assert_eq!(retained_membership_readback["isMember"], true);
+    assert_eq!(retained_membership_readback["roles"], serde_json::json!([]));
     assert_eq!(
         issue_connector_operation_grant(
             &directory,
@@ -256,6 +418,29 @@ async fn maintainer_role_grant_and_revoke_are_immediately_visible_to_directory_r
         .status()
         .expect("membership cleanup CLI starts");
     assert!(cleanup_status.success(), "membership cleanup CLI succeeds");
+    let absent_membership_readback =
+        Command::new(env!("CARGO_BIN_EXE_cy-workspace-directory-admin"))
+            .args([
+                "membership",
+                "get",
+                "--issuer",
+                &identity.issuer,
+                "--subject",
+                &identity.subject,
+                "--organization",
+                &organization_id,
+                "--workspace",
+                &workspace_id,
+            ])
+            .env("CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL", &reader_url)
+            .output()
+            .expect("membership absence readback starts");
+    assert!(absent_membership_readback.status.success());
+    let absent_membership_readback: serde_json::Value =
+        serde_json::from_slice(&absent_membership_readback.stdout)
+            .expect("membership readback is JSON");
+    assert_eq!(absent_membership_readback["isMember"], false);
+    assert_eq!(absent_membership_readback["roles"], serde_json::json!([]));
 }
 
 fn set_test_env(name: &str, value: &str) {

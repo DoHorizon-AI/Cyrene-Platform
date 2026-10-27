@@ -13,7 +13,7 @@ goals, and verified installation evidence.
 | `node-agent.md` | Node Agent operation and ownership. | Node Agent 操作与归属 |
 | `kernel-execution-goals.md` | Execution safety goals. | 执行安全目标 |
 | `workspace-product-policy-v2.md` | Workspace Product v2 policy release and Directory role activation. | Workspace Product v2 policy 发布与 Directory role 激活 |
-| `workspace-connector-authorization-v1.md` | Directory-backed connector maintainer roles and signed per-operation grants. | Directory 连接器维护者角色与逐操作签名 grant |
+| `workspace-connector-authorization-v1.md` | Directory-backed connector roles, viewer/task-writer limits, and signed per-operation grants. | Directory 连接器角色、viewer/task-writer 边界与逐操作签名 grant |
 | `verified-installation-record.md` | Installation evidence record. | 安装证据记录 |
 
 ## Suggested reading | 推荐顺序
@@ -44,7 +44,7 @@ System 与 Sandbox Adapter 的中文镜像见 [`../zh-CN/operations/`](../zh-CN/
 | `node-agent.md` | Node Agent 操作与归属。 |
 | `kernel-execution-goals.md` | 执行安全目标。 |
 | `workspace-product-policy-v2.md` | Workspace Product v2 policy 发布与 Directory role 激活。 |
-| `workspace-connector-authorization-v1.md` | Directory 连接器维护者角色与逐操作签名 grant。 |
+| `workspace-connector-authorization-v1.md` | Directory 连接器角色、viewer/task-writer 边界与逐操作签名 grant。 |
 | `verified-installation-record.md` | 安装证据记录。 |
 
 ## 推荐顺序
