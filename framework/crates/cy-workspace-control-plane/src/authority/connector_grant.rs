@@ -114,6 +114,12 @@ pub const OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS: [&str; 8] = [
     "microsoft_graph.sharepoint.list.items.delta",
 ];
 
+/// Exact Teams transport operation available to the two automation roles.
+///
+/// This allows a member to receive a reply for their own authorized Work task. It does not
+/// authorize arbitrary Teams messages or expand either role's source-operation catalog.
+pub const AUTOMATION_TRANSPORT_CONNECTOR_OPERATION_IDS: [&str; 1] = ["msteams.message.reply"];
+
 const SIGNATURE_DOMAIN: &[u8] = b"cyrene.workspace.authority.v2/connector-operation-grant\0";
 
 /// Expected exact scope for verifying one connector operation grant.
@@ -190,6 +196,13 @@ pub fn is_automation_viewer_connector_operation(provider_id: &str, operation_id:
 pub fn is_office_task_writer_connector_operation(provider_id: &str, operation_id: &str) -> bool {
     provider_id == "microsoft_graph"
         && OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS.contains(&operation_id)
+        && is_supported_connector_operation(provider_id, operation_id)
+}
+
+/// Return whether an exact provider/operation pair is in the automation transport catalog.
+pub fn is_automation_transport_connector_operation(provider_id: &str, operation_id: &str) -> bool {
+    provider_id == "msteams"
+        && AUTOMATION_TRANSPORT_CONNECTOR_OPERATION_IDS.contains(&operation_id)
         && is_supported_connector_operation(provider_id, operation_id)
 }
 
@@ -828,6 +841,7 @@ mod tests {
             read_only_operations: Vec<Operation>,
             task_writer_role: String,
             task_writer_operations: Vec<Operation>,
+            automation_transport_operations: Vec<Operation>,
         }
         #[derive(serde::Deserialize)]
         struct Grant {
@@ -917,6 +931,28 @@ mod tests {
         for operation in policy.task_writer_operations {
             for provider_id in operation.provider_ids {
                 assert!(is_office_task_writer_connector_operation(
+                    &provider_id,
+                    &operation.operation_id
+                ));
+                assert!(
+                    catalog_pairs.contains(&(operation.operation_id.clone(), provider_id.clone()))
+                );
+            }
+        }
+        let transport_ids = policy
+            .automation_transport_operations
+            .iter()
+            .map(|entry| entry.operation_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            transport_ids,
+            AUTOMATION_TRANSPORT_CONNECTOR_OPERATION_IDS
+                .into_iter()
+                .collect()
+        );
+        for operation in policy.automation_transport_operations {
+            for provider_id in operation.provider_ids {
+                assert!(is_automation_transport_connector_operation(
                     &provider_id,
                     &operation.operation_id
                 ));
@@ -1249,6 +1285,179 @@ mod tests {
                 .expect_err("task writer role must not extend beyond the Graph catalog")
                 .code(),
                 expected_code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_roles_can_only_receive_exact_actor_bound_teams_replies() {
+        let identity = UserIdentityRef {
+            issuer: "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0"
+                .to_owned(),
+            subject: "11111111-1111-4111-8111-111111111111".to_owned(),
+        };
+        let signer = AuthorityCredentialSigner::new(
+            KEY_ID,
+            SigningKey::from_bytes(&[14; 32]),
+            std::time::Duration::from_secs(30),
+        )
+        .expect("Authority signing key is valid");
+        let workload = AuthorityManagedWorkload {
+            workload_id: "exchange-test".into(),
+            audience: "exchange".into(),
+            certificate_fingerprints_sha256: Vec::new(),
+        };
+
+        for role in [
+            NAVIGATOR_AUTOMATION_VIEWER_ROLE,
+            NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
+        ] {
+            let directory = MutableRoleDirectory {
+                identity: identity.clone(),
+                organization_id: "org-1".to_owned(),
+                workspace_id: "workspace-1".to_owned(),
+                roles: Mutex::new(BTreeSet::from([role.to_owned()])),
+            };
+            let request = request_for("msteams", "msteams.message.reply");
+            let grant = issue_connector_operation_grant(
+                &directory,
+                &signer,
+                "org-1",
+                "workspace-1",
+                &identity.issuer,
+                &workload,
+                &request,
+            )
+            .await
+            .expect("both automation roles can receive the existing Teams reply operation");
+
+            let now_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after Unix epoch")
+                .as_millis() as u64;
+            let exact_scope = ConnectorOperationGrantExpectation {
+                audience: "exchange",
+                organization_id: "org-1",
+                workspace_id: &request.workspace_id,
+                principal_issuer: &request.principal_issuer,
+                principal_subject: &request.principal_subject,
+                connection_ref: &request.connection_ref,
+                provider_id: &request.provider_id,
+                profile_ref: &request.profile_ref,
+                operation_id: &request.operation_id,
+                resource_ref: &request.resource_ref,
+                arguments_digest_sha256: &request.arguments_digest_sha256,
+                request_id: &request.request_id,
+            };
+            verify_connector_operation_grant(
+                &grant,
+                &signer.verifying_key(),
+                KEY_ID,
+                exact_scope,
+                now_unix_ms,
+            )
+            .expect("Teams reply grant is bound to the exact original actor and target");
+
+            let changed_arguments = [0x72; 32];
+            for changed_scope in [
+                ConnectorOperationGrantExpectation {
+                    principal_subject: "00000000-0000-4000-8000-000000000002",
+                    ..exact_scope
+                },
+                ConnectorOperationGrantExpectation {
+                    provider_id: "microsoft_graph",
+                    ..exact_scope
+                },
+                ConnectorOperationGrantExpectation {
+                    operation_id: "microsoft_graph.planner.tasks.list",
+                    ..exact_scope
+                },
+                ConnectorOperationGrantExpectation {
+                    resource_ref: "source:another-target",
+                    ..exact_scope
+                },
+                ConnectorOperationGrantExpectation {
+                    arguments_digest_sha256: &changed_arguments,
+                    ..exact_scope
+                },
+            ] {
+                assert_eq!(
+                    verify_connector_operation_grant(
+                        &grant,
+                        &signer.verifying_key(),
+                        KEY_ID,
+                        changed_scope,
+                        now_unix_ms,
+                    ),
+                    Err(ConnectorOperationGrantError::ScopeMismatch)
+                );
+            }
+
+            directory
+                .roles
+                .lock()
+                .expect("roles lock is healthy")
+                .remove(role);
+            assert_eq!(
+                issue_connector_operation_grant(
+                    &directory,
+                    &signer,
+                    "org-1",
+                    "workspace-1",
+                    &identity.issuer,
+                    &workload,
+                    &request,
+                )
+                .await
+                .expect_err("the next lookup must see role revocation")
+                .code(),
+                Code::PermissionDenied
+            );
+        }
+
+        assert!(is_automation_transport_connector_operation(
+            "msteams",
+            "msteams.message.reply"
+        ));
+        assert!(!is_automation_transport_connector_operation(
+            "microsoft_graph",
+            "msteams.message.reply"
+        ));
+        assert!(!is_automation_transport_connector_operation(
+            "msteams",
+            "microsoft_graph.planner.tasks.list"
+        ));
+        assert!(!is_automation_transport_connector_operation(
+            "msteams",
+            "msteams.message.send"
+        ));
+
+        let directory = MutableRoleDirectory {
+            identity: identity.clone(),
+            organization_id: "org-1".to_owned(),
+            workspace_id: "workspace-1".to_owned(),
+            roles: Mutex::new(BTreeSet::from(
+                [NAVIGATOR_AUTOMATION_VIEWER_ROLE.to_owned()],
+            )),
+        };
+        for invalid_request in [
+            request_for("microsoft_graph", "msteams.message.reply"),
+            request_for("msteams", "msteams.message.send"),
+        ] {
+            assert_eq!(
+                issue_connector_operation_grant(
+                    &directory,
+                    &signer,
+                    "org-1",
+                    "workspace-1",
+                    &identity.issuer,
+                    &workload,
+                    &invalid_request,
+                )
+                .await
+                .expect_err("wrong provider or generic send is not a supported action")
+                .code(),
+                Code::InvalidArgument
             );
         }
     }
