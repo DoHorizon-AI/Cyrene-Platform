@@ -6,7 +6,10 @@ for that operation. `navigator.connector.operator.v1` retains its existing
 catalog behavior. `navigator.automation.viewer.v1` can request only the six
 Microsoft Graph read operations listed in the policy; it does not grant Graph
 writes, other providers, vendor CLI, computer access, or credential export.
-Pilot members receive this viewer role by default. The owner may later grant
+Pilot members receive this viewer role by default. Both automation roles can
+also use the existing `msteams.message.reply` transport operation so a member
+can receive a response to their own authorized Work task. This does not permit
+arbitrary Teams messages or add any source operation. The owner may later grant
 `navigator.office.task_writer.v1` explicitly; it is limited to the eight Graph
 operations in policy and does not grant OAuth scopes or other provider access.
 Exchange requests the grant through its authenticated mTLS connection; Navigator
@@ -25,6 +28,15 @@ operation, resource, canonical arguments digest and original request ID. The
 grant expires after 15 seconds and is meant for one call. Exchange validates all
 bindings and does not reuse grants; role removal applies to the next Authority
 lookup.
+
+The automation transport catalog contains only `msteams.message.reply` for
+provider `msteams`. Each reply grant is signed for the original actor, exact
+connection/profile, target and canonical arguments; the viewer's six Graph
+reads and the task writer's eight Graph operations remain separate unchanged
+source catalogs. A grant signature is not proof that the actor owns the target
+conversation. Work must bind the task to the verified Teams actor, and Exchange
+and the Teams callback must enforce that binding before sending. This policy
+does not authorize sending a new message to an arbitrary user or conversation.
 
 The closed action catalog is
 [`../../contracts/policies/workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json).
@@ -169,7 +181,7 @@ membership with no assigned roles returns `isMember: true` and `roles: []`.
 ## Workspace connector authorization v1 | Workspace connector 授权 v1
 
 Workspace Authority 每次签发 grant 前都会重新读取当前 Directory membership，并按操作检查 role。
-`navigator.connector.operator.v1` 保留原有操作目录；新 pilot 成员默认只授予 `navigator.automation.viewer.v1`，仅可请求 policy 中列出的六个 Graph 只读操作。owner 可稍后显式授予 `navigator.office.task_writer.v1`，该角色只允许完整的八个 Graph operation，不开放其他 provider、vendor CLI、computer 或凭据导出。
+`navigator.connector.operator.v1` 保留原有操作目录；新 pilot 成员默认只授予 `navigator.automation.viewer.v1`，仅可请求 policy 中列出的六个 Graph 只读操作。两个 automation role 还可使用既有 `msteams.message.reply` 传输操作，让成员收到自己已授权 Work task 的回复；这不允许任意 Teams 消息，也不会增加 source operation。owner 可稍后显式授予 `navigator.office.task_writer.v1`，该角色只允许完整的八个 Graph operation，不开放其他 provider、vendor CLI、computer 或凭据导出。
 grant 只允许一个具体操作，且只有 15 秒有效。
 Navigator 通过 HMAC-authenticated Exchange 内部 grant facade 请求授权；Exchange 再通过
 mTLS 调用 Authority。Teams 显示名、用户消息字段和请求体中的 role 都不是授权来源。
@@ -182,6 +194,8 @@ Workspace 为键。Authority 从部署配置读取组织，并要求请求使用
 Workspace。签名 grant 绑定连接、provider、profile、封闭目录中的 operation、resource、规范
 arguments digest 和原始 request ID。Exchange 必须逐字段校验且每次调用重新申请，不能缓存或
 复用 grant；role 撤销会影响下一次 Authority 查询。
+
+Automation transport catalog 只包含 provider `msteams` 的 `msteams.message.reply`。每个 reply grant 都绑定原始 actor、精确 connection/profile、target 和规范 arguments；viewer 的六个 Graph read 与 task writer 的八个 Graph operation 仍是彼此独立且不变的 source catalog。grant signature 不代表 actor 拥有该会话；Work 必须把任务绑定到已验证的 Teams actor，Exchange 与 Teams callback 也必须在发送前执行该绑定。此策略不允许向任意用户或会话发送新消息。
 
 封闭 operation catalog 见
 [`workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json)。viewer 的 Graph 只读集合为 `microsoft_graph.planner.plan.get`、`microsoft_graph.planner.tasks.list`、`microsoft_graph.planner.task.get`、`microsoft_graph.sharepoint.site.get`、`microsoft_graph.sharepoint.list.get` 和 `microsoft_graph.sharepoint.list.items.delta`。`navigator.office.task_writer.v1` 的完整集合是这六个读取 operation 加上 `microsoft_graph.planner.task.create` 和 `microsoft_graph.planner.task.update`；viewer 不可执行这两个写操作，operator 与 task writer 可以。`azure_devops.observations.poll` 已进入 canonical operation catalog，但在 provider 绑定并强制校验原始调用者的 source profile 前，viewer 请求仍会拒绝。

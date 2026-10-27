@@ -27,14 +27,14 @@ use crate::deployment_admission::{
 };
 use crate::{
     authority::{
-        is_automation_viewer_connector_operation, is_office_task_writer_connector_operation,
-        is_supported_connector_operation, now_unix_ms, AuthorityDelegation,
-        AuthorityDelegationError, AuthorityDelegationStore, AuthorityOutboxError,
-        AuthorityOutboxStore, DelegatedOperationScope, EnqueueOutcome, ExecutionDevicePeer,
-        InvocationWaitScope, NewAuthorityInvocation, PersistedInvocationResult,
-        CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION, CONNECTOR_OPERATION_GRANT_TTL_MS,
-        NAVIGATOR_AUTOMATION_VIEWER_ROLE, NAVIGATOR_CONNECTOR_OPERATOR_ROLE,
-        NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
+        is_automation_transport_connector_operation, is_automation_viewer_connector_operation,
+        is_office_task_writer_connector_operation, is_supported_connector_operation, now_unix_ms,
+        AuthorityDelegation, AuthorityDelegationError, AuthorityDelegationStore,
+        AuthorityOutboxError, AuthorityOutboxStore, DelegatedOperationScope, EnqueueOutcome,
+        ExecutionDevicePeer, InvocationWaitScope, NewAuthorityInvocation,
+        PersistedInvocationResult, CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION,
+        CONNECTOR_OPERATION_GRANT_TTL_MS, NAVIGATOR_AUTOMATION_VIEWER_ROLE,
+        NAVIGATOR_CONNECTOR_OPERATOR_ROLE, NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
     },
     device_registry::{
         CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError,
@@ -2491,6 +2491,9 @@ pub(super) async fn require_directory_connector_operation_role(
             && roles.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE))
         || (is_office_task_writer_connector_operation(provider_id, operation_id)
             && roles.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE))
+        || (is_automation_transport_connector_operation(provider_id, operation_id)
+            && (roles.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE)
+                || roles.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE)))
     {
         return Ok(());
     }
