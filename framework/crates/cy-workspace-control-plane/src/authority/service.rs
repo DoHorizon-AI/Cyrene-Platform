@@ -4198,6 +4198,7 @@ mod connector_operation_request_tests {
 
     use crate::authority::{
         OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS,
+        OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS,
         OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS,
     };
 
@@ -4320,10 +4321,11 @@ mod connector_operation_request_tests {
     }
 
     #[test]
-    fn connector_request_accepts_the_non_mail_office_catalog_and_rejects_mail() {
+    fn connector_request_accepts_office_mail_catalog_and_rejects_unlisted_mail_actions() {
         for operation_id in OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS
             .into_iter()
             .chain(OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+            .chain(OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
         {
             let mut office_request = request();
             office_request.connection_ref = "graph-connection".to_owned();
@@ -4339,15 +4341,16 @@ mod connector_operation_request_tests {
         }
 
         for operation_id in [
-            "microsoft_graph.mail.messages.list",
-            "microsoft_graph.mail.message.send",
+            "microsoft_graph.mail.message.body.get",
+            "microsoft_graph.mail.message.permanent_delete",
+            "microsoft_graph.mail.credentials.export",
         ] {
             let mut mail_request = request();
             mail_request.provider_id = "microsoft_graph".to_owned();
             mail_request.operation_id = operation_id.to_owned();
             assert_eq!(
                 validate_connector_operation_request(&mail_request, "workspace-1", ISSUER)
-                    .expect_err("deferred Graph Mail operations must remain outside the catalog")
+                    .expect_err("unlisted Graph Mail actions must remain outside the catalog")
                     .code(),
                 Code::InvalidArgument,
                 "Graph Mail operation {operation_id} must remain unsupported"

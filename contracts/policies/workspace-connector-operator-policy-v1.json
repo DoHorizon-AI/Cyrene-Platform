@@ -102,7 +102,15 @@
     { "operationId": "microsoft_graph.todo.task.get", "providerIds": ["microsoft_graph"] },
     { "operationId": "microsoft_graph.todo.task.create", "providerIds": ["microsoft_graph"] },
     { "operationId": "microsoft_graph.todo.task.update", "providerIds": ["microsoft_graph"] },
-    { "operationId": "microsoft_graph.todo.task.delete", "providerIds": ["microsoft_graph"] }
+    { "operationId": "microsoft_graph.todo.task.delete", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.folders.list", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.messages.list", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.message.get", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.drafts.list", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.draft.create", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.draft.update", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.draft.delete", "providerIds": ["microsoft_graph"] },
+    { "operationId": "microsoft_graph.mail.message.send", "providerIds": ["microsoft_graph"] }
   ],
   "readOnlyOperations": [
     { "operationId": "microsoft_graph.planner.plan.get", "providerIds": ["microsoft_graph"] },
