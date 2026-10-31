@@ -29,7 +29,7 @@ pub const CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION: &str =
 pub const CONNECTOR_OPERATION_GRANT_TTL_MS: u64 = 15_000;
 
 /// Closed operation identifiers accepted by the connector authorization boundary.
-pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 73] = [
+pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 81] = [
     "azure_devops.observations.poll",
     "cloud.operation.cancel",
     "cloud.operation.logs.read",
@@ -86,6 +86,14 @@ pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 73] = [
     "microsoft_graph.calendar.event.update",
     "microsoft_graph.calendar.events.list",
     "microsoft_graph.calendar.freebusy.get",
+    "microsoft_graph.mail.draft.create",
+    "microsoft_graph.mail.draft.delete",
+    "microsoft_graph.mail.draft.update",
+    "microsoft_graph.mail.drafts.list",
+    "microsoft_graph.mail.folders.list",
+    "microsoft_graph.mail.message.get",
+    "microsoft_graph.mail.message.send",
+    "microsoft_graph.mail.messages.list",
     "microsoft_graph.planner.plan.get",
     "microsoft_graph.planner.plans.list",
     "microsoft_graph.planner.task.create",
@@ -148,6 +156,21 @@ pub const OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS: [&str; 7] = [
     "microsoft_graph.calendar.event.create",
     "microsoft_graph.calendar.event.update",
     "microsoft_graph.calendar.event.delete",
+];
+
+/// Mail operations require the connector operator role and a separately opted-in profile.
+///
+/// This catalog grants no Microsoft permissions and does not enable mail on existing profiles.
+/// 邮箱操作不会自动向普通任务成员开放，也不会替已有连接申请邮件权限。
+pub const OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS: [&str; 8] = [
+    "microsoft_graph.mail.folders.list",
+    "microsoft_graph.mail.messages.list",
+    "microsoft_graph.mail.message.get",
+    "microsoft_graph.mail.drafts.list",
+    "microsoft_graph.mail.draft.create",
+    "microsoft_graph.mail.draft.update",
+    "microsoft_graph.mail.draft.delete",
+    "microsoft_graph.mail.message.send",
 ];
 
 /// Exact Teams transport operation available to the two automation roles.
@@ -1004,6 +1027,7 @@ mod tests {
         for operation_id in OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS
             .into_iter()
             .chain(OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+            .chain(OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
         {
             assert!(is_supported_connector_operation(
                 "microsoft_graph",
@@ -1014,7 +1038,10 @@ mod tests {
                 operation_id
             ));
         }
-        for operation_id in OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS {
+        for operation_id in OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS
+            .into_iter()
+            .chain(OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+        {
             assert!(!is_automation_viewer_connector_operation(
                 "microsoft_graph",
                 operation_id
@@ -1149,6 +1176,7 @@ mod tests {
         for operation_id in OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS
             .into_iter()
             .chain(OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+            .chain(OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
         {
             if AUTOMATION_VIEWER_CONNECTOR_OPERATION_IDS.contains(&operation_id) {
                 continue;
@@ -1213,16 +1241,6 @@ mod tests {
             (
                 "microsoft_graph",
                 "microsoft_graph.credentials.export",
-                Code::InvalidArgument,
-            ),
-            (
-                "microsoft_graph",
-                "microsoft_graph.mail.messages.list",
-                Code::InvalidArgument,
-            ),
-            (
-                "microsoft_graph",
-                "microsoft_graph.mail.message.send",
                 Code::InvalidArgument,
             ),
             (
@@ -1317,7 +1335,10 @@ mod tests {
             .expect("task writer grant verifies against the exact operation scope");
         }
 
-        for operation_id in OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS {
+        for operation_id in OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS
+            .into_iter()
+            .chain(OFFICE_MAIL_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+        {
             let request = request_for("microsoft_graph", operation_id);
             assert_eq!(
                 issue_connector_operation_grant(
@@ -1363,16 +1384,6 @@ mod tests {
             (
                 "microsoft_graph",
                 "microsoft_graph.credentials.export",
-                Code::InvalidArgument,
-            ),
-            (
-                "microsoft_graph",
-                "microsoft_graph.mail.messages.list",
-                Code::InvalidArgument,
-            ),
-            (
-                "microsoft_graph",
-                "microsoft_graph.mail.message.send",
                 Code::InvalidArgument,
             ),
         ] {
