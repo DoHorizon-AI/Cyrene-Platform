@@ -29,7 +29,7 @@ pub const CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION: &str =
 pub const CONNECTOR_OPERATION_GRANT_TTL_MS: u64 = 15_000;
 
 /// Closed operation identifiers accepted by the connector authorization boundary.
-pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 57] = [
+pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 73] = [
     "azure_devops.observations.poll",
     "cloud.operation.cancel",
     "cloud.operation.logs.read",
@@ -79,14 +79,30 @@ pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 57] = [
     "huggingface.spaces.list",
     "huggingface.vendor.cli.execute",
     "msteams.message.reply",
+    "microsoft_graph.calendar.calendars.list",
+    "microsoft_graph.calendar.event.create",
+    "microsoft_graph.calendar.event.delete",
+    "microsoft_graph.calendar.event.get",
+    "microsoft_graph.calendar.event.update",
+    "microsoft_graph.calendar.events.list",
+    "microsoft_graph.calendar.freebusy.get",
     "microsoft_graph.planner.plan.get",
-    "microsoft_graph.planner.tasks.list",
-    "microsoft_graph.planner.task.get",
+    "microsoft_graph.planner.plans.list",
     "microsoft_graph.planner.task.create",
+    "microsoft_graph.planner.task.get",
     "microsoft_graph.planner.task.update",
-    "microsoft_graph.sharepoint.site.get",
+    "microsoft_graph.planner.tasks.list",
+    "microsoft_graph.sharepoint.drive.items.list",
+    "microsoft_graph.sharepoint.drives.list",
     "microsoft_graph.sharepoint.list.get",
     "microsoft_graph.sharepoint.list.items.delta",
+    "microsoft_graph.sharepoint.site.get",
+    "microsoft_graph.todo.lists.list",
+    "microsoft_graph.todo.task.create",
+    "microsoft_graph.todo.task.delete",
+    "microsoft_graph.todo.task.get",
+    "microsoft_graph.todo.task.update",
+    "microsoft_graph.todo.tasks.list",
 ];
 
 /// Exact read operations currently available to the automation viewer role.
@@ -102,9 +118,10 @@ pub const AUTOMATION_VIEWER_CONNECTOR_OPERATION_IDS: [&str; 6] = [
     "microsoft_graph.sharepoint.list.items.delta",
 ];
 
-/// Exact Microsoft Graph operations available to the Office task writer role.
-pub const OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS: [&str; 8] = [
+/// Planner, To Do, and selected SharePoint metadata operations for Office task writers.
+pub const OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS: [&str; 17] = [
     "microsoft_graph.planner.plan.get",
+    "microsoft_graph.planner.plans.list",
     "microsoft_graph.planner.tasks.list",
     "microsoft_graph.planner.task.get",
     "microsoft_graph.planner.task.create",
@@ -112,6 +129,25 @@ pub const OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS: [&str; 8] = [
     "microsoft_graph.sharepoint.site.get",
     "microsoft_graph.sharepoint.list.get",
     "microsoft_graph.sharepoint.list.items.delta",
+    "microsoft_graph.sharepoint.drives.list",
+    "microsoft_graph.sharepoint.drive.items.list",
+    "microsoft_graph.todo.lists.list",
+    "microsoft_graph.todo.tasks.list",
+    "microsoft_graph.todo.task.get",
+    "microsoft_graph.todo.task.create",
+    "microsoft_graph.todo.task.update",
+    "microsoft_graph.todo.task.delete",
+];
+
+/// Calendar operations remain limited to the existing connector operator role.
+pub const OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS: [&str; 7] = [
+    "microsoft_graph.calendar.calendars.list",
+    "microsoft_graph.calendar.events.list",
+    "microsoft_graph.calendar.event.get",
+    "microsoft_graph.calendar.freebusy.get",
+    "microsoft_graph.calendar.event.create",
+    "microsoft_graph.calendar.event.update",
+    "microsoft_graph.calendar.event.delete",
 ];
 
 /// Exact Teams transport operation available to the two automation roles.
@@ -964,23 +1000,27 @@ mod tests {
     }
 
     #[test]
-    fn new_provider_operations_are_closed_and_have_exact_provider_pairs() {
-        for operation_id in [
-            "microsoft_graph.planner.plan.get",
-            "microsoft_graph.planner.tasks.list",
-            "microsoft_graph.planner.task.get",
-            "microsoft_graph.planner.task.create",
-            "microsoft_graph.planner.task.update",
-            "microsoft_graph.sharepoint.site.get",
-            "microsoft_graph.sharepoint.list.get",
-            "microsoft_graph.sharepoint.list.items.delta",
-        ] {
+    fn office_operations_are_closed_and_have_exact_provider_pairs() {
+        for operation_id in OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS
+            .into_iter()
+            .chain(OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+        {
             assert!(is_supported_connector_operation(
                 "microsoft_graph",
                 operation_id
             ));
             assert!(!is_supported_connector_operation(
                 "azure_devops",
+                operation_id
+            ));
+        }
+        for operation_id in OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS {
+            assert!(!is_automation_viewer_connector_operation(
+                "microsoft_graph",
+                operation_id
+            ));
+            assert!(!is_office_task_writer_connector_operation(
+                "microsoft_graph",
                 operation_id
             ));
         }
@@ -1106,6 +1146,32 @@ mod tests {
             }
         }
 
+        for operation_id in OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS
+            .into_iter()
+            .chain(OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+        {
+            if AUTOMATION_VIEWER_CONNECTOR_OPERATION_IDS.contains(&operation_id) {
+                continue;
+            }
+            let request = request_for("microsoft_graph", operation_id);
+            assert_eq!(
+                issue_connector_operation_grant(
+                    &directory,
+                    &signer,
+                    "org-1",
+                    "workspace-1",
+                    &identity.issuer,
+                    &workload,
+                    &request,
+                )
+                .await
+                .expect_err("viewer cannot receive an Office operation grant")
+                .code(),
+                Code::PermissionDenied,
+                "viewer must not receive {operation_id}"
+            );
+        }
+
         for (provider_id, operation_id, expected_code) in [
             (
                 "microsoft_graph",
@@ -1151,6 +1217,16 @@ mod tests {
             ),
             (
                 "microsoft_graph",
+                "microsoft_graph.mail.messages.list",
+                Code::InvalidArgument,
+            ),
+            (
+                "microsoft_graph",
+                "microsoft_graph.mail.message.send",
+                Code::InvalidArgument,
+            ),
+            (
+                "microsoft_graph",
                 "github.vendor.cli.execute",
                 Code::InvalidArgument,
             ),
@@ -1175,7 +1251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn office_task_writer_role_can_grant_only_eight_graph_operations() {
+    async fn office_task_writer_role_can_grant_only_non_mail_office_graph_operations() {
         let identity = UserIdentityRef {
             issuer: "https://login.microsoftonline.com/11111111-1111-4111-8111-111111111111/v2.0"
                 .to_owned(),
@@ -1213,7 +1289,7 @@ mod tests {
                 &request,
             )
             .await
-            .expect("task writer role can grant only the eight Graph operations");
+            .expect("task writer role can grant the exact non-mail Office operation set");
             let now_unix_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system clock is after Unix epoch")
@@ -1239,6 +1315,26 @@ mod tests {
                 now_unix_ms,
             )
             .expect("task writer grant verifies against the exact operation scope");
+        }
+
+        for operation_id in OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS {
+            let request = request_for("microsoft_graph", operation_id);
+            assert_eq!(
+                issue_connector_operation_grant(
+                    &directory,
+                    &signer,
+                    "org-1",
+                    "workspace-1",
+                    &identity.issuer,
+                    &workload,
+                    &request,
+                )
+                .await
+                .expect_err("Calendar grants remain limited to connector operators")
+                .code(),
+                Code::PermissionDenied,
+                "task writer must not receive {operation_id}"
+            );
         }
 
         for (provider_id, operation_id, expected_code) in [
@@ -1267,6 +1363,16 @@ mod tests {
             (
                 "microsoft_graph",
                 "microsoft_graph.credentials.export",
+                Code::InvalidArgument,
+            ),
+            (
+                "microsoft_graph",
+                "microsoft_graph.mail.messages.list",
+                Code::InvalidArgument,
+            ),
+            (
+                "microsoft_graph",
+                "microsoft_graph.mail.message.send",
                 Code::InvalidArgument,
             ),
         ] {
