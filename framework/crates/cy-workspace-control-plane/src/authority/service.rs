@@ -4196,6 +4196,11 @@ mod get_delegation_identity_tests {
 mod connector_operation_request_tests {
     use tonic::Code;
 
+    use crate::authority::{
+        OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS,
+        OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS,
+    };
+
     use super::*;
 
     const ISSUER: &str =
@@ -4312,5 +4317,41 @@ mod connector_operation_request_tests {
                 .code(),
             Code::InvalidArgument
         );
+    }
+
+    #[test]
+    fn connector_request_accepts_the_non_mail_office_catalog_and_rejects_mail() {
+        for operation_id in OFFICE_TASK_WRITER_CONNECTOR_OPERATION_IDS
+            .into_iter()
+            .chain(OFFICE_CALENDAR_OPERATOR_ONLY_CONNECTOR_OPERATION_IDS)
+        {
+            let mut office_request = request();
+            office_request.connection_ref = "graph-connection".to_owned();
+            office_request.provider_id = "microsoft_graph".to_owned();
+            office_request.profile_ref = "graph-profile".to_owned();
+            office_request.operation_id = operation_id.to_owned();
+            office_request.resource_ref = format!("sha256:{}", "a".repeat(64));
+            assert!(
+                validate_connector_operation_request(&office_request, "workspace-1", ISSUER)
+                    .is_ok(),
+                "supported Office operation {operation_id} must pass the RPC request gate"
+            );
+        }
+
+        for operation_id in [
+            "microsoft_graph.mail.messages.list",
+            "microsoft_graph.mail.message.send",
+        ] {
+            let mut mail_request = request();
+            mail_request.provider_id = "microsoft_graph".to_owned();
+            mail_request.operation_id = operation_id.to_owned();
+            assert_eq!(
+                validate_connector_operation_request(&mail_request, "workspace-1", ISSUER)
+                    .expect_err("deferred Graph Mail operations must remain outside the catalog")
+                    .code(),
+                Code::InvalidArgument,
+                "Graph Mail operation {operation_id} must remain unsupported"
+            );
+        }
     }
 }
