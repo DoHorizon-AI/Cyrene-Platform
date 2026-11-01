@@ -29,8 +29,21 @@ pub const CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION: &str =
 pub const CONNECTOR_OPERATION_GRANT_TTL_MS: u64 = 15_000;
 
 /// Closed operation identifiers accepted by the connector authorization boundary.
-pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 81] = [
+pub const SUPPORTED_CONNECTOR_OPERATION_IDS: [&str; 94] = [
     "azure_devops.observations.poll",
+    "bilibili.auth.qr.begin",
+    "bilibili.auth.qr.status",
+    "bilibili.comment.create",
+    "bilibili.comments.list",
+    "bilibili.dm.list",
+    "bilibili.dm.read",
+    "bilibili.dm.send",
+    "bilibili.dynamic.read",
+    "bilibili.dynamic.publish",
+    "bilibili.dynamics.list",
+    "bilibili.search",
+    "bilibili.user.find",
+    "bilibili.video.read",
     "cloud.operation.cancel",
     "cloud.operation.logs.read",
     "cloud.operation.status.read",
@@ -234,6 +247,7 @@ pub fn is_supported_connector_operation(provider_id: &str, operation_id: &str) -
     }
     match operation_id.split_once('.') {
         Some(("github", _)) => provider_id == "github",
+        Some(("bilibili", _)) => provider_id == "bilibili",
         Some(("huggingface", _)) => provider_id == "huggingface",
         Some(("msteams", _)) => provider_id == "msteams",
         Some(("computer", _)) => provider_id == "computer",
@@ -676,7 +690,8 @@ mod tests {
             SUPPORTED_CONNECTOR_OPERATION_IDS
                 .iter()
                 .filter(|operation_id| {
-                    operation_id.starts_with("microsoft_graph.")
+                    operation_id.starts_with("bilibili.")
+                        || operation_id.starts_with("microsoft_graph.")
                         || **operation_id == "azure_devops.observations.poll"
                 })
                 .map(|operation_id| {
@@ -886,6 +901,17 @@ mod tests {
             "msteams",
             "msteams.message.reply"
         ));
+        for operation_id in SUPPORTED_CONNECTOR_OPERATION_IDS
+            .iter()
+            .filter(|operation_id| operation_id.starts_with("bilibili."))
+        {
+            assert!(is_supported_connector_operation("bilibili", operation_id));
+            assert!(!is_supported_connector_operation("github", operation_id));
+        }
+        assert!(!is_supported_connector_operation(
+            "bilibili",
+            "bilibili.unknown.write"
+        ));
     }
 
     #[test]
@@ -1067,6 +1093,19 @@ mod tests {
             "azure_devops",
             "azure_devops.pipeline_run.delete"
         ));
+        for operation_id in SUPPORTED_CONNECTOR_OPERATION_IDS
+            .into_iter()
+            .filter(|operation_id| operation_id.starts_with("bilibili."))
+        {
+            assert!(!is_automation_viewer_connector_operation(
+                "bilibili",
+                operation_id
+            ));
+            assert!(!is_office_task_writer_connector_operation(
+                "bilibili",
+                operation_id
+            ));
+        }
     }
 
     #[tokio::test]
