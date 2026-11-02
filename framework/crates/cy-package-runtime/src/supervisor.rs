@@ -11,13 +11,17 @@ use std::{
 use cy_manifest::{ExecutionMode, PluginManifest, Runtime};
 use serde::Deserialize;
 
-use crate::{BindingId, InstallationId, PackageRuntimeError, RuntimeGeneration, RuntimeState};
+use crate::{
+    BindingId, InstallationId, PackageRuntimeError, RuntimeGeneration, RuntimeState,
+    ServiceContractSelection,
+};
 
 const READY_LINE_MAX_BYTES: usize = 16 * 1024;
 
 /// Generic process options for one Plugin-owned service runtime.
 #[derive(Debug, Clone)]
 pub struct ServiceActivationOptions {
+    pub selected_contract: Option<ServiceContractSelection>,
     pub working_dir: Option<PathBuf>,
     pub runtime_executable: Option<String>,
     pub environment: HashMap<String, String>,
@@ -28,6 +32,7 @@ pub struct ServiceActivationOptions {
 impl Default for ServiceActivationOptions {
     fn default() -> Self {
         Self {
+            selected_contract: None,
             working_dir: None,
             runtime_executable: None,
             environment: HashMap::new(),
@@ -100,8 +105,9 @@ impl PluginServiceSupervisor for ProcessPluginServiceSupervisor {
         options: ServiceActivationOptions,
         generation: RuntimeGeneration,
     ) -> Result<String, PackageRuntimeError> {
-        self.deactivate(binding_id)?;
-        let (capability, interface_version) = direct_contract(manifest)?;
+        let selected = resolve_service_contract(manifest, options.selected_contract.as_ref())?;
+        let capability = selected.capability_id.as_str();
+        let interface_version = selected.interface_version.as_str();
         let launch = manifest.plugin.launch.as_ref().ok_or_else(|| {
             PackageRuntimeError::new(
                 "PLUGIN_LAUNCH_MISSING",
@@ -112,6 +118,9 @@ impl PluginServiceSupervisor for ProcessPluginServiceSupervisor {
             )
         })?;
         let executable = resolve_executable(launch.executable.as_str(), &options)?;
+
+        // A malformed or unsupported contract must not stop an existing binding.
+        self.deactivate(binding_id)?;
 
         let mut command = Command::new(executable);
         command
@@ -336,7 +345,10 @@ struct ReadyDescriptor {
     interface_version: String,
 }
 
-fn direct_contract(manifest: &PluginManifest) -> Result<(&str, &str), PackageRuntimeError> {
+pub(crate) fn resolve_service_contract(
+    manifest: &PluginManifest,
+    selected: Option<&ServiceContractSelection>,
+) -> Result<ServiceContractSelection, PackageRuntimeError> {
     if manifest.plugin.runtime != Some(Runtime::Service) {
         return Err(PackageRuntimeError::new(
             "PLUGIN_RUNTIME_UNSUPPORTED",
@@ -348,16 +360,36 @@ fn direct_contract(manifest: &PluginManifest) -> Result<(&str, &str), PackageRun
         .iter()
         .filter(|descriptor| descriptor.supports_mode(ExecutionMode::Service))
         .collect::<Vec<_>>();
-    if descriptors.len() != 1 {
+    let matched = if let Some(selection) = selected {
+        // Deserialized identity newtypes also pass through constructor validation.
+        ServiceContractSelection::new(
+            selection.capability_id.as_str(),
+            &selection.interface_version,
+        )?;
+        descriptors
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.id.id == selection.capability_id.as_str()
+                    && descriptor.interface_version.version == selection.interface_version
+            })
+            .collect::<Vec<_>>()
+    } else {
+        descriptors
+    };
+    if matched.len() != 1 {
         return Err(PackageRuntimeError::new(
-            "PLUGIN_SERVICE_AMBIGUOUS",
-            "One binding must resolve to exactly one service capability and interface version",
+            if selected.is_some() {
+                "PLUGIN_SERVICE_SELECTION_MISMATCH"
+            } else {
+                "PLUGIN_SERVICE_AMBIGUOUS"
+            },
+            "One binding must match exactly one installed service capability and interface version",
         ));
     }
-    Ok((
-        descriptors[0].id.id.as_str(),
-        descriptors[0].interface_version.version.as_str(),
-    ))
+    ServiceContractSelection::new(
+        matched[0].id.id.as_str(),
+        matched[0].interface_version.version.as_str(),
+    )
 }
 
 fn parse_readiness(

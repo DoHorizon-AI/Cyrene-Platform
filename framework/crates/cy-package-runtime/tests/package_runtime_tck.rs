@@ -17,8 +17,9 @@ use cy_manifest::PluginManifest;
 use cy_package_runtime::{
     ActivationRequest, ArtifactDigest, BindingId, DependencyPreparationEvidence,
     DependencyPreparer, FilesystemPackageRuntime, InstallationId, InstallationState, PackageId,
-    PackageRuntimeError, PackageSource, PackageVersion, PluginServiceSupervisor,
-    ProcessPluginServiceSupervisor, RuntimeGeneration, RuntimeState, ServiceActivationOptions,
+    PackageRuntimeControlServer, PackageRuntimeError, PackageSource, PackageVersion,
+    PluginServiceSupervisor, ProcessPluginServiceSupervisor, RuntimeGeneration, RuntimeState,
+    ServiceActivationOptions, ServiceContractSelection,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -117,11 +118,30 @@ impl DependencyPreparer for FixtureDependencyPreparer {
 
 fn service_options() -> ServiceActivationOptions {
     ServiceActivationOptions {
-        runtime_executable: Some(if cfg!(windows) {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        }),
+        runtime_executable: Some(
+            std::env::var("CYRENE_PACKAGE_TCK_PYTHON").unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "python".to_string()
+                } else {
+                    "python3".to_string()
+                }
+            }),
+        ),
+        // Windows sockets need the OS provider directory even in an env_clear child.
+        // This is explicit fixture host configuration, never a contract selector.
+        environment: {
+            #[cfg(windows)]
+            {
+                std::collections::HashMap::from([(
+                    "SystemRoot".into(),
+                    std::env::var("SystemRoot").unwrap(),
+                )])
+            }
+            #[cfg(not(windows))]
+            {
+                std::collections::HashMap::new()
+            }
+        },
         startup_timeout: Duration::from_secs(5),
         shutdown_grace_period: Duration::from_secs(1),
         ..ServiceActivationOptions::default()
@@ -219,34 +239,47 @@ fn build_package_with_entry(
     version: &str,
     special_entry: Option<(&str, &[u8], Option<u32>)>,
 ) -> PackageSource {
+    build_package_fixture(root, version, special_entry, None, None)
+}
+
+fn build_package_fixture(
+    root: &Path,
+    version: &str,
+    special_entry: Option<(&str, &[u8], Option<u32>)>,
+    manifest_override: Option<serde_json::Value>,
+    runtime_override: Option<&str>,
+) -> PackageSource {
     fs::create_dir_all(root).unwrap();
-    let manifest = serde_json::to_vec_pretty(&json!({
-        "schemaVersion": 1,
-        "id": PACKAGE_ID,
-        "name": "Generic Package TCK Service",
-        "version": version,
-        "kind": "capability-plugin",
-        "capabilities": [CAPABILITY_ID],
-        "methods": [{
-            "name": "echo",
-            "interfaceVersion": "1",
-            "executionMode": "service"
-        }],
-        "runtime": {
-            "language": "python",
-            "entrypoint": "package_service:PackageService",
-            "protocol": "cyrene.plugin.runtime.v1.DirectPluginRuntime",
-            "launch": {
-                "executable": "prepared-runtime",
-                "args": [
-                    "src/cyrene_plugin_runtime/server.py",
-                    "--entrypoint",
-                    "package_service:PackageService"
-                ]
+    let manifest_value = manifest_override.unwrap_or_else(|| {
+        json!({
+            "schemaVersion": 1,
+            "id": PACKAGE_ID,
+            "name": "Generic Package TCK Service",
+            "version": version,
+            "kind": "capability-plugin",
+            "capabilities": [CAPABILITY_ID],
+            "methods": [{
+                "name": "echo",
+                "interfaceVersion": "1",
+                "executionMode": "service"
+            }],
+            "runtime": {
+                "language": "python",
+                "entrypoint": "package_service:PackageService",
+                "protocol": "cyrene.plugin.runtime.v1.DirectPluginRuntime",
+                "launch": {
+                    "executable": "prepared-runtime",
+                    "args": [
+                        "src/cyrene_plugin_runtime/server.py",
+                        "--entrypoint",
+                        "package_service:PackageService"
+                    ]
+                }
             }
-        }
-    }))
-    .unwrap();
+        })
+    });
+    let primary_capability = manifest_value["capabilities"][0].as_str().unwrap();
+    let manifest = serde_json::to_vec_pretty(&manifest_value).unwrap();
     let mut entries = BTreeMap::from([
         (
             "configuration.schema.json".to_string(),
@@ -269,7 +302,10 @@ fn build_package_with_entry(
         ),
         (
             "src/cyrene_plugin_runtime/server.py".to_string(),
-            DIRECT_RUNTIME.as_bytes().to_vec(),
+            runtime_override
+                .unwrap_or(DIRECT_RUNTIME)
+                .as_bytes()
+                .to_vec(),
         ),
     ]);
     if let Some((name, content, _)) = special_entry {
@@ -306,7 +342,7 @@ fn build_package_with_entry(
         "record_type": "package_descriptor",
         "spec_version": "0.1",
         "package": {"id": PACKAGE_ID, "version": version},
-        "capability": {"id": CAPABILITY_ID, "interface_version": "1"},
+        "capability": {"id": primary_capability, "interface_version": "1"},
         "implementation": {
             "artifact": {
                 "status": "PUBLISHED",
@@ -863,4 +899,667 @@ impl DigestHex for ArtifactDigest {
     fn hex(&self) -> &str {
         self.as_str().strip_prefix("sha256:").unwrap()
     }
+}
+
+fn graph_manifest(version: &str, contracts: &[(&str, &str)]) -> serde_json::Value {
+    json!({"schemaVersion":1,"id":PACKAGE_ID,"name":"Local Graph contract fixture",
+        "version":version,"kind":"capability-plugin",
+        "capabilities":contracts.iter().map(|(id,_)|*id).collect::<Vec<_>>(),
+        "methods":contracts.iter().enumerate().map(|(i,(id,version))|json!({
+            "capability":id,"name":format!("query_{i}"),"interfaceVersion":version,
+            "executionMode":"service"})).collect::<Vec<_>>(),
+        "runtime":{"language":"python","entrypoint":"package_service:PackageService",
+            "protocol":"cyrene.plugin.runtime.v1.DirectPluginRuntime",
+            "launch":{"executable":"prepared-runtime","args":["src/cyrene_plugin_runtime/server.py",
+                "--entrypoint","package_service:PackageService"]}}})
+}
+
+fn selected(capability: &str, version: &str) -> ServiceContractSelection {
+    ServiceContractSelection::new(capability, version).unwrap()
+}
+
+fn request(
+    binding: &BindingId,
+    installation: &cy_package_runtime::InstallationId,
+    trace: &Path,
+) -> ActivationRequest {
+    ActivationRequest {
+        binding_id: binding.clone(),
+        installation_id: installation.clone(),
+        environment: BTreeMap::from([
+            (
+                "TCK_TRACE_FILE".into(),
+                trace.to_string_lossy().into_owned(),
+            ),
+            ("SYNTHETIC_SECRET".into(), "must-not-persist".into()),
+            // Neither environment nor model selectors can select a service contract.
+            ("CYRENE_CAPABILITY".into(), "untrusted.environment".into()),
+            ("CYRENE_MODEL".into(), "untrusted-model".into()),
+        ]),
+    }
+}
+
+fn traced_runtime() -> String {
+    DIRECT_RUNTIME.replace(
+        "    host, _separator, port = options.listen.rpartition(\":\")",
+        r#"    import os
+    trace = os.environ.get("TCK_TRACE_FILE")
+    if trace:
+        with open(trace, "a", encoding="utf-8") as output:
+            output.write(json.dumps({"pid":os.getpid(),"capability":options.capability,
+                "interface_version":options.interface_version,
+                "binding_id":os.environ.get("CYRENE_CAPABILITY_BINDING_ID")}) + "\n")
+    host, _separator, port = options.listen.rpartition(":")"#,
+    )
+}
+
+fn trace_rows(path: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn selected_graph_contracts_pin_independent_processes_across_lifecycle() {
+    let temp = TempDir::new().unwrap();
+    let trace = temp.path().join("trace.jsonl");
+    let root = temp.path().join("owner");
+    let script = traced_runtime();
+    assert!(script.contains("TCK_TRACE_FILE"));
+    let contracts = [("knowledge.graph.v1", "1"), ("knowledge.graph.v2", "2")];
+    let source = build_package_fixture(
+        &temp.path().join("package"),
+        "2.0.0",
+        None,
+        Some(graph_manifest("2.0.0", &contracts)),
+        Some(&script),
+    );
+    let upgraded = build_package_fixture(
+        &temp.path().join("upgrade"),
+        "2.1.0",
+        None,
+        Some(graph_manifest("2.1.0", &[contracts[1], contracts[0]])),
+        Some(&script),
+    );
+    let incompatible = build_package_fixture(
+        &temp.path().join("incompatible"),
+        "3.0.0",
+        None,
+        Some(graph_manifest("3.0.0", &contracts[1..])),
+        Some(&script),
+    );
+    let runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let installed = runtime.install(&source).unwrap();
+    let target = runtime.install(&upgraded).unwrap();
+    let wrong = runtime.install(&incompatible).unwrap();
+    let a = BindingId::new("graph-v1").unwrap();
+    let b = BindingId::new("graph-v2").unwrap();
+    assert_eq!(
+        runtime
+            .activate(request(&a, &installed.installation_id, &trace))
+            .unwrap_err()
+            .code,
+        "PLUGIN_SERVICE_AMBIGUOUS"
+    );
+    assert!(trace_rows(&trace).is_empty());
+    for pair in [("knowledge.graph.v9", "1"), ("knowledge.graph.v1", "2")] {
+        assert_eq!(
+            runtime
+                .activate_selected(
+                    request(&a, &installed.installation_id, &trace),
+                    selected(pair.0, pair.1)
+                )
+                .unwrap_err()
+                .code,
+            "PLUGIN_SERVICE_SELECTION_MISMATCH"
+        );
+    }
+    assert!(trace_rows(&trace).is_empty());
+    let first = runtime
+        .activate_selected(
+            request(&a, &installed.installation_id, &trace),
+            selected(contracts[0].0, contracts[0].1),
+        )
+        .unwrap();
+    let second = runtime
+        .activate_selected(
+            request(&b, &installed.installation_id, &trace),
+            selected(contracts[1].0, contracts[1].1),
+        )
+        .unwrap();
+    assert_ne!(first.connection_ref, second.connection_ref);
+    assert_connection_is_reachable(first.connection_ref.as_ref().unwrap());
+    assert_connection_is_reachable(second.connection_ref.as_ref().unwrap());
+    let rows = trace_rows(&trace);
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0]["pid"], rows[1]["pid"]);
+    assert_eq!(rows[0]["capability"], "knowledge.graph.v1");
+    assert_eq!(rows[1]["interface_version"], "2");
+    assert_eq!(
+        runtime
+            .activate_selected(
+                request(&a, &installed.installation_id, &trace),
+                selected(contracts[1].0, contracts[1].1)
+            )
+            .unwrap_err()
+            .code,
+        "BINDING_SERVICE_CONTRACT_MISMATCH"
+    );
+    assert_eq!(
+        runtime
+            .upgrade(&a, &wrong.installation_id, BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "PLUGIN_SERVICE_SELECTION_MISMATCH"
+    );
+    assert_eq!(trace_rows(&trace).len(), 2);
+    assert_connection_is_reachable(first.connection_ref.as_ref().unwrap());
+    let updated = runtime
+        .upgrade(
+            &a,
+            &target.installation_id,
+            request(&a, &installed.installation_id, &trace).environment,
+        )
+        .unwrap();
+    assert_eq!(updated.selected_contract, first.selected_contract);
+    assert_connection_is_reachable(second.connection_ref.as_ref().unwrap());
+    let rolled = runtime
+        .rollback(
+            &a,
+            request(&a, &installed.installation_id, &trace).environment,
+        )
+        .unwrap();
+    assert_eq!(rolled.installation_id, installed.installation_id);
+    assert_eq!(rolled.selected_contract, first.selected_contract);
+    runtime.deactivate(&a).unwrap();
+    assert_eq!(
+        runtime.runtime_status(&b).unwrap().state,
+        RuntimeState::Running
+    );
+    assert_connection_is_reachable(second.connection_ref.as_ref().unwrap());
+    let before_restart = runtime
+        .upgrade(
+            &b,
+            &target.installation_id,
+            request(&b, &target.installation_id, &trace).environment,
+        )
+        .unwrap();
+    let binding_json = root.join("bindings/graph-v2.json");
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&binding_json).unwrap()).unwrap();
+    assert_eq!(record["record_version"], 2);
+    assert_eq!(record["selected_contract"]["interface_version"], "2");
+    assert!(
+        !fs::read_to_string(&binding_json)
+            .unwrap()
+            .contains("must-not-persist")
+    );
+    drop(runtime);
+    // A legacy record from a multi-service installation cannot derive a new pin.
+    let mut legacy = record.clone();
+    legacy["record_version"] = json!(1);
+    legacy.as_object_mut().unwrap().remove("selected_contract");
+    fs::write(&binding_json, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let reopened = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let spawn_count = trace_rows(&trace).len();
+    assert_eq!(
+        reopened
+            .recover_binding(&b, BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "PLUGIN_SERVICE_AMBIGUOUS"
+    );
+    assert_eq!(trace_rows(&trace).len(), spawn_count);
+    fs::write(&binding_json, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(
+        reopened
+            .recover_binding(&a, BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "BINDING_NOT_ENABLED_FOR_RECOVERY"
+    );
+    let recovered = reopened
+        .recover_binding(
+            &b,
+            request(&b, &installed.installation_id, &trace).environment,
+        )
+        .unwrap();
+    assert_eq!(recovered.selected_contract, second.selected_contract);
+    assert_eq!(
+        recovered.generation.value(),
+        before_restart.generation.value() + 1
+    );
+    assert_eq!(
+        reopened.runtime_status(&a).unwrap().state,
+        RuntimeState::Stopped
+    );
+    assert_connection_is_reachable(recovered.connection_ref.as_ref().unwrap());
+    let rolled = reopened.rollback(&b, BTreeMap::new()).unwrap();
+    assert_eq!(rolled.installation_id, installed.installation_id);
+    assert_eq!(rolled.selected_contract, second.selected_contract);
+    assert_connection_is_reachable(rolled.connection_ref.as_ref().unwrap());
+}
+
+#[test]
+fn legacy_record_single_contract_is_pinned_before_upgrade_or_recovery() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("owner");
+    let trace = temp.path().join("trace");
+    let runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let installed = runtime
+        .install(&build_package(&temp.path().join("single"), "1.0.0"))
+        .unwrap();
+    let binding = BindingId::new("legacy-contract").unwrap();
+    runtime
+        .activate(request(&binding, &installed.installation_id, &trace))
+        .unwrap();
+    drop(runtime);
+    let record_path = root.join("bindings/legacy-contract.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["record_version"] = json!(1);
+    record.as_object_mut().unwrap().remove("selected_contract");
+    fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let recovered = runtime.recover_binding(&binding, BTreeMap::new()).unwrap();
+    assert_eq!(
+        recovered.selected_contract,
+        Some(selected(CAPABILITY_ID, "1"))
+    );
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(migrated["record_version"], 2);
+    let replacement = build_package_fixture(
+        &temp.path().join("only-v2"),
+        "2.0.0",
+        None,
+        Some(graph_manifest("2.0.0", &[(CAPABILITY_ID, "2")])),
+        None,
+    );
+    let replacement = runtime.install(&replacement).unwrap();
+    assert_eq!(
+        runtime
+            .upgrade(&binding, &replacement.installation_id, BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "PLUGIN_SERVICE_SELECTION_MISMATCH"
+    );
+    assert_connection_is_reachable(recovered.connection_ref.as_ref().unwrap());
+    let mut malformed = migrated;
+    malformed
+        .as_object_mut()
+        .unwrap()
+        .remove("selected_contract");
+    fs::write(&record_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+    assert_eq!(
+        runtime
+            .recover_binding(&binding, BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "BINDING_RECORD_INVALID"
+    );
+}
+
+fn control_call(
+    server: &PackageRuntimeControlServer,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    let input = serde_json::to_string(&value).unwrap() + "\n";
+    let mut output = Vec::new();
+    server
+        .run(std::io::Cursor::new(input), &mut output)
+        .unwrap();
+    serde_json::from_slice(&output).unwrap()
+}
+
+#[test]
+fn stdio_rejects_selected_mutations_and_reports_the_pinned_contract() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("owner");
+    let trace = temp.path().join("trace");
+    let runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let source = build_package_fixture(
+        &temp.path().join("package"),
+        "2.0.0",
+        None,
+        Some(graph_manifest(
+            "2.0.0",
+            &[("knowledge.graph.v1", "1"), ("knowledge.graph.v2", "2")],
+        )),
+        Some(&traced_runtime()),
+    );
+    let installed = runtime.install(&source).unwrap();
+    let binding = BindingId::new("control-graph-v2").unwrap();
+    let active = runtime
+        .activate_selected(
+            request(&binding, &installed.installation_id, &trace),
+            selected("knowledge.graph.v2", "2"),
+        )
+        .unwrap();
+    let server = PackageRuntimeControlServer::new(runtime);
+    for operation in [
+        "activate_selected",
+        "activate",
+        "recover_binding",
+        "deactivate",
+        "install",
+    ] {
+        let command = match operation {
+            "install" => json!({"request_id":"write", "operation":operation,
+                "descriptor_path":source.descriptor_path, "archive_path":source.archive_path}),
+            "activate_selected" => json!({"request_id":"write", "operation":operation,
+                "binding_id":binding, "installation_id":installed.installation_id,
+                "selected_contract":{"capability_id":"knowledge.graph.v2", "interface_version":"2"}}),
+            "activate" => json!({"request_id":"write", "operation":operation,
+                "binding_id":binding, "installation_id":installed.installation_id}),
+            _ => json!({"request_id":"write", "operation":operation, "binding_id":binding}),
+        };
+        assert_eq!(
+            control_call(&server, command)["error"]["code"],
+            "MAINTENANCE_ADMISSION_REQUIRED"
+        );
+    }
+    let invalid = json!({"request_id":"invalid", "operation":"activate_selected",
+        "binding_id":binding, "installation_id":installed.installation_id,
+        "selected_contract":{"capability_id":"knowledge.graph.v2", "interface_version":"2", "namespace":"forged"}});
+    assert_eq!(
+        control_call(&server, invalid)["error"]["code"],
+        "CONTROL_REQUEST_INVALID"
+    );
+    let status = control_call(
+        &server,
+        json!({"request_id":"read", "operation":"runtime_status", "binding_id":binding}),
+    );
+    assert_eq!(
+        status["result"]["selected_contract"],
+        serde_json::to_value(active.selected_contract).unwrap()
+    );
+    assert_connection_is_reachable(status["result"]["connection_ref"].as_str().unwrap());
+    assert_eq!(trace_rows(&trace).len(), 1);
+}
+
+#[test]
+fn actual_supervisor_rejects_ambiguous_selection_before_stopping_and_checks_readiness() {
+    let temp = TempDir::new().unwrap();
+    let trace = temp.path().join("trace");
+    fs::create_dir_all(temp.path().join("src/cyrene_plugin_runtime")).unwrap();
+    let script_path = temp.path().join("src/cyrene_plugin_runtime/server.py");
+    fs::write(&script_path, traced_runtime()).unwrap();
+    let manifest = cy_platform_api::normalize_repository_manifest(graph_manifest(
+        "1.0.0",
+        &[("knowledge.graph", "1"), ("knowledge.graph", "2")],
+    ))
+    .unwrap();
+    let mut supervisor = ProcessPluginServiceSupervisor::new();
+    let binding = BindingId::new("supervisor-graph").unwrap();
+    let installation = InstallationId::new("fixture-installed").unwrap();
+    let generation = RuntimeGeneration::new(1).unwrap();
+    let mut options = service_options();
+    options.working_dir = Some(temp.path().to_path_buf());
+    options.environment.insert(
+        "TCK_TRACE_FILE".into(),
+        trace.to_string_lossy().into_owned(),
+    );
+    assert_eq!(
+        supervisor
+            .activate(
+                &binding,
+                &installation,
+                &manifest,
+                options.clone(),
+                generation
+            )
+            .unwrap_err()
+            .code,
+        "PLUGIN_SERVICE_AMBIGUOUS"
+    );
+    assert!(trace_rows(&trace).is_empty());
+    options.selected_contract = Some(selected("knowledge.graph", "2"));
+    let connection = supervisor
+        .activate(
+            &binding,
+            &installation,
+            &manifest,
+            options.clone(),
+            generation,
+        )
+        .unwrap();
+    assert_eq!(trace_rows(&trace)[0]["interface_version"], "2");
+    let mut duplicate = manifest.clone();
+    duplicate.capability_descriptors.push(
+        manifest
+            .capability_descriptors
+            .iter()
+            .find(|item| item.interface_version.version == "2")
+            .unwrap()
+            .clone(),
+    );
+    for invalid in [duplicate, {
+        let mut unknown = manifest.clone();
+        unknown.capability_descriptors.clear();
+        unknown
+    }] {
+        assert_eq!(
+            supervisor
+                .activate(
+                    &binding,
+                    &installation,
+                    &invalid,
+                    options.clone(),
+                    generation
+                )
+                .unwrap_err()
+                .code,
+            "PLUGIN_SERVICE_SELECTION_MISMATCH"
+        );
+        assert_connection_is_reachable(&connection);
+        assert_eq!(
+            supervisor.connection_ref(&binding).unwrap(),
+            Some(connection.clone())
+        );
+    }
+    // Current upstream identity deserialization rejects traversal immediately.
+    assert!(
+        serde_json::from_value::<ServiceContractSelection>(json!({
+        "capability_id":"../escape", "interface_version":"2"}))
+        .is_err()
+    );
+    // Plain version strings still need validation at the supervisor boundary.
+    let mut invalid_version = selected("knowledge.graph", "2");
+    invalid_version.interface_version = "../escape".into();
+    options.selected_contract = Some(invalid_version);
+    assert_eq!(
+        supervisor
+            .activate(
+                &binding,
+                &installation,
+                &manifest,
+                options.clone(),
+                generation
+            )
+            .unwrap_err()
+            .code,
+        "PLUGIN_SERVICE_SELECTION_INVALID"
+    );
+    assert_eq!(trace_rows(&trace).len(), 1);
+    assert_connection_is_reachable(&connection);
+    options.selected_contract = Some(selected("knowledge.graph", "2"));
+    // An actual process claiming another interface cannot publish a connection.
+    let bad = traced_runtime().replace(
+        "\"interface_version\": options.interface_version",
+        "\"interface_version\": \"1\"",
+    );
+    fs::write(&script_path, bad).unwrap();
+    let other = BindingId::new("mismatch-graph").unwrap();
+    assert_eq!(
+        supervisor
+            .activate(&other, &installation, &manifest, options, generation)
+            .unwrap_err()
+            .code,
+        "PLUGIN_READINESS_MISMATCH"
+    );
+    assert_eq!(supervisor.connection_ref(&other).unwrap(), None);
+    assert_eq!(supervisor.status(&other).unwrap(), RuntimeState::Stopped);
+    assert_connection_is_reachable(&connection);
+}
+
+#[test]
+fn failed_readiness_upgrade_restores_the_same_pinned_contract() {
+    let temp = TempDir::new().unwrap();
+    let runtime = open_runtime(
+        &temp.path().join("owner"),
+        FixtureDependencyPreparer::successful(),
+    );
+    let contracts = [("knowledge.graph.v1", "1"), ("knowledge.graph.v2", "2")];
+    let source = build_package_fixture(
+        &temp.path().join("good"),
+        "1.0.0",
+        None,
+        Some(graph_manifest("1.0.0", &contracts)),
+        None,
+    );
+    let bad_runtime = DIRECT_RUNTIME.replace(
+        "\"interface_version\": options.interface_version",
+        "\"interface_version\": \"wrong-version\"",
+    );
+    let bad = build_package_fixture(
+        &temp.path().join("bad"),
+        "2.0.0",
+        None,
+        Some(graph_manifest("2.0.0", &contracts)),
+        Some(&bad_runtime),
+    );
+    let installed = runtime.install(&source).unwrap();
+    let bad = runtime.install(&bad).unwrap();
+    let binding = BindingId::new("restore-contract").unwrap();
+    let trace = temp.path().join("trace");
+    let original = runtime
+        .activate_selected(
+            request(&binding, &installed.installation_id, &trace),
+            selected("knowledge.graph.v2", "2"),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .upgrade(&binding, &bad.installation_id, BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "PLUGIN_READINESS_MISMATCH"
+    );
+    let restored = runtime.runtime_status(&binding).unwrap();
+    assert_eq!(restored.installation_id, original.installation_id);
+    assert_eq!(restored.selected_contract, original.selected_contract);
+    assert_eq!(restored.generation, original.generation);
+    assert_eq!(restored.state, RuntimeState::Running);
+    assert_connection_is_reachable(restored.connection_ref.as_ref().unwrap());
+}
+
+#[cfg(unix)]
+struct ControlProcess {
+    child: std::process::Child,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+
+#[cfg(unix)]
+impl ControlProcess {
+    fn start(root: &Path, preparer: &Path) -> Self {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_cy-package-runtime"))
+            .args([
+                "--stdio",
+                "--root",
+                root.to_str().unwrap(),
+                "--dependency-preparer",
+                "/usr/bin/python3",
+                "--dependency-preparer-arg",
+                preparer.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let output = std::io::BufReader::new(child.stdout.take().unwrap());
+        Self { child, output }
+    }
+    fn call(&mut self, value: serde_json::Value) -> serde_json::Value {
+        use std::io::BufRead;
+        let input = self.child.stdin.as_mut().unwrap();
+        writeln!(input, "{value}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(
+            self.output.read_line(&mut line).unwrap() > 0,
+            "control process closed before response"
+        );
+        serde_json::from_str(&line).unwrap()
+    }
+    fn shutdown(&mut self) {
+        assert_eq!(
+            self.call(json!({"request_id":"shutdown","operation":"shutdown"}))["ok"],
+            true
+        );
+        assert!(self.child.wait().unwrap().success());
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ControlProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn actual_control_binary_stdio_rejects_mutation_and_preserves_the_pin() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("owner");
+    let trace = temp.path().join("trace");
+    let runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+    let source = build_package_fixture(
+        &temp.path().join("package"),
+        "1.0.0",
+        None,
+        Some(graph_manifest(
+            "1.0.0",
+            &[("knowledge.graph.v1", "1"), ("knowledge.graph.v2", "2")],
+        )),
+        Some(&traced_runtime()),
+    );
+    let installed = runtime.install(&source).unwrap();
+    let binding = BindingId::new("stdio-graph-v2").unwrap();
+    let active = runtime
+        .activate_selected(
+            request(&binding, &installed.installation_id, &trace),
+            selected("knowledge.graph.v2", "2"),
+        )
+        .unwrap();
+    drop(runtime);
+    let mut process = ControlProcess::start(&root, Path::new("unused-read-only-preparer.py"));
+    for command in [
+        json!({"request_id":"write", "operation":"activate_selected", "binding_id":binding,
+            "installation_id":installed.installation_id,
+            "selected_contract":{"capability_id":"knowledge.graph.v2", "interface_version":"2"}}),
+        json!({"request_id":"recover", "operation":"recover_binding", "binding_id":binding}),
+    ] {
+        let response = process.call(command);
+        assert_eq!(
+            response["error"]["code"], "MAINTENANCE_ADMISSION_REQUIRED",
+            "{response}"
+        );
+    }
+    let status = process
+        .call(json!({"request_id":"read", "operation":"runtime_status", "binding_id":binding}));
+    assert_eq!(status["ok"], true, "{status}");
+    assert_eq!(
+        status["result"]["selected_contract"],
+        serde_json::to_value(active.selected_contract).unwrap()
+    );
+    assert_eq!(status["result"]["state"], "FAILED");
+    assert!(status["result"]["connection_ref"].is_null());
+    assert_eq!(trace_rows(&trace).len(), 1);
+    process.shutdown();
 }

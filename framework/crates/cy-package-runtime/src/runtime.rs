@@ -30,15 +30,16 @@ use crate::{
     DependencyPreparationEvidence, InstallationId, InstallationRecord, InstallationState,
     OfflineInstallCandidateIdentity, PackageId, PackageInspection, PackageRuntimeError,
     PackageSource, PackageVersion, PluginServiceSupervisor, RuntimeGeneration, RuntimeState,
-    RuntimeStatus, ServiceActivationOptions, VerifiedPackage,
+    RuntimeStatus, ServiceActivationOptions, ServiceContractSelection, VerifiedPackage,
     dependency::DependencyPreparer,
     descriptor::{
         digest_entries, digest_file, inspect_source, unix_ms, validate_archive_paths, verify_source,
     },
+    supervisor::resolve_service_contract,
 };
 
 const INSTALLATION_RECORD_VERSION: u32 = 1;
-const ACTIVATION_RECORD_VERSION: u32 = 1;
+const ACTIVATION_RECORD_VERSION: u32 = 2;
 const PROCESS_LOCK_FILE: &str = ".package-runtime.lock";
 const PRIVATE_DATA_DIRECTORY: &str = "binding-private";
 const PRIVATE_DATA_ENVIRONMENT: &str = "CYRENE_PLUGIN_STORAGE_PATH";
@@ -223,6 +224,10 @@ struct ActivationRecord {
     previous_installation_id: Option<InstallationId>,
     generation: RuntimeGeneration,
     desired_active: bool,
+    #[serde(default)]
+    selected_contract: Option<ServiceContractSelection>,
+    #[serde(default)]
+    requires_selected_policy: bool,
     last_failure_code: Option<String>,
     last_failure_message: Option<String>,
 }
@@ -510,6 +515,19 @@ impl FilesystemPackageRuntime {
         })
     }
 
+    /// Reads immutable selection authority for the authenticated transport.
+    pub(crate) fn binding_contract_scope(
+        &self,
+        binding_id: &BindingId,
+    ) -> Result<(ServiceContractSelection, bool), PackageRuntimeError> {
+        let _guard = self.lock_lifecycle()?;
+        let record = self.read_activation(binding_id)?;
+        Ok((
+            self.record_contract(&record)?,
+            record.requires_selected_policy,
+        ))
+    }
+
     pub fn list_installations(&self) -> Result<Vec<InstallationRecord>, PackageRuntimeError> {
         let mut records = Vec::new();
         for entry in read_directory(&self.root.join("installations"))? {
@@ -527,12 +545,52 @@ impl FilesystemPackageRuntime {
         Ok(records)
     }
 
+    /// Legacy callers must still resolve exactly one installed service descriptor.
     pub fn activate(
         &self,
         request: ActivationRequest,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
         let _guard = self.lock_lifecycle()?;
+        self.activate_locked(request, None)
+    }
+
+    /// Host/operator-only explicit contract selection. No environment value is authority.
+    pub fn activate_selected(
+        &self,
+        request: ActivationRequest,
+        selected: ServiceContractSelection,
+    ) -> Result<RuntimeStatus, PackageRuntimeError> {
+        let _guard = self.lock_lifecycle()?;
+        self.activate_locked(request, Some(selected))
+    }
+
+    fn activate_locked(
+        &self,
+        request: ActivationRequest,
+        selected: Option<ServiceContractSelection>,
+    ) -> Result<RuntimeStatus, PackageRuntimeError> {
         let previous = self.read_activation_optional(&request.binding_id)?;
+        let requires_selected_policy = selected.is_some();
+        if previous
+            .as_ref()
+            .is_some_and(|record| record.requires_selected_policy)
+            && !requires_selected_policy
+        {
+            return Err(PackageRuntimeError::new(
+                "PLUGIN_SERVICE_SELECTION_REQUIRED",
+                "An explicitly selected binding cannot use legacy activation",
+            ));
+        }
+        let selected =
+            self.resolve_installed_contract(&request.installation_id, selected.as_ref())?;
+        if let Some(previous) = &previous
+            && self.record_contract(previous)? != selected
+        {
+            return Err(PackageRuntimeError::new(
+                "BINDING_SERVICE_CONTRACT_MISMATCH",
+                "An existing binding retains its service contract; stop and remove its reference before selecting another contract",
+            ));
+        }
         if previous.is_some() {
             // `activate` is the only mutation admitted to a catalog source for
             // selecting an exact InstallationId. Preserve upgrade semantics
@@ -542,10 +600,11 @@ impl FilesystemPackageRuntime {
                 &request.binding_id,
                 &request.installation_id,
                 request.environment,
+                requires_selected_policy,
             );
         }
         let generation = RuntimeGeneration::new(1)?;
-        let connection_ref = self.activate_service(&request, generation)?;
+        let connection_ref = self.activate_service(&request, generation, &selected)?;
         let record = ActivationRecord {
             record_version: ACTIVATION_RECORD_VERSION,
             binding_id: request.binding_id.clone(),
@@ -553,6 +612,8 @@ impl FilesystemPackageRuntime {
             previous_installation_id: None,
             generation,
             desired_active: true,
+            selected_contract: Some(selected.clone()),
+            requires_selected_policy,
             last_failure_code: None,
             last_failure_message: None,
         };
@@ -586,16 +647,17 @@ impl FilesystemPackageRuntime {
             failure_code: None,
             failure_message: None,
             connection_ref: Some(connection_ref),
+            selected_contract: Some(selected),
         })
     }
 
-    /// Recover one Product-authorized binding after process restart. Secret
-    /// values are supplied again and are never persisted by this runtime.
+    /// Recovery uses the persisted contract pin; secret values must be supplied again.
     pub fn recover_binding(
         &self,
         binding_id: &BindingId,
         environment: BTreeMap<String, String>,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
+        let _guard = self.lock_lifecycle()?;
         let record = self.read_activation(binding_id)?;
         if !record.desired_active {
             return Err(PackageRuntimeError::new(
@@ -603,11 +665,9 @@ impl FilesystemPackageRuntime {
                 format!("binding {binding_id} is not marked active"),
             ));
         }
-        self.activate(ActivationRequest {
-            binding_id: binding_id.clone(),
-            installation_id: record.installation_id,
-            environment,
-        })
+        let selected = self.record_contract(&record)?;
+        self.resolve_installed_contract(&record.installation_id, Some(&selected))?;
+        self.switch_installation_locked(binding_id, &record.installation_id, environment, false)
     }
 
     pub fn deactivate(&self, binding_id: &BindingId) -> Result<RuntimeStatus, PackageRuntimeError> {
@@ -617,6 +677,16 @@ impl FilesystemPackageRuntime {
         record.desired_active = false;
         record.last_failure_code = None;
         record.last_failure_message = None;
+        // Stopping remains possible even when the installed payload has become corrupt.
+        // A legacy record can report an unresolved contract without granting activation.
+        let selected_contract = record
+            .selected_contract
+            .clone()
+            .or_else(|| self.record_contract(&record).ok());
+        if let Some(selected) = &selected_contract {
+            record.record_version = ACTIVATION_RECORD_VERSION;
+            record.selected_contract = Some(selected.clone());
+        }
         self.write_activation(&record)?;
         tracing::info!(
             event.name = "platform.package.deactivated",
@@ -633,6 +703,7 @@ impl FilesystemPackageRuntime {
             failure_code: None,
             failure_message: None,
             connection_ref: None,
+            selected_contract,
         })
     }
 
@@ -644,6 +715,10 @@ impl FilesystemPackageRuntime {
         // completed mutation, not an activation record midway through a switch.
         let _guard = self.lock_lifecycle()?;
         let record = self.read_activation(binding_id)?;
+        let selected_contract = record
+            .selected_contract
+            .clone()
+            .or_else(|| self.record_contract(&record).ok());
         let mut supervisor = self.service_supervisor()?;
         let state = supervisor.status(binding_id)?;
         let state = if record.desired_active && state == RuntimeState::Stopped {
@@ -659,6 +734,7 @@ impl FilesystemPackageRuntime {
             failure_code: record.last_failure_code,
             failure_message: record.last_failure_message,
             connection_ref: supervisor.connection_ref(binding_id)?,
+            selected_contract,
         })
     }
 
@@ -676,6 +752,7 @@ impl FilesystemPackageRuntime {
         binding_id: &BindingId,
         environment: BTreeMap<String, String>,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
+        let _guard = self.lock_lifecycle()?;
         let current = self.read_activation(binding_id)?;
         let previous = current.previous_installation_id.clone().ok_or_else(|| {
             PackageRuntimeError::new(
@@ -683,7 +760,7 @@ impl FilesystemPackageRuntime {
                 format!("no rollback target for {binding_id}"),
             )
         })?;
-        self.switch_installation(binding_id, &previous, environment)
+        self.switch_installation_locked(binding_id, &previous, environment, false)
     }
 
     pub fn remove_binding_reference(
@@ -1079,10 +1156,31 @@ impl FilesystemPackageRuntime {
         result
     }
 
+    fn resolve_installed_contract(
+        &self,
+        installation_id: &InstallationId,
+        selected: Option<&ServiceContractSelection>,
+    ) -> Result<ServiceContractSelection, PackageRuntimeError> {
+        let record = self.get_installation(installation_id)?;
+        let payload = self.installation_path(installation_id).join("payload");
+        self.verify_installed_integrity(&record, &payload)?;
+        let manifest = read_platform_manifest(&payload)?;
+        validate_installed_manifest_record(&record, &manifest)?;
+        resolve_service_contract(&manifest, selected)
+    }
+
+    fn record_contract(
+        &self,
+        record: &ActivationRecord,
+    ) -> Result<ServiceContractSelection, PackageRuntimeError> {
+        self.resolve_installed_contract(&record.installation_id, record.selected_contract.as_ref())
+    }
+
     fn activate_service(
         &self,
         request: &ActivationRequest,
         generation: RuntimeGeneration,
+        selected: &ServiceContractSelection,
     ) -> Result<String, PackageRuntimeError> {
         let record = self.get_installation(&request.installation_id)?;
         let payload = self
@@ -1092,7 +1190,9 @@ impl FilesystemPackageRuntime {
         let manifest = read_platform_manifest(&payload)?;
         validate_installed_manifest_record(&record, &manifest)?;
         let dependency_root = self.dependency_path(&record.dependencies.lock_digest);
+        resolve_service_contract(&manifest, Some(selected))?;
         let mut options = self.base_service_options.clone();
+        options.selected_contract = Some(selected.clone());
         options.working_dir = Some(payload.clone());
         if let Some(executable) = &record.dependencies.runtime_executable {
             options.runtime_executable = Some(
@@ -1139,7 +1239,7 @@ impl FilesystemPackageRuntime {
         environment: BTreeMap<String, String>,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
         let _guard = self.lock_lifecycle()?;
-        self.switch_installation_locked(binding_id, installation_id, environment)
+        self.switch_installation_locked(binding_id, installation_id, environment, false)
     }
 
     fn switch_installation_locked(
@@ -1147,17 +1247,20 @@ impl FilesystemPackageRuntime {
         binding_id: &BindingId,
         installation_id: &InstallationId,
         environment: BTreeMap<String, String>,
+        requires_selected_policy: bool,
     ) -> Result<RuntimeStatus, PackageRuntimeError> {
         self.get_installation(installation_id)?;
         let current = self.read_activation(binding_id)?;
         let generation = RuntimeGeneration::new(current.generation.value() + 1)?;
+        let selected = self.record_contract(&current)?;
+        self.resolve_installed_contract(installation_id, Some(&selected))?;
         self.service_supervisor()?.deactivate(binding_id)?;
         let request = ActivationRequest {
             binding_id: binding_id.clone(),
             installation_id: installation_id.clone(),
             environment: environment.clone(),
         };
-        let connection_ref = match self.activate_service(&request, generation) {
+        let connection_ref = match self.activate_service(&request, generation, &selected) {
             Ok(connection_ref) => connection_ref,
             Err(error) => {
                 if current.desired_active {
@@ -1166,7 +1269,8 @@ impl FilesystemPackageRuntime {
                         installation_id: current.installation_id.clone(),
                         environment,
                     };
-                    if let Err(restore_error) = self.activate_service(&restore, current.generation)
+                    if let Err(restore_error) =
+                        self.activate_service(&restore, current.generation, &selected)
                     {
                         tracing::error!(
                             event.name = "platform.package.activation_restore_failed",
@@ -1184,7 +1288,13 @@ impl FilesystemPackageRuntime {
             record_version: ACTIVATION_RECORD_VERSION,
             binding_id: binding_id.clone(),
             installation_id: installation_id.clone(),
-            previous_installation_id: Some(current.installation_id.clone()),
+            previous_installation_id: if current.installation_id == *installation_id {
+                current.previous_installation_id.clone()
+            } else {
+                Some(current.installation_id.clone())
+            },
+            selected_contract: Some(selected.clone()),
+            requires_selected_policy: current.requires_selected_policy || requires_selected_policy,
             generation,
             desired_active: true,
             last_failure_code: None,
@@ -1216,7 +1326,9 @@ impl FilesystemPackageRuntime {
                     installation_id: current.installation_id.clone(),
                     environment,
                 };
-                if let Err(restore_error) = self.activate_service(&restore, current.generation) {
+                if let Err(restore_error) =
+                    self.activate_service(&restore, current.generation, &selected)
+                {
                     tracing::error!(
                         event.name = "platform.package.activation_restore_failed",
                         binding_id = %binding_id,
@@ -1237,6 +1349,7 @@ impl FilesystemPackageRuntime {
             failure_code: None,
             failure_message: None,
             connection_ref: Some(connection_ref),
+            selected_contract: Some(selected),
         })
     }
 
@@ -1302,7 +1415,19 @@ impl FilesystemPackageRuntime {
         &self,
         binding_id: &BindingId,
     ) -> Result<ActivationRecord, PackageRuntimeError> {
-        read_json(&self.activation_path(binding_id), "BINDING_NOT_FOUND")
+        let record: ActivationRecord =
+            read_json(&self.activation_path(binding_id), "BINDING_NOT_FOUND")?;
+        if record.binding_id != *binding_id
+            || ![1, ACTIVATION_RECORD_VERSION].contains(&record.record_version)
+            || (record.record_version == ACTIVATION_RECORD_VERSION
+                && record.selected_contract.is_none())
+        {
+            return Err(PackageRuntimeError::new(
+                "BINDING_RECORD_INVALID",
+                "Binding contract record is invalid or unsupported",
+            ));
+        }
+        Ok(record)
     }
 
     fn read_activation_optional(
@@ -1313,7 +1438,7 @@ impl FilesystemPackageRuntime {
         if !path.is_file() {
             return Ok(None);
         }
-        read_json(&path, "BINDING_RECORD_INVALID").map(Some)
+        self.read_activation(binding_id).map(Some)
     }
 
     fn write_activation(&self, record: &ActivationRecord) -> Result<(), PackageRuntimeError> {

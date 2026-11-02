@@ -29,7 +29,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     BindingId, ControlCommand, ControlRequest, ControlResponse, InstallationId, PackageId,
-    PackageRuntimeControlServer, PackageRuntimeError, control::failure_response,
+    PackageRuntimeControlServer, PackageRuntimeError, ServiceContractSelection,
+    control::failure_response,
 };
 
 const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
@@ -225,7 +226,7 @@ impl PackageRuntimeSocketServer {
 
         if request.control.command.is_state_mutation() {
             let response = if request.control.command.is_binding_mutation() {
-                match self.handle_binding_mutation(request, &policy, principal) {
+                match self.handle_binding_mutation(request, peer) {
                     Ok(response) => response,
                     Err(error) => failure_response(request_id, error),
                 }
@@ -273,8 +274,7 @@ impl PackageRuntimeSocketServer {
     fn handle_binding_mutation(
         &self,
         request: AuthenticatedRequest,
-        policy: &PolicySnapshot,
-        principal: AuthenticatedPrincipal<'_>,
+        peer: PeerIdentity,
     ) -> Result<ControlResponse, PackageRuntimeError> {
         let _serialized = self.binding_operation_lock.lock().map_err(|_| {
             PackageRuntimeError::new(
@@ -282,6 +282,25 @@ impl PackageRuntimeSocketServer {
                 "binding operation serialization is unavailable",
             )
         })?;
+        // Another mutation may have committed a pin, or policy may have been
+        // revoked while this request waited for the serialization lock. Check
+        // current credentials, generation and fixed pair before broker I/O.
+        let policy = self.policy.load().map_err(|_| {
+            PackageRuntimeError::new(
+                "CONTROL_SOURCE_POLICY_UNAVAILABLE",
+                "package runtime source policy is unavailable or invalid",
+            )
+        })?;
+        let principal = authenticate(
+            &policy,
+            peer,
+            &request.auth,
+            request.generation,
+            &request.control.command,
+        )
+        .map_err(|(code, message)| PackageRuntimeError::new(code, message))?;
+        authorize_command(&self.control, &principal, &request.control.command)
+            .map_err(|(code, message)| PackageRuntimeError::new(code, message))?;
         let AuthenticatedPrincipal::Source(source) = principal else {
             return Ok(error_response(
                 request.control.request_id,
@@ -410,6 +429,11 @@ impl PackageRuntimeSocketServer {
     ) -> Result<Option<BindingOperationScope>, PackageRuntimeError> {
         let (binding_id, installation_id, operation) = match command {
             ControlCommand::Activate {
+                binding_id,
+                installation_id,
+                ..
+            }
+            | ControlCommand::ActivateSelected {
                 binding_id,
                 installation_id,
                 ..
@@ -599,6 +623,8 @@ struct BindingPolicy {
     package_id: String,
     installation_ids: Vec<String>,
     operations: Vec<String>,
+    #[serde(default)]
+    selected_contract: Option<ServiceContractSelection>,
 }
 
 struct ValidatedSourcePolicy {
@@ -614,6 +640,7 @@ struct ValidatedBindingPolicy {
     package_id: String,
     installation_ids: BTreeSet<String>,
     operations: BTreeSet<String>,
+    selected_contract: Option<ServiceContractSelection>,
 }
 
 struct PolicySnapshot {
@@ -793,6 +820,14 @@ fn validate_control_fields(value: &Value) -> Result<(), &'static str> {
             "installation_id",
             "environment",
         ],
+        "activate_selected" => &[
+            "request_id",
+            "operation",
+            "binding_id",
+            "installation_id",
+            "selected_contract",
+            "environment",
+        ],
         "recover_binding" | "rollback" => &["request_id", "operation", "binding_id", "environment"],
         "deactivate" | "runtime_status" | "remove_binding_reference" => {
             &["request_id", "operation", "binding_id"]
@@ -905,6 +940,11 @@ fn authorize_command(
             installation_id,
             ..
         }
+        | ControlCommand::ActivateSelected {
+            binding_id,
+            installation_id,
+            ..
+        }
         | ControlCommand::Upgrade {
             binding_id,
             installation_id,
@@ -920,6 +960,21 @@ fn authorize_command(
                     "operation is outside the installed source scope",
                 ));
             }
+            if matches!(command, ControlCommand::Activate { .. })
+                && binding.selected_contract.is_some()
+            {
+                return Err((
+                    "CONTROL_SCOPE_DENIED",
+                    "selected bindings require activate_selected",
+                ));
+            }
+            let requested = match command {
+                ControlCommand::ActivateSelected {
+                    selected_contract, ..
+                } => Some(selected_contract),
+                _ => None,
+            };
+            authorize_contract_pin(control, binding, binding_id, requested, true)?;
             Ok(())
         }
         ControlCommand::RuntimeStatus { binding_id } => {
@@ -957,6 +1012,9 @@ fn authorize_command(
                     "operation is outside the installed source scope",
                 ));
             }
+            if !matches!(command, ControlCommand::Deactivate { .. }) {
+                authorize_contract_pin(control, binding, binding_id, None, false)?;
+            }
             Ok(())
         }
         _ => Err((
@@ -964,6 +1022,44 @@ fn authorize_command(
             "operation is outside the installed source scope",
         )),
     }
+}
+
+/// A fixed local pair is part of the installed binding policy, not a choice
+/// carried as an unbound extra field in the unchanged Broker v1 reservation.
+fn authorize_contract_pin(
+    control: &PackageRuntimeControlServer,
+    binding: &ValidatedBindingPolicy,
+    binding_id: &str,
+    requested: Option<&ServiceContractSelection>,
+    allow_unbound: bool,
+) -> Result<(), (&'static str, &'static str)> {
+    let denied = (
+        "CONTROL_SCOPE_DENIED",
+        "service contract is outside the installed binding scope",
+    );
+    let persisted = match control.binding_contract_scope(binding_id) {
+        Ok(pin) => Some(pin),
+        Err(error) if allow_unbound && error.code == "BINDING_NOT_FOUND" => None,
+        Err(_) => return Err(denied),
+    };
+    match &binding.selected_contract {
+        Some(fixed) => {
+            if !binding.operations.contains("activate_selected")
+                || requested.is_some_and(|selected| selected != fixed)
+                || persisted
+                    .as_ref()
+                    .is_some_and(|(selected, _)| selected != fixed)
+            {
+                return Err(denied);
+            }
+        }
+        None => {
+            if requested.is_some() || persisted.is_some_and(|(_, required)| required) {
+                return Err(denied);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn find_binding_scope<'a>(
@@ -996,6 +1092,7 @@ fn operation_name(command: &ControlCommand) -> &'static str {
         ControlCommand::GetInstallation { .. } => "get_installation",
         ControlCommand::ListInstallations => "list_installations",
         ControlCommand::Activate { .. } => "activate",
+        ControlCommand::ActivateSelected { .. } => "activate_selected",
         ControlCommand::RecoverBinding { .. } => "recover_binding",
         ControlCommand::Deactivate { .. } => "deactivate",
         ControlCommand::RuntimeStatus { .. } => "runtime_status",
@@ -1012,6 +1109,7 @@ fn operation_name(command: &ControlCommand) -> &'static str {
 fn validate_request_limits(command: &ControlCommand) -> Result<(), (&'static str, &'static str)> {
     let environment = match command {
         ControlCommand::Activate { environment, .. }
+        | ControlCommand::ActivateSelected { environment, .. }
         | ControlCommand::RecoverBinding { environment, .. }
         | ControlCommand::Upgrade { environment, .. }
         | ControlCommand::Rollback { environment, .. } => environment,
@@ -1134,6 +1232,7 @@ fn parse_policy(bytes: &[u8]) -> Result<PolicySnapshot, PackageRuntimeError> {
                 if !matches!(
                     operation.as_str(),
                     "activate"
+                        | "activate_selected"
                         | "recover_binding"
                         | "deactivate"
                         | "runtime_status"
@@ -1143,16 +1242,27 @@ fn parse_policy(bytes: &[u8]) -> Result<PolicySnapshot, PackageRuntimeError> {
                     return Err(policy_error());
                 }
             }
-            if (operations.contains("activate") || operations.contains("upgrade"))
+            if (operations.contains("activate") || operations.contains("activate_selected"))
                 && installation_ids.is_empty()
             {
                 return Err(policy_error());
+            }
+            if operations.contains("activate_selected") != binding.selected_contract.is_some() {
+                return Err(policy_error());
+            }
+            if let Some(selected) = &binding.selected_contract {
+                ServiceContractSelection::new(
+                    selected.capability_id.as_str(),
+                    &selected.interface_version,
+                )
+                .map_err(|_| policy_error())?;
             }
             bindings.push(ValidatedBindingPolicy {
                 binding_id: binding.binding_id,
                 package_id: binding.package_id,
                 installation_ids,
                 operations,
+                selected_contract: binding.selected_contract,
             });
         }
         sources.push(ValidatedSourcePolicy {
@@ -1490,6 +1600,7 @@ fn clone_policy(policy: &PolicySnapshot) -> PolicySnapshot {
                         package_id: binding.package_id.clone(),
                         installation_ids: binding.installation_ids.clone(),
                         operations: binding.operations.clone(),
+                        selected_contract: binding.selected_contract.clone(),
                     })
                     .collect(),
             })
@@ -1573,6 +1684,85 @@ mod tests {
         PeerIdentity {
             uid: TEST_SOURCE_UID,
             gid: TEST_SOURCE_GID,
+        }
+    }
+
+    #[test]
+    fn selected_binding_requires_an_explicit_operation_and_one_fixed_policy_pair() {
+        let base = json!({
+            "schema_version":1, "generation":7, "sources":[{
+                "source_id":SOURCE_ID,"uid":TEST_SOURCE_UID,"gid":TEST_SOURCE_GID,
+                "source_token_sha256":"0".repeat(64), "bindings":[{
+                    "binding_id":BINDING_ID,"package_id":"com.cyrene.test",
+                    "installation_ids":[INSTALLATION_ID],"operations":["activate_selected"],
+                    "selected_contract":{"capability_id":"knowledge.graph.v2","interface_version":"2"}
+                }]
+            }]
+        });
+        assert!(parse_policy(&serde_json::to_vec(&base).unwrap()).is_ok());
+        for field in ["selected_contract", "operations"] {
+            let mut invalid = base.clone();
+            invalid["sources"][0]["bindings"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(parse_policy(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+        let mut invalid = base.clone();
+        invalid["sources"][0]["bindings"][0]["selected_contract"]["namespace"] = json!("forged");
+        assert!(parse_policy(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        let mut invalid = base;
+        invalid["sources"][0]["bindings"][0]["selected_contract"]["interface_version"] =
+            json!("../bad");
+        assert!(parse_policy(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    }
+
+    #[test]
+    fn selected_policy_cannot_choose_another_pair_or_reuse_legacy_source_authority() {
+        let peer = test_peer();
+        let legacy = test_policy(peer.uid, peer.gid);
+        let fixed = ServiceContractSelection::new("knowledge.graph.v2", "2").unwrap();
+        let legacy_server = server(clone_policy(&legacy));
+        assert!(
+            authorize_contract_pin(
+                &legacy_server.control,
+                &legacy.sources[0].bindings[0],
+                BINDING_ID,
+                Some(&fixed),
+                true
+            )
+            .is_err()
+        );
+        let mut policy = legacy;
+        let binding = &mut policy.sources[0].bindings[0];
+        binding.operations.insert("activate_selected".into());
+        binding.selected_contract = Some(fixed.clone());
+        let selected_server = server(clone_policy(&policy));
+        let binding = &policy.sources[0].bindings[0];
+        assert!(
+            authorize_contract_pin(
+                &selected_server.control,
+                binding,
+                BINDING_ID,
+                Some(&fixed),
+                true
+            )
+            .is_ok()
+        );
+        for other in [
+            ServiceContractSelection::new("knowledge.graph.v1", "1").unwrap(),
+            ServiceContractSelection::new("knowledge.graph.v2", "1").unwrap(),
+        ] {
+            assert!(
+                authorize_contract_pin(
+                    &selected_server.control,
+                    binding,
+                    BINDING_ID,
+                    Some(&other),
+                    true
+                )
+                .is_err()
+            );
         }
     }
 

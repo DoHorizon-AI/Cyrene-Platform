@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "baseline": "a3917fb9e3bcc5c9abf6e2fb6265d08f02dd1e3a",
+  "state": "SOURCE_FROZEN_UNCOMMITTED",
+  "files": [
+    {
+      "path": "docs/package-runtime.md",
+      "sha256": "19ce264ed66b1f90a7dc492e52d464ba46e949046144b2b6f7efc1a3561d0760"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/control.rs",
+      "sha256": "2d903b8e98a72a8331caba0cf2425f93d4a7cbb63e76362a04cf2608f44ecd7b"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/runtime.rs",
+      "sha256": "61bba157229a728870536e28382d67b47ad9e61ea4659b1d925cf37d221444d5"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/supervisor.rs",
+      "sha256": "6160f428d92d792866cb7ee81730e84748407185383c032929bb1f21aca63b04"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/types.rs",
+      "sha256": "e4a071127810b31ec260a83b885d4c9d92be52550015eb7a4dce1a5ea8bcbeb4"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/tests/package_runtime_tck.rs",
+      "sha256": "9fead0a34d012fe4ad3eb3b2889182ec86be886441b347567af2c48b2f45245a"
+    }
+  ]
+}

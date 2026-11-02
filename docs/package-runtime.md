@@ -588,3 +588,118 @@ cy-package-runtime \
 ```
 
 命令要求 effective UID 0，在 mutation 前后验证当前 hold，确认 daemon 已停止，并取得与 daemon 相同的 process lock；文件系统卸载逻辑以 `cyrene` 身份运行，不增加 UDS/stdin mutation 入口。成功时输出不含秘密的 JSON 回执，其中含精确 hold/代次、安装身份和 `already_absent`；仅当同一安装已被删除且本次是安全重试时，该值为 true。失败返回结构化错误并保留 hold。Workspace 完成 package state 和 source policy 对账后再关闭 hold。
+
+
+## Fixed service contract selection (unpublished local candidate)
+
+A verified installation can declare several service descriptors. The trusted Rust
+host API `activate_selected(request, ServiceContractSelection)` selects one exact
+`capability_id` and `interface_version` from its integrity-checked manifest. Legacy
+`ActivationRequest` and `activate` still require exactly one descriptor. Environment,
+model, namespace, provider and account fields never select a contract. Readiness must
+report the exact selected pair, and `runtime_status` returns that pair alongside the
+existing runtime facts.
+
+The authenticated UDS method is an additive, unpublished host implementation format.
+It requires an installed source with the new operation **and one fixed pair per
+binding**. Existing sources do not gain this permission. A policy binding can contain:
+
+```json
+{
+  "binding_id": "graph-v2-binding",
+  "package_id": "org.example.graph",
+  "installation_ids": ["install-verified-example", "install-next-verified-example"],
+  "operations": ["activate_selected", "recover_binding", "deactivate", "runtime_status", "get_installation"],
+  "selected_contract": {
+    "capability_id": "knowledge.graph.v2",
+    "interface_version": "2"
+  }
+}
+```
+
+`selected_contract` is a closed object with exactly those two required fields. It is
+optional/nullable for legacy bindings. The fixed pair and `activate_selected` operation
+must be configured together; a partial configuration invalidates the policy. Capability
+IDs contain 2–128 ASCII bytes, start with a lowercase letter or digit and otherwise use
+`[a-z0-9._-]`. Interface versions contain 1–128 ASCII bytes from `[A-Za-z0-9._+-]`.
+A host policy generation must match the source catalog and maintenance broker generation.
+Two protocols require two binding IDs, each with its own fixed pair. Old implementations
+reject the added policy field/operation rather than silently granting access.
+
+The installed source sends the existing authentication envelope and current generation:
+
+```json
+{
+  "request_id": "graph-v2-activation",
+  "operation": "activate_selected",
+  "catalog_generation": 12,
+  "auth": {
+    "source_id": "configured-source",
+    "source_token": "<host-supplied source token>"
+  },
+  "binding_id": "graph-v2-binding",
+  "installation_id": "install-verified-example",
+  "selected_contract": {
+    "capability_id": "knowledge.graph.v2",
+    "interface_version": "2"
+  },
+  "environment": {}
+}
+```
+
+These are shape examples, not installed identities, credentials or acceptance receipts.
+The daemon checks the request against its installed fixed pair and any existing durable
+pin before contacting the broker. It reloads policy and repeats credentials, generation
+and pin checks after acquiring the binding-operation serialization lock. A changed pair
+on an existing binding, a revoked permission, a legacy `activate` request for a selected
+binding, or an extra selection field is rejected. Source token, kernel peer identity,
+package/installation scope and all existing input limits remain mandatory. Root peers and
+stdio cannot bypass maintenance admission.
+
+Broker v1 is unchanged: its scope still contains only binding, package, installation and
+operation, and the operation is the existing `activate`. No unrecognized pair field is
+added to a broker reservation. The pair is fixed host policy tied to the same binding and
+catalog generation, not a dynamic intent carried outside the reservation. Upgrade and
+rollback through UDS use this existing exact-installation activation path with the same
+fixed pair; the old UDS `upgrade`/`rollback` permissions are not widened. The trusted Rust
+`upgrade` and `rollback` lifecycle APIs retain their existing behavior and pin checks.
+Reserved or completed admissions retain the existing no-replay behavior and receipts;
+this change adds no automatic Complete, release, maintenance recovery or action replay.
+
+Activation record version 2 persists the selected pair and `requires_selected_policy`,
+without environment or secret values. Explicit selection sets that authority marker;
+recovery and installation switches retain it. External recovery must still have the
+current new operation and identical fixed pair, so revoking policy cannot be bypassed
+using an old record. Legacy records default the marker to false and retain the original
+singleton activation behavior. Version 1 records can derive a pair only from their
+original verified singleton manifest; ambiguous legacy and malformed version 2 records
+remain held with an error. Successful activation or recovery writes version 2.
+
+Target manifests are checked before stopping a running worker. Failed readiness or
+activation-record commit retains the upstream restoration behavior and logging.
+Recovering the same installation keeps its rollback target. Private Plugin data,
+cross-process ownership locks, root-only offline bootstrap/uninstall and all existing
+security checks remain in place. Changing a pin requires a trusted owner to deactivate
+and remove its binding reference first.
+
+The candidate targets the existing **Linux / WSL Ubuntu** host. Native Windows is
+**UNSUPPORTED / NOT_RUN** for this upstream daemon, whose control, account, bootstrap and
+locking boundaries are Unix-specific. Native Windows persistence work and its earlier
+proof belong to a separate pre-port candidate and do not validate this target.
+
+Validation uses synthetic package archives, a real separate process calling the trusted
+Rust install API, a real local uv venv adapter without dependency installation, the actual
+production daemon UDS path, kernel `SO_PEERCRED`, and independent socket-listening workers.
+The exact Broker v1 health/admission fixture is **SIMULATED**; business RPC, external models
+and platform accounts are **NOT_RUN**. An isolated mount namespace supplies a private
+`/run` tmpfs for the fixture; host sockets, accounts and services are not modified.
+The actual UDS flow exercises fixed-pair activation, independent workers, exact-installation
+upgrade/rollback, owner process-group termination, and admitted pin recovery after restart.
+Public protocol schemas, SDK pins and consumer execution remain unpublished and unchanged;
+this candidate does not grant browser or MCP model selection authority.
+
+中文：本候选只面向既定 Linux/WSL 宿主。显式选择必须来自已配置的 source，具有新增
+`activate_selected` 权限和每个 binding 唯一固定的 `selected_contract`；请求与固定配置、
+原持久 pin 必须一致。旧 source 不自动扩权，撤权后不能通过旧 record 恢复，固定绑定不能
+借 legacy Activate 绕过。Broker v1 四字段和原 Activate admission 不变，stdio/root 不新增
+mutation 绕过。Windows 原生验证属于另一份前移植候选，不能作为当前公开候选的验收。

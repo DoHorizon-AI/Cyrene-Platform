@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ActivationRequest, BindingId, FilesystemPackageRuntime, InstallationId, PackageId,
-    PackageRuntimeError, PackageSource, PackageVersion,
+    PackageRuntimeError, PackageSource, PackageVersion, ServiceContractSelection,
 };
 
 const CONTROL_PROTOCOL_VERSION: &str = "cy-package-runtime.control.v1";
@@ -57,6 +57,14 @@ pub enum ControlCommand {
         #[serde(default)]
         environment: BTreeMap<String, String>,
     },
+    /// Node-local operator method; no Product/browser/model selector projection.
+    ActivateSelected {
+        binding_id: String,
+        installation_id: String,
+        selected_contract: ServiceContractSelection,
+        #[serde(default)]
+        environment: BTreeMap<String, String>,
+    },
     RecoverBinding {
         binding_id: String,
         #[serde(default)]
@@ -96,6 +104,7 @@ impl ControlCommand {
         matches!(
             self,
             Self::Activate { .. }
+                | Self::ActivateSelected { .. }
                 | Self::RecoverBinding { .. }
                 | Self::Deactivate { .. }
                 | Self::Upgrade { .. }
@@ -251,6 +260,14 @@ impl PackageRuntimeControlServer {
         Ok(record.package_id.to_string())
     }
 
+    pub(crate) fn binding_contract_scope(
+        &self,
+        binding_id: &str,
+    ) -> Result<(ServiceContractSelection, bool), PackageRuntimeError> {
+        self.runtime
+            .binding_contract_scope(&BindingId::new(binding_id)?)
+    }
+
     fn dispatch(&self, command: ControlCommand) -> Result<Value, PackageRuntimeError> {
         match command {
             ControlCommand::Authority => Ok(json!({
@@ -311,6 +328,19 @@ impl PackageRuntimeControlServer {
                 self.runtime
                     .recover_binding(&BindingId::new(binding_id)?, environment)?,
             ),
+            ControlCommand::ActivateSelected {
+                binding_id,
+                installation_id,
+                selected_contract,
+                environment,
+            } => to_value(self.runtime.activate_selected(
+                ActivationRequest {
+                    binding_id: BindingId::new(binding_id)?,
+                    installation_id: InstallationId::new(installation_id)?,
+                    environment,
+                },
+                selected_contract,
+            )?),
             ControlCommand::Deactivate { binding_id } => {
                 to_value(self.runtime.deactivate(&BindingId::new(binding_id)?)?)
             }
@@ -401,6 +431,18 @@ fn remediation(code: &str) -> &'static str {
         }
         "ARCHIVE_CORRUPT" | "ARTIFACT_CORRUPT" | "CACHE_CORRUPT" | "DEPENDENCY_LOCK_CORRUPT" => {
             "discard the source and obtain the official package and descriptor again"
+        }
+        "PLUGIN_SERVICE_AMBIGUOUS"
+        | "PLUGIN_SERVICE_SELECTION_MISMATCH"
+        | "PLUGIN_SERVICE_SELECTION_REQUIRED"
+        | "PLUGIN_SERVICE_SELECTION_INVALID" => {
+            "use activate_selected with one exact service capability_id and interface_version from the verified installed manifest"
+        }
+        "BINDING_SERVICE_CONTRACT_MISMATCH" => {
+            "retain the binding contract, or deactivate and remove its reference before an operator selects a different contract"
+        }
+        "BINDING_RECORD_INVALID" => {
+            "inspect the binding record version and contract pin; do not infer or replay an unknown contract"
         }
         "PLUGIN_RUNTIME_UNAVAILABLE" | "PLUGIN_RUNTIME_EXITED" => {
             "inspect Plugin runtime diagnostics and retry activation"
