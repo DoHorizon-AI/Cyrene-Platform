@@ -1700,6 +1700,27 @@ mod tests {
             }]
         });
         assert!(parse_policy(&serde_json::to_vec(&base).unwrap()).is_ok());
+        for version in [
+            "2026/01".to_string(),
+            "urn:graph:v1".to_string(),
+            "接口/版本一".to_string(),
+            " \t\u{2003}graph:版本/1\u{2003}  ".to_string(),
+            "v".repeat(256),
+            " \u{1c} ".to_string(),
+        ] {
+            let mut compatible = base.clone();
+            compatible["sources"][0]["bindings"][0]["selected_contract"]["interface_version"] =
+                json!(version);
+            let parsed = parse_policy(&serde_json::to_vec(&compatible).unwrap()).unwrap();
+            assert_eq!(
+                parsed.sources[0].bindings[0]
+                    .selected_contract
+                    .as_ref()
+                    .unwrap()
+                    .interface_version,
+                version
+            );
+        }
         for field in ["selected_contract", "operations"] {
             let mut invalid = base.clone();
             invalid["sources"][0]["bindings"][0]
@@ -1713,7 +1734,7 @@ mod tests {
         assert!(parse_policy(&serde_json::to_vec(&invalid).unwrap()).is_err());
         let mut invalid = base;
         invalid["sources"][0]["bindings"][0]["selected_contract"]["interface_version"] =
-            json!("../bad");
+            json!("\u{2003}\t ");
         assert!(parse_policy(&serde_json::to_vec(&invalid).unwrap()).is_err());
     }
 

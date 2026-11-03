@@ -621,7 +621,14 @@ binding**. Existing sources do not gain this permission. A policy binding can co
 optional/nullable for legacy bindings. The fixed pair and `activate_selected` operation
 must be configured together; a partial configuration invalidates the policy. Capability
 IDs contain 2–128 ASCII bytes, start with a lowercase letter or digit and otherwise use
-`[a-z0-9._-]`. Interface versions contain 1–128 ASCII bytes from `[A-Za-z0-9._+-]`.
+`[a-z0-9._-]`. Interface versions use the existing manifest `CapabilityInterfaceVersion`
+constructor: the string must contain a non-whitespace character after `trim`, and the
+original string is retained exactly. Punctuation, Unicode, surrounding whitespace and
+versions longer than 128 bytes remain valid. Existing overall frame and policy size
+limits still apply; this change adds no separate version length or character restriction.
+The existing repository-manifest normalizer still trims method interface versions when
+building descriptors. Selection and pins match that descriptor exactly; the selection
+constructor does not trim or otherwise rewrite the supplied value.
 A host policy generation must match the source catalog and maintenance broker generation.
 Two protocols require two binding IDs, each with its own fixed pair. Old implementations
 reject the added policy field/operation rather than silently granting access.

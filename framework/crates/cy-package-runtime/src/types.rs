@@ -241,18 +241,12 @@ impl ServiceContractSelection {
         interface_version: impl Into<String>,
     ) -> Result<Self, PackageRuntimeError> {
         let capability_id = CapabilityId::new(capability_id)?;
-        let interface_version = interface_version.into();
-        if interface_version.is_empty()
-            || interface_version.len() > 128
-            || !interface_version.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
-            })
-        {
-            return Err(PackageRuntimeError::new(
-                "PLUGIN_SERVICE_SELECTION_INVALID",
-                "invalid service interface version",
-            ));
-        }
+        // Preserve the existing manifest contract, including punctuation,
+        // Unicode and surrounding whitespace. Its constructor only checks
+        // trim-nonempty and retains the exact original string.
+        let interface_version = cy_manifest::CapabilityInterfaceVersion::new(interface_version)
+            .map_err(|error| PackageRuntimeError::new("PLUGIN_SERVICE_SELECTION_INVALID", error))?
+            .version;
         Ok(Self {
             capability_id,
             interface_version,

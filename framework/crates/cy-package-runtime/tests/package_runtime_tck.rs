@@ -1143,6 +1143,75 @@ fn selected_graph_contracts_pin_independent_processes_across_lifecycle() {
 }
 
 #[test]
+fn legacy_singleton_versions_preserve_manifest_semantics_across_record_and_recovery() {
+    let versions = [
+        "2026/01".to_string(),
+        "urn:graph:v1".to_string(),
+        "接口/版本一".to_string(),
+        " \t\u{2003}graph:版本/1\u{2003}  ".to_string(),
+        "v".repeat(256),
+        " \u{1c} ".to_string(),
+    ];
+    for version in versions {
+        let raw_selection = selected(CAPABILITY_ID, &version);
+        assert_eq!(raw_selection.interface_version, version);
+        let raw_roundtrip: ServiceContractSelection =
+            serde_json::from_value(serde_json::to_value(&raw_selection).unwrap()).unwrap();
+        assert_eq!(raw_roundtrip, raw_selection);
+        // Repository method versions have always been trimmed by the existing
+        // manifest normalizer. Selection construction itself must not trim.
+        let descriptor_version = version.trim();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("owner");
+        let trace = temp.path().join("trace");
+        let runtime = open_runtime(&root, FixtureDependencyPreparer::successful());
+        let source = build_package_fixture(
+            &temp.path().join("package"),
+            "1.0.0",
+            None,
+            Some(graph_manifest("1.0.0", &[(CAPABILITY_ID, &version)])),
+            Some(&traced_runtime()),
+        );
+        let installed = runtime.install(&source).unwrap();
+        let binding = BindingId::new("legacy-interface-version").unwrap();
+        let active = runtime
+            .activate(request(&binding, &installed.installation_id, &trace))
+            .unwrap();
+        let expected = selected(CAPABILITY_ID, descriptor_version);
+        assert_eq!(active.selected_contract.as_ref(), Some(&expected));
+        assert_connection_is_reachable(active.connection_ref.as_ref().unwrap());
+        let record_path = root.join("bindings/legacy-interface-version.json");
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        assert_eq!(
+            record["selected_contract"]["interface_version"],
+            descriptor_version
+        );
+        assert_eq!(record["requires_selected_policy"], false);
+        let decoded: ServiceContractSelection =
+            serde_json::from_value(record["selected_contract"].clone()).unwrap();
+        assert_eq!(decoded, expected);
+        drop(runtime);
+        let reopened = open_runtime(&root, FixtureDependencyPreparer::successful());
+        let recovered = reopened
+            .recover_binding(
+                &binding,
+                request(&binding, &installed.installation_id, &trace).environment,
+            )
+            .unwrap();
+        assert_eq!(recovered.selected_contract, Some(expected));
+        assert_connection_is_reachable(recovered.connection_ref.as_ref().unwrap());
+        assert_eq!(
+            trace_rows(&trace)[1]["interface_version"],
+            descriptor_version
+        );
+    }
+    for blank in ["", " \t\r\n", "\u{2003}\u{3000}"] {
+        assert!(ServiceContractSelection::new(CAPABILITY_ID, blank).is_err());
+    }
+}
+
+#[test]
 fn legacy_record_single_contract_is_pinned_before_upgrade_or_recovery() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("owner");
@@ -1368,7 +1437,7 @@ fn actual_supervisor_rejects_ambiguous_selection_before_stopping_and_checks_read
     );
     // Plain version strings still need validation at the supervisor boundary.
     let mut invalid_version = selected("knowledge.graph", "2");
-    invalid_version.interface_version = "../escape".into();
+    invalid_version.interface_version = "\u{2003}\t ".into();
     options.selected_contract = Some(invalid_version);
     assert_eq!(
         supervisor
