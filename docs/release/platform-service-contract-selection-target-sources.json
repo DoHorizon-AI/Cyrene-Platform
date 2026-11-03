@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "baseline": "afed688f2605f8543646a10e6cbb018fe5fe981d",
+  "featureCommit": "afd6d84e54ce37008911a6b8e6a1c1096af0b089",
+  "sourceCommit": "0ff33e5d10342cfb510f2e2eaa680d4ed42173a7",
+  "compatibilityCommit": "0ff33e5d10342cfb510f2e2eaa680d4ed42173a7",
+  "originalSelectionCandidate": "b80836f7c3422f5cb478b5b1984479add750516b",
+  "state": "TARGET_COMMITTED_FEATURE_SNAPSHOT",
+  "normalization": "Exact committed Git blob bytes (UTF-8 with LF); target validation metadata added separately.",
+  "files": [
+    {
+      "path": "docs/package-runtime.md",
+      "gitBlob": "a28f1925670c85007fb51b1323b056d5f99488d6",
+      "sha256": "200f79136ec42ae385da4f0a5737dc98a16060bf4c2993b9f719cae6f2f1e782"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/control.rs",
+      "gitBlob": "1b8e3848eb13c7b539905b00b72e425dc40ea92d",
+      "sha256": "d5aea73a0247cc8fd0acaf291d28e138b7356b9b176ef68284c336afbe0302ac"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/local_control.rs",
+      "gitBlob": "3cfaa7417778b53011a3b3dca1a3eab8c9ba63b8",
+      "sha256": "65f338d6cbe1b09778ecd88764e6533f61845ba520df21aba349bdad5805efad"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/runtime.rs",
+      "gitBlob": "f9f607bbb5fad6a856fa7d1ab1c03e1a65d66ad8",
+      "sha256": "0e2843a3e4784b4ed8c804f4ab94e7204cc8f2a86fab4ef60d8fb6fb9ad6675f"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/supervisor.rs",
+      "gitBlob": "59ffa274f5c999b5dbfffb38af2257c18e9da00a",
+      "sha256": "6160f428d92d792866cb7ee81730e84748407185383c032929bb1f21aca63b04"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/src/types.rs",
+      "gitBlob": "2d23a2855cea7316e0effb6e236408fa939205c8",
+      "sha256": "5e5695b11012d1aaef9c861c633d79a46dd16bfac1fb999c2fe7879ac8b2726f"
+    },
+    {
+      "path": "framework/crates/cy-package-runtime/tests/package_runtime_tck.rs",
+      "gitBlob": "4f186a27bc312c58e9a040874e666770220e1c78",
+      "sha256": "622dc3ce2b69379a90fbb9ed39d488a0fd0f6204a6486df0a375154aaa3ce886"
+    }
+  ],
+  "allowedPortDifferences": [
+    "Preserve the full newer upstream tree, including root bootstrap, offline uninstall, process ownership locks, private Plugin state and failure restoration.",
+    "Authenticate additive fixed-pair selection through the existing Unix socket source scope and Broker v1 activate admission; never reopen stdio mutation.",
+    "Add an explicit fixed selected_contract source-policy field and activate_selected operation, with revocation authority persisted in activation records.",
+    "Recheck credentials, current policy generation and existing pin after binding serialization and before broker I/O.",
+    "Adapt negative identity tests to the newer validating Deserialize boundary; retain actual supervisor version validation and running-worker assertions.",
+    "Reuse the public CapabilityInterfaceVersion constructor without new length/charset limits; preserve raw selection/policy strings and the existing repository normalizer boundary.",
+    "Replace obsolete stdio-mutation positive tests with fail-closed stdio tests and separately recorded real authenticated UDS acceptance.",
+    "Retain native Windows persistence work separately; this upstream target remains Linux/WSL-only.",
+    "Redact only public-copy historical workstation paths and label all pre-port evidence as non-target."
+  ],
+  "unchangedBoundaries": [
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "contracts/",
+    "framework/crates/cy-package-runtime/src/main.rs",
+    "framework/crates/cy-package-runtime/src/bootstrap.rs"
+  ]
+}
