@@ -100,6 +100,47 @@ settings. Its RPC listener defaults to `0.0.0.0:50051`; health defaults to
 loopback `127.0.0.1:8080`. It fails to start when the Directory cannot be read
 or the Exchange workload pin is missing.
 
+## Deployment-approved operation manifest
+
+By default, Authority grants from Platform's built-in operation lists. A
+deployment can replace them with the manifest generated in Cyrene-Plugins
+(`contracts/connector-operations/v1/connector-operations.json`) by setting both
+of these on `cy-workspace-authority-host` or
+`cy-workspace-connector-authority-host`:
+
+- `CYRENE_CONNECTOR_OPERATIONS_MANIFEST_FILE`: the manifest's path.
+- `CYRENE_CONNECTOR_OPERATIONS_MANIFEST_SHA256`: `sha256:` followed by the 64
+  lowercase hex characters of the SHA-256 of the file's exact bytes. Setting this
+  value is the approval, so keep it in the deployment's reviewed configuration,
+  not next to the file.
+
+Authority reads the manifest once, at startup. It refuses to start if only one
+setting is present, the file can't be read, the digest differs, or a row breaks a
+rule below. A changed manifest needs a new digest and a restart. The startup log
+states which source applies and the manifest's digest.
+
+With a manifest, only the operations it lists can be granted. An operation it
+omits is refused, even for the connector operator. Every manifest must follow
+these rules:
+
+- Role names must match Platform's.
+- The automation viewer and Office task writer can't gain anything beyond the
+  built-in lists in this document, because those roles go to ordinary members. A
+  manifest can take access away from them. An operation given to the viewer must
+  state `mutating: false`, except `msteams.message.reply`.
+- `msteams.message.reply` stays the only transport operation.
+- The first segment of an operation ID must equal its provider. `cloud.*`
+  operations can only apply to `azure`, `gcp`, and `runpod`.
+- Every row must include `operator`.
+
+So a manifest can add a new provider's operations for connector operators only.
+Giving ordinary members access still takes a Platform change.
+
+This covers Authority only. Exchange and Navigator keep their own operation
+tables, and a new operation has to pass those too. Platform's
+`verify_connector_operation_grant` also still checks the built-in lists; only
+tests call it today.
+
 ## Add or remove a maintainer
 
 Run these commands through the restricted Directory admin environment. The
@@ -223,6 +264,27 @@ outbox。现有 `cy-workspace-authority-host` 仍是完整 Product profile。
 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL_FILE`，也可通过 `CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL` 提供）。还需现有 Authority signer 与
 mTLS 文件，以及 Exchange workload ID/audience/证书指纹配置。RPC 默认监听 `0.0.0.0:50051`；health
 默认监听 loopback `127.0.0.1:8080`。Directory 无法读取或缺少 Exchange certificate pin 时，进程拒绝启动。
+
+## 部署批准的操作清单
+
+Authority 默认按 Platform 内置的操作列表授权。部署可以改用 Cyrene-Plugins 生成的清单（`contracts/connector-operations/v1/connector-operations.json`），方法是在 `cy-workspace-authority-host` 或 `cy-workspace-connector-authority-host` 上同时设置：
+
+- `CYRENE_CONNECTOR_OPERATIONS_MANIFEST_FILE`：清单文件路径。
+- `CYRENE_CONNECTOR_OPERATIONS_MANIFEST_SHA256`：`sha256:` 加上文件原始字节 SHA-256 的 64 位小写十六进制。设置这个值就是批准，所以它要放在经过审查的部署配置里，不要和清单文件放在一起。
+
+Authority 只在启动时读取一次清单。只设置其中一项、文件读不了、摘要不符，或某一行违反下面的规则，进程都拒绝启动。清单有变化时，要换新摘要并重启。启动日志会写明当前用的是哪种来源，以及清单的摘要。
+
+使用清单后，只有清单列出的操作才能授权。没列出的操作会被拒绝，connector operator 也一样。每份清单都要满足这些规则：
+
+- 角色名必须和 Platform 一致。
+- automation viewer 和 Office task writer 不能获得超出本文内置列表的操作，因为这两个角色是给普通成员的。清单可以减少它们的权限。给 viewer 的操作必须写明 `mutating: false`，`msteams.message.reply` 除外。
+- `msteams.message.reply` 仍是唯一的 transport 操作。
+- 操作 ID 的第一段必须等于 provider。`cloud.*` 操作只能用于 `azure`、`gcp` 和 `runpod`。
+- 每一行都必须包含 `operator`。
+
+所以，清单可以只为 connector operator 增加新 provider 的操作。要让普通成员使用，仍然要改 Platform。
+
+这里只涉及 Authority。Exchange 和 Navigator 还有各自的操作表，新操作也要被它们接受才能使用。Platform 的 `verify_connector_operation_grant` 也仍然按内置列表校验，目前只有测试调用它。
 
 ## 增删维护者
 

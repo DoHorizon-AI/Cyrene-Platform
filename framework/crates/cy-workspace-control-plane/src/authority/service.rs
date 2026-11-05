@@ -27,14 +27,11 @@ use crate::deployment_admission::{
 };
 use crate::{
     authority::{
-        is_automation_transport_connector_operation, is_automation_viewer_connector_operation,
-        is_office_task_writer_connector_operation, is_supported_connector_operation, now_unix_ms,
-        AuthorityDelegation, AuthorityDelegationError, AuthorityDelegationStore,
-        AuthorityOutboxError, AuthorityOutboxStore, DelegatedOperationScope, EnqueueOutcome,
-        ExecutionDevicePeer, InvocationWaitScope, NewAuthorityInvocation,
-        PersistedInvocationResult, CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION,
-        CONNECTOR_OPERATION_GRANT_TTL_MS, NAVIGATOR_AUTOMATION_VIEWER_ROLE,
-        NAVIGATOR_CONNECTOR_OPERATOR_ROLE, NAVIGATOR_OFFICE_TASK_WRITER_ROLE,
+        now_unix_ms, AuthorityDelegation, AuthorityDelegationError, AuthorityDelegationStore,
+        AuthorityOutboxError, AuthorityOutboxStore, ConnectorOperationCatalog,
+        DelegatedOperationScope, EnqueueOutcome, ExecutionDevicePeer, InvocationWaitScope,
+        NewAuthorityInvocation, PersistedInvocationResult,
+        CONNECTOR_OPERATION_GRANT_SCHEMA_VERSION, CONNECTOR_OPERATION_GRANT_TTL_MS,
     },
     device_registry::{
         CurrentRelayPeerRevocationEvidence, RelayPeerRevocationCheckError,
@@ -280,6 +277,8 @@ pub struct AuthorityServiceDependencies {
     pub delegations: Arc<dyn AuthorityDelegationStore>,
     /// Authenticated managed workload identity and its fixed grant audience.
     pub exchange_workload: AuthorityManagedWorkload,
+    /// Connector operations this deployment can grant, fixed at startup.
+    pub connector_operations: Arc<ConnectorOperationCatalog>,
     /// Certificate-derived Product workload identities with narrow owner and target scopes.
     pub product_workload_profiles: Vec<AuthorityProductWorkloadProfile>,
     /// Operator-managed execution targets.
@@ -471,7 +470,8 @@ impl AuthorityRpcService {
         input: &wire::AuthorizeConnectorOperationRequest,
         workload: &AuthorityManagedWorkload,
     ) -> Result<wire::ConnectorOperationGrantV1, Status> {
-        issue_connector_operation_grant(
+        issue_connector_operation_grant_in_catalog(
+            self.dependencies.connector_operations.as_ref(),
             self.dependencies.directory.as_ref(),
             &self.dependencies.signer,
             &self.dependencies.organization_id,
@@ -2372,8 +2372,24 @@ fn resolve_endpoint(
     Ok(endpoint)
 }
 
+#[cfg(test)]
 #[allow(clippy::result_large_err)]
 fn validate_connector_operation_request(
+    request: &wire::AuthorizeConnectorOperationRequest,
+    expected_workspace_id: &str,
+    expected_identity_issuer: &str,
+) -> Result<(), Status> {
+    validate_connector_operation_request_in_catalog(
+        &ConnectorOperationCatalog::builtin(),
+        request,
+        expected_workspace_id,
+        expected_identity_issuer,
+    )
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_connector_operation_request_in_catalog(
+    catalog: &ConnectorOperationCatalog,
     request: &wire::AuthorizeConnectorOperationRequest,
     expected_workspace_id: &str,
     expected_identity_issuer: &str,
@@ -2396,7 +2412,7 @@ fn validate_connector_operation_request(
         ));
     }
     if request.arguments_digest_sha256.len() != 32
-        || !is_supported_connector_operation(&request.provider_id, &request.operation_id)
+        || !catalog.is_supported(&request.provider_id, &request.operation_id)
         || !valid_connector_scope_value(&request.connection_ref, 256)
         || !valid_connector_scope_value(&request.provider_id, 64)
         || !valid_connector_scope_value(&request.profile_ref, 256)
@@ -2411,12 +2427,10 @@ fn validate_connector_operation_request(
     Ok(())
 }
 
-/// Reload the authoritative Directory role and mint one exact-scope grant.
+/// Mint one exact-scope grant using Platform's built-in operation lists.
 ///
-/// The network RPC invokes this only after validating the registered connector authorization
-/// caller's mTLS peer. The
-/// organization, workspace, issuer and workload audience arguments must come from that Authority
-/// host's protected configuration; request identity and operation values are checked against them.
+/// Hosts call [`issue_connector_operation_grant_in_catalog`] instead, so an approved manifest
+/// applies. This stays until the built-in lists are retired.
 pub async fn issue_connector_operation_grant(
     directory: &dyn WorkspaceDirectory,
     signer: &AuthorityCredentialSigner,
@@ -2426,7 +2440,42 @@ pub async fn issue_connector_operation_grant(
     workload: &AuthorityManagedWorkload,
     input: &wire::AuthorizeConnectorOperationRequest,
 ) -> Result<wire::ConnectorOperationGrantV1, Status> {
-    validate_connector_operation_request(input, workspace_id, expected_identity_issuer)?;
+    issue_connector_operation_grant_in_catalog(
+        &ConnectorOperationCatalog::builtin(),
+        directory,
+        signer,
+        organization_id,
+        workspace_id,
+        expected_identity_issuer,
+        workload,
+        input,
+    )
+    .await
+}
+
+/// Reload the authoritative Directory role and mint one exact-scope grant.
+///
+/// The network RPC invokes this only after validating the registered connector authorization
+/// caller's mTLS peer. The
+/// organization, workspace, issuer and workload audience arguments must come from that Authority
+/// host's protected configuration; request identity and operation values are checked against them.
+#[allow(clippy::too_many_arguments)]
+pub async fn issue_connector_operation_grant_in_catalog(
+    catalog: &ConnectorOperationCatalog,
+    directory: &dyn WorkspaceDirectory,
+    signer: &AuthorityCredentialSigner,
+    organization_id: &str,
+    workspace_id: &str,
+    expected_identity_issuer: &str,
+    workload: &AuthorityManagedWorkload,
+    input: &wire::AuthorizeConnectorOperationRequest,
+) -> Result<wire::ConnectorOperationGrantV1, Status> {
+    validate_connector_operation_request_in_catalog(
+        catalog,
+        input,
+        workspace_id,
+        expected_identity_issuer,
+    )?;
     if workload.workload_id.trim().is_empty() || workload.audience.trim().is_empty() {
         return Err(Status::failed_precondition(
             "connector authorization caller is not configured",
@@ -2436,7 +2485,8 @@ pub async fn issue_connector_operation_grant(
         issuer: input.principal_issuer.clone(),
         subject: input.principal_subject.clone(),
     };
-    require_directory_connector_operation_role(
+    require_directory_connector_operation_role_in_catalog(
+        catalog,
         directory,
         &identity,
         organization_id,
@@ -2472,8 +2522,31 @@ pub async fn issue_connector_operation_grant(
     Ok(grant)
 }
 
+#[cfg(test)]
 #[allow(clippy::result_large_err)]
 pub(super) async fn require_directory_connector_operation_role(
+    directory: &dyn WorkspaceDirectory,
+    identity: &UserIdentityRef,
+    organization_id: &str,
+    workspace_id: &str,
+    provider_id: &str,
+    operation_id: &str,
+) -> Result<(), Status> {
+    require_directory_connector_operation_role_in_catalog(
+        &ConnectorOperationCatalog::builtin(),
+        directory,
+        identity,
+        organization_id,
+        workspace_id,
+        provider_id,
+        operation_id,
+    )
+    .await
+}
+
+#[allow(clippy::result_large_err)]
+async fn require_directory_connector_operation_role_in_catalog(
+    catalog: &ConnectorOperationCatalog,
     directory: &dyn WorkspaceDirectory,
     identity: &UserIdentityRef,
     organization_id: &str,
@@ -2486,15 +2559,7 @@ pub(super) async fn require_directory_connector_operation_role(
         .await
         .map_err(|_| Status::unavailable("workspace directory is unavailable"))?
         .ok_or_else(|| Status::permission_denied("workspace membership is required"))?;
-    if roles.contains(NAVIGATOR_CONNECTOR_OPERATOR_ROLE)
-        || (is_automation_viewer_connector_operation(provider_id, operation_id)
-            && roles.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE))
-        || (is_office_task_writer_connector_operation(provider_id, operation_id)
-            && roles.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE))
-        || (is_automation_transport_connector_operation(provider_id, operation_id)
-            && (roles.contains(NAVIGATOR_AUTOMATION_VIEWER_ROLE)
-                || roles.contains(NAVIGATOR_OFFICE_TASK_WRITER_ROLE)))
-    {
+    if catalog.role_allows(&roles, provider_id, operation_id) {
         return Ok(());
     }
     Err(Status::permission_denied(
@@ -3518,6 +3583,7 @@ mod get_delegation_identity_tests {
         expired_credential: bool,
         wrong_profile: bool,
         authorization_source: wire::InvocationAuthorizationSource,
+        connector_operations: ConnectorOperationCatalog,
     }
 
     impl Default for FixtureOptions {
@@ -3528,6 +3594,7 @@ mod get_delegation_identity_tests {
                 expired_credential: false,
                 wrong_profile: false,
                 authorization_source: wire::InvocationAuthorizationSource::Delegation,
+                connector_operations: ConnectorOperationCatalog::builtin(),
             }
         }
     }
@@ -3644,6 +3711,7 @@ mod get_delegation_identity_tests {
                     audience: "example".to_owned(),
                     certificate_fingerprints_sha256: Vec::new(),
                 },
+                connector_operations: Arc::new(options.connector_operations.clone()),
                 product_workload_profiles: vec![AuthorityProductWorkloadProfile {
                     workload_id: PRODUCT_WORKLOAD_ID.to_owned(),
                     owner_id: OWNER_ID.to_owned(),
@@ -4077,6 +4145,91 @@ mod get_delegation_identity_tests {
         assert_eq!(fixture.validations.load(Ordering::Relaxed), 1);
         assert_eq!(fixture.verifier_calls.load(Ordering::Relaxed), 0);
         assert_eq!(fixture.session_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// Refusal by the catalog is `InvalidArgument`. A pair the catalog accepts gets as far as the
+    /// role check, which refuses this non-member with `PermissionDenied`.
+    async fn connector_refusal(
+        catalog: ConnectorOperationCatalog,
+        provider_id: &str,
+        operation_id: &str,
+    ) -> Code {
+        let fixture = ServiceFixture::new(FixtureOptions {
+            connector_operations: catalog,
+            ..FixtureOptions::default()
+        })
+        .await;
+        let request = wire::AuthorizeConnectorOperationRequest {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            principal_issuer: format!("{PRINCIPAL_ISSUER}/v2.0"),
+            principal_subject: "11111111-1111-4111-8111-111111111111".to_owned(),
+            connection_ref: "connection-1".to_owned(),
+            provider_id: provider_id.to_owned(),
+            profile_ref: "profile-1".to_owned(),
+            operation_id: operation_id.to_owned(),
+            resource_ref: "source:target-1".to_owned(),
+            arguments_digest_sha256: vec![0x27; 32],
+            request_id: "request-1".to_owned(),
+        };
+        let workload = fixture.service.dependencies.exchange_workload.clone();
+        fixture
+            .service
+            .authorize_connector_operation_scope(&request, &workload)
+            .await
+            .expect_err("this caller has no connector role")
+            .code()
+    }
+
+    #[tokio::test]
+    async fn connector_authorization_uses_the_deployment_catalog() {
+        let manifest = br#"{
+            "schemaVersion": "cyrene.connector-operations.v1",
+            "roles": {
+                "operator": "navigator.connector.operator.v1",
+                "automationViewer": "navigator.automation.viewer.v1",
+                "officeTaskWriter": "navigator.office.task_writer.v1"
+            },
+            "operations": [{
+                "operationId": "demo.items.list",
+                "providerIds": ["demo"],
+                "roles": ["operator"],
+                "automationTransport": false,
+                "mutating": false
+            }]
+        }"#;
+        let digest = format!(
+            "sha256:{}",
+            crate::authority::connector_grant::encode_hex(&Sha256::digest(manifest))
+        );
+        let approved = ConnectorOperationCatalog::from_approved_manifest(manifest, &digest)
+            .expect("the manifest is approved");
+
+        assert_eq!(
+            connector_refusal(approved.clone(), "demo", "demo.items.list").await,
+            Code::PermissionDenied
+        );
+        assert_eq!(
+            connector_refusal(approved, "github", "github.repository.list").await,
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            connector_refusal(
+                ConnectorOperationCatalog::builtin(),
+                "demo",
+                "demo.items.list"
+            )
+            .await,
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            connector_refusal(
+                ConnectorOperationCatalog::builtin(),
+                "github",
+                "github.repository.list"
+            )
+            .await,
+            Code::PermissionDenied
+        );
     }
 
     #[tokio::test]
