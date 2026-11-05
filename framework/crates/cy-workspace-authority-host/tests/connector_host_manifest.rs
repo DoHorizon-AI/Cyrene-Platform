@@ -123,7 +123,7 @@ impl Deployment {
         let signing_key_file = scratch.secret_file("signing-key", &[9; 32]);
         let exchange_fingerprint =
             fs::read_to_string(tls_directory.join("connector-exchange.sha256"))
-                .expect("the Exchange certificate fingerprint is present")
+                .expect("the client certificate fingerprint is present")
                 .trim()
                 .to_owned();
         Self {
