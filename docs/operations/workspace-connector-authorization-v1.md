@@ -41,7 +41,7 @@ conversation. Work must bind the task to the verified Teams actor, and Exchange
 and the Teams callback must enforce that binding before sending. This policy
 does not authorize sending a new message to an arbitrary user or conversation.
 
-The closed action catalog is
+Unless a deployment approves a manifest (see below), the closed action catalog is
 [`../../contracts/policies/workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json).
 Unknown operation IDs and provider mismatches fail closed. The viewer's exact
 Graph read set is `microsoft_graph.planner.plan.get`,
@@ -133,8 +133,10 @@ these rules:
   operations can only apply to `azure`, `gcp`, and `runpod`.
 - Every row must include `operator`.
 
-So a manifest can add a new provider's operations for connector operators only.
-Giving ordinary members access still takes a Platform change.
+So for connector operators, a manifest can add operations on a new or an existing
+provider, including new namespaces, and can widen an existing row, such as
+`cloud.resource.restart` to `azure`. Review its operator rows as carefully as a
+code change. Giving ordinary members access still takes a Platform change.
 
 This covers Authority only. Exchange and Navigator keep their own operation
 tables, and a new operation has to pass those too. Platform's
@@ -244,7 +246,7 @@ arguments digest 和原始 request ID。Exchange 必须逐字段校验且每次�
 
 Automation transport catalog 只包含 provider `msteams` 的 `msteams.message.reply`。每个 reply grant 都绑定原始 actor、精确 connection/profile、target 和规范 arguments；viewer 的六个 Graph read 与 task writer 的 17 个 Planner、To Do 和选定 SharePoint 元数据 operation 仍是彼此独立的 role set。Calendar operation 不属于这两个集合，只允许既有 connector operator role。grant signature 不代表 actor 拥有该会话；Work 必须把任务绑定到已验证的 Teams actor，Exchange 与 Teams callback 也必须在发送前执行该绑定。此策略不允许向任意用户或会话发送新消息。
 
-封闭 operation catalog 见
+除非部署批准了清单（见下文），封闭 operation catalog 见
 [`workspace-connector-operator-policy-v1.json`](../../contracts/policies/workspace-connector-operator-policy-v1.json)。viewer 的 Graph 只读集合仍是 `microsoft_graph.planner.plan.get`、`microsoft_graph.planner.tasks.list`、`microsoft_graph.planner.task.get`、`microsoft_graph.sharepoint.site.get`、`microsoft_graph.sharepoint.list.get` 和 `microsoft_graph.sharepoint.list.items.delta`。`navigator.office.task_writer.v1` 的 17 项集合是这六个读取 operation，加上 `microsoft_graph.planner.plans.list`、Planner task create/update、六个 To Do list/task read/write operation，以及 `microsoft_graph.sharepoint.drives.list` 和 `microsoft_graph.sharepoint.drive.items.list` 两个选定 drive metadata read。Calendar list、event 与 free/busy operation 只允许既有 connector operator role；viewer 和 task writer 均不可请求。`azure_devops.observations.poll` 已进入 canonical operation catalog，但在 provider 绑定并强制校验原始调用者的 source profile 前，viewer 请求仍会拒绝。
 
 Directory role membership 不代表用户可读取任意 provider source 或 target。Authority 会把 grant 精确绑定到 actor、Workspace、connection、provider、profile、operation、resource、arguments digest 与 request ID，但不会查询 provider profile owner 或 source ACL。Graph provider 必须使用请求 actor 自己的 Account Center lease，并以同一个 delegated token 校验 `/me` 后才读取或写入；Planner 和 To Do write 还要求该 actor 显式同意 `Tasks.ReadWrite`，Calendar event write 要求 `Calendars.ReadWrite`，Directory role 本身不授予 OAuth scope。此 Authority 改动不实现或观测这些 provider 检查。在这些检查部署并验证前，pilot viewer 与 task writer 均不得访问 Graph source。缺少 same-actor profile lease、source 授权检查或所需 OAuth scope 时，provider 必须拒绝调用，不能使用 owner 共享 credential，也不能把 Directory role 当作 source access。ADO viewer 读取在有等效调用者绑定前保持关闭。viewer 与 task writer role 不会开放既有 cloud service-identity 或 computer 读取路径。
@@ -282,7 +284,7 @@ Authority 只在启动时读取一次清单。只设置其中一项、文件读�
 - 操作 ID 的第一段必须等于 provider。`cloud.*` 操作只能用于 `azure`、`gcp` 和 `runpod`。
 - 每一行都必须包含 `operator`。
 
-所以，清单可以只为 connector operator 增加新 provider 的操作。要让普通成员使用，仍然要改 Platform。
+所以，对 connector operator，清单可以在新的或已有的 provider 上增加操作，包括新的命名空间，也可以放宽已有的行，比如把 `cloud.resource.restart` 放宽到 `azure`。审查清单里的 operator 行时，要像审查代码改动一样仔细。要让普通成员使用，仍然要改 Platform。
 
 这里只涉及 Authority。Exchange 和 Navigator 还有各自的操作表，新操作也要被它们接受才能使用。Platform 的 `verify_connector_operation_grant` 也仍然按内置列表校验，目前只有测试调用它。
 

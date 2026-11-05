@@ -699,10 +699,15 @@ fn connector_operation_catalog_from(
 /// has no ownership or mode requirement. It only has to be a regular file of a sensible size.
 fn read_connector_manifest(path: &Path) -> Result<Vec<u8>, HostError> {
     let unreadable = |_| HostError::ConnectorManifestUnreadable;
-    if !fs::metadata(path).map_err(unreadable)?.is_file() {
+    // O_NONBLOCK so opening a FIFO can't stall startup. It doesn't affect regular files.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(unreadable)?;
+    if !file.metadata().map_err(unreadable)?.is_file() {
         return Err(HostError::ConnectorManifestUnreadable);
     }
-    let file = fs::File::open(path).map_err(unreadable)?;
     let mut bytes = Vec::new();
     file.take(CONNECTOR_OPERATIONS_MANIFEST_MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -2104,7 +2109,13 @@ mod tests {
 
         let absent = scratch.0.join("absent.json").into_os_string();
         let directory = scratch.0.clone().into_os_string();
-        for path in [absent, directory, OsString::new()] {
+        let fifo = scratch.0.join("fifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs")
+            .success());
+        for path in [absent, directory, fifo.into_os_string(), OsString::new()] {
             assert!(
                 matches!(
                     connector_operation_catalog_from(Some(path.clone()), Some(approved.clone())),

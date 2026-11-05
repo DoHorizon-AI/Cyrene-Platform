@@ -200,6 +200,10 @@ impl ConnectorOperationCatalog {
     }
 
     /// Return whether any of these Directory roles may request this pair.
+    ///
+    /// Check [`Self::is_supported`] first, as request validation does. For a pair outside the
+    /// catalog, the built-in lists answer `true` for the connector operator and a manifest answers
+    /// `false`.
     pub fn role_allows(
         &self,
         roles: &BTreeSet<String>,
@@ -922,9 +926,14 @@ mod tests {
         let mut changed = manifest();
         operations(&mut changed).retain(|row| row["operationId"] != "github.repository.list");
         operations(&mut changed).push(demo_row());
+        row(&mut changed, "microsoft_graph.planner.plan.get")["roles"] =
+            json!([ROLE_OPERATOR, ROLE_OFFICE_TASK_WRITER]);
+        row(&mut changed, "msteams.message.reply")["roles"] =
+            json!([ROLE_OPERATOR, ROLE_AUTOMATION_VIEWER]);
         let catalog = load(&changed).expect("manifest is accepted");
         let operator = NAVIGATOR_CONNECTOR_OPERATOR_ROLE;
         let viewer = NAVIGATOR_AUTOMATION_VIEWER_ROLE;
+        let writer = NAVIGATOR_OFFICE_TASK_WRITER_ROLE;
 
         // An operation the manifest doesn't declare is refused, even for the operator.
         assert_eq!(
@@ -940,21 +949,52 @@ mod tests {
             issue(&catalog, operator, "github", "demo.items.list").await,
             Err(Code::InvalidArgument)
         );
-        // Ordinary members don't get it, and keep what they had.
+        // Ordinary members don't get it.
         assert_eq!(
             issue(&catalog, viewer, "demo", "demo.items.list").await,
             Err(Code::PermissionDenied)
         );
-        assert_eq!(
-            issue(
-                &catalog,
+        // A role the manifest removes from a row is refused, for that role only.
+        for (role, provider_id, operation_id, expected) in [
+            (
                 viewer,
                 "microsoft_graph",
-                "microsoft_graph.planner.plan.get"
-            )
-            .await,
-            Ok(())
-        );
+                "microsoft_graph.planner.plan.get",
+                Err(Code::PermissionDenied),
+            ),
+            (
+                writer,
+                "microsoft_graph",
+                "microsoft_graph.planner.plan.get",
+                Ok(()),
+            ),
+            (
+                operator,
+                "microsoft_graph",
+                "microsoft_graph.planner.plan.get",
+                Ok(()),
+            ),
+            (
+                writer,
+                "msteams",
+                "msteams.message.reply",
+                Err(Code::PermissionDenied),
+            ),
+            (viewer, "msteams", "msteams.message.reply", Ok(())),
+            // A row the manifest leaves alone keeps its roles.
+            (
+                viewer,
+                "microsoft_graph",
+                "microsoft_graph.planner.task.get",
+                Ok(()),
+            ),
+        ] {
+            assert_eq!(
+                issue(&catalog, role, provider_id, operation_id).await,
+                expected,
+                "{role} {operation_id}"
+            );
+        }
     }
 
     #[tokio::test]
