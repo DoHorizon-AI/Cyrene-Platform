@@ -123,3 +123,40 @@ export CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID="directory-connector-integration-t
 printf 'postgres_test_gate=directory-connector-maintainer-and-signed-grant\n'
 cargo test --locked -p cy-workspace-postgres-storage --test directory_connector_operator -- --ignored --nocapture
 printf 'directory_connector_operator_postgres=PASS\n'
+
+issue_connector_certificate() {
+    local name="$1"
+    local usage="$2"
+    openssl req -newkey rsa:2048 -nodes \
+        -keyout "${fixture_dir}/connector-${name}.key" \
+        -out "${fixture_dir}/connector-${name}.csr" \
+        -subj "/CN=${name}"
+    printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=%s\n' "${usage}" \
+        > "${fixture_dir}/connector-${name}.ext"
+    openssl x509 -req \
+        -in "${fixture_dir}/connector-${name}.csr" \
+        -CA "${fixture_dir}/connector-ca.crt" \
+        -CAkey "${fixture_dir}/connector-ca.key" \
+        -CAcreateserial \
+        -out "${fixture_dir}/connector-${name}.crt" \
+        -days 2 \
+        -sha256 \
+        -extfile "${fixture_dir}/connector-${name}.ext"
+}
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "${fixture_dir}/connector-ca.key" \
+    -out "${fixture_dir}/connector-ca.crt" \
+    -days 2 \
+    -subj "/CN=connector-host-test-ca" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign"
+issue_connector_certificate authority serverAuth
+issue_connector_certificate exchange clientAuth
+chmod 0600 "${fixture_dir}"/connector-*.key "${fixture_dir}"/connector-*.crt
+openssl x509 -in "${fixture_dir}/connector-exchange.crt" -outform der | sha256sum | cut -c1-64 \
+    > "${fixture_dir}/connector-exchange.sha256"
+export CYRENE_CONNECTOR_HOST_TEST_TLS_DIR="${fixture_dir}"
+
+printf 'postgres_test_gate=connector-host-approved-manifest\n'
+cargo test --locked -p cy-workspace-authority-host --test connector_host_manifest -- --ignored --nocapture
+printf 'connector_host_manifest_postgres=PASS\n'

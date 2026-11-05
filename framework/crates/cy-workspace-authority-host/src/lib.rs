@@ -4,6 +4,7 @@
 
 use std::{
     env,
+    ffi::OsString,
     fs::{self, OpenOptions},
     future::Future,
     io::{self, Read},
@@ -30,10 +31,12 @@ use cy_proto::cyrene::workspace::authority::v2::{
 };
 use cy_workspace_control_plane::{
     authority::{
-        issue_connector_operation_grant, AuthorityCredentialSigner, AuthorityExecutionTargetStore,
-        AuthorityManagedWorkload, AuthorityProductWorkloadProfile, AuthorityRpcService,
-        AuthorityServiceDependencies, AuthorityWebSessionStore, ContractSnapshotManager,
+        issue_connector_operation_grant_in_catalog, AuthorityCredentialSigner,
+        AuthorityExecutionTargetStore, AuthorityManagedWorkload, AuthorityProductWorkloadProfile,
+        AuthorityRpcService, AuthorityServiceDependencies, AuthorityWebSessionStore,
+        ConnectorCatalogError, ConnectorOperationCatalog, ContractSnapshotManager,
         SnapshotArtifactInput, SnapshotTrust, VerifiedContractSnapshot,
+        CONNECTOR_OPERATIONS_MANIFEST_MAX_BYTES,
     },
     AdmissionHealthEvidence, AzureAdWebIdentityConfig, AzureAdWebPrincipalVerifier,
     DeploymentAdmission, DeploymentIdentity, WebIdentityDirectory, WebIdentityDirectoryError,
@@ -69,6 +72,10 @@ const BFF_UDS_DEFAULT: &str = "/run/cyrene-workspace-authority/bff/bff.sock";
 const ADMIN_UDS_DEFAULT: &str = "/run/cyrene-workspace-authority/admin.sock";
 const MAX_ADMIN_LINE: usize = 32 * 1024;
 
+const CONNECTOR_OPERATIONS_MANIFEST_FILE_ENV: &str = "CYRENE_CONNECTOR_OPERATIONS_MANIFEST_FILE";
+const CONNECTOR_OPERATIONS_MANIFEST_SHA256_ENV: &str =
+    "CYRENE_CONNECTOR_OPERATIONS_MANIFEST_SHA256";
+
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
     #[error("Authority configuration is invalid or incomplete")]
@@ -83,6 +90,10 @@ pub enum HostError {
     Signer,
     #[error("Authority mTLS configuration is invalid")]
     Tls,
+    #[error("Connector operation manifest could not be read")]
+    ConnectorManifestUnreadable,
+    #[error("Connector operation manifest was refused: {0}")]
+    ConnectorManifestRefused(#[from] ConnectorCatalogError),
     #[error("Authority listener setup failed")]
     Listener(#[from] io::Error),
 }
@@ -157,6 +168,7 @@ impl AdminResponse {
 
 pub async fn run_host() -> Result<(), HostError> {
     let mut settings = Settings::load()?;
+    let connector_operations = Arc::new(load_connector_operation_catalog()?);
     let deployment_admission = Arc::new(
         DeploymentAdmission::from_environment(settings.deployment_identity())
             .map_err(|_| HostError::Configuration)?,
@@ -310,6 +322,7 @@ pub async fn run_host() -> Result<(), HostError> {
             audience: settings.exchange_workload_audience.clone(),
             certificate_fingerprints_sha256: settings.exchange_workload_fingerprints_sha256.clone(),
         },
+        connector_operations,
         product_workload_profiles: settings.product_workload_profiles.clone(),
         targets,
         device_registry: registry.clone(),
@@ -416,6 +429,7 @@ pub async fn run_host() -> Result<(), HostError> {
 /// admission receipt, and serves only the connector-authorization RPC plus a bounded health route.
 pub async fn run_connector_authorization_host() -> Result<(), HostError> {
     let settings = ConnectorAuthorizationOnlySettings::load()?;
+    let connector_operations = Arc::new(load_connector_operation_catalog()?);
     let directory = Arc::new(
         PostgresWorkspaceDirectory::connect(&settings.directory_database_url)
             .await
@@ -452,6 +466,7 @@ pub async fn run_connector_authorization_host() -> Result<(), HostError> {
             settings.tenant_id
         ),
         exchange_workload: settings.exchange_workload.clone(),
+        connector_operations,
     };
     let tls_cert = read_secret_file(&settings.tls_cert_file, 1024 * 1024)?;
     let mut tls_key = Zeroizing::new(read_secret_file(&settings.tls_key_file, 1024 * 1024)?);
@@ -510,6 +525,7 @@ struct ConnectorAuthorizationOnlyRpcService {
     workspace_id: String,
     connector_identity_issuer: String,
     exchange_workload: AuthorityManagedWorkload,
+    connector_operations: Arc<ConnectorOperationCatalog>,
 }
 
 #[tonic::async_trait]
@@ -532,7 +548,8 @@ impl WorkspaceConnectorAuthorizationService for ConnectorAuthorizationOnlyRpcSer
                 "connector authorization caller is not configured",
             ));
         }
-        let grant = issue_connector_operation_grant(
+        let grant = issue_connector_operation_grant_in_catalog(
+            self.connector_operations.as_ref(),
             self.directory.as_ref(),
             &self.signer,
             &self.organization_id,
@@ -638,6 +655,64 @@ fn connector_directory_database_url() -> Result<Zeroizing<String>, HostError> {
         return Err(HostError::Configuration);
     }
     Ok(Zeroizing::new(database_url))
+}
+
+/// Load the operations this process can grant. Both settings or neither: a deployment that set
+/// only one of them meant to pin a manifest, so falling back to the built-in lists would be wrong.
+fn load_connector_operation_catalog() -> Result<ConnectorOperationCatalog, HostError> {
+    let catalog = connector_operation_catalog_from(
+        env::var_os(CONNECTOR_OPERATIONS_MANIFEST_FILE_ENV),
+        env::var_os(CONNECTOR_OPERATIONS_MANIFEST_SHA256_ENV),
+    )?;
+    match catalog.approved_digest() {
+        Some(digest) => info!(
+            digest,
+            operations = catalog.approved_operation_count(),
+            "Connector operations come from the approved manifest"
+        ),
+        None => info!("Connector operations come from the built-in lists"),
+    }
+    Ok(catalog)
+}
+
+fn connector_operation_catalog_from(
+    manifest_file: Option<OsString>,
+    approved_digest: Option<OsString>,
+) -> Result<ConnectorOperationCatalog, HostError> {
+    match (manifest_file, approved_digest) {
+        (None, None) => Ok(ConnectorOperationCatalog::builtin()),
+        (Some(manifest_file), Some(approved_digest)) => {
+            let approved_digest = approved_digest
+                .to_str()
+                .ok_or(ConnectorCatalogError::ApprovedDigestInvalid)?;
+            let bytes = read_connector_manifest(Path::new(&manifest_file))?;
+            Ok(ConnectorOperationCatalog::from_approved_manifest(
+                &bytes,
+                approved_digest,
+            )?)
+        }
+        _ => Err(HostError::Configuration),
+    }
+}
+
+/// The approved digest protects this file's content, so unlike the secret and artifact files it
+/// has no ownership or mode requirement. It only has to be a regular file of a sensible size.
+fn read_connector_manifest(path: &Path) -> Result<Vec<u8>, HostError> {
+    let unreadable = |_| HostError::ConnectorManifestUnreadable;
+    // O_NONBLOCK so opening a FIFO can't stall startup. It doesn't affect regular files.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(unreadable)?;
+    if !file.metadata().map_err(unreadable)?.is_file() {
+        return Err(HostError::ConnectorManifestUnreadable);
+    }
+    let mut bytes = Vec::new();
+    file.take(CONNECTOR_OPERATIONS_MANIFEST_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    Ok(bytes)
 }
 
 fn valid_connector_host_identity(value: &str) -> bool {
@@ -1923,10 +1998,141 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bff_rpc_path_allowed, is_artifact_id, tcp_rpc_path_allowed, verify_outer_manifest,
+        bff_rpc_path_allowed, connector_operation_catalog_from, is_artifact_id,
+        tcp_rpc_path_allowed, verify_outer_manifest, ConnectorCatalogError, HostError,
+        CONNECTOR_OPERATIONS_MANIFEST_MAX_BYTES,
     };
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
+    use std::{ffi::OsString, path::PathBuf};
+
+    const OPERATIONS_MANIFEST: &str = r#"{
+        "schemaVersion": "cyrene.connector-operations.v1",
+        "roles": {
+            "operator": "navigator.connector.operator.v1",
+            "automationViewer": "navigator.automation.viewer.v1",
+            "officeTaskWriter": "navigator.office.task_writer.v1"
+        },
+        "operations": [{
+            "operationId": "demo.items.list",
+            "providerIds": ["demo"],
+            "roles": ["operator"],
+            "automationTransport": false,
+            "mutating": false
+        }]
+    }"#;
+
+    fn operations_digest(bytes: &[u8]) -> OsString {
+        format!("sha256:{}", super::hex(&Sha256::digest(bytes))).into()
+    }
+
+    /// A scratch directory that goes away with the test.
+    struct ScratchDirectory(PathBuf);
+
+    impl ScratchDirectory {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("cy-authority-host-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("scratch directory is created");
+            Self(path)
+        }
+
+        fn write(&self, bytes: &[u8]) -> OsString {
+            let path = self.0.join("connector-operations.json");
+            std::fs::write(&path, bytes).expect("scratch manifest is written");
+            path.into_os_string()
+        }
+    }
+
+    impl Drop for ScratchDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn without_a_manifest_the_builtin_lists_apply() {
+        let catalog = connector_operation_catalog_from(None, None).expect("nothing to refuse");
+        assert_eq!(catalog.approved_digest(), None);
+        assert!(catalog.is_supported("github", "github.repository.list"));
+        assert!(!catalog.is_supported("demo", "demo.items.list"));
+    }
+
+    #[test]
+    fn half_of_the_manifest_settings_is_refused() {
+        let scratch = ScratchDirectory::new("half");
+        let file = scratch.write(OPERATIONS_MANIFEST.as_bytes());
+        let digest = operations_digest(OPERATIONS_MANIFEST.as_bytes());
+        assert!(matches!(
+            connector_operation_catalog_from(Some(file), None),
+            Err(HostError::Configuration)
+        ));
+        assert!(matches!(
+            connector_operation_catalog_from(None, Some(digest)),
+            Err(HostError::Configuration)
+        ));
+    }
+
+    #[test]
+    fn the_approved_manifest_replaces_the_builtin_lists() {
+        let scratch = ScratchDirectory::new("approved");
+        let file = scratch.write(OPERATIONS_MANIFEST.as_bytes());
+        let digest = operations_digest(OPERATIONS_MANIFEST.as_bytes());
+        let catalog = connector_operation_catalog_from(Some(file), Some(digest.clone()))
+            .expect("the approved manifest is accepted");
+        assert_eq!(catalog.approved_digest().map(OsString::from), Some(digest));
+        assert!(catalog.is_supported("demo", "demo.items.list"));
+        assert!(!catalog.is_supported("github", "github.repository.list"));
+    }
+
+    #[test]
+    fn a_changed_or_unreadable_manifest_is_refused() {
+        let scratch = ScratchDirectory::new("refused");
+        let approved = operations_digest(OPERATIONS_MANIFEST.as_bytes());
+        let changed = scratch.write(format!("{OPERATIONS_MANIFEST}\n").as_bytes());
+        assert!(matches!(
+            connector_operation_catalog_from(Some(changed), Some(approved.clone())),
+            Err(HostError::ConnectorManifestRefused(
+                ConnectorCatalogError::DigestMismatch
+            ))
+        ));
+
+        let oversized = vec![b' '; CONNECTOR_OPERATIONS_MANIFEST_MAX_BYTES + 1];
+        let oversized_digest = operations_digest(&oversized);
+        let file = scratch.write(&oversized);
+        assert!(matches!(
+            connector_operation_catalog_from(Some(file), Some(oversized_digest)),
+            Err(HostError::ConnectorManifestRefused(
+                ConnectorCatalogError::TooLarge
+            ))
+        ));
+
+        let absent = scratch.0.join("absent.json").into_os_string();
+        let directory = scratch.0.clone().into_os_string();
+        let fifo = scratch.0.join("fifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs")
+            .success());
+        for path in [absent, directory, fifo.into_os_string(), OsString::new()] {
+            assert!(
+                matches!(
+                    connector_operation_catalog_from(Some(path.clone()), Some(approved.clone())),
+                    Err(HostError::ConnectorManifestUnreadable)
+                ),
+                "{path:?}"
+            );
+        }
+
+        let file = scratch.write(OPERATIONS_MANIFEST.as_bytes());
+        assert!(matches!(
+            connector_operation_catalog_from(Some(file), Some(OsString::new())),
+            Err(HostError::ConnectorManifestRefused(
+                ConnectorCatalogError::ApprovedDigestInvalid
+            ))
+        ));
+    }
 
     fn manifest_with_digest() -> Value {
         let mut manifest = json!({
