@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "candidate": "Fixed host service-contract selection ported onto current Linux upstream",
+  "createdAtUtc": "2026-11-03T08:51:04.894540+00:00",
+  "targetBase": "afed688f2605f8543646a10e6cbb018fe5fe981d",
+  "featureCommit": "afd6d84e54ce37008911a6b8e6a1c1096af0b089",
+  "validatedSourceCommit": "0ff33e5d10342cfb510f2e2eaa680d4ed42173a7",
+  "sourceManifest": {
+    "path": "docs/release/platform-service-contract-selection-target-sources.json",
+    "sha256": "c036be2d97f4cd980c2cb3357c2d466a3ce23079085ff3b7a7f31793163efd6b",
+    "scope": "Exact committed source blobs; this receipt and manifest are subsequent metadata-only additions."
+  },
+  "ancestry": "Target baseline is an ancestor; original pre-port branch history was not rewritten or overlaid onto upstream.",
+  "implementation": {
+    "selection": "One fixed capability_id/interface_version per installed source-policy binding; explicit activate_selected permission and field must appear together.",
+    "admission": "Existing authenticated UDS, source token, real peer identity, package/installation scope, current catalog/gate generation and Broker v1 activate reservation remain mandatory.",
+    "authorityRecheck": "Reload and reauthenticate source policy and validate durable pin after binding serialization, before broker I/O.",
+    "revocation": "Explicit selection persists requires_selected_policy; legacy Activate cannot bypass a selected binding, and recovery cannot bypass revoked or changed fixed policy.",
+    "legacyVersions": "Directly reuse cy_manifest::CapabilityInterfaceVersion constructor: trim-nonempty only, retain the supplied string; no new charset or length limit. Existing repository-manifest normalization remains unchanged.",
+    "brokerWire": "Unchanged four-field binding/package/installation/operation scope; no selection field added to Broker v1.",
+    "installationSwitches": "UDS upgrade/rollback use exact installation activation through the existing activate reservation; standalone UDS upgrade/rollback permissions are not widened.",
+    "preserved": "All upstream process locks, private Plugin data, root-only bootstrap/uninstall, recovery protections, no-replay receipts, restoration behavior and logging.",
+    "excluded": "Native Windows persistence changes and pre-port proof are separate work; no portable durability or Windows transport redesign in this target."
+  },
+  "toolchain": {
+    "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+    "cargo": "Repository-pinned 1.96.1",
+    "platform": "Linux / WSL Ubuntu",
+    "isolation": "Task-owned Cargo home, target, source snapshot and short TMPDIR; existing pinned compiler reused read-only."
+  },
+  "validation": [
+    {
+      "command": "cargo fmt --check",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo check --locked --offline --workspace --all-targets",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo clippy --locked --offline --workspace --all-targets -- -D warnings",
+      "result": "PASS"
+    },
+    {
+      "command": "unshare --user --map-root-user cargo test --locked --offline --workspace",
+      "result": "PASS",
+      "topLevelPassed": 863,
+      "topLevelIgnored": 12,
+      "topLevelFiltered": 0,
+      "nestedHelperPassed": 4,
+      "note": "Four child --exact helper invocations account for the log-only 330 filtered count; no top-level suite was filtered."
+    },
+    {
+      "command": "unshare --user --map-root-user cargo test --locked --offline -p cy-package-runtime",
+      "result": "PASS",
+      "unitPassed": 35,
+      "integrationPassed": 13
+    },
+    {
+      "command": "Isolated production daemon authenticated UDS acceptance",
+      "result": "PASS",
+      "checks": 20,
+      "brokerExchanges": 58,
+      "graphWorkerStarts": 5,
+      "legacyWorkerStarts": 12
+    },
+    {
+      "command": "python tooling/docs/validate_docs.py",
+      "result": "PASS"
+    },
+    {
+      "command": "python tooling/ci/check_service_boundaries.py",
+      "result": "PASS"
+    },
+    {
+      "command": "python tooling/governance/validate_repository_policy.py",
+      "result": "PASS"
+    },
+    {
+      "command": "git diff --check",
+      "result": "PASS"
+    }
+  ],
+  "evidenceGrade": {
+    "installation": "REAL separate process using trusted public Rust install API",
+    "daemon": "REAL unmodified production executable UDS path; daemon UID 1000",
+    "peerIdentity": "REAL kernel SO_PEERCRED source UID 1001 / GID 1000; source cannot read private daemon state",
+    "workers": "REAL distinct OS processes and reachable loopback sockets",
+    "preparation": "REAL uv venv; no dependency installation",
+    "maintenanceBroker": "SIMULATED isolated exact v1 health/admission broker",
+    "businessRpc": "NOT_RUN",
+    "externalModelOrPlatform": "NOT_RUN",
+    "nativeWindowsPublicTarget": "UNSUPPORTED / NOT_RUN"
+  },
+  "daemonBinarySha256": "5b8f3e8b228f1b84bdd71161e9f9c31170258711f050cf87c1ace4f9cfef5502",
+  "seedHelperSha256": "4237eca6a5366ea2045eefb652b19c1f94be4022859daf8ff7e863f1bd9d7442",
+  "coverage": [
+    "Real separate-process trusted Rust installation of two multi-service packages and six legacy singleton packages; no unadmitted administrative transport.",
+    "Real production UDS daemon and distinct source/daemon UIDs; the source cannot read private daemon state.",
+    "Independent fixed Graph v1/v2 workers with reachable sockets, exact-installation upgrade and rollback, owner process-group termination and admitted recovery preserving pin and rollback target.",
+    "Same request ID with another pair, old-source missing permission, unknown nested field, wrong peer/root bypass, stale generation, revoked policy, changed fixed pair and legacy Activate bypass reject before any broker I/O.",
+    "Gate denial and in-flight/completed admissions preserve the current worker and do not replay work.",
+    "Legacy slash, URN, Unicode, whitespace, 256-character and non-White-Space C0 versions pass real activation, record/serde roundtrip, owner restart and authenticated legacy-source UDS recovery. Selection/policy preserve raw strings; installed pins follow the unchanged repository normalizer.",
+    "Empty/Unicode-whitespace-only versions, wrong pairs, corruption/traversal/symlink payloads, readiness mismatch and legacy ambiguous records remain rejected."
+  ],
+  "negativeEvidence": [
+    {
+      "name": "legacy-version-compat-red.log",
+      "finding": "The committed pre-fix narrow constructor with the new real singleton regression fails with PLUGIN_SERVICE_SELECTION_INVALID; the fix reuses the existing public manifest type."
+    },
+    {
+      "name": "pre-legacy-workspace-tests-long-tmp-red.log",
+      "finding": "Six existing sandbox-client tests exceeded Linux SUN_LEN with the long task TMPDIR; final validation uses a shorter task-owned TMPDIR, with production code and original assertions unchanged."
+    },
+    {
+      "finding": "An intermediate new parallel owner-reopen fixture observed PACKAGE_RUNTIME_ALREADY_RUNNING; the error log is retained privately. No production lock change, global serialization, ignored error or retry was introduced; subsequent default-parallel package and complete workspace runs passed."
+    },
+    {
+      "finding": "Archive extraction preserves source mtimes, so switching red/green snapshot directories with one target cache initially reused a stale test artifact. Final scripts refresh only snapshot Rust source mtimes (bytes unchanged), compile the corrected crate, and associate actual daemon binary hashes with acceptance."
+    }
+  ],
+  "artifacts": {
+    "location": "Retained task-local validation-platform evidence directory; private workstation paths are not published.",
+    "files": [
+      {
+        "name": "target-toolchain.log",
+        "sha256": "2af3376cb254e69564e00978cada767f05432a299af78300c47d14c103366c1e"
+      },
+      {
+        "name": "compat-workspace-fmt.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "compat-workspace-check.log",
+        "sha256": "603e089e8c69216eb02934c0cddee9c20a890445c842d7af67b67c72fba7b4f8"
+      },
+      {
+        "name": "compat-workspace-clippy.log",
+        "sha256": "bd3eaebd56967ad1f916dde610280557d13d0df2f3483889ab6edba38957cbe2"
+      },
+      {
+        "name": "compat-workspace-tests.log",
+        "sha256": "828b0e4191aa756c657ee96329116d1684bcfdec77b633a3940b496340280c1a"
+      },
+      {
+        "name": "compat-workspace-test-totals-final.json",
+        "sha256": "2b4bcb20e27e1443974310741001b54e01b5c93dbf92a909aa8ae13677a12d5b"
+      },
+      {
+        "name": "compat-package-tests-final.log",
+        "sha256": "79b28e658f5f2bdb7085d783746c9cf560f72c7341bf036e0729bf9be9b6a049"
+      },
+      {
+        "name": "compat-authenticated-uds-acceptance.json",
+        "sha256": "cbf67d5e2709682c6eb1b4f75ea9aee15d8cff50ef3ec605751482c96ee4b80f"
+      },
+      {
+        "name": "compat-authenticated-uds-final-recorded.log",
+        "sha256": "f697a89267f1e18ebad895e18640a98e5bef0465dd2746e70c90fed2ade27dc6"
+      },
+      {
+        "name": "authenticated-uds-acceptance.py",
+        "sha256": "ebd20a82aff0470e74c6825ec631bb99fa25d24ddc74e0a2806913e4ee103998"
+      },
+      {
+        "name": "seed-installed.rs",
+        "sha256": "fbbbbf43466f212c5d5de94e802a365b47fbc1d550fc2c8c1eebb37f36efb848"
+      },
+      {
+        "name": "source-compat.json",
+        "sha256": "fbe6d313a20ab16b648d7aaa40d7f918d624ef352fc11344580d7605b219d031"
+      },
+      {
+        "name": "source-compat.tar",
+        "sha256": "d861d51699566f9dfba45aa5ca5bed98df9782d01e9fbbaf7d8c02f34c7a9f33"
+      },
+      {
+        "name": "compat-docs-validation.log",
+        "sha256": "efcc2e33087c999bedb094ff4e2068839eda4e5187fd97b8341f9dd7b2184468"
+      },
+      {
+        "name": "final-service-boundaries.log",
+        "sha256": "d91148a3b619eef1e1db4cf8baac07a3385b34c48b43bcc166ba21b4847f8d82"
+      },
+      {
+        "name": "final-repository-policy.log",
+        "sha256": "9db846db512fb7c643076c4cb17f96cf09498df52aed84041959924548286a63"
+      },
+      {
+        "name": "legacy-version-compat-red.log",
+        "sha256": "6370e52a53019cf46bdbe3b17862bd87b03bc16d6a6490c57b8cfbb2698ef38f"
+      },
+      {
+        "name": "pre-legacy-workspace-tests-long-tmp-red.log",
+        "sha256": "a83ae73d6e2260e237f010e02f1d20fbb97fbce58373b9179c7a87158cc13e6a"
+      }
+    ]
+  },
+  "unchangedFromTargetBase": [
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "contracts/",
+    "framework/crates/cy-package-runtime/src/main.rs",
+    "framework/crates/cy-package-runtime/src/bootstrap.rs",
+    "framework/crates/cy-platform-api/src/repository_manifest.rs"
+  ],
+  "limitations": [
+    "Exact Broker v1 admission service and Graph business payloads are synthetic fixtures; broker owner integration, business RPC and external model/platform accounts are NOT_RUN.",
+    "Real uv venv creation is tested without installing dependency packages; official bootstrap/deployment and package/toolchain release installation are not claimed.",
+    "Twelve pre-existing workspace tests remain ignored for explicit Docker/PostgreSQL/provisioned-account/generated-bundle or internal-helper conditions; they are not silently counted as passed.",
+    "Native Windows is UNSUPPORTED / NOT_RUN for this Unix-only upstream daemon. Earlier native Windows proof is pre-port evidence only.",
+    "Formal protocol schemas, published SDK/provider pins and consumer execution are unchanged/unpublished; Selected remains gated as NOT_PUBLISHED in consumers until normal provider publication and dependency approval.",
+    "All checks are local. No remote fetch/push, CI success, PR merge, deployment, account/message action or publication is claimed."
+  ]
+}

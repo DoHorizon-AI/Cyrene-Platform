@@ -226,6 +226,34 @@ pub struct ActivationRequest {
     pub environment: BTreeMap<String, String>,
 }
 
+/// Exact operator-selected service contract from the verified installed manifest.
+/// This is host lifecycle metadata, never a namespace, provider or model selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceContractSelection {
+    pub capability_id: CapabilityId,
+    pub interface_version: String,
+}
+
+impl ServiceContractSelection {
+    pub fn new(
+        capability_id: impl Into<String>,
+        interface_version: impl Into<String>,
+    ) -> Result<Self, PackageRuntimeError> {
+        let capability_id = CapabilityId::new(capability_id)?;
+        // Preserve the existing manifest contract, including punctuation,
+        // Unicode and surrounding whitespace. Its constructor only checks
+        // trim-nonempty and retains the exact original string.
+        let interface_version = cy_manifest::CapabilityInterfaceVersion::new(interface_version)
+            .map_err(|error| PackageRuntimeError::new("PLUGIN_SERVICE_SELECTION_INVALID", error))?
+            .version;
+        Ok(Self {
+            capability_id,
+            interface_version,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RuntimeState {
@@ -243,6 +271,8 @@ pub struct RuntimeStatus {
     pub failure_code: Option<String>,
     pub failure_message: Option<String>,
     pub connection_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_contract: Option<ServiceContractSelection>,
 }
 
 /// Activation facts resolved by the package runtime from durable binding state.

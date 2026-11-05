@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "candidate": "Platform explicit installed service contract selection",
+  "createdAtUtc": "2026-11-02T22:09:38.869679+00:00",
+  "workspace": "<isolated-pre-port-worktree>",
+  "branch": "fix/aether-platform-capability-20261103",
+  "baseline": "a3917fb9e3bcc5c9abf6e2fb6265d08f02dd1e3a",
+  "sourceState": "FROZEN_UNCOMMITTED",
+  "sourceManifest": {
+    "path": "docs/release/platform-capability-selection-sources.json",
+    "sha256": "e429c1d3600e1fa14647a3bf95cf027484194bb5bae1fea3b614e0a8996e7842"
+  },
+  "authority": {
+    "entrypoint": "trusted node-local activate_selected / FilesystemPackageRuntime.activate_selected",
+    "selection": "exact capability_id + interface_version in verified installed service descriptors",
+    "legacy": "unchanged ActivationRequest + activate require exactly one service descriptor",
+    "bindingRecordVersion": 2,
+    "contractPin": "persisted per binding, retained by recovery/upgrade/rollback",
+    "modelBrowserMcpSelection": false,
+    "publishedSdkOrProtocolUpdate": false,
+    "environmentSecretsPersisted": false,
+    "packageVerificationAndPrivateKeyBoundariesChanged": false
+  },
+  "evidenceGrade": {
+    "controlBinary": "REAL native Linux OS process",
+    "preparationAdapter": "REAL local fixture OS process, no dependency install/download",
+    "supervisedWorkers": "REAL independent OS processes with live loopback listening sockets",
+    "GraphBusinessProvider": "SIMULATED synthetic package contract and readiness; business RPC NOT_RUN",
+    "externalModelOrPlatform": "NOT_RUN",
+    "nativeWindowsInstall": "FAILED pre-existing directory fsync OS5, not claimed available"
+  },
+  "toolchain": {
+    "repositoryPin": "1.96.1",
+    "finalLinuxRustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+    "finalLinuxCargo": "cargo 1.96.1 (356927216 2026-06-26)",
+    "linuxHome": "<isolated-pre-port-validation-root>",
+    "windowsSupplementalRustc": "1.97.1",
+    "cachePolicy": "task-owned Cargo home, target and ASCII temp; existing lock unchanged"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt --check -p cy-package-runtime",
+      "platform": "Linux / Rust 1.96.1",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo test --locked --offline -p cy-package-runtime",
+      "platform": "Linux / Rust 1.96.1",
+      "result": "PASS",
+      "unitPassed": 3,
+      "integrationPassed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "command": "cargo clippy --locked --offline -p cy-package-runtime --all-targets -- -D warnings",
+      "platform": "Linux / Rust 1.96.1",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo check --locked --offline --workspace --all-targets",
+      "platform": "Linux / Rust 1.96.1",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo test --locked --offline -p cy-package-runtime --test package_runtime_tck actual_supervisor",
+      "platform": "Windows / Rust 1.97.1",
+      "result": "PASS",
+      "passed": 1,
+      "filtered": 6,
+      "preexistingWarnings": 2
+    },
+    {
+      "command": "python tooling/docs/validate_docs.py",
+      "result": "PASS"
+    },
+    {
+      "command": "git diff --check",
+      "result": "PASS"
+    },
+    {
+      "command": "git diff --quiet -- Cargo.lock rust-toolchain.toml contracts",
+      "result": "PASS unchanged"
+    }
+  ],
+  "coverage": [
+    "actual control binary install, activate_selected, readback status, independent v1/v2 worker processes, stop and owner process restart/recover",
+    "legacy singleton activate and v1 record migrate to v2; ambiguous legacy multi-service record rejects with zero new spawns",
+    "exact capability and version selection, including same capability with two versions",
+    "unknown capability, wrong version, duplicate descriptors, invalid deserialized identity and forged namespace reject before spawn/stop",
+    "incompatible upgrade leaves old worker alive; compatible upgrade and rollback retain pin even when descriptor order changes",
+    "recovery preserves rollback target; disabled binding cannot recover; malformed v2 missing pin rejects",
+    "actual wrong-interface readiness rejects without publishing a connection; failed upgrade restores original contract and installation",
+    "environment/model selector values cannot override selected manifest pair; environment secrets do not enter binding state",
+    "existing generic package lifecycle, immutable corruption, traversal/absolute/symlink rejection regressions retained"
+  ],
+  "negativeEvidence": [
+    {
+      "log": "first-lib-test.txt",
+      "result": "initial offline dependency cache missing adler2; downloaded locked third-party compilation dependencies only"
+    },
+    {
+      "log": "package-tests-first.txt",
+      "result": "native Windows full TCK all five integration tests failed at original directory File::open().sync_all() with OS5; durability path unchanged"
+    },
+    {
+      "log": "windows-supervisor.txt",
+      "result": "first isolated Windows socket fixture lacked explicit SystemRoot after env_clear; only fixture host environment amended, production boundary unchanged"
+    },
+    {
+      "log": "tests-first.log",
+      "result": "intermediate expanded recovery test asserted old generation after adding upgrade; assertion corrected to before_restart generation + 1; final exact-pin suite passes"
+    },
+    {
+      "log": "toolchain-pin.log",
+      "result": "Rust1.96.1 toolchain+components installed in isolated task directory; rustup then exited1 on self-update because no rustup shim installed in task Cargo home. Direct actual pinned compiler/cargo/fmt/clippy commands succeeded."
+    }
+  ],
+  "logs": [
+    {
+      "path": "first-lib-test.txt",
+      "sha256": "631b788585d85324cf22493ed57fd6401bb8e88dd0ecfa35f5cbada65b1590fa"
+    },
+    {
+      "path": "package-tests-first.txt",
+      "sha256": "28ac4c96b58adae608990220a94dd8e587a18b3384f0b2e7f6afdc6255598ddf"
+    },
+    {
+      "path": "windows-supervisor.txt",
+      "sha256": "1cfc9f7f44b801528cbb0bd49fef401bd53369f7784d6483e21609b211434345"
+    },
+    {
+      "path": "windows-supervisor-final.txt",
+      "sha256": "b23de99d621e7b120a3b8c8b92c361a8e970fbeca9d1151e5b2e5230352df26c"
+    },
+    {
+      "path": "tests-first.log",
+      "sha256": "002fa288894f469dca0829cc546746d710813cc72aca3ac5a72eab8ce538deda"
+    },
+    {
+      "path": "tests-pinned.log",
+      "sha256": "140de63f224aba748b3a7d028944877ce4c69928ffca0841cf19791c6c959e12"
+    },
+    {
+      "path": "clippy-pinned.log",
+      "sha256": "d62b6a8786f9754d53004f388641b5965b6026e0a5b960956a19f1452a99e11b"
+    },
+    {
+      "path": "workspace-check-pinned.log",
+      "sha256": "2e665f1a98c9e08744b672dc92d31cf1fbea916d3e88771eb50d7dd4240ca5fb"
+    },
+    {
+      "path": "fmt-pinned.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "toolchain-pin.log",
+      "sha256": "7c46d1260079c0fe0f4b50ca80514fb27edd0b0bb927c4f32fe788d835bdfccc"
+    }
+  ],
+  "limitations": [
+    "Native Windows installation directory sync remains a baseline platform limitation; no durability relaxation in this candidate.",
+    "No real Graph/Teams/model provider calls or Plugin payload installation; only local synthetic fixtures.",
+    "No remote operation, publication, deployment or business commit."
+  ],
+  "ownedFiles": [
+    "docs/package-runtime.md",
+    "framework/crates/cy-package-runtime/src/control.rs",
+    "framework/crates/cy-package-runtime/src/runtime.rs",
+    "framework/crates/cy-package-runtime/src/supervisor.rs",
+    "framework/crates/cy-package-runtime/src/types.rs",
+    "framework/crates/cy-package-runtime/tests/package_runtime_tck.rs",
+    "docs/release/platform-capability-selection-sources.json",
+    "docs/release/platform-capability-selection-validation.json"
+  ],
+  "historicalScope": {
+    "candidateCommit": "b80836f7c3422f5cb478b5b1984479add750516b",
+    "originalRecordSha256": "e905bc1b6491b27c1d5518925d4c79dc34e6b960c436582f8ca2fe1423c97ddc",
+    "targetBase": "afed688f2605f8543646a10e6cbb018fe5fe981d",
+    "targetValidation": false,
+    "note": "Historical pre-port proof only; local workstation paths redacted in this public copy. Upstream now requires authenticated UDS admission and is Linux-only. See the separate target validation receipt."
+  }
+}
